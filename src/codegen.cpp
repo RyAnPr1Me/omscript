@@ -490,6 +490,8 @@ void CodeGenerator::initTBAAMetadata() {
     llvm::MDNode* tbaaStructType = makeTBAAType("struct field");
     tbaaStructTypeNode_ = tbaaStructType;
     llvm::MDNode* tbaaStrType    = makeTBAAType("string data");
+    llvm::MDNode* tbaaStrLenType = makeTBAAType("string length");
+    llvm::MDNode* tbaaStrCapType = makeTBAAType("string capacity");
     llvm::MDNode* tbaaMapKeyType = makeTBAAType("map key");
     llvm::MDNode* tbaaMapValType = makeTBAAType("map value");
     llvm::MDNode* tbaaMapHashType = makeTBAAType("map hash");
@@ -503,6 +505,8 @@ void CodeGenerator::initTBAAMetadata() {
     tbaaArrayLen_    = llvm::MDNode::get(C, {tbaaLenType, tbaaLenType, zero});
     tbaaArrayElem_   = llvm::MDNode::get(C, {tbaaElemType, tbaaElemType, zero});
     tbaaStructField_ = llvm::MDNode::get(C, {tbaaStructType, tbaaStructType, zero});
+    tbaaStringLen_  = llvm::MDNode::get(C, {tbaaStrLenType, tbaaStrLenType, zero});
+    tbaaStringCap_  = llvm::MDNode::get(C, {tbaaStrCapType, tbaaStrCapType, zero});
     tbaaStringData_  = llvm::MDNode::get(C, {tbaaStrType, tbaaStrType, zero});
     tbaaMapKey_      = llvm::MDNode::get(C, {tbaaMapKeyType, tbaaMapKeyType, zero});
     tbaaMapVal_      = llvm::MDNode::get(C, {tbaaMapValType, tbaaMapValType, zero});
@@ -533,6 +537,85 @@ void CodeGenerator::initTBAAMetadata() {
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Ty, 65))
     });
 }
+
+// ── Fat-pointer string helpers ───────────────────────────────────────────────
+// OmScript string layout: [ len:i64 | cap:i64 | char data... | NUL ]
+//                          ^─── string pointer points here (offset 0)
+
+llvm::Value* CodeGenerator::emitStringLen(llvm::Value* strPtr, const llvm::Twine& name) {
+    if (!strPtr->getType()->isPointerTy())
+        strPtr = builder->CreateIntToPtr(strPtr, llvm::PointerType::getUnqual(*context));
+    auto* lenPtr = strPtr; // len is at offset 0
+    auto* load = builder->CreateLoad(llvm::Type::getInt64Ty(*context), lenPtr, name);
+    load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringLen_);
+    load->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+    if (optimizationLevel >= OptimizationLevel::O1)
+        load->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
+    nonNegValues_.insert(load);
+    return load;
+}
+
+llvm::Value* CodeGenerator::emitStringCap(llvm::Value* strPtr, const llvm::Twine& name) {
+    if (!strPtr->getType()->isPointerTy())
+        strPtr = builder->CreateIntToPtr(strPtr, llvm::PointerType::getUnqual(*context));
+    // cap field is the second i64 (offset 8 = 1 × sizeof(i64))
+    auto* capPtr = builder->CreateInBoundsGEP(
+        llvm::Type::getInt64Ty(*context), strPtr,
+        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 1), name + ".ptr");
+    auto* load = builder->CreateLoad(llvm::Type::getInt64Ty(*context), capPtr, name);
+    load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringCap_);
+    load->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+    if (optimizationLevel >= OptimizationLevel::O1)
+        load->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
+    nonNegValues_.insert(load);
+    return load;
+}
+
+llvm::Value* CodeGenerator::emitStringData(llvm::Value* strPtr, const llvm::Twine& name) {
+    if (!strPtr->getType()->isPointerTy())
+        strPtr = builder->CreateIntToPtr(strPtr, llvm::PointerType::getUnqual(*context));
+    // data starts after 2 i64 fields = offset 16 bytes
+    return builder->CreateInBoundsGEP(
+        llvm::Type::getInt8Ty(*context), strPtr,
+        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 16), name);
+}
+
+void CodeGenerator::emitStoreStringLen(llvm::Value* len, llvm::Value* strPtr) {
+    if (!strPtr->getType()->isPointerTy())
+        strPtr = builder->CreateIntToPtr(strPtr, llvm::PointerType::getUnqual(*context));
+    auto* st = builder->CreateStore(len, strPtr);
+    st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringLen_);
+}
+
+void CodeGenerator::emitStoreStringCap(llvm::Value* cap, llvm::Value* strPtr) {
+    if (!strPtr->getType()->isPointerTy())
+        strPtr = builder->CreateIntToPtr(strPtr, llvm::PointerType::getUnqual(*context));
+    auto* capPtr = builder->CreateInBoundsGEP(
+        llvm::Type::getInt64Ty(*context), strPtr,
+        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 1), "str.capptr");
+    auto* st = builder->CreateStore(cap, capPtr);
+    st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringCap_);
+}
+
+llvm::Value* CodeGenerator::emitAllocString(llvm::Value* len, llvm::Value* cap,
+                                             const llvm::Twine& name) {
+    // Allocate: 16 (header) + cap + 1 (NUL) bytes
+    auto* i64Ty = llvm::Type::getInt64Ty(*context);
+    auto* headerSz = llvm::ConstantInt::get(i64Ty, 16);
+    auto* one      = llvm::ConstantInt::get(i64Ty, 1);
+    auto* withNul  = builder->CreateAdd(cap, one, name + ".wnul", /*nuw=*/true, /*nsw=*/true);
+    auto* total    = builder->CreateAdd(withNul, headerSz, name + ".sz", /*nuw=*/true, /*nsw=*/true);
+    nonNegValues_.insert(withNul);
+    nonNegValues_.insert(total);
+    auto* ptr = builder->CreateCall(getOrDeclareMalloc(), {total}, name);
+    llvm::cast<llvm::CallInst>(ptr)->addRetAttr(llvm::Attribute::NonNull);
+    // Store len and cap into header
+    emitStoreStringLen(len, ptr);
+    emitStoreStringCap(cap, ptr);
+    return ptr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 llvm::MDNode* CodeGenerator::getOrCreateFieldTBAA(const std::string& structType, size_t fieldIdx) {
     auto key = std::make_pair(structType, fieldIdx);
@@ -6760,18 +6843,29 @@ llvm::GlobalVariable* CodeGenerator::internString(const std::string& content) {
         return it->second;
     }
 
-    // Create a new global string constant with internal linkage and
-    // unnamed_addr so LLVM can merge it with other identical constants.
-    auto* strConst = llvm::ConstantDataArray::getString(*context, content, /*AddNull=*/true);
+    // Build a fat-pointer global constant with the layout:
+    //   { len:i64, cap:i64, [N+1 x i8] data }
+    // The string variable stores a pointer to the start of this struct.
+    auto& C = *context;
+    auto* i64Ty = llvm::Type::getInt64Ty(C);
+    int64_t slen = static_cast<int64_t>(content.size());
+
+    auto* charArr = llvm::ConstantDataArray::getString(C, content, /*AddNull=*/true);
+    auto* structTy = llvm::StructType::get(C, {i64Ty, i64Ty, charArr->getType()});
+    auto* globalInit = llvm::ConstantStruct::get(structTy, {
+        llvm::ConstantInt::get(i64Ty, slen),   // len
+        llvm::ConstantInt::get(i64Ty, slen),   // cap == len for literals
+        charArr
+    });
     auto* gv = new llvm::GlobalVariable(
         *module,
-        strConst->getType(),
+        structTy,
         /*isConstant=*/true,
         llvm::GlobalValue::PrivateLinkage,
-        strConst,
+        globalInit,
         ".str.intern");
     gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-    gv->setAlignment(llvm::Align(1));
+    gv->setAlignment(llvm::Align(8));  // aligned to i64 (8 bytes)
 
     internedStrings_[content] = gv;
     return gv;

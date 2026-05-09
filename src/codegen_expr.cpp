@@ -288,11 +288,8 @@ void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
 
     llvm::Value* lenVal;
     if (isStr) {
-        auto* strlenCall = builder->CreateCall(getOrDeclareStrlen(), {basePtr},
-                                     llvm::Twine(prefix) + ".strlen");
-        // !range [0, INT64_MAX): strlen always returns a non-negative value.
-        strlenCall->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-        lenVal = strlenCall;
+        // Fat-pointer string: length is stored at offset 0 of the header.
+        lenVal = emitStringLen(basePtr, llvm::Twine(prefix) + ".strlen");
     } else {
         // Loop-scope array length cache: when we're inside a loop and have
         auto cacheIt = loopArrayLenCache_.find(basePtr);
@@ -352,13 +349,14 @@ llvm::Value* CodeGenerator::generateLiteral(LiteralExpr* expr) {
     } else if (expr->literalType == LiteralExpr::LiteralType::FLOAT) {
         return llvm::ConstantFP::get(getFloatType(), expr->floatValue);
     } else {
-        // String literal — use the interning pool to deduplicate identical
+        // String literal — interning pool produces a fat-pointer global
+        // { len:i64, cap:i64, [N+1 x i8] }.  Return a pointer to the struct
+        // start (offset 0 = len field), which is the OmScript string value.
         llvm::GlobalVariable* gv = internString(expr->stringValue);
         return llvm::ConstantExpr::getInBoundsGetElementPtr(
             gv->getValueType(),
             gv,
             llvm::ArrayRef<llvm::Constant*>{
-                llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
                 llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
             });
     }
@@ -1231,57 +1229,59 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // String concatenation path: either operand is a string (ptr or i64-as-string).
     if (expr->op == "+") {
         if (leftIsStr || rightIsStr) {
-            // Auto-convert non-string operand to string via snprintf (like to_string builtin).
+            // Auto-convert non-string operand to a fat-pointer string via snprintf.
             auto ensureStrPtr = [&](llvm::Value* val, bool isStr) -> llvm::Value* {
                 if (isStr) {
                     if (!val->getType()->isPointerTy())
                         val = builder->CreateIntToPtr(val, llvm::PointerType::getUnqual(*context), "str.cast.ptr");
                     return val;
                 }
-                // Convert integer or float to string.
-                llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 32);
-                llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "autostr.buf");
-                llvm::cast<llvm::CallInst>(buf)->addRetAttr(
-                    llvm::Attribute::getWithDereferenceableBytes(*context, 32));
+                // Convert integer or float to fat-pointer string (capacity = 31).
+                auto* cap31 = llvm::ConstantInt::get(getDefaultType(), 31);
+                // Placeholder len=0; will be updated after snprintf.
+                auto* zero64 = llvm::ConstantInt::get(getDefaultType(), 0);
+                llvm::Value* str = emitAllocString(zero64, cap31, "autostr");
+                llvm::Value* data = emitStringData(str, "autostr.data");
+                auto* bufSize = llvm::ConstantInt::get(getDefaultType(), 32);
                 if (val->getType()->isDoubleTy()) {
                     llvm::GlobalVariable* fmt = module->getGlobalVariable("autostr_float_fmt", true);
                     if (!fmt)
                         fmt = builder->CreateGlobalString("%g", "autostr_float_fmt");
-                    builder->CreateCall(getOrDeclareSnprintf(), {buf, bufSize, fmt, val});
+                    builder->CreateCall(getOrDeclareSnprintf(), {data, bufSize, fmt, val});
                 } else {
                     val = toDefaultType(val);
                     llvm::GlobalVariable* fmt = module->getGlobalVariable("tostr_fmt", true);
                     if (!fmt)
                         fmt = builder->CreateGlobalString("%lld", "tostr_fmt");
-                    builder->CreateCall(getOrDeclareSnprintf(), {buf, bufSize, fmt, val});
+                    builder->CreateCall(getOrDeclareSnprintf(), {data, bufSize, fmt, val});
                 }
-                return buf;
+                // Update the length field with the actual written length.
+                llvm::Value* written = builder->CreateCall(getOrDeclareStrlen(), {data}, "autostr.len");
+                nonNegValues_.insert(written);
+                emitStoreStringLen(written, str);
+                return str;
             };
             left = ensureStrPtr(left, leftIsStr);
             right = ensureStrPtr(right, rightIsStr);
 
-            llvm::Value* len1 = builder->CreateCall(getOrDeclareStrlen(), {left}, "len1");
-            llvm::Value* len2 = builder->CreateCall(getOrDeclareStrlen(), {right}, "len2");
-            // !range [0, INT64_MAX): strlen always returns non-negative.
-            if (optimizationLevel >= OptimizationLevel::O1) {
-                llvm::cast<llvm::Instruction>(len1)->setMetadata(
-                    llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-                llvm::cast<llvm::Instruction>(len2)->setMetadata(
-                    llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-            }
+            llvm::Value* len1 = emitStringLen(left,  "concat.len1");
+            llvm::Value* len2 = emitStringLen(right, "concat.len2");
             // strlen results are always non-negative and bounded by addressable
             llvm::Value* totalLen = builder->CreateAdd(len1, len2, "totallen", /*HasNUW=*/true, /*HasNSW=*/true);
-            llvm::Value* allocSize =
-                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "allocsize", /*HasNUW=*/true, /*HasNSW=*/true);
-            llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "strbuf");
-            // Use memcpy instead of strcpy+strcat: strcat must scan for the
-            builder->CreateCall(getOrDeclareMemcpy(), {buf, left, len1});
+            nonNegValues_.insert(totalLen);
+            // Allocate fat-pointer header + data (capacity = totalLen, len = totalLen)
+            llvm::Value* buf = emitAllocString(totalLen, totalLen, "concat");
+            llvm::Value* data = emitStringData(buf, "concat.data");
+            llvm::Value* data1 = emitStringData(left,  "concat.src1");
+            llvm::Value* data2 = emitStringData(right, "concat.src2");
+            // Use memcpy instead of strcpy+strcat: strcat must scan for the NUL
+            builder->CreateCall(getOrDeclareMemcpy(), {data, data1, len1});
             llvm::Value* dest2 = builder->CreateInBoundsGEP(
-                llvm::Type::getInt8Ty(*context), buf, len1, "concat.dst2");
+                llvm::Type::getInt8Ty(*context), data, len1, "concat.dst2");
             // Copy len2+1 bytes from right to include the null terminator.
             llvm::Value* len2Plus1 = builder->CreateAdd(
                 len2, llvm::ConstantInt::get(getDefaultType(), 1), "len2p1", /*HasNUW=*/true, /*HasNSW=*/true);
-            builder->CreateCall(getOrDeclareMemcpy(), {dest2, right, len2Plus1});
+            builder->CreateCall(getOrDeclareMemcpy(), {dest2, data2, len2Plus1});
             return buf;
         }
     }
@@ -1299,11 +1299,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         countVal = builder->CreateSelect(isNeg, zero, countVal, "strmul.clamp");
         llvm::Value* strPtr =
             strVal->getType()->isPointerTy() ? strVal : builder->CreateIntToPtr(strVal, ptrTy, "strmul.ptr");
-        llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strPtr}, "strmul.len");
-        // !range [0, INT64_MAX): strlen always returns non-negative.
-        if (optimizationLevel >= OptimizationLevel::O1)
-            llvm::cast<llvm::Instruction>(strLen)->setMetadata(
-                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        llvm::Value* strLen = emitStringLen(strPtr, "strmul.len");
+        llvm::Value* strData = emitStringData(strPtr, "strmul.data");
 
         // Guard against multiplication overflow: strLen * countVal could wrap
         llvm::Function* overflowIntrinsic = OMSC_GET_INTRINSIC(
@@ -1332,9 +1329,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         builder->CreateUnreachable();
 
         builder->SetInsertPoint(okBB);
-        llvm::Value* allocSz =
-            builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "strmul.alloc", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {allocSz}, "strmul.buf");
+        // Allocate fat-pointer string header + data
+        llvm::Value* buf = emitAllocString(totalLen, totalLen, "strmul");
+        llvm::Value* bufData = emitStringData(buf, "strmul.bufdata");
         // Use memcpy loop with a tracked write pointer — O(totalLen) instead of
         llvm::BasicBlock* preHdr = builder->GetInsertBlock();
         llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "strmul.loop", curFn);
@@ -1347,13 +1344,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::PHINode* writePtr = builder->CreatePHI(
             llvm::PointerType::getUnqual(*context), 2, "strmul.wptr");
         idx->addIncoming(zero, preHdr);
-        writePtr->addIncoming(buf, preHdr);
+        writePtr->addIncoming(bufData, preHdr);
         builder->CreateCondBr(builder->CreateICmpSLT(idx, countVal, "strmul.cond"), bodyBB, doneBB);
         builder->SetInsertPoint(bodyBB);
-        // memcpy(writePtr, strPtr, strLen)  — no null terminator yet.
+        // memcpy(writePtr, strData, strLen)  — no null terminator yet.
         if (auto* strLenCI = llvm::dyn_cast<llvm::ConstantInt>(strLen)) {
             if (strLenCI->getZExtValue() > 0) {
-                builder->CreateCall(getOrDeclareMemcpy(), {writePtr, strPtr, strLen});
+                builder->CreateCall(getOrDeclareMemcpy(), {writePtr, strData, strLen});
             }
             // else: zero-length string — no copy needed; writePtr stays unchanged
         } else {
@@ -1365,7 +1362,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 builder->CreateICmpNE(strLen, llvm::ConstantInt::get(getDefaultType(), 0), "strmul.nonempty"),
                 copyBB, skipBB);
             builder->SetInsertPoint(copyBB);
-            builder->CreateCall(getOrDeclareMemcpy(), {writePtr, strPtr, strLen});
+            builder->CreateCall(getOrDeclareMemcpy(), {writePtr, strData, strLen});
             builder->CreateBr(skipBB);
             builder->SetInsertPoint(skipBB);
         }
@@ -1417,9 +1414,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 : llvm::ConstantInt::get(getDefaultType(), 0);
             builder->CreateBr(mergeBB);
 
-            // Slow path: call strcmp
+            // Slow path: call strcmp on char data pointers
             builder->SetInsertPoint(slowBB);
-            llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lPtr, rPtr}, "strcmp.res");
+            llvm::Value* lData = emitStringData(lPtr, "streq.ldata");
+            llvm::Value* rData = emitStringData(rPtr, "streq.rdata");
+            llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lData, rData}, "strcmp.res");
             llvm::Value* slowBool = (expr->op == "==")
                 ? builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "scmp.eq")
                 : builder->CreateICmpNE(cmpResult, builder->getInt32(0), "scmp.ne");
@@ -1434,7 +1433,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return phi;
         }
 
-        llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lPtr, rPtr}, "strcmp.res");
+        llvm::Value* lData = emitStringData(lPtr, "scmp.ldata");
+        llvm::Value* rData = emitStringData(rPtr, "scmp.rdata");
+        llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lData, rData}, "strcmp.res");
         llvm::Value* zero32 = builder->getInt32(0);
         llvm::Value* cmpBool;
         if (expr->op == "==")
@@ -5912,8 +5913,9 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     }
 
     if (isStr) {
-        // Load single byte at offset index, zero-extend to i64
-        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idx.charptr");
+        // Fat-pointer: char data starts at offset 16.  Index into data.
+        llvm::Value* dataPtr = emitStringData(basePtr, "idx.strdata");
+        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dataPtr, idxVal, "idx.charptr");
         auto* charLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "idx.char");
         charLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         // Zero-extend to i64; result is always in [0, 256).
@@ -6454,21 +6456,25 @@ llvm::Value* CodeGenerator::generateInplaceStringAppend(AssignExpr* assignExpr,
     }
 
     // ── 3. Compute lengths ────────────────────────────────────────────────
-    llvm::Function* strlenFn = getOrDeclareStrlen();
-    auto* len1 = builder->CreateCall(strlenFn, {xPtr},   "iap.len1");
-    auto* len2 = builder->CreateCall(strlenFn, {rhsPtr}, "iap.len2");
+    auto* len1 = emitStringLen(xPtr,   "iap.len1");
+    auto* len2 = emitStringLen(rhsPtr, "iap.len2");
 
-    // ── 4. Compute new allocation size: len1 + len2 + 1 (null term) ──────
+    // ── 4. Compute new allocation size: 16 (header) + len1+len2 + 1 (NUL) ─
     auto* totalLen = builder->CreateAdd(len1, len2, "iap.totlen",
                                         /*NUW=*/true, /*NSW=*/true);
-    auto* newSize  = builder->CreateAdd(totalLen,
+    auto* hdrSz   = llvm::ConstantInt::get(getDefaultType(), 16);
+    auto* dataLen = builder->CreateAdd(totalLen,
                                         llvm::ConstantInt::get(getDefaultType(), 1),
-                                        "iap.newsz", /*NUW=*/true, /*NSW=*/true);
+                                        "iap.datalen", /*NUW=*/true, /*NSW=*/true);
+    auto* newSize  = builder->CreateAdd(dataLen, hdrSz, "iap.newsz",
+                                        /*NUW=*/true, /*NSW=*/true);
+    nonNegValues_.insert(totalLen);
+    nonNegValues_.insert(dataLen);
+    nonNegValues_.insert(newSize);
 
-    // ── 5. realloc(x, newSize) ────────────────────────────────────────────
-    // realloc either extends the buffer in-place (no copy at all) or moves it
-    // to a new location.  Either way the result points to a buffer containing
-    // the original x content at the beginning.
+    // ── 5. realloc(xPtr, newSize) ─────────────────────────────────────────
+    // realloc extends (or moves) the entire fat-pointer block in-place.
+    // After the call, the header fields still hold the old len/cap; update them.
     auto* newPtr = builder->CreateCall(getOrDeclareRealloc(), {xPtr, newSize},
                                        "iap.newptr");
     if (optimizationLevel >= OptimizationLevel::O1) {
@@ -6477,16 +6483,21 @@ llvm::Value* CodeGenerator::generateInplaceStringAppend(AssignExpr* assignExpr,
         ci->addRetAttr(llvm::Attribute::get(*context, llvm::Attribute::NonNull));
         ci->addRetAttr(llvm::Attribute::getWithDereferenceableBytes(*context, 1));
     }
+    // Update length and capacity fields in the (possibly relocated) header.
+    emitStoreStringLen(totalLen, newPtr);
+    emitStoreStringCap(totalLen, newPtr);
 
-    // ── 6. Copy rhs to position len1 ─────────────────────────────────────
+    // ── 6. Copy rhs to position data+len1 ────────────────────────────────
+    auto* newData   = emitStringData(newPtr,  "iap.newdata");
     auto* appendPos = builder->CreateInBoundsGEP(
-        llvm::Type::getInt8Ty(*context), newPtr, len1, "iap.dst");
+        llvm::Type::getInt8Ty(*context), newData, len1, "iap.dst");
+    auto* rhsData = emitStringData(rhsPtr, "iap.rhsdata");
     // Copy len2+1 bytes (include null terminator from rhs so the buffer is
     // always null-terminated after the operation).
     auto* len2p1 = builder->CreateAdd(len2,
                                        llvm::ConstantInt::get(getDefaultType(), 1),
                                        "iap.len2p1", /*NUW=*/true, /*NSW=*/true);
-    builder->CreateCall(getOrDeclareMemcpy(), {appendPos, rhsPtr, len2p1});
+    builder->CreateCall(getOrDeclareMemcpy(), {appendPos, rhsData, len2p1});
 
     // ── 7. Store updated pointer back ────────────────────────────────────
     builder->CreateAlignedStore(newPtr, it->second, llvm::Align(8));

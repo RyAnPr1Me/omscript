@@ -1,0 +1,28 @@
+fn test_array_insert() {
+    var a = [1, 2, 4, 5];
+    var b = array_insert(a, 2, 3);
+    var s = 0;
+    for (x in b) { s = s + x; }
+    var c = array_insert([10, 20], 0, 5);
+    var t = 0;
+    for (x in c) { t = t + x; }
+    var d = array_insert([1, 2], 2, 3);
+    return s + t - 35;
+}
+fn test_str_pad_left() {
+    var s = str_pad_left("hi", 5, " ");
+    var l = str_len(s);
+    var s2 = str_pad_left("hello", 3, " ");
+    var l2 = str_len(s2);
+    var n = str_pad_left("42", 6, "0");
+    var l3 = str_len(n);
+    var first = char_at(s, 0);
+    var last = char_at(s, 4);
+    var content = (first == 32) + (last == 105);
+    return l + l2 + l3 + content;
+}
+fn main() {
+    var r3 = test_array_insert();
+    var r4 = test_str_pad_left();
+    return r3 + r4;
+}

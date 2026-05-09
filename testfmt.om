@@ -1,0 +1,5 @@
+fn main() {
+    var a = str_format("%lld items", 42);
+    var l = str_len(a);  // should be 8 ("42 items")
+    return l;
+}

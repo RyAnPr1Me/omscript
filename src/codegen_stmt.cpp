@@ -2412,11 +2412,8 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // Get the collection length
     llvm::Value* lenVal;
     if (isStr) {
-        // String: strlen (no length header)
-        auto* strlenCall = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "foreach.strlen");
-        // !range [0, INT64_MAX): strlen always returns a non-negative value.
-        strlenCall->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-        lenVal = strlenCall;
+        // Fat-pointer string: load length field from header (offset 0).
+        lenVal = emitStringLen(basePtr, "foreach.strlen");
     } else {
         // Array: length stored in slot 0
                 llvm::Value* lenLoad = emitLoadArrayLen(basePtr, "foreach.len");
@@ -2487,8 +2484,9 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
     llvm::Value* elemVal;
     if (isStr) {
-        // String: load single byte at offset bodyIdx, zero-extend to i64
-        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, bodyIdx, "foreach.charptr");
+        // Fat-pointer string: char data starts at offset 16.  Index into data.
+        llvm::Value* strData = emitStringData(basePtr, "foreach.strdata");
+        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strData, bodyIdx, "foreach.charptr");
         auto* charByte = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "foreach.char");
         // TBAA: string character loads are in the string-data type set,
         charByte->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);

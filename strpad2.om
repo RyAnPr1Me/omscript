@@ -1,0 +1,8 @@
+fn main() {
+    var s = str_pad_right("hi", 5, " ");
+    var l = str_len(s);
+    var c0 = char_at(s, 0);  // 104 h
+    var c1 = char_at(s, 1);  // 105 i
+    var c2 = char_at(s, 2);  // 32 space
+    return c0 + c1 + c2 - 208;  // 104+105+32 - 208 = 33, or 3 if testing (c0==104)+(c1==105)+(c2==32)
+}

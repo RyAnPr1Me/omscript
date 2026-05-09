@@ -547,7 +547,9 @@ class CodeGenerator {
     llvm::MDNode* tbaaArrayElem_ = nullptr;  ///< TBAA access tag for array elements (slots 1+)
     llvm::MDNode* tbaaStructField_ = nullptr; ///< TBAA access tag for struct field loads/stores (generic)
     llvm::MDNode* tbaaStructTypeNode_ = nullptr; ///< TBAA type node for "struct field" (parent of per-field types)
-    llvm::MDNode* tbaaStringData_ = nullptr;  ///< TBAA access tag for string character data
+    llvm::MDNode* tbaaStringLen_  = nullptr;  ///< TBAA access tag for string length field  (offset 0)
+    llvm::MDNode* tbaaStringCap_  = nullptr;  ///< TBAA access tag for string capacity field (offset 8)
+    llvm::MDNode* tbaaStringData_ = nullptr;  ///< TBAA access tag for string character data (offset 16+)
     llvm::MDNode* tbaaMapKey_ = nullptr;      ///< TBAA access tag for map key slots
     llvm::MDNode* tbaaMapVal_ = nullptr;      ///< TBAA access tag for map value slots
     llvm::MDNode* tbaaMapHash_ = nullptr;     ///< TBAA access tag for map hash slots
@@ -1082,6 +1084,28 @@ class CodeGenerator {
 
     // Lazy-declaration helpers: return existing or create new external C library function declaration.
     llvm::Function* getOrDeclareStrlen();
+
+    // ── Fat-pointer string helpers ──────────────────────────────────────────
+    // OmScript strings are heap allocations with the layout:
+    //   [ len : i64 | cap : i64 | char data... | NUL ]
+    //              ^─── string variable stores a pointer to the start
+    // These helpers hide the byte offsets and TBAA tags from callers.
+
+    /// Load the length field (offset 0) of a string allocation.
+    llvm::Value* emitStringLen(llvm::Value* strPtr, const llvm::Twine& name = "str.len");
+    /// Load the capacity field (offset 8) of a string allocation.
+    llvm::Value* emitStringCap(llvm::Value* strPtr, const llvm::Twine& name = "str.cap");
+    /// Get a pointer to the first character (offset 16) of a string allocation.
+    llvm::Value* emitStringData(llvm::Value* strPtr, const llvm::Twine& name = "str.data");
+    /// Store the length field (offset 0) of a string allocation.
+    void emitStoreStringLen(llvm::Value* len, llvm::Value* strPtr);
+    /// Store the capacity field (offset 8) of a string allocation.
+    void emitStoreStringCap(llvm::Value* cap, llvm::Value* strPtr);
+    /// Allocate a new string: malloc(16+cap+1), store len and cap.
+    /// Returns a pointer to the header.  Caller fills in char data via emitStringData().
+    llvm::Value* emitAllocString(llvm::Value* len, llvm::Value* cap,
+                                 const llvm::Twine& name = "str.alloc");
+    // ────────────────────────────────────────────────────────────────────────
     llvm::Function* getOrDeclareMalloc();
     llvm::Function* getOrDeclareAlignedAlloc();
     llvm::Function* getOrDeclareCalloc();
