@@ -2097,179 +2097,45 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "str_concat", 2);
         llvm::Value* lhsArg = generateExpression(expr->arguments[0].get());
         llvm::Value* rhsArg = generateExpression(expr->arguments[1].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* lhsPtr =
             lhsArg->getType()->isPointerTy()
                 ? lhsArg
-                : builder->CreateIntToPtr(lhsArg, llvm::PointerType::getUnqual(*context), "concat.lhs");
+                : builder->CreateIntToPtr(lhsArg, ptrTy, "concat.lhs");
         llvm::Value* rhsPtr =
             rhsArg->getType()->isPointerTy()
                 ? rhsArg
-                : builder->CreateIntToPtr(rhsArg, llvm::PointerType::getUnqual(*context), "concat.rhs");
+                : builder->CreateIntToPtr(rhsArg, ptrTy, "concat.rhs");
 
-        // Optimization: use a length-cache alloca for the LHS string variable.
-        std::string lhsVarName;
-        llvm::AllocaInst* lenCacheAlloca = nullptr;
-        if (expr->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
-            auto* id = static_cast<IdentifierExpr*>(expr->arguments[0].get());
-            lhsVarName = id->name;
-            auto cacheIt = stringLenCache_.find(lhsVarName);
-            if (cacheIt != stringLenCache_.end()) {
-                lenCacheAlloca = cacheIt->second;
-            } else {
-                // Lazily create the cache alloca in the entry block.
-                llvm::Function* fn = builder->GetInsertBlock()->getParent();
-                lenCacheAlloca = createEntryBlockAlloca(fn, lhsVarName + ".strlen");
-                // Initialize with -1 sentinel (meaning "not yet computed").
-                // Insert the store right after the alloca in the entry block.
-                llvm::IRBuilder<> entryBuilder(lenCacheAlloca->getNextNode());
-                entryBuilder.CreateStore(
-                    llvm::ConstantInt::get(getDefaultType(), -1, true), lenCacheAlloca);
-                stringLenCache_[lhsVarName] = lenCacheAlloca;
-            }
-        }
-
-        llvm::Value* len1;
-        if (lenCacheAlloca) {
-            // Load cached length; if -1 (sentinel), fall back to strlen.
-            llvm::Value* cachedLen = builder->CreateAlignedLoad(getDefaultType(), lenCacheAlloca, llvm::MaybeAlign(8), "concat.cachedlen1");
-            llvm::Value* isSentinel = builder->CreateICmpEQ(
-                cachedLen, llvm::ConstantInt::get(getDefaultType(), -1, true), "concat.issent");
-            llvm::Function* fn = builder->GetInsertBlock()->getParent();
-            llvm::BasicBlock* cachedBB = builder->GetInsertBlock();
-            llvm::BasicBlock* strlenBB = llvm::BasicBlock::Create(*context, "concat.strlen", fn);
-            llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "concat.merge", fn);
-            // Cache hit is the common case after first concat — favour merge.
-            auto* sentW = llvm::MDBuilder(*context).createBranchWeights(1, 9);
-            builder->CreateCondBr(isSentinel, strlenBB, mergeBB, sentW);
-
-            builder->SetInsertPoint(strlenBB);
-            llvm::Value* realLen = emitStringLen(lhsPtr, "concat.len1.real");
-            builder->CreateBr(mergeBB);
-
-            builder->SetInsertPoint(mergeBB);
-            llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "concat.len1");
-            phi->addIncoming(cachedLen, cachedBB);
-            phi->addIncoming(realLen, strlenBB);
-            len1 = phi;
-            // Both incoming values are non-negative (cached len from nonNegValues_, strlen has !range);
-            // track the PHI so downstream operations benefit from the non-negative hint.
-            nonNegValues_.insert(phi);
-        } else {
-            len1 = emitStringLen(lhsPtr, "concat.len1");
-        }
+        llvm::Value* len1 = emitStringLen(lhsPtr, "concat.len1");
         llvm::Value* len2 = emitStringLen(rhsPtr, "concat.len2");
-        llvm::Value* totalLen = builder->CreateAdd(len1, len2, "concat.totallen", /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* totalLen = builder->CreateAdd(
+            len1, len2, "concat.totallen", /*HasNUW=*/true, /*HasNSW=*/true);
 
-        // Update the string length cache for the LHS variable.
-        if (lenCacheAlloca) {
-            builder->CreateStore(totalLen, lenCacheAlloca);
-        }
+        // Allocate a new string header + data: {len, cap, chars...}
+        llvm::Value* hdr = emitAllocString(totalLen, totalLen, "concat");
 
-        // Determine whether the LHS came from a heap allocation (variable load
-        bool lhsIsHeap = false;
-        llvm::AllocaInst* capCacheAlloca = nullptr;
-        if (expr->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
-            auto* id = static_cast<IdentifierExpr*>(expr->arguments[0].get());
-            // Static literal strings (staticStringVars_) must NOT be realloc'd —
-            // they point at read-only .rodata constants.  Treat as non-heap so
-            // the malloc + memcpy path is used instead.
-            if (stringVars_.count(id->name) && !staticStringVars_.count(id->name)) {
-                lhsIsHeap = true;
-                // Look up or create a capacity cache alloca for this variable.
-                auto capIt = stringCapCache_.find(id->name);
-                if (capIt != stringCapCache_.end()) {
-                    capCacheAlloca = capIt->second;
-                } else {
-                    llvm::Function* fn = builder->GetInsertBlock()->getParent();
-                    capCacheAlloca = createEntryBlockAlloca(fn, id->name + ".strcap");
-                    // Initialize capacity to 0 (forces first realloc).
-                    llvm::IRBuilder<> entryBuilder(capCacheAlloca->getNextNode());
-                    entryBuilder.CreateStore(
-                        llvm::ConstantInt::get(getDefaultType(), 0), capCacheAlloca);
-                    stringCapCache_[id->name] = capCacheAlloca;
-                }
-            }
-        } else if (expr->arguments[0]->type == ASTNodeType::CALL_EXPR) {
-            lhsIsHeap = true;
-        }
-        llvm::Value* buf;
-        if (lhsIsHeap && capCacheAlloca) {
-            // Capacity-tracked path: only realloc when buffer is too small.
-            // This matches the C pattern: if (len+1 > cap) { cap*=2; realloc; }
-            llvm::Value* needed =
-                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.needed", /*HasNUW=*/true, /*HasNSW=*/true);
-            llvm::Value* curCap = builder->CreateAlignedLoad(getDefaultType(), capCacheAlloca, llvm::MaybeAlign(8), "concat.curcap");
-            llvm::Value* needGrow = builder->CreateICmpUGT(needed, curCap, "concat.needgrow");
+        // Get pointer to the character data area (header + 16 bytes).
+        llvm::Value* data = emitStringData(hdr, "concat.data");
 
-            llvm::Function* fn = builder->GetInsertBlock()->getParent();
-            llvm::BasicBlock* growBB = llvm::BasicBlock::Create(*context, "concat.grow", fn);
-            llvm::BasicBlock* appendBB = llvm::BasicBlock::Create(*context, "concat.append", fn);
-            llvm::BasicBlock* curBB = builder->GetInsertBlock();
-            // Growth is rare in append loops — weight accordingly for branch
-            // predictor and code layout (grow path moved out of line).
-            llvm::MDNode* concatGrowWeights = llvm::MDBuilder(*context).createBranchWeights(1, 100);
-            builder->CreateCondBr(needGrow, growBB, appendBB, concatGrowWeights);
+        // Copy LHS characters then RHS characters into data area.
+        builder->CreateCall(
+            getOrDeclareMemcpy(),
+            {data, emitStringData(lhsPtr, "concat.ldata"), len1});
+        llvm::Value* dst2 = builder->CreateInBoundsGEP(
+            builder->getInt8Ty(), data, len1, "concat.dst2");
+        builder->CreateCall(
+            getOrDeclareMemcpy(),
+            {dst2, emitStringData(rhsPtr, "concat.rdata"), len2});
 
-            // Grow path: double capacity until sufficient, then realloc.
-            builder->SetInsertPoint(growBB);
-            // newCap = max(curCap * 2, needed); but at least 16
-            llvm::Value* doubled = builder->CreateShl(curCap, llvm::ConstantInt::get(getDefaultType(), 1), "concat.doubled");
-            llvm::Value* sixteen = llvm::ConstantInt::get(getDefaultType(), 16);
-            llvm::Value* minCap = builder->CreateSelect(
-                builder->CreateICmpUGT(doubled, sixteen), doubled, sixteen, "concat.mincap");
-            llvm::Value* newCap = builder->CreateSelect(
-                builder->CreateICmpUGT(needed, minCap), needed, minCap, "concat.newcap");
-            builder->CreateStore(newCap, capCacheAlloca);
-            llvm::Value* grownBuf = builder->CreateCall(getOrDeclareRealloc(), {lhsPtr, newCap}, "concat.grown");
-            llvm::BasicBlock* growExitBB = builder->GetInsertBlock();
-            builder->CreateBr(appendBB);
+        // NUL-terminate.
+        llvm::Value* endPtr = builder->CreateInBoundsGEP(
+            builder->getInt8Ty(), data, totalLen, "concat.end");
+        builder->CreateStore(builder->getInt8(0), endPtr)
+            ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
 
-            // Append path: merge buffer pointer from grow / no-grow paths.
-            builder->SetInsertPoint(appendBB);
-            llvm::PHINode* bufPhi = builder->CreatePHI(lhsPtr->getType(), 2, "concat.buf");
-            bufPhi->addIncoming(lhsPtr, curBB);
-            bufPhi->addIncoming(grownBuf, growExitBB);
-            buf = bufPhi;
-
-            // memcpy(buf + len1, rhs, len2) — only append the RHS portion
-            llvm::Value* dst2 = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, len1, "concat.dst2");
-            builder->CreateCall(getOrDeclareMemcpy(), {dst2, emitStringData(rhsPtr, "concat.rdata"), len2});
-        } else if (lhsIsHeap) {
-            // Heap LHS without capacity tracking: use power-of-2 realloc.
-            llvm::Value* minSize =
-                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.minsize", /*HasNUW=*/true, /*HasNSW=*/true);
-            llvm::Value* one64 = llvm::ConstantInt::get(getDefaultType(), 1);
-            llvm::Value* v = builder->CreateSub(minSize, one64, "concat.pm1", /*HasNUW=*/true, /*HasNSW=*/true);
-            llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(),
-                llvm::Intrinsic::ctlz, {getDefaultType()});
-            // is_zero_poison=true: minSize = totalLen + 1 >= 2 (totalLen is the
-            llvm::Value* lz = builder->CreateCall(ctlzFn,
-                {v, llvm::ConstantInt::getTrue(*context)}, "concat.lz");
-            llvm::Value* shift = builder->CreateSub(
-                llvm::ConstantInt::get(getDefaultType(), 64), lz, "concat.shift");
-            llvm::Value* allocSize = builder->CreateShl(one64, shift, "concat.allocsize", /*HasNUW=*/true, /*HasNSW=*/true);
-            buf = builder->CreateCall(getOrDeclareRealloc(), {lhsPtr, allocSize}, "concat.buf");
-            // memcpy(buf + len1, rhs, len2) — only append the RHS portion
-            llvm::Value* dst2 = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, len1, "concat.dst2");
-            builder->CreateCall(getOrDeclareMemcpy(), {dst2, emitStringData(rhsPtr, "concat.rdata2"), len2});
-        } else {
-            llvm::Value* allocSize =
-                builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "concat.allocsize", /*HasNUW=*/true, /*HasNSW=*/true);
-            buf = builder->CreateCall(getOrDeclareMalloc(), {allocSize}, "concat.buf");
-            llvm::cast<llvm::CallInst>(buf)->addRetAttr(
-                llvm::Attribute::getWithDereferenceableBytes(*context, 1));
-            builder->CreateCall(getOrDeclareMemcpy(), {buf, emitStringData(lhsPtr, "concat.ldata"), len1});
-            // memcpy(buf + len1, rhs, len2) — append RHS
-            llvm::Value* dst2 = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, len1, "concat.dst2");
-            builder->CreateCall(getOrDeclareMemcpy(), {dst2, emitStringData(rhsPtr, "concat.rdata3"), len2});
-        }
-        // null-terminate: buf[totalLen] = '\0'
-        llvm::Value* endPtr = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, totalLen, "concat.end");
-        builder->CreateStore(builder->getInt8(0), endPtr)->setMetadata(
-            llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-        // Mark return as string-returning so callers can track it
         stringReturningFunctions_.insert("str_concat");
-        return buf;
+        return hdr;
     }
 
     if (bid == BuiltinId::LOG2) {
@@ -3491,30 +3357,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         newBuf->addIncoming(grownBuf, growBB);
         newBuf->addIncoming(arrPtr, nogrowBB);
 
-        // ── Issue (E) fix: dereferenceable assume on newBuf ──────────────────
-        // After the realloc/no-grow PHI, LLVM does not know how many bytes are
-        // valid through newBuf.  Without this information, LoopVectorize and
-        // LoopDistribute treat the pointer as "could be any size" and refuse to
-        // transform loops that call push().  Emitting a dereferenceable operand-
-        // bundle assume tells LLVM the buffer holds at least (newLen+1)*8 valid
-        // bytes, enabling downstream optimization passes to reason about the
-        // pointer's extent without relying on the realloc's allocsize attribute.
-        {
-            llvm::Value* derefSlots = builder->CreateAdd(
-                newLen, one64, "push.deref.slots", /*NUW=*/true, /*NSW=*/true);
-            llvm::Value* derefBytes = builder->CreateMul(
-                derefSlots, llvm::ConstantInt::get(getDefaultType(), 8),
-                "push.deref.bytes", /*NUW=*/true, /*NSW=*/true);
-            llvm::Function* assumeFn = OMSC_GET_INTRINSIC(module.get(),
-                llvm::Intrinsic::assume, {});
-            llvm::Value* derefArgs[] = {static_cast<llvm::Value*>(newBuf), derefBytes};
-            llvm::OperandBundleDef derefBundle("dereferenceable",
-                llvm::ArrayRef<llvm::Value*>(derefArgs));
-            builder->CreateCall(
-                assumeFn, {llvm::ConstantInt::getTrue(*context)},
-                llvm::ArrayRef<llvm::OperandBundleDef>{derefBundle});
-        }
-
         // Update length
         emitStoreArrayLen(newLen, newBuf);
         // Store new value at index oldLen + 1 (after header)
@@ -3682,21 +3524,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         newBuf->addIncoming(grownBuf, growBB);
         newBuf->addIncoming(arrPtr, nogrowBB);
 
-        // Dereferenceable assume — same rationale as push() (Issue E fix).
-        {
-            llvm::Value* derefSlots = builder->CreateAdd(
-                newLen, one64, "ush.deref.slots", /*NUW=*/true, /*NSW=*/true);
-            llvm::Value* derefBytes = builder->CreateMul(
-                derefSlots, eight, "ush.deref.bytes", /*NUW=*/true, /*NSW=*/true);
-            llvm::Function* assumeFn = OMSC_GET_INTRINSIC(module.get(),
-                llvm::Intrinsic::assume, {});
-            llvm::Value* derefArgs[] = {static_cast<llvm::Value*>(newBuf), derefBytes};
-            llvm::OperandBundleDef derefBundle("dereferenceable",
-                llvm::ArrayRef<llvm::Value*>(derefArgs));
-            builder->CreateCall(
-                assumeFn, {llvm::ConstantInt::getTrue(*context)},
-                llvm::ArrayRef<llvm::OperandBundleDef>{derefBundle});
-        }
 
         // memmove arr[1..oldLen+1) → arr[2..newLen+1) — overlapping, dest > src.
         llvm::Value* moveBytes = builder->CreateMul(oldLen, eight, "ush.movebytes", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -5542,10 +5369,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "scount.done", function);
 
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+        // Compute the string data pointer (initial cursor) while still in mainBB,
+        // so it dominates the PHI incoming value and isn't inserted between PHIs.
+        llvm::Value* scountStrData = emitStringData(strPtr, "scount.sdata");
 
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* cursor = builder->CreatePHI(ptrTy, 2, "scount.cursor");
-        llvm::Value* scountStrData = emitStringData(strPtr, "scount.sdata");
         cursor->addIncoming(scountStrData, mainBB);
         llvm::PHINode* count = builder->CreatePHI(getDefaultType(), 2, "scount.count");
         count->addIncoming(zero, mainBB);

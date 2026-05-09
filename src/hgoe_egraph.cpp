@@ -1176,7 +1176,13 @@ static void visitBlock(BlockStmt* block,
                 remaining.push_back(std::move(bodyStmt));
         }
 
-        if (toHoist.empty()) { ++i; continue; }
+        if (toHoist.empty()) {
+            // Nothing to hoist, but we already moved everything out of
+            // body->statements into `remaining` — restore it before skipping.
+            body->statements = std::move(remaining);
+            ++i;
+            continue;
+        }
 
         // Insert hoisted declarations just before the FOR_STMT at index i.
         const size_t numHoisted = toHoist.size();
