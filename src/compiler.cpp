@@ -331,7 +331,12 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         }
 #endif
         // Also link C++ standard library (bigint runtime is C++ internally).
+        // macOS (Darwin) uses libc++; Linux and other platforms use libstdc++.
+#if defined(__APPLE__)
+        linkArgs.push_back("-lc++");
+#else
         linkArgs.push_back("-lstdc++");
+#endif
         llvm::SmallVector<llvm::StringRef, 8> argRefs;
         argRefs.push_back(linkerProgram);
         for (const auto& arg : linkArgs) {

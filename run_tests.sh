@@ -14,6 +14,32 @@ NC='\033[0m' # No Color
 FAILURES=0
 TOTAL=0
 
+# ── Portable helpers ───────────────────────────────────────────────────────────
+# nproc is Linux-only; macOS uses sysctl.
+_nproc() {
+    if command -v nproc &>/dev/null; then
+        nproc
+    elif command -v sysctl &>/dev/null; then
+        sysctl -n hw.logicalcpu
+    else
+        echo 4
+    fi
+}
+
+# timeout is Linux/GNU coreutils; macOS ships gtimeout (coreutils) or nothing.
+_timeout() {
+    local duration=$1
+    shift
+    if command -v timeout &>/dev/null; then
+        timeout "$duration" "$@"
+    elif command -v gtimeout &>/dev/null; then
+        gtimeout "$duration" "$@"
+    else
+        # No timeout available: run directly (no time limit enforcement).
+        "$@"
+    fi
+}
+
 # Build the compiler (skippable when the binary is already built externally,
 # e.g. during a PGO/LTO release build where rebuilding would overwrite the
 # optimized binary.  Set OMSC_SKIP_BUILD=1 to skip the cmake+make step.)
@@ -29,7 +55,7 @@ else
     mkdir -p build
     cd build
     cmake .. -DLLVM_DIR=$(/usr/lib/llvm-18/bin/llvm-config --cmakedir) > /dev/null 2>&1
-    make -j$(nproc) > /dev/null 2>&1
+    make -j$(_nproc) > /dev/null 2>&1
 
     if [ $? -ne 0 ]; then
         echo -e "${RED}✗ Build failed${NC}"
@@ -49,7 +75,7 @@ trap 'rm -rf "$TMPTEST"' EXIT
 _PT_IDX=0
 declare -a _PT_PIDS=()
 declare -a _PT_NAMES=()
-MAX_PARALLEL=$(nproc)
+MAX_PARALLEL=$(_nproc)
 
 # Throttle: wait for a slot when too many jobs are in flight
 _ptest_throttle() {
@@ -75,7 +101,7 @@ ptest_program() {
     (
         ./build/omsc "$source" -o "$exe" >/dev/null 2>&1 \
             || { echo "FAIL compile-failed" > "$rf"; exit 0; }
-        timeout 60 "$exe" 2>/dev/null
+        _timeout 60 "$exe" 2>/dev/null
         local rc=$?
         rm -f "$exe"
         local em=$(( expected % 256 ))
@@ -334,7 +360,7 @@ if [ -f /tmp/omscript_clean_target ] || [ -f /tmp/omscript_clean_target.o ]; the
 fi
 echo ""
 
-echo "Running test programs (parallel, $(nproc) workers):"
+echo "Running test programs (parallel, $(_nproc) workers):"
 echo "--------------------------------------------"
 ptest_program "examples/factorial.om" 120
 ptest_program "examples/fibonacci.om" 55
@@ -770,7 +796,7 @@ rm -rf om_packages
 
 # Optimization correctness tests + syntactic features + new features (parallel)
 echo ""
-echo "Running optimization and feature tests (parallel, $(nproc) workers):"
+echo "Running optimization and feature tests (parallel, $(_nproc) workers):"
 echo "--------------------------------------------"
 ptest_program "examples/runtime_div_opt_test.om" 5
 ptest_program "examples/loop_ucmp_test.om" 5
