@@ -37,8 +37,7 @@ jobs:
             llvm-18-dev \
             libgtest-dev \
             gcc \
-            ccache \
-            libcurl4-openssl-dev
+            ccache
 
       - name: Restore ccache
         uses: actions/cache@v4
@@ -47,6 +46,11 @@ jobs:
           key: ccache-Linux-build-release-${{ github.sha }}
           restore-keys: |
             ccache-Linux-build-release-
+
+      - name: Configure ccache
+        run: |
+          rm -f ~/.ccache/ccache.conf ~/.config/ccache/ccache.conf
+          ccache --set-config=max_size=600M
 
       - name: Determine version and build
         id: version
@@ -121,10 +125,13 @@ jobs:
           # ── Simple Release build for correctness testing ──────────────
           # PGO+LTO optimized builds are done by release.yml for the actual
           # distribution artifacts.  Here we just need a fast build to run
-          # tests before tagging.
+          # tests before tagging.  ccache is threaded via COMPILER_LAUNCHER
+          # so incremental rebuilds are significantly faster on re-runs.
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_DIR=/usr/lib/llvm-18/cmake \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             "-DOMSC_VERSION=$NEW_VERSION"
           cmake --build build --parallel $(nproc)
           

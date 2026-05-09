@@ -13,6 +13,13 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-main-${{ runner.os }}-${{ hashFiles('.github/workflows/main.yml') }}
+          restore-keys: apt-main-${{ runner.os }}-
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -24,11 +31,29 @@ jobs:
             gcc \
             libgtest-dev \
             mold \
-            libcurl4-openssl-dev
+            ccache
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-main-${{ github.sha }}
+          restore-keys: ccache-main-
+
+      - name: Configure ccache
+        run: |
+          rm -f ~/.ccache/ccache.conf ~/.config/ccache/ccache.conf
+          ccache --set-config=max_size=600M
 
       - name: Build omsc from source
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/cmake -DLTO=ON -DUSE_MOLD=ON
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=/usr/lib/llvm-18/cmake \
+            -DLTO=ON \
+            -DUSE_MOLD=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build build --parallel $(nproc)
 
       - name: Run integration tests
@@ -36,3 +61,4 @@ jobs:
 
       - name: Run benchmarks (omsc vs C)
         run: BENCH_RUNS=5 BENCH_WARMUP=1 bash test.sh
+

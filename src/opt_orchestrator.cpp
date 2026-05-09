@@ -421,7 +421,15 @@ static void registerAllPasses() {
         "then snap them to hardware-friendly storage sizes (8/16/32/64/multiples-of-64) before codegen",
         PassPhase::ASTTransform,
         PassKind::Analysis,
-        {AnalysisFact::kRangeAnalysis, AnalysisFact::kCopyProp, AnalysisFact::kAlgSimp},
+        // Must run AFTER all expression-level transforms (EGraph + HGOEEGraph) so
+        // that bit-width analysis sees the final, fully-optimised AST.  Running
+        // before those passes would produce stale width maps: EGraph and HGOEEGraph
+        // both rewrite expressions and invalidate kWidthLegalization, leaving codegen
+        // with no valid width facts.  Adding kHGOEEGraph here pushes
+        // kWidthLegalization (and transitively kWidthOpt) to the last topological
+        // tier, after all rewrites have settled.
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kCopyProp, AnalysisFact::kAlgSimp,
+         AnalysisFact::kHGOEEGraph},
         {AnalysisFact::kWidthLegalization},
         // Pure analysis — does not modify the AST, invalidates nothing.
         {},

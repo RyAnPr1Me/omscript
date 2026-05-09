@@ -45,10 +45,28 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake build-essential llvm-18-dev libgtest-dev clang-tidy gcc libcurl4-openssl-dev
+          sudo apt-get install -y cmake build-essential llvm-18-dev libgtest-dev clang-tidy gcc ccache
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-tidy-${{ github.sha }}
+          restore-keys: ccache-tidy-
+
+      - name: Configure ccache
+        run: |
+          rm -f ~/.ccache/ccache.conf ~/.config/ccache/ccache.conf
+          ccache --set-config=max_size=400M
 
       - name: Configure CMake
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DLLVM_DIR=/usr/lib/llvm-18/cmake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DLLVM_DIR=/usr/lib/llvm-18/cmake \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build
         run: cmake --build build --parallel $(nproc)
@@ -78,6 +96,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-build-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: apt-build-${{ runner.os }}-
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -87,10 +112,27 @@ jobs:
             llvm-18-dev \
             libgtest-dev \
             gcc \
-            libcurl4-openssl-dev
+            ccache
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-build-${{ github.sha }}
+          restore-keys: ccache-build-
+
+      - name: Configure ccache
+        run: |
+          rm -f ~/.ccache/ccache.conf ~/.config/ccache/ccache.conf
+          ccache --set-config=max_size=600M
 
       - name: Configure CMake (Release)
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR=/usr/lib/llvm-18/cmake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=/usr/lib/llvm-18/cmake \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build compiler
         run: cmake --build build --parallel $(nproc)
@@ -108,6 +150,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-asan-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: apt-asan-${{ runner.os }}-
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -117,13 +166,32 @@ jobs:
             llvm-18-dev \
             libgtest-dev \
             gcc \
-            libcurl4-openssl-dev
+            ccache
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-asan-${{ github.sha }}
+          restore-keys: ccache-asan-
+
+      - name: Configure ccache
+        run: |
+          rm -f ~/.ccache/ccache.conf ~/.config/ccache/ccache.conf
+          ccache --set-config=max_size=400M
 
       - name: Configure CMake (Debug + ASan/UBSan)
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DSANITIZE=address,undefined -DLLVM_DIR=/usr/lib/llvm-18/cmake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DSANITIZE=address,undefined \
+            -DLLVM_DIR=/usr/lib/llvm-18/cmake \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build compiler
         run: cmake --build build --parallel $(nproc)
 
       - name: Run unit tests (sanitized)
         run: cd build && ctest --output-on-failure
+
