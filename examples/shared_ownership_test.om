@@ -1,0 +1,21 @@
+// shared_ownership_test.om — verify `shared` ownership state (Ω spec §3.1)
+// Expected exit code: 55
+
+fn main() -> int {
+    var total = 0;
+
+    // Test 1: shared allows multiple immutable borrows
+    var x = 10;
+    shared x;
+    // Take two immutable borrows of the shared variable
+    var r1 = x;
+    var r2 = x;
+    total = total + r1 + r2;  // 10 + 10 = 20
+
+    // Test 2: own x restores unique ownership (allows write again)
+    own x;
+    x = 35;
+    total = total + x;        // 20 + 35 = 55
+
+    return total;
+}

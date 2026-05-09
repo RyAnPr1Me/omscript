@@ -3825,6 +3825,9 @@ OwnershipState CodeGenerator::getOwnershipState(const std::string& varName) cons
 }
 
 void CodeGenerator::checkVariableReadable(const std::string& varName, ASTNode* site) {
+    // Ω spec §6.2: --no-ownership-checks disables all safety validation.
+    if (noOwnershipChecks_) return;
+
     // Dead check (moved / invalidated)
     auto deadIt = deadVars_.find(varName);
     if (deadIt != deadVars_.end()) {
@@ -3910,9 +3913,64 @@ void CodeGenerator::generateFreeze(FreezeStmt* stmt) {
     }
 }
 
-// generatePipeline: desugar a pipeline { stage ... } block into a for-loop
+// ── generateShared ────────────────────────────────────────────────────────────
+// `shared x;` — transition variable x to read-only aliasable ownership (Ω §3.1).
+void CodeGenerator::generateShared(SharedStmt* stmt) {
+    const std::string& name = stmt->varName;
 
-// Helper: collect all unique array-identifier bases from a statement subtree.
+    // Validate variable exists.
+    if (namedValues.find(name) == namedValues.end()) {
+        codegenError("Unknown variable '" + name + "' in shared statement", stmt);
+    }
+
+    // Validate ownership state.
+    auto state = getOwnershipState(name);
+    if (state == OwnershipState::Moved) {
+        codegenError("Cannot mark moved variable '" + name + "' as shared", stmt);
+    }
+    if (state == OwnershipState::Invalidated) {
+        codegenError("Cannot mark invalidated variable '" + name + "' as shared", stmt);
+    }
+    if (state == OwnershipState::MutBorrowed) {
+        codegenError("Cannot mark '" + name +
+                     "' as shared — it has an active mutable borrow", stmt);
+    }
+
+    // Update codegen ownership state to Shared.
+    varBorrowStates_[name].shared = true;
+}
+
+// ── generateOwn ──────────────────────────────────────────────────────────────
+// `own x;` — assert unique ownership of x, clearing shared state (Ω §3.1).
+void CodeGenerator::generateOwn(OwnStmt* stmt) {
+    const std::string& name = stmt->varName;
+
+    // Validate variable exists.
+    if (namedValues.find(name) == namedValues.end()) {
+        codegenError("Unknown variable '" + name + "' in own statement", stmt);
+    }
+
+    // Validate ownership state.
+    auto state = getOwnershipState(name);
+    if (state == OwnershipState::Moved) {
+        codegenError("Cannot assert ownership of moved variable '" + name + "'", stmt);
+    }
+    if (state == OwnershipState::Invalidated) {
+        codegenError("Cannot assert ownership of invalidated variable '" + name + "'", stmt);
+    }
+    if (state == OwnershipState::Borrowed || state == OwnershipState::MutBorrowed) {
+        codegenError("Cannot assert unique ownership of '" + name +
+                     "' — it has active borrow(s)", stmt);
+    }
+
+    // Clear shared flag — frozen remains (freeze is a stronger invariant).
+    auto it = varBorrowStates_.find(name);
+    if (it != varBorrowStates_.end()) {
+        it->second.shared = false;
+    }
+}
+
+// generatePipeline: desugar a pipeline { stage ... } block into a for-loop
 // Used by generatePipeline to know which arrays to auto-prefetch.
 static void collectArrayBases(const Statement* s, std::vector<std::string>& out) {
     if (!s) return;

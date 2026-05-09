@@ -163,6 +163,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     codegen.setHardwareGraphOpt(hgoe_);
     codegen.setSDR(sdr_);
     codegen.setIPOF(ipof_);
+    codegen.setNoOwnershipChecks(noOwnershipChecks_);
+    codegen.setMemSanitize(memSanitize_);
     codegen.setSourceFilename(sourceFile);
     if (!pgoGenPath_.empty()) {
         codegen.setPGOGen(pgoGenPath_);

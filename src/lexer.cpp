@@ -66,7 +66,10 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"global",   TokenType::GLOBAL},
     {"atomic",   TokenType::ATOMIC},
     {"volatile", TokenType::VOLATILE},
-    {"type",     TokenType::TYPE}};
+    {"type",     TokenType::TYPE},
+    {"nullptr",  TokenType::NULL_LITERAL},  // Ω spec §2.2: nullptr == null
+    {"shared",   TokenType::SHARED},        // Ω spec §3.1: read-only aliasable ownership
+    {"own",      TokenType::OWN}};
 
 /// Throw a DiagnosticError with the given message and source location.
 [[noreturn]] [[gnu::cold]] static void lexError(const std::string& msg, int ln, int col) {

@@ -6520,4 +6520,53 @@ llvm::Value* CodeGenerator::generateInplaceStringAppend(AssignExpr* assignExpr,
     return newPtr;
 }
 
+// ── generateDerefAssign ───────────────────────────────────────────────────────
+// `*ptr = value` — write-through-pointer (Ω spec §4.2).
+llvm::Value* CodeGenerator::generateDerefAssign(DerefAssignExpr* expr) {
+    // Evaluate pointer expression.
+    llvm::Value* ptrVal = generateExpression(expr->ptr.get());
+
+    // Ensure it is a pointer type.
+    if (!ptrVal->getType()->isPointerTy()) {
+        ptrVal = builder->CreateIntToPtr(
+            ptrVal, llvm::PointerType::getUnqual(*context), "derefassign.itop");
+    }
+
+    // Evaluate the RHS value.
+    llvm::Value* rhs = generateExpression(expr->value.get());
+
+    // Determine element type for the store:
+    // If the pointer expression is a named ptr<T> variable, use T.
+    // If it is a GEP over a named ptr<T>, still use T.
+    // Fallback: use the default i64 type.
+    llvm::Type* storeTy = getDefaultType();
+    {
+        const Expression* ptrExpr = expr->ptr.get();
+        // Strip arithmetic: (p + n) → p
+        if (ptrExpr->type == ASTNodeType::BINARY_EXPR) {
+            ptrExpr = static_cast<const BinaryExpr*>(ptrExpr)->left.get();
+        }
+        if (ptrExpr->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const auto* id = static_cast<const IdentifierExpr*>(ptrExpr);
+            auto it = ptrElemTypes_.find(id->name);
+            if (it != ptrElemTypes_.end()) {
+                storeTy = resolveAnnotatedType(it->second);
+            }
+        }
+    }
+
+    // Truncate / extend value to match storage type when types differ.
+    if (rhs->getType() != storeTy) {
+        if (storeTy->isIntegerTy() && rhs->getType()->isIntegerTy()) {
+            rhs = builder->CreateIntCast(rhs, storeTy, /*isSigned=*/true, "derefassign.cast");
+        } else if (storeTy->isFloatingPointTy() && rhs->getType()->isIntegerTy()) {
+            rhs = builder->CreateSIToFP(rhs, storeTy, "derefassign.itofp");
+        }
+    }
+
+    builder->CreateStore(rhs, ptrVal);
+    // Return the stored value (mirrors C assignment semantics).
+    return rhs;
+}
+
 } // namespace omscript

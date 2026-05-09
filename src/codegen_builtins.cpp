@@ -432,16 +432,24 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         const uint64_t elemSize  = DL.getTypeAllocSize(elemTy);
         const llvm::Align elemAlign = DL.getABITypeAlign(elemTy);
 
-        if (expr->arguments.size() != 1)
-            codegenError("alloc<T> expects exactly one argument (element count)", expr);
+        if (expr->arguments.size() > 1)
+            codegenError("alloc<T> expects zero or one argument (element count); "
+                         "alloc<T>() allocates one element, alloc<T>(n) allocates n elements",
+                         expr);
 
         // Reset side-channels for the upcoming VarDecl registration.
         lastStackAllocBacking_ = nullptr;
         lastAllocWasArena_     = false;
 
-        llvm::Value* countVal = generateExpression(expr->arguments[0].get());
-        countVal = builder->CreateIntCast(countVal, getDefaultType(),
-                                          /*isSigned=*/true, "alloc.cnt");
+        // Zero arguments: allocate exactly one element (Ω spec §4.1: alloc<T>()).
+        llvm::Value* countVal;
+        if (expr->arguments.empty()) {
+            countVal = llvm::ConstantInt::get(getDefaultType(), 1);
+        } else {
+            countVal = generateExpression(expr->arguments[0].get());
+            countVal = builder->CreateIntCast(countVal, getDefaultType(),
+                                              /*isSigned=*/true, "alloc.cnt");
+        }
 
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(countVal)) {
             const uint64_t count = ci->getZExtValue();

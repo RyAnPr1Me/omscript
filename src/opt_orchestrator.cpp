@@ -1348,7 +1348,7 @@ void OptimizationOrchestrator::runBorrowCheck(Program* program,
         ctx.validity().borrowCheck = true;
         return;
     }
-    omscript::runBorrowCheck(*program, verbose_);
+    omscript::runBorrowCheck(*program, verbose_, noOwnershipChecks_, memSanitize_);
     ctx.validity().borrowCheck = true;
 }
 

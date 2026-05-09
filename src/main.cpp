@@ -1479,6 +1479,10 @@ void printUsage(const char* progName) {
                  "  -fsuperopt-level=N  Superoptimizer aggressiveness 0-3 (default: 2)\n"
                  "  -fhgoe           Hardware graph optimization (default: on)\n"
                  "\n"
+                 "Ownership & Memory (Ω spec):\n"
+                 "  --no-ownership-checks  Disable borrow/ownership checks (unsafe mode)\n"
+                 "  --mem-sanitize         Compile-time path-sensitive memory-safety diagnostics\n"
+                 "\n"
                  "Linker:\n"
                  "  -static          Static linking\n"
                  "  -s, --strip      Strip symbols\n"
@@ -1758,6 +1762,10 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "VOLATILE";
     case omscript::TokenType::TYPE:
         return "TYPE";
+    case omscript::TokenType::SHARED:
+        return "SHARED";
+    case omscript::TokenType::OWN:
+        return "OWN";
     }
     return "UNKNOWN";
 }
@@ -2207,6 +2215,8 @@ int main(int argc, char* argv[]) {
     bool flagSDR  = true;
     bool flagIPOF = true;
     bool flagDebug = false;
+    bool flagNoOwnershipChecks = false;  // --no-ownership-checks (Ω spec §6.2)
+    bool flagMemSanitize       = false;  // --mem-sanitize        (Ω spec §7)
 
     // Profile selection for project-mode commands.
     std::string profileName;  // empty = use default ("debug")
@@ -2330,6 +2340,14 @@ int main(int argc, char* argv[]) {
         if (arg == "-g" || arg == "--debug") {
             flagDebug = true;
             explicitFlags.debug = true;
+            return true;
+        }
+        if (arg == "--no-ownership-checks") {
+            flagNoOwnershipChecks = true;
+            return true;
+        }
+        if (arg == "--mem-sanitize") {
+            flagMemSanitize = true;
             return true;
         }
         return false;
@@ -2787,6 +2805,8 @@ int main(int argc, char* argv[]) {
             cg.setSDR(flagSDR);
             cg.setIPOF(flagIPOF);
             cg.setDebugMode(flagDebug);
+            cg.setNoOwnershipChecks(flagNoOwnershipChecks);
+            cg.setMemSanitize(flagMemSanitize);
         };
 
         if (command == Command::Lex || command == Command::Parse || command == Command::EmitIR ||
@@ -2994,6 +3014,8 @@ int main(int argc, char* argv[]) {
         compiler.setSDR(flagSDR);
         compiler.setIPOF(flagIPOF);
         compiler.setDebugMode(flagDebug);
+        compiler.setNoOwnershipChecks(flagNoOwnershipChecks);
+        compiler.setMemSanitize(flagMemSanitize);
         if (quiet) {
             compiler.setVerbose(false);
             compiler.setQuiet(true);

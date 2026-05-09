@@ -128,12 +128,13 @@ struct OptStats {
 };
 
 /// Ownership lattice states for compile-time memory safety.
-/// Owned→Borrowed/MutBorrowed/Frozen/Moved/Invalidated; see VarBorrowState for transitions.
+/// Owned→Borrowed/MutBorrowed/Frozen/Shared/Moved/Invalidated; see VarBorrowState.
 enum class OwnershipState {
     Owned,        ///< Variable owns its value — full read/write access
     Borrowed,     ///< Has ≥1 immutable borrows — readable but not writable
     MutBorrowed,  ///< Has one mutable alias — source is completely locked
     Frozen,       ///< Permanently immutable — all loads are invariant
+    Shared,       ///< Read-only aliasable ownership (Ω spec §3.1) — multiple immut borrows ok
     Moved,        ///< Ownership transferred out — use is a compile error
     Invalidated   ///< Explicitly killed — use is a compile error
 };
@@ -145,20 +146,22 @@ struct VarBorrowState {
     bool moved            = false;
     bool invalidated      = false;
     bool frozen           = false;
+    bool shared           = false;  ///< True after `shared x;` (Ω spec §3.1)
 
     bool isDead()     const { return moved || invalidated; }
     /// Source can be read when not mutably borrowed and not dead.
     bool isReadable() const { return !isDead() && !mutBorrowed; }
-    /// Source can be written only when no borrows exist, not frozen, not dead.
+    /// Source can be written only when no borrows exist, not frozen, not shared, not dead.
     bool isWritable() const {
-        return !isDead() && !mutBorrowed && immutBorrowCount == 0 && !frozen;
+        return !isDead() && !mutBorrowed && immutBorrowCount == 0 && !frozen && !shared;
     }
     /// Derive the canonical OwnershipState.
     OwnershipState state() const {
-        if (invalidated)         return OwnershipState::Invalidated;
-        if (moved)               return OwnershipState::Moved;
-        if (frozen)              return OwnershipState::Frozen;
-        if (mutBorrowed)         return OwnershipState::MutBorrowed;
+        if (invalidated)          return OwnershipState::Invalidated;
+        if (moved)                return OwnershipState::Moved;
+        if (frozen)               return OwnershipState::Frozen;
+        if (shared)               return OwnershipState::Shared;
+        if (mutBorrowed)          return OwnershipState::MutBorrowed;
         if (immutBorrowCount > 0) return OwnershipState::Borrowed;
         return OwnershipState::Owned;
     }
@@ -275,6 +278,18 @@ class CodeGenerator {
     void setRunIRPasses(bool enable) {
         runIRPasses_ = enable;
     }
+
+    /// Disable all ownership/borrow safety checks (Ω spec §6.2: --no-ownership-checks).
+    void setNoOwnershipChecks(bool enable) {
+        noOwnershipChecks_ = enable;
+    }
+    [[nodiscard]] bool isNoOwnershipChecks() const noexcept { return noOwnershipChecks_; }
+
+    /// Enable compile-time path-sensitive memory-safety diagnostics (Ω spec §7: --mem-sanitize).
+    void setMemSanitize(bool enable) {
+        memSanitize_ = enable;
+    }
+    [[nodiscard]] bool isMemSanitize() const noexcept { return memSanitize_; }
 
     /// Enable PGO instrumentation generation mode (writes .profraw to profilePath).
     void setPGOGen(const std::string& profilePath) {
@@ -819,6 +834,7 @@ class CodeGenerator {
     /// Emit inline map_get (equivalent to map_get(mapVal, keyVal, 0)).
     llvm::Value* emitMapGet(llvm::Value* mapVal, llvm::Value* keyVal);
     llvm::Value* generateIndexAssign(IndexAssignExpr* expr);
+    llvm::Value* generateDerefAssign(DerefAssignExpr* expr);  ///< *p = v (Ω spec §4.2)
     llvm::Value* generateStructLiteral(StructLiteralExpr* expr);
     llvm::Value* generateFieldAccess(FieldAccessExpr* expr);
     llvm::Value* generateFieldAssign(FieldAssignExpr* expr);
@@ -862,6 +878,8 @@ class CodeGenerator {
     void generateInvalidate(InvalidateStmt* stmt);
     void generateMoveDecl(MoveDecl* stmt);
     void generateFreeze(FreezeStmt* stmt);
+    void generateShared(SharedStmt* stmt);  ///< shared x; — Ω spec §3.1
+    void generateOwn(OwnStmt* stmt);        ///< own x;    — Ω spec §3.1
     void generatePrefetch(PrefetchStmt* stmt);
     void generateAssume(AssumeStmt* stmt);
     void generatePipeline(PipelineStmt* stmt);
@@ -1046,6 +1064,8 @@ class CodeGenerator {
     bool enableIPOF_ = true;          // -fipof / -fno-ipof (implicit phase ordering fixer)
     unsigned ipofLevel_ = 0;          // 0 = auto (set from optimization level at call time)
     bool runIRPasses_ = true;         // Run runOptimizationPasses() after codegen (set false in IR unit tests).
+    bool noOwnershipChecks_ = false;  // --no-ownership-checks (Ω spec §6.2)
+    bool memSanitize_       = false;  // --mem-sanitize        (Ω spec §7)
     unsigned preferredVectorWidth_ = 4; // SIMD vector width for loop hints (target-aware)
     std::string pgoGenPath_;          // --pgo-gen=<path>: emit raw profile to this file
     std::string pgoUsePath_;          // --pgo-use=<path>: read profile data from this file

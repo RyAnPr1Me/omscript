@@ -1920,6 +1920,28 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         return stmt;
     }
 
+    if (match(TokenType::SHARED)) {
+        // `shared x;` — transition x to read-only aliasable ownership (Ω spec §3.1).
+        const Token kw = tokens[current - 1];
+        const Token name = consume(TokenType::IDENTIFIER, "Expected variable name after 'shared'");
+        consume(TokenType::SEMICOLON, "Expected ';' after 'shared'");
+        auto stmt = std::make_unique<SharedStmt>(name.lexeme);
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+
+    if (match(TokenType::OWN)) {
+        // `own x;` — explicitly assert unique ownership of x (Ω spec §3.1).
+        const Token kw = tokens[current - 1];
+        const Token name = consume(TokenType::IDENTIFIER, "Expected variable name after 'own'");
+        consume(TokenType::SEMICOLON, "Expected ';' after 'own'");
+        auto stmt = std::make_unique<OwnStmt>(name.lexeme);
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+
     return parseExprStmt();
 }
 
@@ -3155,6 +3177,18 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             node->line = expr->line;
             node->column = expr->column;
             return node;
+        } else if (expr->type == ASTNodeType::UNARY_EXPR) {
+            // Handle `*ptr = value` — write-through-pointer (Ω spec §4.2).
+            auto* ue = static_cast<UnaryExpr*>(expr.get());
+            if (ue->op == "deref") {
+                auto rhs = parseAssignment();
+                auto ptrExpr = std::move(ue->operand);
+                auto node = std::make_unique<DerefAssignExpr>(std::move(ptrExpr), std::move(rhs));
+                node->line = expr->line;
+                node->column = expr->column;
+                return node;
+            }
+            error("Invalid assignment target");
         } else {
             error("Invalid assignment target");
         }
@@ -4096,6 +4130,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     // Decides stack vs heap at compile time based on whether x is a
     // compile-time constant and fits within the stack threshold.
     // Returns a ptr<T> pointing to x contiguous elements of type T.
+    // alloc<T>() with no argument allocates exactly one element (Ω spec §4.1).
     if (check(TokenType::IDENTIFIER) && peek().lexeme == "alloc" &&
         current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LT) {
         const Token kw = advance(); // consume 'alloc'
@@ -4103,12 +4138,15 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         std::string elemTypeName = parseTypeAnnotation();
         consume(TokenType::GT, "Expected '>' after type in alloc<T>(...)");
         consume(TokenType::LPAREN, "Expected '(' after alloc<T>");
-        auto countExpr = parseExpression();
-        consume(TokenType::RPAREN, "Expected ')' after count in alloc<T>(...)");
         // Encode the element type in the callee name so codegen can recover it
-        // without modifying the CallExpr AST.  Pattern: "alloc<T>" with one arg.
+        // without modifying the CallExpr AST.
         std::vector<std::unique_ptr<Expression>> args;
-        args.push_back(std::move(countExpr));
+        if (!check(TokenType::RPAREN)) {
+            // alloc<T>(n) — explicit count
+            args.push_back(parseExpression());
+        }
+        // alloc<T>() — zero args means allocate 1 element (handled in codegen)
+        consume(TokenType::RPAREN, "Expected ')' after alloc<T>(...) arguments");
         auto call = std::make_unique<CallExpr>("alloc<" + elemTypeName + ">", std::move(args));
         call->line   = kw.line;
         call->column = kw.column;

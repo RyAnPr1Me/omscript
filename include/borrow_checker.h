@@ -49,6 +49,8 @@
 
 #include "ast.h"
 #include "diagnostic.h"
+#include <string>
+#include <vector>
 
 namespace omscript {
 
@@ -64,6 +66,10 @@ struct BorrowState {
     bool moved          = false;  ///< True after the variable's value was moved out
     bool invalidated    = false;  ///< True after an explicit `invalidate` statement
     bool frozen         = false;  ///< True after a `freeze` statement
+    bool shared         = false;  ///< True after a `shared x;` statement (Ω spec §3.1)
+                                  ///< Read-only aliasable ownership: multiple immutable
+                                  ///< borrows allowed, but mutation and mutable borrows
+                                  ///< are compile-time errors.  Still owns the memory.
 
     /// True if the variable cannot be used at all (moved or invalidated).
     bool isDead()      const noexcept { return moved || invalidated; }
@@ -73,7 +79,8 @@ struct BorrowState {
 
     /// True if the variable can be written (assigned to).
     bool isWritable()  const noexcept {
-        return !isDead() && !mutBorrowed && immutBorrows == 0 && reborrows == 0 && !frozen;
+        return !isDead() && !mutBorrowed && immutBorrows == 0 && reborrows == 0
+               && !frozen && !shared;
     }
 
     /// True if ownership can be moved out.
@@ -83,8 +90,8 @@ struct BorrowState {
     /// block the move.
     bool isMovable()   const noexcept {
         if (isDead() || mutBorrowed || immutBorrows > 0) return false;
-        // Frozen + only reborrows: caller has promised the reborrows are dead.
-        if (frozen && reborrows > 0) return true;
+        // Frozen/shared + only reborrows: caller has promised the reborrows are dead.
+        if ((frozen || shared) && reborrows > 0) return true;
         return reborrows == 0;
     }
 
@@ -92,8 +99,10 @@ struct BorrowState {
     bool canImmutBorrow() const noexcept { return !isDead() && !mutBorrowed; }
 
     /// True if a mutable borrow can be created.
+    /// Shared variables do not permit mutable borrows (Ω spec §3.1).
     bool canMutBorrow()   const noexcept {
-        return !isDead() && !mutBorrowed && immutBorrows == 0 && reborrows == 0 && !frozen;
+        return !isDead() && !mutBorrowed && immutBorrows == 0 && reborrows == 0
+               && !frozen && !shared;
     }
 };
 
@@ -101,10 +110,23 @@ struct BorrowState {
 // BorrowCheckResult — aggregated result for one program
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// A single memory-sanitizer diagnostic entry produced by `--mem-sanitize`.
+struct MemSanitizerDiag {
+    std::string kind;       ///< "use-after-invalidate", "null-deref", etc.
+    std::string varName;    ///< Variable involved
+    std::string file;       ///< Source file name
+    int         causeLine;  ///< Line where the invalidation/null-assign happened
+    int         useLine;    ///< Line of the invalid use
+    std::string causeDesc;  ///< Human-readable cause (e.g. "invalidate p")
+    std::string useDesc;    ///< Human-readable use (e.g. "*p (invalid use)")
+};
+
 /// Result from running the borrow checker over a program.
 struct BorrowCheckResult {
     /// True when at least one E015–E018 error was found.
     bool hadError = false;
+    /// Memory-sanitizer diagnostics (only populated with --mem-sanitize).
+    std::vector<MemSanitizerDiag> memSanitizerDiags;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -114,11 +136,20 @@ struct BorrowCheckResult {
 /// Run the standalone borrow checker over every function in @p program.
 ///
 /// Throws `DiagnosticError` (with code E015–E018) on the first borrow
-/// violation found.  Returns normally if no violations are detected.
+/// violation found (unless @p noOwnershipChecks is true).  Returns normally
+/// if no violations are detected.
 ///
-/// @param program  The parsed program to check.
-/// @param verbose  When true, log per-function check activity to stderr.
-BorrowCheckResult runBorrowCheck(const Program& program, bool verbose = false);
+/// @param program           The parsed program to check.
+/// @param verbose           When true, log per-function check activity to stderr.
+/// @param noOwnershipChecks When true, skip all borrow/invalidation checks
+///                          (Ω spec §6.2: --no-ownership-checks flag).
+/// @param memSanitize       When true, perform additional path-sensitive
+///                          diagnostics and populate result.memSanitizerDiags
+///                          (Ω spec §7: --mem-sanitize flag).
+BorrowCheckResult runBorrowCheck(const Program& program,
+                                 bool verbose          = false,
+                                 bool noOwnershipChecks = false,
+                                 bool memSanitize      = false);
 
 } // namespace omscript
 

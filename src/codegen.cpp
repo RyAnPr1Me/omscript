@@ -1110,6 +1110,9 @@ bool CodeGenerator::isUnsignedValue(llvm::Value* v) const {
 }
 
 void CodeGenerator::checkConstModification(const std::string& name, const std::string& action) {
+    // Ω spec §6.2: --no-ownership-checks disables all safety validation.
+    if (noOwnershipChecks_) return;
+
     auto constIt = constValues.find(name);
     if (constIt != constValues.end() && constIt->second) {
         // Give a more specific error message for frozen variables
@@ -1122,8 +1125,16 @@ void CodeGenerator::checkConstModification(const std::string& name, const std::s
         throw DiagnosticError(
             Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, "Cannot " + action + " const variable: " + name});
     }
-    // Block writes to the source variable of an active mutable borrow.
+    // Block writes to variables in shared ownership state (Ω spec §3.1).
     auto* bs = getBorrowStateOpt(name);
+    if (bs && bs->shared) {
+        throw DiagnosticError(
+            Diagnostic{DiagnosticSeverity::Error, {"", 0, 0},
+                       "Cannot " + action + " variable '" + name +
+                       "' — it is in shared ownership state (Ω spec §3.1); "
+                       "use 'own " + name + ";' to restore unique ownership first"});
+    }
+    // Block writes to the source variable of an active mutable borrow.
     if (bs && bs->mutBorrowed) {
         throw DiagnosticError(
             Diagnostic{DiagnosticSeverity::Error, {"", 0, 0},
@@ -4179,6 +4190,8 @@ void CodeGenerator::generate(Program* program) {
 
     {
         OptimizationOrchestrator orch(optimizationLevel, verbose_, this, optMgr_.get());
+        orch.setNoOwnershipChecks(noOwnershipChecks_);
+        orch.setMemSanitize(memSanitize_);
         orch.runPrepasses(program, *optCtx_);
     }
 
@@ -5483,6 +5496,12 @@ void CodeGenerator::generateStatement(Statement* stmt) {
     case ASTNodeType::FREEZE_STMT:
         generateFreeze(static_cast<FreezeStmt*>(stmt));
         break;
+    case ASTNodeType::SHARED_STMT:
+        generateShared(static_cast<SharedStmt*>(stmt));
+        break;
+    case ASTNodeType::OWN_STMT:
+        generateOwn(static_cast<OwnStmt*>(stmt));
+        break;
     case ASTNodeType::PREFETCH_STMT:
         generatePrefetch(static_cast<PrefetchStmt*>(stmt));
         break;
@@ -5529,6 +5548,8 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateIndex(static_cast<IndexExpr*>(expr));
     case ASTNodeType::INDEX_ASSIGN_EXPR:
         return generateIndexAssign(static_cast<IndexAssignExpr*>(expr));
+    case ASTNodeType::DEREF_ASSIGN_EXPR:
+        return generateDerefAssign(static_cast<DerefAssignExpr*>(expr));
     case ASTNodeType::STRUCT_LITERAL_EXPR:
         return generateStructLiteral(static_cast<StructLiteralExpr*>(expr));
     case ASTNodeType::FIELD_ACCESS_EXPR:
@@ -6314,6 +6335,11 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
             return false;
         case ASTNodeType::BREAK_STMT:
         case ASTNodeType::CONTINUE_STMT:
+        case ASTNodeType::FREEZE_STMT:
+        case ASTNodeType::SHARED_STMT:
+        case ASTNodeType::OWN_STMT:
+            // These are compile-time ownership annotations with no side effects.
+            return true;
             return true;
         case ASTNodeType::SWITCH_STMT: {
             auto* sw = static_cast<const SwitchStmt*>(stmt);

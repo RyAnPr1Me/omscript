@@ -67,7 +67,10 @@ enum class ASTNodeType {
     COMPTIME_EXPR,  // comptime { ... } — compile-time evaluated block expression
     REBORROW_EXPR,  // reborrow ref = &src; / reborrow ref = &src.field; / reborrow ref = &src[idx];
     PIPELINE_STMT,  // pipeline (i in start...end) { stage name { ... } ... }
-    RANGE_ANNOT_EXPR // @range[lo, hi] expr — compiler-level integer range hint
+    RANGE_ANNOT_EXPR, // @range[lo, hi] expr — compiler-level integer range hint
+    SHARED_STMT,    // shared x; — mark variable as shared ownership (Ω spec §3.1)
+    OWN_STMT,       // own x;   — explicitly assert unique ownership (Ω spec §3.1)
+    DEREF_ASSIGN_EXPR  // *p = v — write through pointer (Ω spec §4.2)
 };
 
 class ASTNode {
@@ -215,6 +218,17 @@ class IndexAssignExpr : public Expression {
     IndexAssignExpr(std::unique_ptr<Expression> arr, std::unique_ptr<Expression> idx, std::unique_ptr<Expression> val)
         : Expression(ASTNodeType::INDEX_ASSIGN_EXPR), array(std::move(arr)), index(std::move(idx)),
           value(std::move(val)) {}
+};
+
+/// `*ptr = value` — write-through-pointer (Ω spec §4.2).
+/// The pointer expression is evaluated and the RHS value is stored through it.
+class DerefAssignExpr : public Expression {
+  public:
+    std::unique_ptr<Expression> ptr;    ///< The pointer expression (e.g. p, p+1)
+    std::unique_ptr<Expression> value;  ///< The RHS value to store
+
+    DerefAssignExpr(std::unique_ptr<Expression> p, std::unique_ptr<Expression> val)
+        : Expression(ASTNodeType::DEREF_ASSIGN_EXPR), ptr(std::move(p)), value(std::move(val)) {}
 };
 
 class LambdaExpr : public Expression {
@@ -857,6 +871,33 @@ class FreezeStmt : public Statement {
 
     explicit FreezeStmt(const std::string& name)
         : Statement(ASTNodeType::FREEZE_STMT), varName(name) {}
+};
+
+/// `shared x;` — transitions variable `x` to read-only aliasable ownership (Ω spec §3.1).
+/// After shared:
+///   - Multiple immutable borrows are permitted.
+///   - Mutable borrows and direct mutation are compile-time errors.
+///   - The variable still owns the memory; invalidate will free it.
+///   - Unlike freeze, no LLVM invariant.start is emitted (value may not
+///     be constant, only access is restricted).
+class SharedStmt : public Statement {
+  public:
+    std::string varName;
+
+    explicit SharedStmt(const std::string& name)
+        : Statement(ASTNodeType::SHARED_STMT), varName(name) {}
+};
+
+/// `own x;` — explicitly asserts unique ownership of variable `x` (Ω spec §3.1).
+/// Clears any shared/borrowed state and re-establishes exclusive ownership.
+/// Useful after scope-limited borrows end and the programmer wants the
+/// compiler to verify that no aliases remain.
+class OwnStmt : public Statement {
+  public:
+    std::string varName;
+
+    explicit OwnStmt(const std::string& name)
+        : Statement(ASTNodeType::OWN_STMT), varName(name) {}
 };
 
 /// `comptime { statements... }` — compile-time evaluated block expression.

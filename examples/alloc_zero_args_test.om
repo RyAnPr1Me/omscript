@@ -1,0 +1,15 @@
+// alloc_zero_args_test.om — verify alloc<T>() with no args allocates 1 element (Ω spec §4.1)
+// Expected exit code: 99
+
+fn main() -> int {
+    // alloc<i64>() allocates exactly one i64 element
+    var p: ptr<i64> = alloc<i64>();
+
+    // Write to the allocated element via deref-assign
+    *p = 99;
+
+    // Read back and return
+    var val = *p;
+    invalidate p;
+    return val;
+}

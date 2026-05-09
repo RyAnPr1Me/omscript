@@ -1,0 +1,21 @@
+// ptr_arith_typed_test.om — verify type-aware pointer arithmetic (Ω spec §4.4)
+// ptr<T> + n advances by n * sizeof(T)
+// Expected exit code: 77
+
+fn main() -> int {
+    // Allocate 3 i64 elements
+    var arr: ptr<i64> = alloc<i64>(3);
+
+    // Initialize via pointer arithmetic + deref-assign
+    *arr       = 10;
+    *(arr + 1) = 20;
+    *(arr + 2) = 47;
+
+    // Read back: arr + 0, arr + 1, arr + 2
+    var a = *arr;
+    var b = *(arr + 1);
+    var c = *(arr + 2);
+
+    invalidate arr;
+    return a + b + c;  // 10 + 20 + 47 = 77
+}

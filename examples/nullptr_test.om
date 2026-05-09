@@ -1,0 +1,15 @@
+// nullptr_test.om — verify `nullptr` keyword is equivalent to `null` (Ω spec §2.2)
+// Expected exit code: 42
+
+fn main() -> int {
+    // null and nullptr are both zero pointers
+    var p: ptr<i64> = null;
+    var q: ptr<i64> = nullptr;
+
+    // Comparison: both should be null (zero)
+    var result = 0;
+    if (p == q) {
+        result = 42;
+    }
+    return result;
+}
