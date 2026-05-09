@@ -522,6 +522,8 @@ ptest_compile_fail "examples/unknown_annotation.om"
 # Ω Ownership System negative tests (must be rejected by the compiler)
 ptest_compile_fail "examples/double_invalidate_error_test.om"
 ptest_compile_fail "examples/write_to_shared_error_test.om"
+ptest_compile_fail "examples/invalidate_while_borrowed_error_test.om"
+ptest_compile_fail "examples/own_on_frozen_error_test.om"
 flush_ptests
 test_cli_output "error-line-info" "line" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "error-includes-filename" "undefined_var.om" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
@@ -539,6 +541,8 @@ test_cli_output "invalid-numeric-underscore-msg" "Invalid underscore placement i
 # Ω Ownership error code diagnostics
 test_cli_output "e019-double-invalidate-msg" "E019" 1 ./build/omsc examples/double_invalidate_error_test.om -o /tmp/test_e019
 test_cli_output "e020-write-to-shared-msg" "E020" 1 ./build/omsc examples/write_to_shared_error_test.om -o /tmp/test_e020
+test_cli_output "e021-own-on-frozen-msg" "E021" 1 ./build/omsc examples/own_on_frozen_error_test.om -o /tmp/test_e021
+test_cli_output "e022-invalidate-while-borrowed-msg" "E022" 1 ./build/omsc examples/invalidate_while_borrowed_error_test.om -o /tmp/test_e022
 
 echo ""
 echo "============================================"

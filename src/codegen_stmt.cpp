@@ -3970,8 +3970,10 @@ void CodeGenerator::generateOwn(OwnStmt* stmt) {
     }
 }
 
-// generatePipeline: desugar a pipeline { stage ... } block into a for-loop
-// Used by generatePipeline to know which arrays to auto-prefetch.
+// ── collectArrayBases ─────────────────────────────────────────────────────────
+// Helper used by generatePipeline to know which arrays to auto-prefetch.
+// Walks statement/expression trees and collects all base array names accessed
+// via INDEX_EXPR into @p out (deduplicating via @p seen).
 static void collectArrayBases(const Statement* s, std::vector<std::string>& out) {
     if (!s) return;
     std::unordered_set<std::string> seen(out.begin(), out.end());

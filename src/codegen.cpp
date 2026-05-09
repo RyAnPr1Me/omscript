@@ -6340,7 +6340,6 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
         case ASTNodeType::OWN_STMT:
             // These are compile-time ownership annotations with no side effects.
             return true;
-            return true;
         case ASTNodeType::SWITCH_STMT: {
             auto* sw = static_cast<const SwitchStmt*>(stmt);
             if (!isExprPure(sw->condition.get())) return false;

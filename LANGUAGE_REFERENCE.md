@@ -21,7 +21,7 @@
 14. [Structs](#14-structs)
 15. [Enums](#15-enums)
 16. [Error Handling](#16-error-handling)
-17. [Memory and Ownership System](#17-memory-and-ownership-system) — Ω Ownership spec v1.0: `move`, `borrow`, `shared`, `own`, `freeze`, `invalidate`, `ptr<T>`, `alloc<T>`, `nullptr`, `*p = v`, E015–E020, `--no-ownership-checks`, `--mem-sanitize`
+17. [Memory and Ownership System](#17-memory-and-ownership-system) — Ω Ownership spec v1.0: `move`, `borrow`, `shared`, `own`, `freeze`, `invalidate`, `ptr<T>`, `alloc<T>`, `nullptr`, `*p = v`, E015–E022, constraint matrix, `--no-ownership-checks`, `--mem-sanitize`
 18. [OPTMAX](#18-optmax)
 19. [Built-in Functions](#19-built-in-functions)
 20. [Concurrency](#20-concurrency)
@@ -5483,6 +5483,7 @@ freeze x;
 2. All subsequent loads from `x` are annotated with LLVM `!invariant` metadata.
 3. Any write to `x` is a compile-time error — even after scope re-entry.
 4. **No runtime cost** — purely a compile-time annotation.
+5. **`own x;` on a frozen variable is a compile-time error** (E021) — freeze is irreversible.
 
 **Example:**
 ```omscript
@@ -5490,11 +5491,26 @@ var a = 42;
 freeze a;
 println(a);   // 42
 // a = 99;    // [E005] cannot modify constant/frozen variable 'a'
+// own a;     // [E021] cannot assert unique ownership of 'a' — it is frozen
 ```
 
 **Difference from `shared`:**
-- `freeze` is permanent and irreversible; `shared` can be lifted by `own`.
-- `freeze` emits LLVM `!invariant` hints; `shared` does not.
+
+| Property | `freeze` | `shared` |
+|----------|----------|----------|
+| Write blocked | ✓ permanent | ✓ until `own` |
+| LLVM `!invariant` | ✓ | ✗ |
+| Reversible | ✗ | ✓ via `own` |
+| `own` allowed | ✗ (E021) | ✓ |
+| `invalidate` allowed | ✓ | ✓ |
+
+If you need a mutable copy of a frozen variable, declare a new variable:
+```omscript
+var x = 42;
+freeze x;
+var y = x;   // copy — y is independently owned and writable
+y = 99;      // OK: y is a separate variable
+```
 
 ---
 
@@ -5510,6 +5526,7 @@ invalidate x;
 - Schedules `free(x)` at the optimal CFG exit point (deferred-free queue).
 - Any subsequent use of `x` is a compile-time error (E015).
 - **Double-invalidate** is a compile-time error (E019).
+- **Invalidate while borrowed** is a compile-time error (E022) — freeing memory with active aliases would dangle the borrow.
 
 **Which types are freed:**
 | Type | Action |
@@ -5529,9 +5546,32 @@ fn main() -> int {
     *p = 99;
     var val = *p;
     invalidate p;
-    // *p = 1;      // [E015] use of invalidated variable 'p'
+    // *p = 1;       // [E015] use of invalidated variable 'p'
     // invalidate p; // [E019] double invalidation of 'p'
-    return val;     // 99
+    return val;      // 99
+}
+```
+
+**Borrow constraint (E022):**
+```omscript
+fn main() -> int {
+    var p: ptr<i64> = alloc<i64>(1);
+    borrow var r = p;   // active borrow
+    invalidate p;        // [E022] cannot invalidate 'p' — 1 immutable borrow(s) active
+    return 0;
+}
+```
+
+To correctly invalidate after borrowing, ensure all borrows end first (go out of scope):
+```omscript
+fn main() -> int {
+    var p: ptr<i64> = alloc<i64>(1);
+    {
+        borrow var r = p;    // borrow is active in this block
+        var val = *r;
+    }                        // r goes out of scope → borrow released
+    invalidate p;            // OK: no active borrows
+    return 0;
 }
 ```
 
@@ -5666,13 +5706,47 @@ The compiler does, however, emit `llvm.lifetime.end` for stack-allocated `alloc<
 | E015 | `USE_AFTER_MOVE` | Read/write of moved or invalidated variable |
 | E016 | `BORROW_WRITE_CONFLICT` | Write to variable with active immutable borrow(s) |
 | E017 | `DOUBLE_MUT_BORROW` | Mutable borrow of already mutably-borrowed variable |
-| E018 | `MOVE_WHILE_BORROWED` | Move/own of variable with active borrow(s) |
+| E018 | `MOVE_WHILE_BORROWED` | Move/`own` of variable with active borrow(s) |
 | E019 | `DOUBLE_INVALIDATE` | `invalidate` on already-invalidated variable |
 | E020 | `WRITE_TO_SHARED` | Write to variable in `shared` ownership state |
+| E021 | `OWN_ON_FROZEN` | `own` on a `frozen` variable — freeze is irreversible |
+| E022 | `INVALIDATE_WHILE_BORROWED` | `invalidate` while active borrow(s) exist on the variable |
+
+**Design notes:**
+- E019 and E022 together make `invalidate` fully safe: no double-free (E019) and no dangling alias (E022).
+- E021 enforces that `freeze` is strictly stronger than `shared`: once frozen, ownership cannot be reclaimed via `own`.
+- All error codes are compile-time only — zero runtime overhead.
 
 ---
 
-### 17.15 Safety Mode Flags
+### 17.15 Ownership Constraint Summary
+
+The following matrix summarizes which operations are permitted in each ownership state:
+
+| Operation | `Owned` | `Borrowed` | `MutBorrowed` | `Shared` | `Frozen` | `Moved` | `Invalidated` |
+|-----------|:-------:|:----------:|:-------------:|:--------:|:--------:|:-------:|:-------------:|
+| Read | ✓ | ✓ | ✗ | ✓ | ✓ | ✗ | ✗ |
+| Write | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `move` | ✓ | ✗ | ✗ | ✗ | ✓¹ | ✗ | ✗ |
+| `invalidate` | ✓ | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
+| `freeze` | ✓ | ✗ | ✗ | ✓ | —² | ✗ | ✗ |
+| `shared` | ✓ | ✓ | ✗ | —² | ✓ | ✗ | ✗ |
+| `own` | —² | ✗ | ✗ | ✓ | ✗³ | ✗ | ✗ |
+| `borrow` | ✓ | ✓ | ✗ | ✓ | ✓ | ✗ | ✗ |
+| `borrow mut` | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+
+¹ Frozen variables may be moved; the destination is a new frozen owner.  
+² No-op / already in that state.  
+³ E021 — freeze is irreversible; `own` cannot downgrade a frozen variable.
+
+**Error triggered on invalid operation:**
+- Write to `Borrowed` → E016; write to `Shared` → E020; write to `Frozen`/`Moved`/`Invalidated` → E005/E015
+- `invalidate` on `Moved` → E015; on `Invalidated` → E019; on `Borrowed`/`MutBorrowed` → E022
+- `own` on `Frozen` → E021; `own` on `Borrowed` → E018
+
+---
+
+### 17.16 Safety Mode Flags
 
 #### `--no-ownership-checks` (Ω spec §6.2)
 
@@ -9749,11 +9823,18 @@ fn multiply_add(a: int, b: int, c: int) -> int {
 | **Fuel**              | Instruction budget for CF-CTRE evaluation. Default: 10,000,000 instructions at O2. |
 | **Comptime**          | Compile-time evaluation. Code inside `comptime { ... }` blocks is executed by CF-CTRE. |
 | **Ptr-elem-type**     | Pointer element type. The type of data pointed to by a pointer (used internally by LLVM IR). |
-| **Ownership state**   | State of a region variable: `created`, `invalidated`. Tracked by RLC pass. |
-| **Freeze**            | Operation that converts a mutable reference to an immutable reference (future feature). |
-| **Invalidate**        | Keyword that marks the end of a region's lifetime. After `invalidate(r)`, `r` cannot be used. |
-| **Reborrow**          | Creating a new reference to the same data (future feature). |
-| **No-alias**          | Guarantee that two pointers do not refer to overlapping memory. Enables aggressive optimization. |
+| **Ownership state**   | Per-variable state tracked by the borrow checker. One of: `Owned`, `Borrowed`, `MutBorrowed`, `Shared`, `Frozen`, `Moved`, `Invalidated`. See §17.1. |
+| **Owned**             | Initial ownership state: variable has unique, exclusive read-write access. |
+| **Borrowed**          | Variable has ≥1 active immutable borrows (`borrow var r = x`). Source is readable but not writable or moveable until all borrows end. |
+| **MutBorrowed**       | Variable has exactly one active mutable borrow (`borrow mut var r = x`). Source is completely locked (no reads or writes) until the borrow ends. |
+| **Shared**            | Variable transitioned via `shared x;`. Multiple reads allowed; writes and mutable borrows are compile-time errors (E020). Reversible via `own x;`. |
+| **Frozen**            | Variable permanently immutable via `freeze x;`. LLVM `!invariant` metadata emitted on all loads. Irreversible — `own` is a compile-time error (E021). |
+| **Moved**             | Ownership transferred via `move var y = x`. Reading/writing `x` afterwards is a compile-time error (E015). |
+| **Invalidated**       | Variable killed via `invalidate x;`. Memory scheduled for deferred `free()`. Any subsequent use is E015. Double-invalidate is E019. |
+| **Freeze**            | `freeze x;` — mark variable permanently read-only. LLVM `!invariant.load` emitted. `own` on frozen variable → E021. |
+| **Invalidate**        | `invalidate x;` — deferred deallocation. Logical death is immediate; physical `free()` is batched at function exit. Cannot invalidate while borrowed (E022). |
+| **Reborrow**          | `reborrow var ref = src;` — create a new non-owning immutable alias from an existing borrow. Increments the source's `reborrows` count. |
+| **No-alias**          | Guarantee that two pointers do not refer to overlapping memory. Emitted as LLVM `noalias` on `Owned` and `MutBorrowed` variables. Enables aggressive optimization. |
 | **Saturation**        | Termination condition for e-graph: no new e-nodes added in an iteration. |
 | **Extraction**        | Phase of e-graph optimization where the minimum-cost term is selected from each e-class. |
 | **SCoP**              | Static Control Part. Loop nest with affine bounds and subscripts, eligible for polyhedral optimization. |

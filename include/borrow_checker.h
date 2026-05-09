@@ -11,21 +11,23 @@
 /// each function's AST, detecting ownership violations BEFORE code generation.
 /// It complements the codegen-embedded ownership checks by providing:
 ///
-///   - Structured error codes (E015–E020) instead of ad-hoc codegenError()
+///   - Structured error codes (E015–E022) instead of ad-hoc codegenError()
 ///   - Precise source locations from AST nodes
 ///   - Early termination: errors are caught before expensive IR generation
 ///   - Clear, user-facing messages referencing the violating variable by name
 ///
 /// ## What it checks
 ///
-/// | Code | Violation                                                        |
-/// |------|------------------------------------------------------------------|
-/// | E015 | Read or write of a variable after it was moved or invalidated    |
-/// | E016 | Write to a variable with active immutable borrow(s)              |
-/// | E017 | Creating a mutable borrow of an already-mutably-borrowed variable|
-/// | E018 | Moving a variable that still has active borrow(s)                |
-/// | E019 | `invalidate` called on an already-invalidated variable           |
-/// | E020 | Write to a variable in `shared` ownership state                  |
+/// | Code | Violation                                                              |
+/// |------|------------------------------------------------------------------------|
+/// | E015 | Read or write of a variable after it was moved or invalidated          |
+/// | E016 | Write to a variable with active immutable borrow(s)                    |
+/// | E017 | Creating a mutable borrow of an already-mutably-borrowed variable      |
+/// | E018 | Moving a variable that still has active borrow(s)                      |
+/// | E019 | `invalidate` called on an already-invalidated variable                 |
+/// | E020 | Write to a variable in `shared` ownership state                        |
+/// | E021 | `own` called on a `frozen` variable — freeze is irreversible           |
+/// | E022 | `invalidate` called while active borrow(s) exist on the variable       |
 ///
 /// ## Scope handling
 ///
@@ -124,7 +126,7 @@ struct MemSanitizerDiag {
 
 /// Result from running the borrow checker over a program.
 struct BorrowCheckResult {
-    /// True when at least one E015–E020 error was found.
+    /// True when at least one E015–E022 error was found.
     bool hadError = false;
     /// Memory-sanitizer diagnostics (only populated with --mem-sanitize).
     std::vector<MemSanitizerDiag> memSanitizerDiags;
@@ -136,7 +138,7 @@ struct BorrowCheckResult {
 
 /// Run the standalone borrow checker over every function in @p program.
 ///
-/// Throws `DiagnosticError` (with code E015–E020) on the first borrow
+/// Throws `DiagnosticError` (with code E015–E022) on the first borrow
 /// violation found (unless @p noOwnershipChecks is true).  Returns normally
 /// if no violations are detected.
 ///

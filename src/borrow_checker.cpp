@@ -592,6 +592,19 @@ private:
                         "cannot invalidate '" + iv->varName +
                         "' — variable was already moved", stmt);
                 }
+                // E022 — invalidate while borrowed: active borrows still reference
+                // this variable; freeing the memory now would dangle the alias.
+                if (s->mutBorrowed || s->immutBorrows > 0 || s->reborrows > 0) {
+                    std::string detail;
+                    if (s->mutBorrowed)          detail = "a mutable borrow";
+                    else if (s->immutBorrows > 0) detail = std::to_string(s->immutBorrows) +
+                                                           " immutable borrow(s)";
+                    else                          detail = std::to_string(s->reborrows) +
+                                                           " reborrow alias(es)";
+                    throw makeBorrowError(ErrorCode::E022_INVALIDATE_WHILE_BORROWED,
+                        "cannot invalidate '" + iv->varName + "' — it still has " + detail +
+                        " active; end all borrows before invalidating (Ω spec §6.2)", stmt);
+                }
             }
             stateOf(iv->varName).invalidated = true;
             stateOf(iv->varName).moved = false;
@@ -646,6 +659,14 @@ private:
                     throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
                         "cannot assert ownership of '" + ow->varName +
                         "' — variable is " + (s->moved ? "moved" : "invalidated"), stmt);
+                }
+                // E021 — own on frozen: freeze is irreversible; 'own' cannot
+                // downgrade a frozen variable back to a writable owned state.
+                if (s->frozen) {
+                    throw makeBorrowError(ErrorCode::E021_OWN_ON_FROZEN,
+                        "cannot assert unique ownership of '" + ow->varName +
+                        "' — it is frozen (freeze is irreversible; use a new variable if "
+                        "you need a mutable copy)", stmt);
                 }
                 if (s->mutBorrowed || s->immutBorrows > 0 || s->reborrows > 0) {
                     throw makeBorrowError(ErrorCode::E018_MOVE_WHILE_BORROWED,
