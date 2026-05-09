@@ -698,9 +698,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                             isUnsignedSrc = isUnsignedAnnot(typeId->name);
                     }
                 }
-                return isUnsignedSrc
-                    ? builder->CreateZExt(val, dstTy, "as.zext")
-                    : builder->CreateSExt(val, dstTy, "as.sext");
+                if (isUnsignedSrc) {
+                    auto* z = builder->CreateZExt(val, dstTy, "as.zext",
+                                                   /*IsNonNeg=*/true);
+                    nonNegValues_.insert(z);
+                    return z;
+                }
+                return builder->CreateSExt(val, dstTy, "as.sext");
             } else if (dstBits < srcBits) {
                 return builder->CreateTrunc(val, dstTy, "as.trunc");
             } else {
@@ -1516,13 +1520,21 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         const bool leftUnsigned  = unsignedExprs_.count(left) || isUnsignedValue(left);
         const bool rightUnsigned = unsignedExprs_.count(right) || isUnsignedValue(right);
         if (leftBits < rightBits) {
-            left = leftUnsigned
-                ? builder->CreateZExt(left, right->getType(), "zext")
-                : builder->CreateSExt(left, right->getType(), "sext");
+            if (leftUnsigned) {
+                left = builder->CreateZExt(left, right->getType(), "zext",
+                                           /*IsNonNeg=*/true);
+                nonNegValues_.insert(left);
+            } else {
+                left = builder->CreateSExt(left, right->getType(), "sext");
+            }
         } else {
-            right = rightUnsigned
-                ? builder->CreateZExt(right, left->getType(), "zext")
-                : builder->CreateSExt(right, left->getType(), "sext");
+            if (rightUnsigned) {
+                right = builder->CreateZExt(right, left->getType(), "zext",
+                                            /*IsNonNeg=*/true);
+                nonNegValues_.insert(right);
+            } else {
+                right = builder->CreateSExt(right, left->getType(), "sext");
+            }
         }
     }
 
