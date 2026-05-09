@@ -532,6 +532,14 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map,
             killName(map, static_cast<InvalidateStmt*>(stmt.get())->varName);
             break;
 
+        // Ownership state transitions: none of these reassign variable data,
+        // so existing copy-map entries remain valid across these statements.
+        // `shared`, `own`, and `freeze` only change ownership metadata.
+        case ASTNodeType::SHARED_STMT:
+        case ASTNodeType::OWN_STMT:
+        case ASTNodeType::FREEZE_STMT:
+            break;
+
         case ASTNodeType::ASSUME_STMT: {
             auto* as = static_cast<AssumeStmt*>(stmt.get());
             count += propagateInExpr(as->condition, map, opaque);

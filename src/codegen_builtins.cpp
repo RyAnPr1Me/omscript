@@ -574,7 +574,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(),
                                                         static_cast<int64_t>(~(alignBytes - 1)));
             llvm::Value* roundedSize = builder->CreateAnd(
-                builder->CreateAdd(totalSize, alignMinus1, "halloc.roundup"),
+                builder->CreateAdd(totalSize, alignMinus1, "halloc.roundup", /*HasNUW=*/true, /*HasNSW=*/false),
                 mask, "halloc.rounded");
             heapPtr = builder->CreateCall(getOrDeclareAlignedAlloc(),
                                           {alignV, roundedSize}, "halloc.ptr");
@@ -3346,7 +3346,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* lz = builder->CreateCall(ctlzFn,
             {slotsM1, llvm::ConstantInt::getTrue(*context)}, "push.lz");
         llvm::Value* shift = builder->CreateSub(
-            llvm::ConstantInt::get(getDefaultType(), 64), lz, "push.shift");
+            llvm::ConstantInt::get(getDefaultType(), 64), lz, "push.shift",
+            /*HasNUW=*/false, /*HasNSW=*/true);
         llvm::Value* cap = builder->CreateShl(one64, shift, "push.cap", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* useMin = builder->CreateICmpSLT(cap, minSlots, "push.usemin");
         cap = builder->CreateSelect(useMin, minSlots, cap, "push.finalcap");
@@ -3516,7 +3517,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* lz = builder->CreateCall(ctlzFn,
             {slotsM1, llvm::ConstantInt::getTrue(*context)}, "ush.lz");
         llvm::Value* shiftAmt = builder->CreateSub(
-            llvm::ConstantInt::get(getDefaultType(), 64), lz, "ush.shift");
+            llvm::ConstantInt::get(getDefaultType(), 64), lz, "ush.shift",
+            /*HasNUW=*/false, /*HasNSW=*/true);
         llvm::Value* cap = builder->CreateShl(one64, shiftAmt, "ush.cap", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* useMin = builder->CreateICmpSLT(cap, minSlots, "ush.usemin");
         cap = builder->CreateSelect(useMin, minSlots, cap, "ush.finalcap");
@@ -7620,10 +7622,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             mmBi->addIncoming(mmZero, mmPreBB);
             builder->CreateCondBr(builder->CreateICmpULT(mmBi, mmCap), mmTestBB, mmDoneBB);
             builder->SetInsertPoint(mmTestBB);
-            // bucket offset = 2 + bi*3
+            // bucket offset = 2 + bi*3  (nuw+nsw: bi >= 0 and small relative to capacity)
             llvm::Value* mmBoff = builder->CreateAdd(
-                builder->CreateMul(mmBi, llvm::ConstantInt::get(getDefaultType(), 3)),
-                llvm::ConstantInt::get(getDefaultType(), 2));
+                builder->CreateMul(mmBi, llvm::ConstantInt::get(getDefaultType(), 3),
+                                   "", /*HasNUW=*/true, /*HasNSW=*/true),
+                llvm::ConstantInt::get(getDefaultType(), 2), "",
+                /*HasNUW=*/true, /*HasNSW=*/true);
             auto* mmHashV = builder->CreateAlignedLoad(getDefaultType(),
                 builder->CreateInBoundsGEP(getDefaultType(), srcMapPtr, mmBoff),
                 llvm::MaybeAlign(8));
@@ -7633,12 +7637,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->SetInsertPoint(mmInsB);
             auto* mmKeyV = builder->CreateAlignedLoad(getDefaultType(),
                 builder->CreateInBoundsGEP(getDefaultType(), srcMapPtr,
-                    builder->CreateAdd(mmBoff, mmOne)),
+                    builder->CreateAdd(mmBoff, mmOne, "", /*HasNUW=*/true, /*HasNSW=*/true)),
                 llvm::MaybeAlign(8));
             mmKeyV->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
             auto* mmValV = builder->CreateAlignedLoad(getDefaultType(),
                 builder->CreateInBoundsGEP(getDefaultType(), srcMapPtr,
-                    builder->CreateAdd(mmBoff, llvm::ConstantInt::get(getDefaultType(), 2))),
+                    builder->CreateAdd(mmBoff, llvm::ConstantInt::get(getDefaultType(), 2),
+                                       "", /*HasNUW=*/true, /*HasNSW=*/true)),
                 llvm::MaybeAlign(8));
             mmValV->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
             llvm::Value* mmCurRes = builder->CreateAlignedLoad(mmPtrTy, mmResA, llvm::MaybeAlign(8));
@@ -7692,8 +7697,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(miTestBB);
         llvm::Value* miBoff = builder->CreateAdd(
-            builder->CreateMul(miBi, llvm::ConstantInt::get(getDefaultType(), 3)),
-            llvm::ConstantInt::get(getDefaultType(), 2));
+            builder->CreateMul(miBi, llvm::ConstantInt::get(getDefaultType(), 3),
+                               "minv.bof3", /*HasNUW=*/true, /*HasNSW=*/true),
+            llvm::ConstantInt::get(getDefaultType(), 2), "minv.boff",
+            /*HasNUW=*/true, /*HasNSW=*/true);
         auto* miHashV = builder->CreateAlignedLoad(getDefaultType(),
             builder->CreateInBoundsGEP(getDefaultType(), miMPtr, miBoff),
             llvm::MaybeAlign(8));
@@ -7702,12 +7709,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(miInsB);
         auto* miKeyV = builder->CreateAlignedLoad(getDefaultType(),
-            builder->CreateInBoundsGEP(getDefaultType(), miMPtr, builder->CreateAdd(miBoff, miOne)),
+            builder->CreateInBoundsGEP(getDefaultType(), miMPtr,
+                builder->CreateAdd(miBoff, miOne, "minv.bkey", /*HasNUW=*/true, /*HasNSW=*/true)),
             llvm::MaybeAlign(8));
         miKeyV->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
         auto* miValV = builder->CreateAlignedLoad(getDefaultType(),
             builder->CreateInBoundsGEP(getDefaultType(), miMPtr,
-                builder->CreateAdd(miBoff, llvm::ConstantInt::get(getDefaultType(), 2))),
+                builder->CreateAdd(miBoff, llvm::ConstantInt::get(getDefaultType(), 2),
+                                   "minv.bval", /*HasNUW=*/true, /*HasNSW=*/true)),
             llvm::MaybeAlign(8));
         miValV->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
         // Invert: new key = old value, new value = old key
@@ -8423,9 +8432,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         a = toDefaultType(a);
         b = toDefaultType(b);
         llvm::Type* i128Ty = llvm::Type::getIntNTy(*context, 128);
-        llvm::Value* aWide = builder->CreateZExt(a, i128Ty, "umulhi.a");
-        llvm::Value* bWide = builder->CreateZExt(b, i128Ty, "umulhi.b");
-        llvm::Value* prod  = builder->CreateMul(aWide, bWide, "umulhi.prod");
+        // nneg: widening unsigned i64→i128 produces a value in [0, 2^64-1].
+        llvm::Value* aWide = builder->CreateZExt(a, i128Ty, "umulhi.a", /*IsNonNeg=*/true);
+        llvm::Value* bWide = builder->CreateZExt(b, i128Ty, "umulhi.b", /*IsNonNeg=*/true);
+        llvm::Value* prod  = builder->CreateMul(aWide, bWide, "umulhi.prod",
+                                                 /*HasNUW=*/true, /*HasNSW=*/false);
         llvm::Value* hi128 = builder->CreateLShr(prod,
             llvm::ConstantInt::get(i128Ty, 64), "umulhi.hi128");
         return builder->CreateTrunc(hi128, getDefaultType(), "umulhi.result");

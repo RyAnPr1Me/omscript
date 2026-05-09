@@ -748,6 +748,16 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
     case ASTNodeType::RANGE_ANNOT_EXPR:
         return evalExpr(frame, static_cast<const RangeAnnotExpr*>(e)->inner.get());
 
+    // ── Ownership expression wrappers — transparent in CT evaluation ──────
+    // move/borrow/reborrow are compile-time ownership annotations; the
+    // CT engine sees the underlying value, not the ownership transfer.
+    case ASTNodeType::MOVE_EXPR:
+        return evalExpr(frame, static_cast<const MoveExpr*>(e)->source.get());
+    case ASTNodeType::BORROW_EXPR:
+        return evalExpr(frame, static_cast<const BorrowExpr*>(e)->source.get());
+    case ASTNodeType::REBORROW_EXPR:
+        return evalExpr(frame, static_cast<const ReborrowExpr*>(e)->source.get());
+
     default:
         return CTValue::uninit();
     }
@@ -3026,10 +3036,12 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
     case ASTNodeType::PIPELINE_STMT:
         return evalPipelineStmt(frame, s);
 
-    // ── Assume / freeze / invalidate / prefetch — skip safely ────────────
+    // ── Assume / freeze / invalidate / shared / own / prefetch — skip safely ─
     case ASTNodeType::ASSUME_STMT:
     case ASTNodeType::FREEZE_STMT:
     case ASTNodeType::INVALIDATE_STMT:
+    case ASTNodeType::SHARED_STMT:
+    case ASTNodeType::OWN_STMT:
     case ASTNodeType::PREFETCH_STMT:
     case ASTNodeType::DEFER_STMT:
         return true;  // no-op in CT evaluation
