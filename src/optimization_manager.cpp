@@ -297,12 +297,17 @@ AnalysisDependencyGraph AnalysisDependencyGraph::createDefault() {
     g.addDependency(F::kCFCTRE, F::kEffects);
     g.addDependency(F::kCFCTRE, F::kSynthesis);
 
-    // egraph depends on cfctre and alg_simp:
+    // egraph depends on cfctre, alg_simp, and cse:
     //   e-graph uses compile-time evaluation results from CF-CTRE.
     //   AlgSimp reduces expressions to canonical form first, shrinking the
     //   e-graph search space and avoiding redundant rewrites.
+    //   CSE must run before EGraph so that repeated subexpressions have already
+    //   been hoisted to temporaries — the e-graph then sees a smaller, more
+    //   uniform set of expressions and reaches saturation faster with fewer
+    //   rewrites needed.
     g.addDependency(F::kEGraph, F::kCFCTRE);
     g.addDependency(F::kEGraph, F::kAlgSimp);
+    g.addDependency(F::kEGraph, F::kCSE);
 
     // range_analysis depends on purity, effects, and cfctre:
     //   range inference uses function effects and CF-CTRE uniform-return facts

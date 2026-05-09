@@ -314,7 +314,10 @@ static void registerAllPasses() {
         // AlgSimp must run first so that expressions are in canonical form,
         // reducing the e-graph search space and avoiding redundant rewrites.
         // (AlgSimp transitively requires DCE and CFCTRE.)
-        {AnalysisFact::kCFCTRE, AnalysisFact::kAlgSimp},
+        // CSE must also run first: hoisting repeated subexpressions to temps
+        // shrinks the number of distinct expression nodes the e-graph has to
+        // saturate, so saturation finishes in fewer rewrite steps.
+        {AnalysisFact::kCFCTRE, AnalysisFact::kAlgSimp, AnalysisFact::kCSE},
         {AnalysisFact::kEGraph},
         // E-graph rewrites change expressions; any fact derived from expression
         // shapes (ranges, CSE candidates, width information) is now stale.
