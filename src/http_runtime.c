@@ -8,7 +8,9 @@
 
 #include "http_runtime.h"
 
+#ifdef HAVE_CURL
 #include <curl/curl.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
@@ -56,6 +58,8 @@ static char* empty_string(void) {
     if (s) s[0] = '\0';
     return s ? s : NULL; // caller must handle NULL defensively
 }
+
+#ifdef HAVE_CURL
 
 // Common CURL setup: SSL verification ON, timeouts, User-Agent.
 static void setup_common(CURL* curl, HttpBuf* buf) {
@@ -235,3 +239,18 @@ long long omsc_http_get_status(const char* url) {
     curl_easy_cleanup(curl);
     return (long long)status;
 }
+
+#else /* !HAVE_CURL — stub implementations when libcurl is not available */
+
+char* omsc_http_get(const char* url) { (void)url; return empty_string(); }
+char* omsc_http_post(const char* url, const char* body, const char* content_type) {
+    (void)url; (void)body; (void)content_type; return empty_string();
+}
+char* omsc_http_request(const char* method, const char* url,
+                        const char* body, const char* headers) {
+    (void)method; (void)url; (void)body; (void)headers;
+    return empty_string();
+}
+long long omsc_http_get_status(const char* url) { (void)url; return 0LL; }
+
+#endif /* HAVE_CURL */

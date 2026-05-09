@@ -1,0 +1,8 @@
+fn main() {
+    var a = "hello";
+    var b = "hello";
+    var c = "world";
+    var r1 = str_eq(a, b);  // should be 1
+    var r2 = str_eq(a, c);  // should be 0
+    return r1 * 10 + r2;  // 10
+}

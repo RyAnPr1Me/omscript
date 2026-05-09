@@ -1,0 +1,14 @@
+fn test_array_insert() {
+    var a = [1, 2, 4, 5];
+    var b = array_insert(a, 2, 3);
+    var s = 0;
+    for (x in b) { s = s + x; }
+    var c = array_insert([10, 20], 0, 5);
+    var t = 0;
+    for (x in c) { t = t + x; }
+    var d = array_insert([1, 2], 2, 3);
+    return s + t - 35;
+}
+fn main() {
+    return test_array_insert();
+}

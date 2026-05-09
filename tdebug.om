@@ -1,0 +1,31 @@
+fn main() {
+    var upper = str_upper("hello");
+    print(upper);
+    print(str_eq(upper, "HELLO"));
+    
+    var lower = str_lower("WORLD");
+    print(lower);
+    print(str_eq(lower, "world"));
+    
+    var sub = str_substr("hello world", 6, 5);
+    print(sub);
+    print(str_eq(sub, "world"));
+    
+    var rep = str_repeat("ab", 3);
+    print(rep);
+    print(str_eq(rep, "ababab"));
+    
+    var rev = str_reverse("hello");
+    print(rev);
+    print(str_eq(rev, "olleh"));
+    
+    var replaced = str_replace("hello world", "world", "there");
+    print(replaced);
+    print(str_eq(replaced, "hello there"));
+    
+    var trimmed = str_trim("  hello  ");
+    print(trimmed);
+    print(str_eq(trimmed, "hello"));
+    
+    return 0;
+}

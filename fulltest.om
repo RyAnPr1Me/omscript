@@ -1,0 +1,46 @@
+fn test_array_product() {
+    var a = [2, 3, 4];
+    var p = array_product(a);
+    var empty = [];
+    var pe = array_product(empty);
+    var single = [7];
+    var ps = array_product(single);
+    return p + pe + ps;
+}
+fn test_array_last() {
+    var a = [10, 20, 30, 99];
+    var l = array_last(a);
+    var b = [42];
+    var l2 = array_last(b);
+    return l + l2 - 41;
+}
+fn test_str_pad_left() {
+    var s = str_pad_left("hi", 5, " ");
+    var l = str_len(s);
+    var s2 = str_pad_left("hello", 3, " ");
+    var l2 = str_len(s2);
+    var n = str_pad_left("42", 6, "0");
+    var l3 = str_len(n);
+    var first = char_at(s, 0);
+    var last = char_at(s, 4);
+    var content = (first == 32) + (last == 105);
+    return l + l2 + l3 + content;
+}
+fn test_str_pad_right() {
+    var s = str_pad_right("hi", 5, " ");
+    var l = str_len(s);
+    var c0 = char_at(s, 0);
+    var c1 = char_at(s, 1);
+    var c2 = char_at(s, 2);
+    var match = (c0 == 104) + (c1 == 105) + (c2 == 32);
+    var s2 = str_pad_right("hello", 3, "-");
+    var l2 = str_len(s2);
+    return l + match + l2;
+}
+fn main() {
+    var r1 = test_array_product();
+    var r2 = test_array_last();
+    var r4 = test_str_pad_left();
+    var r5 = test_str_pad_right();
+    return r1 + r2 + r4 + r5;  // 32+100+18+13 = 163
+}

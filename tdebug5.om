@@ -1,0 +1,13 @@
+fn main() {
+    var total = 0;
+    var upper = str_upper("hello");
+    total = total + str_eq(upper, "HELLO");
+    var lower = str_lower("WORLD");
+    total = total + str_eq(lower, "world");
+    print(total);
+    total = total + str_contains("hello world", "world");
+    print(total);
+    total = total + str_contains("hello world", "xyz");
+    print(total);
+    return total;
+}

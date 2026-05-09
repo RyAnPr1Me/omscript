@@ -269,9 +269,10 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             allocaType = initValue->getType();
 
         // When a string literal is assigned to a mutable string variable,
-        // ordinarily strdup() is needed to make the copy mutable.  However, if
-        // the variable has only read-only uses throughout its lifetime we can
-        // point it directly at the (read-only) string literal — no heap copy.
+        // ordinarily a copy is needed to make the string mutable.  With the
+        // fat-pointer layout ([ len | cap | data... ]) we cannot use strdup
+        // (which interprets the header bytes as a C string).  Instead allocate
+        // a new fat-pointer block and memcpy the data.
         if (!stmt->isConst &&
             stmt->initializer->type == ASTNodeType::LITERAL_EXPR &&
             static_cast<LiteralExpr*>(stmt->initializer.get())->literalType ==
@@ -279,9 +280,21 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             if (doesVarHaveOnlyReadOnlyUses(stmt->name)) {
                 // Static: use the literal pointer directly — no allocation.
                 staticStringVars_.insert(stmt->name);
-                // initValue is already the literal pointer; no strdup needed.
+                // initValue is already the literal pointer; no copy needed.
             } else {
-                initValue = builder->CreateCall(getOrDeclareStrdup(), {initValue}, "strdup.init");
+                // Duplicate the fat-pointer string:
+                //   1. Read the stored length.
+                //   2. Allocate a new header+data block.
+                //   3. memcpy the char data (len+1 bytes for NUL).
+                llvm::Value* srcLen  = emitStringLen(initValue, "strdup.srclen");
+                llvm::Value* newHdr  = emitAllocString(srcLen, srcLen, "strdup");
+                llvm::Value* dstData = emitStringData(newHdr, "strdup.dstdata");
+                llvm::Value* srcData = emitStringData(initValue, "strdup.srcdata");
+                llvm::Value* cpLen   = builder->CreateAdd(srcLen,
+                    llvm::ConstantInt::get(getDefaultType(), 1),
+                    "strdup.cplen", /*NUW=*/true, /*NSW=*/true);
+                builder->CreateCall(getOrDeclareMemcpy(), {dstData, srcData, cpLen});
+                initValue  = newHdr;
                 allocaType = initValue->getType();
             }
         }
@@ -2412,11 +2425,8 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // Get the collection length
     llvm::Value* lenVal;
     if (isStr) {
-        // String: strlen (no length header)
-        auto* strlenCall = builder->CreateCall(getOrDeclareStrlen(), {basePtr}, "foreach.strlen");
-        // !range [0, INT64_MAX): strlen always returns a non-negative value.
-        strlenCall->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
-        lenVal = strlenCall;
+        // Fat-pointer string: load length field from header (offset 0).
+        lenVal = emitStringLen(basePtr, "foreach.strlen");
     } else {
         // Array: length stored in slot 0
                 llvm::Value* lenLoad = emitLoadArrayLen(basePtr, "foreach.len");
@@ -2487,8 +2497,9 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
     llvm::Value* elemVal;
     if (isStr) {
-        // String: load single byte at offset bodyIdx, zero-extend to i64
-        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, bodyIdx, "foreach.charptr");
+        // Fat-pointer string: char data starts at offset 16.  Index into data.
+        llvm::Value* strData = emitStringData(basePtr, "foreach.strdata");
+        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strData, bodyIdx, "foreach.charptr");
         auto* charByte = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "foreach.char");
         // TBAA: string character loads are in the string-data type set,
         charByte->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);

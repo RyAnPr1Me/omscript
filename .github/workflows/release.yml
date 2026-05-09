@@ -69,6 +69,24 @@ jobs:
           restore-keys: |
             ccache-${{ runner.os }}-
 
+      - name: Cache Homebrew packages (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        id: homebrew-cache
+        with:
+          path: |
+            /usr/local/Homebrew/Library/Taps
+            ~/Library/Caches/Homebrew
+            /usr/local/Cellar/llvm
+            /usr/local/Cellar/cmake
+            /usr/local/Cellar/ccache
+            /opt/homebrew/Cellar/llvm
+            /opt/homebrew/Cellar/cmake
+            /opt/homebrew/Cellar/ccache
+          key: brew-${{ runner.arch }}-llvm-${{ hashFiles('.github/workflows/release.yml') }}
+          restore-keys: |
+            brew-${{ runner.arch }}-llvm-
+
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -91,9 +109,10 @@ jobs:
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          # cmake is pre-installed on macOS runners but install via brew
-          # to ensure we have a consistent, recent version.
-          brew install cmake llvm ccache
+          # Install packages; skip already-installed ones (from cache).
+          for pkg in cmake llvm ccache; do
+            brew list "$pkg" &>/dev/null || brew install "$pkg"
+          done
           echo "LLVM_DIR=$(brew --prefix llvm)/lib/cmake/llvm" >> "$GITHUB_ENV"
           # Remove stale ccache config (ccache 3.x used 'compress', ccache 4.x uses 'compression')
           rm -f ~/.ccache/ccache.conf ~/.config/ccache/ccache.conf
@@ -156,50 +175,48 @@ jobs:
           OMSC="./build/omsc"
           PGO_COUNT=0
 
-          # ── Phase A: Compile ALL example .om files at multiple optimization
-          # levels.  This exercises the full compilation pipeline including
-          # lexing, parsing, type resolution, codegen, LLVM optimization
-          # passes, object file emission, and linking.
+          # ── Phase A: Compile ALL example .om files at O2/O3 to build up
+          # hot-path counters for the most important optimization levels.
+          # O0/O1 paths differ significantly from hot code and add training
+          # time without meaningfully improving PGO for the hot pipeline.
           echo "=== PGO Phase A: Compiling example files ==="
           for f in examples/*.om; do
             [ -f "$f" ] || continue
-            for opt in -O0 -O1 -O2 -O3; do
+            for opt in -O2 -O3; do
               timeout 120 "$OMSC" "$f" $opt -o /tmp/pgo_out 2>/dev/null && PGO_COUNT=$((PGO_COUNT + 1)) || true
             done
           done
           echo "  Compiled $PGO_COUNT file+opt-level combinations"
 
-          # ── Phase B: Exercise front-end-only paths (lex, parse, emit-ir,
-          # dump-ast, dry-run) to profile the lexer and parser hot loops.
+          # ── Phase B: Exercise front-end-only paths (lex, parse) to profile
+          # the lexer and parser hot loops.  emit-ir is intentionally excluded:
+          # it runs full unoptimized codegen which Phase A already covers at
+          # O2/O3 with much better profile coverage of the optimization paths.
           echo "=== PGO Phase B: Front-end profiling ==="
           for f in examples/*.om; do
             [ -f "$f" ] || continue
             timeout 30 "$OMSC" lex "$f" > /dev/null 2>&1 || true
             timeout 30 "$OMSC" parse "$f" > /dev/null 2>&1 || true
-            timeout 60 "$OMSC" emit-ir "$f" > /dev/null 2>&1 || true
           done
 
-          # Phase C is intentionally omitted: all example files are already
-          # compiled at every optimization level in Phase A above.
-
-          # ── Phase C: Compile benchmark programs at -O3 multiple times to
+          # ── Phase C: Compile benchmark programs at -O3 twice to
           # build up hot counters for the most expensive optimization paths
           # (LLVM pass pipeline, e-graph saturation, superoptimizer).
-          echo "=== PGO Phase D: Benchmark workloads (repeated) ==="
+          echo "=== PGO Phase C: Benchmark workloads (repeated) ==="
           BENCH_FILES=(
             examples/bench_suite.om
             examples/benchmark_loops_math.om
             examples/optimization_stress_test.om
           )
-          for _iteration in 1 2 3; do
+          for _iteration in 1 2; do
             for f in "${BENCH_FILES[@]}"; do
               [ -f "$f" ] || continue
               timeout 120 "$OMSC" "$f" -O3 -o /tmp/pgo_out 2>/dev/null || true
             done
           done
 
-          # ── Phase E: Exercise CLI paths (help, version, errors).
-          echo "=== PGO Phase E: CLI and error paths ==="
+          # ── Phase D: Exercise CLI paths (help, version, errors).
+          echo "=== PGO Phase D: CLI and error paths ==="
           "$OMSC" --help > /dev/null 2>&1 || true
           "$OMSC" --version > /dev/null 2>&1 || true
           "$OMSC" /dev/null 2>/dev/null || true  # error: empty file
@@ -436,10 +453,11 @@ jobs:
           export LLVM_PROFILE_FILE="$PWD/pgo-profiles/omsc-%p.profraw"
           OMSC="./build/omsc"
 
-          # Compile examples at all optimization levels
+          # Compile examples at O2/O3 — these are the hot optimization paths.
+          # O0/O1 profiles add training time with minimal benefit for the hot pipeline.
           for f in examples/*.om; do
             [ -f "$f" ] || continue
-            for opt in -O0 -O1 -O2 -O3; do
+            for opt in -O2 -O3; do
               timeout 120 "$OMSC" "$f" $opt -o /tmp/pgo_out 2>/dev/null || true
             done
           done
@@ -527,6 +545,11 @@ jobs:
 
       - name: Run integration tests (Linux)
         if: runner.os == 'Linux'
+        timeout-minutes: 15
+        run: OMSC_SKIP_BUILD=1 bash run_tests.sh
+
+      - name: Run integration tests (macOS)
+        if: runner.os == 'macOS'
         timeout-minutes: 15
         run: OMSC_SKIP_BUILD=1 bash run_tests.sh
 

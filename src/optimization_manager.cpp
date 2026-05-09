@@ -297,12 +297,17 @@ AnalysisDependencyGraph AnalysisDependencyGraph::createDefault() {
     g.addDependency(F::kCFCTRE, F::kEffects);
     g.addDependency(F::kCFCTRE, F::kSynthesis);
 
-    // egraph depends on cfctre and alg_simp:
+    // egraph depends on cfctre, alg_simp, and cse:
     //   e-graph uses compile-time evaluation results from CF-CTRE.
     //   AlgSimp reduces expressions to canonical form first, shrinking the
     //   e-graph search space and avoiding redundant rewrites.
+    //   CSE must run before EGraph so that repeated subexpressions have already
+    //   been hoisted to temporaries — the e-graph then sees a smaller, more
+    //   uniform set of expressions and reaches saturation faster with fewer
+    //   rewrites needed.
     g.addDependency(F::kEGraph, F::kCFCTRE);
     g.addDependency(F::kEGraph, F::kAlgSimp);
+    g.addDependency(F::kEGraph, F::kCSE);
 
     // range_analysis depends on purity, effects, and cfctre:
     //   range inference uses function effects and CF-CTRE uniform-return facts
@@ -336,11 +341,17 @@ AnalysisDependencyGraph AnalysisDependencyGraph::createDefault() {
     g.addDependency(F::kCopyProp, F::kDCE);
     g.addDependency(F::kCopyProp, F::kAlgSimp);
 
-    // width_legalization depends on range_analysis, copy_prop, and alg_simp:
-    //   Width computation uses narrowed value ranges and simplified expressions
+    // width_legalization depends on range_analysis, copy_prop, alg_simp, AND hgoe_egraph:
+    //   Width computation uses narrowed value ranges and simplified expressions.
+    //   Critically, it must also run AFTER the HGOE-guided e-graph superoptimizer,
+    //   which is the last expression-rewriting pass.  Without this dependency,
+    //   width_legalization (and width_opt) would run before HGOE rewrites the AST,
+    //   producing stale width maps that HGOE then invalidates, leaving codegen with
+    //   no valid width facts.
     g.addDependency(F::kWidthLegalization, F::kRangeAnalysis);
     g.addDependency(F::kWidthLegalization, F::kCopyProp);
     g.addDependency(F::kWidthLegalization, F::kAlgSimp);
+    g.addDependency(F::kWidthLegalization, F::kHGOEEGraph);
 
     // width_opt depends on width_legalization:
     //   Width-aware rewrites require the semantic bit-width map to be valid

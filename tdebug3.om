@@ -1,0 +1,7 @@
+fn main() {
+    var lower = str_lower("WORLD");
+    print(lower);
+    print(str_eq(lower, "world"));
+    print(str_len(lower));
+    return 0;
+}

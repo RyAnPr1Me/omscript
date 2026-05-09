@@ -1,0 +1,33 @@
+fn test_array_product() {
+    var a = [2, 3, 4];
+    var p = array_product(a);
+    var empty = [];
+    var pe = array_product(empty);
+    var single = [7];
+    var ps = array_product(single);
+    return p + pe + ps;
+}
+fn test_array_last() {
+    var a = [10, 20, 30, 99];
+    var l = array_last(a);
+    var b = [42];
+    var l2 = array_last(b);
+    return l + l2 - 41;
+}
+fn test_array_insert() {
+    var a = [1, 2, 4, 5];
+    var b = array_insert(a, 2, 3);
+    var s = 0;
+    for (x in b) { s = s + x; }
+    var c = array_insert([10, 20], 0, 5);
+    var t = 0;
+    for (x in c) { t = t + x; }
+    var d = array_insert([1, 2], 2, 3);
+    return s + t - 35;
+}
+fn main() {
+    var r1 = test_array_product();
+    var r2 = test_array_last();
+    var r3 = test_array_insert();
+    return r1 + r2 + r3;  // 32+100+15 = 147
+}

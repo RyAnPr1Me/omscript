@@ -1,0 +1,6 @@
+fn main() {
+    var s = "abcabcabc";
+    var cnt = str_count(s, "abc");
+    print(cnt);
+    return 0;
+}

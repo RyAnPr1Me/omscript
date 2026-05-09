@@ -1,0 +1,52 @@
+fn main() {
+    var total = 0;
+    var upper = str_upper("hello");
+    total = total + str_eq(upper, "HELLO");
+    print(total);  // 1
+    
+    var lower = str_lower("WORLD");
+    total = total + str_eq(lower, "world");
+    print(total);  // 2
+    
+    total = total + str_contains("hello world", "world");
+    total = total + str_contains("hello world", "xyz");
+    print(total);  // 3
+    
+    total = total + str_starts_with("hello world", "hello");
+    total = total + str_starts_with("hello world", "world");
+    print(total);  // 4
+    
+    total = total + str_ends_with("hello world", "world");
+    total = total + str_ends_with("hello world", "hello");
+    print(total);  // 5
+    
+    var idx = str_index_of("hello world", "world");
+    total = total + (idx == 6);
+    print(total);  // 6
+    
+    var idx2 = str_index_of("hello world", "xyz");
+    total = total + (idx2 == -1);
+    print(total);  // 7
+    
+    var sub = str_substr("hello world", 6, 5);
+    total = total + str_eq(sub, "world");
+    print(total);  // 8
+    
+    var rep = str_repeat("ab", 3);
+    total = total + str_eq(rep, "ababab");
+    print(total);  // 9
+    
+    var rev = str_reverse("hello");
+    total = total + str_eq(rev, "olleh");
+    print(total);  // 10
+    
+    var replaced = str_replace("hello world", "world", "there");
+    total = total + str_eq(replaced, "hello there");
+    print(total);  // 11
+    
+    var trimmed = str_trim("  hello  ");
+    total = total + str_eq(trimmed, "hello");
+    print(total);  // 12
+    
+    return total;
+}

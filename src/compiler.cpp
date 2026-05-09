@@ -322,12 +322,10 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
                     const std::string curlLib = OMSC_CURL_LIB_PATH;
                     if (!curlLib.empty() && std::filesystem::exists(curlLib)) {
                         linkArgs.push_back(curlLib);
-                    } else {
-                        linkArgs.push_back("-lcurl");
                     }
+                    // If curlLib is empty or missing, curl was not available at build time —
+                    // skip adding -lcurl rather than producing a link error.
                 }
-#else
-                linkArgs.push_back("-lcurl");
 #endif
             }
         }

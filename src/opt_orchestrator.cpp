@@ -311,7 +311,13 @@ static void registerAllPasses() {
         "E-graph equality saturation: algebraic simplification + constant folding at AST level",
         PassPhase::ASTTransform,
         PassKind::SemanticTransform,
-        {AnalysisFact::kCFCTRE},
+        // AlgSimp must run first so that expressions are in canonical form,
+        // reducing the e-graph search space and avoiding redundant rewrites.
+        // (AlgSimp transitively requires DCE and CFCTRE.)
+        // CSE must also run first: hoisting repeated subexpressions to temps
+        // shrinks the number of distinct expression nodes the e-graph has to
+        // saturate, so saturation finishes in fewer rewrite steps.
+        {AnalysisFact::kCFCTRE, AnalysisFact::kAlgSimp, AnalysisFact::kCSE},
         {AnalysisFact::kEGraph},
         // E-graph rewrites change expressions; any fact derived from expression
         // shapes (ranges, CSE candidates, width information) is now stale.
@@ -365,9 +371,10 @@ static void registerAllPasses() {
         "Common Subexpression Elimination: hoist repeated pure binary subexpressions to compiler-managed temps",
         PassPhase::ASTTransform,
         PassKind::CostTransform,
-        // CSE introduces new VarDecl nodes; run after DCE so dead code does
-        // not generate spurious CSE candidates.
-        {AnalysisFact::kDCE},
+        // Copy propagation exposes additional CSE opportunities by substituting
+        // copies of the same value; run CSE after CopyProp so those aliases are
+        // visible.  CopyProp transitively requires DCE and AlgSimp.
+        {AnalysisFact::kDCE, AnalysisFact::kCopyProp},
         {AnalysisFact::kCSE},
         // Introduces new variable declarations — invalidates any fact that
         // tracks exact variable counts or live ranges.
@@ -414,7 +421,15 @@ static void registerAllPasses() {
         "then snap them to hardware-friendly storage sizes (8/16/32/64/multiples-of-64) before codegen",
         PassPhase::ASTTransform,
         PassKind::Analysis,
-        {AnalysisFact::kRangeAnalysis, AnalysisFact::kCopyProp, AnalysisFact::kAlgSimp},
+        // Must run AFTER all expression-level transforms (EGraph + HGOEEGraph) so
+        // that bit-width analysis sees the final, fully-optimised AST.  Running
+        // before those passes would produce stale width maps: EGraph and HGOEEGraph
+        // both rewrite expressions and invalidate kWidthLegalization, leaving codegen
+        // with no valid width facts.  Adding kHGOEEGraph here pushes
+        // kWidthLegalization (and transitively kWidthOpt) to the last topological
+        // tier, after all rewrites have settled.
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kCopyProp, AnalysisFact::kAlgSimp,
+         AnalysisFact::kHGOEEGraph},
         {AnalysisFact::kWidthLegalization},
         // Pure analysis — does not modify the AST, invalidates nothing.
         {},
