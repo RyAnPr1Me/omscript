@@ -7598,7 +7598,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         adN = toDefaultType(adN);
         auto* adPtrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* adArrPtr = builder->CreateIntToPtr(adArr, adPtrTy, "adrop.arrptr");
-                llvm::Value* adLenLoad = emitLoadArrayLen(adArrPtr, "adrop.len");
+        llvm::Value* adLenLoad = emitLoadArrayLen(adArrPtr, "adrop.len");
         // Clamp n: max(0, min(n, len))
         llvm::Value* adZero    = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* adNNeg    = builder->CreateICmpSLT(adN, adZero, "adrop.nneg");
@@ -7627,8 +7627,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::ARRAY_UNIQUE) {
         validateArgCount(expr, "array_unique", 1);
         llvm::Value* auArr = generateExpression(expr->arguments[0].get());
-                llvm::Value* auArrPtr = emitToArrayPtr(auArr, "auniq.arrptr");
-                llvm::Value* auLenLoad = emitLoadArrayLen(auArrPtr, "auniq.len");
+        llvm::Value* auArrPtr = emitToArrayPtr(auArr, "auniq.arrptr");
+        llvm::Value* auLenLoad = emitLoadArrayLen(auArrPtr, "auniq.len");
         llvm::Value* auZero  = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* auOne   = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* auEight = llvm::ConstantInt::get(getDefaultType(), 8);
@@ -7707,7 +7707,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         arN   = toDefaultType(arN);
         auto* arPtrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* arArrPtr = builder->CreateIntToPtr(arArr, arPtrTy, "arot.arrptr");
-                llvm::Value* arLenLoad = emitLoadArrayLen(arArrPtr, "arot.len");
+        llvm::Value* arLenLoad = emitLoadArrayLen(arArrPtr, "arot.len");
         llvm::Value* arZero  = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* arOne   = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* arEight = llvm::ConstantInt::get(getDefaultType(), 8);
@@ -7803,8 +7803,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             }
         }
         llvm::Value* amArr = generateExpression(expr->arguments[0].get());
-                llvm::Value* amArrPtr = emitToArrayPtr(amArr, "amean.arrptr");
-                llvm::Value* amLenLoad = emitLoadArrayLen(amArrPtr, "amean.len");
+        llvm::Value* amArrPtr = emitToArrayPtr(amArr, "amean.arrptr");
+        llvm::Value* amLenLoad = emitLoadArrayLen(amArrPtr, "amean.len");
         llvm::Value* amZero  = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* amOne   = llvm::ConstantInt::get(getDefaultType(), 1);
         // If empty, return 0
@@ -8414,9 +8414,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* aPtr = builder->CreateIntToPtr(a, ptrTy, "azip.aptr");
         llvm::Value* bPtr = builder->CreateIntToPtr(b, ptrTy, "azip.bptr");
 
-                llvm::Value* aLenLoad = emitLoadArrayLen(aPtr, "azip.alen");
+        llvm::Value* aLenLoad = emitLoadArrayLen(aPtr, "azip.alen");
 
-                llvm::Value* bLenLoad = emitLoadArrayLen(bPtr, "azip.blen");
+        llvm::Value* bLenLoad = emitLoadArrayLen(bPtr, "azip.blen");
 
         // m = min(len(a), len(b))
         llvm::Value* aLtB = builder->CreateICmpSLT(aLenLoad, bLenLoad, "azip.altb");
@@ -8474,7 +8474,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // Load a[i] and b[i] (element at srcIdx in the header+data layout)
         llvm::Value* aElemPtr = builder->CreateInBoundsGEP(getDefaultType(), aPtr, srcIdx, "azip.aelemptr");
-                llvm::Value* aElemLoad = emitLoadArrayElem(aElemPtr, "azip.aelem");
+        llvm::Value* aElemLoad = emitLoadArrayElem(aElemPtr, "azip.aelem");
         if (optimizationLevel >= OptimizationLevel::O1)
             llvm::cast<llvm::Instruction>(aElemLoad)->setMetadata(
                 llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));

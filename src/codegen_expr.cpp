@@ -1382,7 +1382,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         builder->SetInsertPoint(doneBB);
         // Null-terminate: when doneBB is reached from loopBB, writePtr holds
         // buf (count==0, no iterations) or the position one past the last copy.
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), writePtr);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), writePtr)
+            ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         return buf;
     }
 
