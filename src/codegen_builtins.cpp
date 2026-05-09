@@ -1453,6 +1453,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                                    ? arg
                                    : builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "pc.strptr");
             llvm::Value* byte = builder->CreateLoad(llvm::Type::getInt8Ty(*context), ptr, "pc.byte");
+            llvm::cast<llvm::LoadInst>(byte)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
             charCode = builder->CreateZExt(byte, llvm::Type::getInt32Ty(*context), "charval",
                                            /*IsNonNeg=*/true);
             nonNegValues_.insert(charCode);
@@ -1510,10 +1511,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(fgetsNull, eofBB, okBB, fgetsW);
         // EOF path: store '\0' at start of buffer
         builder->SetInsertPoint(eofBB);
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), buf);
-        builder->CreateBr(doneBB);
-        // OK path: strip trailing newline
-        builder->SetInsertPoint(okBB);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), buf)
+            ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* nlChar = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 10);
         llvm::Value* nlPtr = builder->CreateCall(getOrDeclareStrchr(), {buf, nlChar}, "inputln.nl");
         llvm::Value* isNull = builder->CreateICmpEQ(nlPtr, llvm::ConstantPointerNull::get(ptrTy), "inputln.isnull");
@@ -1521,7 +1520,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* nlW = llvm::MDBuilder(*context).createBranchWeights(1, 100);
         builder->CreateCondBr(isNull, doneBB, stripBB, nlW);
         builder->SetInsertPoint(stripBB);
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nlPtr);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nlPtr)
+            ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         builder->CreateBr(doneBB);
         builder->SetInsertPoint(doneBB);
         stringReturningFunctions_.insert("input_line");
@@ -1860,7 +1860,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* nulPtr = builder->CreateInBoundsGEP(
             llvm::Type::getInt8Ty(*context), buf,
             llvm::ConstantInt::get(getDefaultType(), 1), "tochar.nul");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nulPtr);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nulPtr)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         stringReturningFunctions_.insert("to_char");
         return buf;
     }
@@ -2290,7 +2290,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         // null-terminate: buf[totalLen] = '\0'
         llvm::Value* endPtr = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, totalLen, "concat.end");
-        builder->CreateStore(builder->getInt8(0), endPtr);
+        builder->CreateStore(builder->getInt8(0), endPtr)->setMetadata(
+            llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         // Mark return as string-returning so callers can track it
         stringReturningFunctions_.insert("str_concat");
         return buf;
@@ -2788,7 +2789,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCall(getOrDeclareMemcpy(), {buf, srcPtr, lenArg});
         // Null-terminate: buf[len] = 0
         llvm::Value* endPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, lenArg, "substr.end");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), endPtr);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), endPtr)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         stringReturningFunctions_.insert("str_substr");
         return buf;
     }
@@ -3256,7 +3257,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* trimSrc = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strPtr, trimStart, "trim.src");
         builder->CreateCall(getOrDeclareMemcpy(), {trimBuf, trimSrc, trimLen});
         llvm::Value* trimEndPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), trimBuf, trimLen, "trim.endptr");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), trimEndPtr);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), trimEndPtr)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         stringReturningFunctions_.insert("str_trim");
         return trimBuf;
     }
@@ -3448,7 +3449,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(doneBB);
         // Null-terminate: buf[totalLen] = '\0'
         llvm::Value* endPtr = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, totalLen, "repeat.end");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), endPtr);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), endPtr)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         stringReturningFunctions_.insert("str_repeat");
         return buf;
     }
@@ -3500,7 +3501,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             });
         // Null-terminate
         llvm::Value* endPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, strLen, "strrev.endptr");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), endPtr);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), endPtr)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         stringReturningFunctions_.insert("str_reverse");
         return buf;
     }
@@ -5703,7 +5704,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             {llvm::ConstantInt::get(getDefaultType(), 1)}, "fread.empty");
         llvm::cast<llvm::CallInst>(emptyBuf)->addRetAttr(
             llvm::Attribute::getWithDereferenceableBytes(*context, 1));
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), emptyBuf);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), emptyBuf)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* emptyResult = emptyBuf;
         builder->CreateBr(mergeBB);
         llvm::BasicBlock* nullEndBB = builder->GetInsertBlock();
@@ -5734,7 +5735,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             {llvm::ConstantInt::get(getDefaultType(), 1)}, "fread.ftempty");
         llvm::cast<llvm::CallInst>(ftellEmptyBuf)->addRetAttr(
             llvm::Attribute::getWithDereferenceableBytes(*context, 1));
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), ftellEmptyBuf);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), ftellEmptyBuf)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         builder->CreateBr(mergeBB);
         llvm::BasicBlock* ftellBadEndBB = builder->GetInsertBlock();
 
@@ -5753,7 +5754,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             {buf, llvm::ConstantInt::get(getDefaultType(), 1), fileSize, fp});
         // null terminate
         llvm::Value* nullTermPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, fileSize, "fread.nullterm");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nullTermPtr);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nullTermPtr)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         // fclose(fp)
         builder->CreateCall(getOrDeclareFclose(), {fp});
         llvm::Value* okResult = buf;
@@ -6127,6 +6128,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* strPtr = strArg->getType()->isPointerTy()
             ? strArg : builder->CreateIntToPtr(strArg, ptrTy, "charcode.ptr");
         llvm::Value* ch = builder->CreateLoad(llvm::Type::getInt8Ty(*context), strPtr, "charcode.ch");
+        llvm::cast<llvm::LoadInst>(ch)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         // Zero-extend to i64; result is always in [0, 256).
         // Use zext nneg (LLVM 18+) — !range is not valid on zext instructions.
         auto* result = builder->CreateZExt(ch, getDefaultType(), "charcode.result",
@@ -6946,6 +6948,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(padBB);
         // Load fill character: first byte of fill string
         llvm::Value* fillByte = builder->CreateAlignedLoad(builder->getInt8Ty(), fillPtr, llvm::MaybeAlign(1), "strpad.fillbyte");
+        llvm::cast<llvm::LoadInst>(fillByte)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
 
         llvm::Value* padLen = builder->CreateSub(effectiveWidth, slen, "strpad.padlen", /*HasNUW=*/true, /*HasNSW=*/true);
         // Allocate (effectiveWidth + 1) bytes for result
@@ -6968,7 +6971,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateMemSet(fillDst, fillByte, padLen, llvm::MaybeAlign(1));
             // Null-terminate
             llvm::Value* nullPtr = builder->CreateInBoundsGEP(builder->getInt8Ty(), buf, effectiveWidth, "strpad.nullptr");
-            builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nullPtr);
+            builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nullPtr)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         }
 
         llvm::Value* padI64 = buf;
@@ -7030,7 +7033,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(nullBB);
         llvm::Value* emptyBuf = builder->CreateCall(getOrDeclareMalloc(),
             {llvm::ConstantInt::get(getDefaultType(), 1)}, "cmd.empty");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), emptyBuf);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), emptyBuf)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* emptyI64 = emptyBuf;
         builder->CreateBr(mergeBB);
         llvm::BasicBlock* nullEndBB = builder->GetInsertBlock();
@@ -7104,7 +7107,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* finalSz  = builder->CreateAlignedLoad(getDefaultType(), sizePtr, llvm::MaybeAlign(8), "cmd.fsz");
         llvm::Value* finalBuf = builder->CreateAlignedLoad(ptrTy, bufPtr, llvm::MaybeAlign(8), "cmd.fbuf");
         llvm::Value* ntPtr    = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), finalBuf, finalSz, "cmd.nt");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), ntPtr);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), ntPtr)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* readResult = finalBuf;
         builder->CreateBr(mergeBB);
         llvm::BasicBlock* readEndBB = builder->GetInsertBlock();
@@ -7201,7 +7204,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // NUL-terminate at outIdx
         llvm::Value* nullCharPtr = builder->CreateInBoundsGEP(
             llvm::Type::getInt8Ty(*context), outBuf, outIdx, "sfilt.nullptr");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nullCharPtr);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nullCharPtr)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         stringReturningFunctions_.insert("str_filter");
         return outBuf;
     }
@@ -7321,6 +7324,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         mfHHash->addIncoming(mfHashInit, mfHashPre);
         llvm::Value* mfCp  = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), mfKeyPtr, mfHI, "mf.cp");
         llvm::Value* mfCh8 = builder->CreateAlignedLoad(llvm::Type::getInt8Ty(*context), mfCp, llvm::MaybeAlign(1), "mf.ch");
+        llvm::cast<llvm::LoadInst>(mfCh8)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* mfCh  = builder->CreateZExt(mfCh8, getDefaultType(), "mf.ch64",
                                                    /*IsNonNeg=*/true);
         nonNegValues_.insert(mfCh);
@@ -7483,7 +7487,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCall(getOrDeclareMemcpy(), {lsBuf, lsSrc, lsResultLen});
         llvm::Value* lsNulPtr = builder->CreateInBoundsGEP(
             llvm::Type::getInt8Ty(*context), lsBuf, lsResultLen, "lstrip.nul");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), lsNulPtr);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), lsNulPtr)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         stringReturningFunctions_.insert("str_lstrip");
         return lsBuf;
     }
@@ -7545,7 +7549,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCall(getOrDeclareMemcpy(), {rsBuf, strPtr, rsFinalEnd});
         llvm::Value* rsNulPtr  = builder->CreateInBoundsGEP(
             llvm::Type::getInt8Ty(*context), rsBuf, rsFinalEnd, "rstrip.nul");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), rsNulPtr);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), rsNulPtr)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         stringReturningFunctions_.insert("str_rstrip");
         return rsBuf;
     }
@@ -8081,7 +8085,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* scEscWrFinal = builder->CreateAlignedLoad(getDefaultType(), scEscWrA, llvm::MaybeAlign(8), "sudo.escfin");
         llvm::Value* scEscNulPtr  = builder->CreateInBoundsGEP(
             llvm::Type::getInt8Ty(*context), scEscBuf, scEscWrFinal, "sudo.escnul");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), scEscNulPtr);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), scEscNulPtr)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
 
         // ---- Step 2: build full pipeline command string ----
         llvm::Value* scCmdLen   = builder->CreateCall(getOrDeclareStrlen(), {scCmdPtr}, "sudo.cmdlen");
@@ -8139,7 +8143,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(scNullBB);
         llvm::Value* scEmptyBuf = builder->CreateCall(getOrDeclareMalloc(),
             {llvm::ConstantInt::get(getDefaultType(), 1)}, "sudo.empty");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), scEmptyBuf);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), scEmptyBuf)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* scEmptyI64 = scEmptyBuf;
         builder->CreateBr(scMergeBB);
         llvm::BasicBlock* scNullEndBB = builder->GetInsertBlock();
@@ -8213,7 +8217,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* scFinalBuf = builder->CreateAlignedLoad(scPtrTy, scBufPtr, llvm::MaybeAlign(8), "sudo.fbuf");
         llvm::Value* scNtPtr    = builder->CreateInBoundsGEP(
             llvm::Type::getInt8Ty(*context), scFinalBuf, scFinalSz, "sudo.nt");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), scNtPtr);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), scNtPtr)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* scReadResult = scFinalBuf;
         builder->CreateBr(scMergeBB);
         llvm::BasicBlock* scReadEndBB = builder->GetInsertBlock();
@@ -8252,7 +8256,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Return a heap-allocated empty string when the variable is not set.
         llvm::Value* emptyBuf = builder->CreateCall(getOrDeclareMalloc(),
             {llvm::ConstantInt::get(getDefaultType(), 1)}, "env_get.empty");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), emptyBuf);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), emptyBuf)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* emptyI64 = emptyBuf;
         builder->CreateBr(mergeBB);
 
