@@ -21,7 +21,7 @@
 14. [Structs](#14-structs)
 15. [Enums](#15-enums)
 16. [Error Handling](#16-error-handling)
-17. [Memory and Ownership System](#17-memory-and-ownership-system)
+17. [Memory and Ownership System](#17-memory-and-ownership-system) — Ω Ownership spec v1.0: `move`, `borrow`, `shared`, `own`, `freeze`, `invalidate`, `ptr<T>`, `alloc<T>`, `nullptr`, `*p = v`, E015–E020, `--no-ownership-checks`, `--mem-sanitize`
 18. [OPTMAX](#18-optmax)
 19. [Built-in Functions](#19-built-in-functions)
 20. [Concurrency](#20-concurrency)
@@ -193,15 +193,18 @@ The following identifiers are reserved as keywords. They are grouped by category
 | `borrow` | Borrow reference |
 | `reborrow` | Re-borrow from existing borrow |
 | `mut` | Mutable borrow annotation |
-| `invalidate` | Explicit invalidation |
-| `freeze` | Mark variable read-only |
+| `invalidate` | Explicit invalidation (schedule deferred free) |
+| `freeze` | Mark variable permanently read-only |
+| `shared` | Transition variable to shared (read-only aliasable) ownership (Ω spec §3.1) |
+| `own` | Restore unique ownership from shared state (Ω spec §3.1) |
 
 **Literals:**
 | Keyword | Purpose |
 |---------|---------|
 | `true` | Boolean true |
 | `false` | Boolean false |
-| `null` | Null literal |
+| `null` | Null pointer literal (zero address) |
+| `nullptr` | Alias for `null` — null pointer literal (Ω spec §2.2) |
 
 **Operators and punctuation:**
 | Keyword | Purpose |
@@ -1194,24 +1197,52 @@ fn main() -> int {
 #### 4.4.4 Pointer Type: `ptr` / `ptr<T>`
 
 **Syntax**:
-- `ptr` — Generic pointer (element type unknown)
+- `ptr` — Generic pointer (element type unknown, treated as opaque)
 - `ptr<T>` — Typed pointer to elements of type `T`
 
-**Representation**: Raw memory address (64-bit on most architectures).
+**Representation**: Raw memory address (64-bit on all supported architectures). No hidden metadata.
 
 **LLVM type**: `ptr` (LLVM opaque pointer)
 
 **Operations**:
-- Address-of: `&x` (produces `ptr<T>` if `x` is type `T`)
-- Dereference: **Not directly supported** (use runtime functions)
-- Null: `null` literal
+- **Address-of**: `&x` — produces `ptr<T>` when `x` has type `T`
+- **Dereference read**: `*p` — loads the value pointed to by `p` using the element type of `ptr<T>`
+- **Dereference write**: `*p = v` — stores `v` through pointer `p` (Ω spec §4.2)
+- **Pointer arithmetic**: `p + n`, `p - n` — advances by `n * sizeof(T)` bytes (Ω spec §4.4)
+- **Null literal**: `null` or `nullptr` (both are zero address, Ω spec §2.2)
+- **Allocation**: `alloc<T>(n)` — allocate `n` elements of type `T`; `alloc<T>()` allocates exactly 1 element (Ω spec §4.1)
+- **Deallocation**: `invalidate p` — free the heap allocation and mark `p` dead
 
-**Safety**: Pointers are **unsafe**. The compiler does not track aliasing or lifetime. Use `borrow` and `move` for safer alternatives.
+**Safety**: In safe mode (default), the borrow checker enforces:
+- No use-after-invalidate
+- No double-invalidate (E019)
+- No write to `shared` pointer (E020)
+- Null dereference paths detected by `--mem-sanitize`
+
+Use `--no-ownership-checks` for raw C-like pointer semantics (unsafe mode).
 
 **Example**:
 ```omscript
-var x: int = 42;
-var p: ptr<int> = &x;  // Pointer to x
+fn main() -> int {
+    var x: i64 = 42;
+    var p: ptr<i64> = &x;       // address-of: stack pointer
+    var q: ptr<i64> = alloc<i64>(4);  // heap: 4 i64 elements
+
+    // Typed dereference write and read
+    *q = 10;
+    *(q + 1) = 20;
+    var sum = *q + *(q + 1);   // 30
+
+    invalidate q;  // free heap allocation
+    return sum;    // 30
+}
+```
+
+**Null pointer**:
+```omscript
+var p: ptr<i64> = null;    // zero pointer
+var q: ptr<i64> = nullptr; // identical to null (Ω spec §2.2)
+if (p == q) { println("both null"); }
 ```
 
 #### 4.4.5 Reference Type: `ref` / `&T`
@@ -5263,67 +5294,94 @@ Errors are reported in two tiers:
 
 ## 17. Memory and Ownership System
 
-### 17.0 Ownership states
+> **Ω Ownership & Memory System — Spec v1.0**
+>
+> A pure compile-time memory management model with deterministic ownership tracking, full pointer arithmetic support, CFG-based lifetime resolution, and zero runtime overhead memory safety (in safe mode).
+>
+> Core principle: **All memory safety is resolved at compile time** unless explicitly disabled by compiler flags.
 
-**Enum definition** (from `codegen.h`):
-```cpp
-enum class OwnershipState {
-    Owned,        // Variable owns its value — full read/write access
-    Borrowed,     // Has ≥1 immutable borrows — readable but not writable
-    MutBorrowed,  // Has one mutable alias — source is completely locked
-    Frozen,       // Permanently immutable — all loads are invariant
-    Moved,        // Ownership transferred out — use is a compile error
-    Invalidated   // Explicitly killed — use is a compile error
-};
-```
+---
 
-**Tracking:** Per-variable borrow state stored in `VarBorrowState`:
+### 17.0 Overview and Design Philosophy
+
+OmScript's ownership system is designed as:
+
+> *"C-level performance with Rust-level safety, but fully resolved at compile time using CFG-based lifetime computation and explicit invalidation semantics."*
+
+**Key guarantees (safe mode):**
+- No use-after-free
+- No double-free (E019 compile error)
+- No invalid dereference
+- No memory leaks (when `invalidate` is used)
+- Deterministic memory lifetime
+- **Zero runtime overhead** — all ownership/safety checks eliminated before code generation
+
+---
+
+### 17.1 Ownership States
+
+Every variable is in one of six ownership states, tracked per-variable by the borrow checker:
+
+| State | Description | Read | Write | Move |
+|-------|-------------|------|-------|------|
+| `Owned` | Unique owner — full read/write access | ✓ | ✓ | ✓ |
+| `Borrowed` | Has ≥1 immutable borrows — readable but not writable | ✓ | ✗ | ✗ |
+| `MutBorrowed` | Has one mutable alias — source is completely locked | ✗ | ✗ | ✗ |
+| `Shared` | Read-only aliasable ownership (Ω spec §3.1) | ✓ | ✗ | ✗ |
+| `Frozen` | Permanently immutable — LLVM `!invariant` loads | ✓ | ✗ | ✓¹ |
+| `Moved` | Ownership transferred out — **compile error on use** | ✗ | ✗ | ✗ |
+| `Invalidated` | Explicitly killed — **compile error on use** | ✗ | ✗ | ✗ |
+
+¹ Frozen variables may be moved; the destination becomes the new frozen owner.
+
+**Per-variable tracking struct** (from `borrow_checker.h`):
 ```cpp
 struct VarBorrowState {
-    int  immutBorrowCount = 0;
-    bool mutBorrowed = false;
-    bool moved = false;
-    bool invalidated = false;
-    bool frozen = false;
+    int  immutBorrows   = 0;    // number of active immutable borrows
+    bool mutBorrowed    = false; // mutable borrow active
+    bool moved          = false; // ownership transferred
+    bool invalidated    = false; // explicitly freed
+    bool frozen         = false; // permanently immutable
+    bool shared         = false; // shared ownership state (Ω spec §3.1)
+    int  reborrows      = 0;    // reborrow alias count
 };
 ```
 
 **State transitions:**
-- `Owned` → `Borrowed` (immutable borrow)
-- `Owned` → `MutBorrowed` (mutable borrow)
-- `Owned` → `Frozen` (freeze permanently)
-- `Owned` → `Moved` (move ownership)
-- Any → `Invalidated` (explicit kill)
+- `Owned` → `Borrowed` (via `borrow var r = x`)
+- `Owned` → `MutBorrowed` (via `borrow mut var r = x`)
+- `Owned` → `Shared` (via `shared x;`)
+- `Owned`/`Shared` → `Frozen` (via `freeze x;`)
+- `Owned` → `Moved` (via `move var y = x;`)
+- Any live state → `Invalidated` (via `invalidate x;`)
+- `Shared` → `Owned` (via `own x;`)
 
 ---
 
-### 17.1 Move semantics — `move var x = expr;`
+### 17.2 Move Semantics — `move var x = expr;`
 
 **Syntax:**
 ```omscript
-move var x = expr;
+move var x = expr;   // declaration form
+var y = move x;      // expression form
 ```
 
 **Semantics:**
-1. Evaluate `expr` and bind to `x`.
-2. Mark the source of `expr` (if it's a variable) as `Moved`.
-3. Any subsequent use of the source is a compile-time error.
+1. Evaluate `expr` and bind to `x` (or transfer `x` to `y`).
+2. Mark the source as `Moved` — any subsequent use is a compile-time error.
+3. No runtime cost: the value is bitwise-copied; no destructor runs.
 
 **Example:**
 ```omscript
 var a = 42;
 move var b = a;
-println(b);  // 42
-// println(a);  // ERROR: use of moved variable
+println(b);     // OK: 42
+// println(a);  // [E015] use of moved variable 'a'
 ```
-
-**Move expression:** `var y = move x;`
-- Transfer ownership from `x` to `y`.
-- `x` becomes dead.
 
 ---
 
-### 17.2 Borrow — `borrow var x = expr;`
+### 17.3 Borrow — `borrow var x = expr;`
 
 **Syntax:**
 ```omscript
@@ -5331,26 +5389,26 @@ borrow var x = expr;
 ```
 
 **Semantics:**
-1. Create an immutable alias `x` to the source variable.
-2. Increment `immutBorrowCount` of the source.
+1. Create an immutable alias `x` for the source variable.
+2. Increment `immutBorrows` of the source.
 3. Source remains readable but NOT writable while the borrow is active.
-4. When `x` goes out of scope, decrement `immutBorrowCount`.
+4. When `x` goes out of scope, `immutBorrows` is decremented.
 
 **Example:**
 ```omscript
 var a = 42;
 {
     borrow var ref = a;
-    println(ref);  // 42
-    println(a);    // 42 (source still readable)
-    // a = 99;     // ERROR: cannot write to borrowed variable
+    println(ref);   // 42
+    println(a);     // 42 (source still readable)
+    // a = 99;      // [E016] cannot write to 'a' — active immutable borrow
 }
-a = 99;  // OK now (borrow ended)
+a = 99;  // OK — borrow ended
 ```
 
 ---
 
-### 17.3 Borrow mut — `borrow mut var x = expr;`
+### 17.4 Borrow Mut — `borrow mut var x = expr;`
 
 **Syntax:**
 ```omscript
@@ -5358,10 +5416,9 @@ borrow mut var x = expr;
 ```
 
 **Semantics:**
-1. Create a mutable alias `x` to the source variable.
-2. Set `mutBorrowed = true` for the source.
-3. Source is completely LOCKED (no reads or writes) while the mutable borrow is active.
-4. When `x` goes out of scope, clear `mutBorrowed`.
+1. Create a mutable alias `x` for the source variable.
+2. Set `mutBorrowed = true` — source is completely locked (no reads or writes).
+3. When `x` goes out of scope, `mutBorrowed` is cleared.
 
 **Example:**
 ```omscript
@@ -5369,40 +5426,52 @@ var a = 42;
 {
     borrow mut var ref = a;
     ref = 99;
-    // println(a);  // ERROR: cannot read mutably borrowed variable
+    // println(a);  // [E016] cannot read mutably-borrowed variable 'a'
 }
-println(a);  // 99 (borrow ended)
+println(a);  // 99 — borrow ended; source reflects the write
 ```
 
 ---
 
-### 17.4 `invalidate x;`
+### 17.5 Shared Ownership — `shared x;`
 
-**Semantics:** Immediately free the heap allocation associated with `x` and mark it as dead.
+**Syntax:**
+```omscript
+shared x;          // transition to shared ownership
+own x;             // restore unique ownership
+```
 
-**Which types get freed:**
-- **Strings:** Calls `free()` on the string pointer.
-- **Arrays (heap-allocated):** Calls `free()` on the array pointer.
-- **Dictionaries:** Calls destructor on the `std::unordered_map` and `free()` on the wrapper.
-- **Structs:** Calls `free()` on the struct pointer.
-- **Heap pointers (`ptr`):** Calls `free()` if the pointer was allocated via `malloc`/`calloc`/`realloc`.
-- **BigInts:** Calls destructor on the GMP `mpz_t` and `free()` on the wrapper.
+**Semantics of `shared x;`** (Ω spec §3.1):
+- Transitions `x` to the `Shared` state.
+- Multiple immutable reads are allowed.
+- Any write to `x` is a **compile-time error** (E020).
+- Mutable borrow of `x` is forbidden.
+- `shared x;` on a moved or invalidated variable is a compile-time error.
 
-**Tracking-set cleanup:** All compile-time tracking maps (`stringVars_`, `nonNegValues_`, etc.) are cleared of the variable.
-
-**Dead-var poisoning:** The variable's `VarBorrowState` is set to `invalidated = true`; any subsequent use is a compile-time error.
+**Semantics of `own x;`** (Ω spec §3.1):
+- Restores `x` to the `Owned` state (clears `shared = false`).
+- Requires that no active borrows exist (E018 if borrows remain).
+- `freeze` is stronger than `shared`: a frozen variable cannot be un-frozen by `own`.
 
 **Example:**
 ```omscript
-var s = "hello";
-println(s);  // "hello"
-invalidate s;
-// println(s);  // ERROR: use of invalidated variable
+fn main() -> int {
+    var x = 10;
+    shared x;         // x is now shared (read-only)
+
+    var r1 = x;       // OK: read
+    var r2 = x;       // OK: second read
+    // x = 99;        // [E020] cannot write to 'x' — shared ownership
+
+    own x;            // restore unique ownership
+    x = 35;           // OK: write
+    return r1 + r2 + x;  // 55
+}
 ```
 
 ---
 
-### 17.5 `freeze x;`
+### 17.6 `freeze x;` — Permanent Immutability
 
 **Syntax:**
 ```omscript
@@ -5410,29 +5479,72 @@ freeze x;
 ```
 
 **Semantics:**
-1. Mark variable `x` as permanently immutable.
-2. Set `frozen = true` in `VarBorrowState`.
-3. All subsequent loads from `x` are annotated with `!invariant` metadata (LLVM optimization hint).
-4. Any write to `x` is a compile-time error.
+1. Mark `x` permanently immutable (`frozen = true`).
+2. All subsequent loads from `x` are annotated with LLVM `!invariant` metadata.
+3. Any write to `x` is a compile-time error — even after scope re-entry.
+4. **No runtime cost** — purely a compile-time annotation.
 
 **Example:**
 ```omscript
 var a = 42;
 freeze a;
-println(a);  // 42
-// a = 99;   // ERROR: cannot write to frozen variable
+println(a);   // 42
+// a = 99;    // [E005] cannot modify constant/frozen variable 'a'
+```
+
+**Difference from `shared`:**
+- `freeze` is permanent and irreversible; `shared` can be lifted by `own`.
+- `freeze` emits LLVM `!invariant` hints; `shared` does not.
+
+---
+
+### 17.7 `invalidate x;` — Explicit Deallocation
+
+**Syntax:**
+```omscript
+invalidate x;
+```
+
+**Semantics:**
+- Marks `x` as logically dead immediately (borrow checker removes it from the live set).
+- Schedules `free(x)` at the optimal CFG exit point (deferred-free queue).
+- Any subsequent use of `x` is a compile-time error (E015).
+- **Double-invalidate** is a compile-time error (E019).
+
+**Which types are freed:**
+| Type | Action |
+|------|--------|
+| String | `free()` on string pointer |
+| Heap array | `free()` on array pointer |
+| Dict/map | Destructor + `free()` on wrapper |
+| Struct | `free()` on struct pointer |
+| Heap `ptr<T>` | `free()` if allocated via `malloc`/`alloc<T>` |
+| BigInt | GMP `mpz_clear()` + `free()` on wrapper |
+| Stack `ptr<T>` | `llvm.lifetime.end` intrinsic (no `free()`) |
+
+**Example:**
+```omscript
+fn main() -> int {
+    var p: ptr<i64> = alloc<i64>(1);
+    *p = 99;
+    var val = *p;
+    invalidate p;
+    // *p = 1;      // [E015] use of invalidated variable 'p'
+    // invalidate p; // [E019] double invalidation of 'p'
+    return val;     // 99
+}
 ```
 
 ---
 
-### 17.6 `reborrow` semantics
+### 17.8 `reborrow` — Chained Borrows
 
 **Syntax:**
 ```omscript
 reborrow var ref = source;
 ```
 
-**Semantics:** Create a new immutable borrow from an existing borrow (chain borrows).
+**Semantics:** Create a new immutable borrow from an existing borrow, incrementing `reborrows` of the source variable.
 
 **Example:**
 ```omscript
@@ -5444,106 +5556,159 @@ println(r2);  // 42
 
 ---
 
-### 17.7 `prefetch` (variable-level vs use-site `@prefetch`)
+### 17.9 Pointer Types (`ptr`, `ptr<T>`)
 
-**Variable-level:** `prefetch x;`  
-**Semantics:** Emit `llvm.prefetch` intrinsic to load the address of `x` into cache (hint to hardware).
+#### 17.9.1 Core Pointer Operations
 
-**Use-site annotation:** `@prefetch` on a loop annotation (see section 8.12 in Part 1).
+| Operation | Syntax | Description |
+|-----------|--------|-------------|
+| Declare | `var p: ptr<T> = ...` | Typed pointer variable |
+| Address-of | `&x` | Take address of `x`; produces `ptr<T>` |
+| Allocate | `alloc<T>(n)` | Heap-allocate `n` elements of type `T` |
+| Allocate 1 | `alloc<T>()` | Heap-allocate exactly 1 element (Ω spec §4.1) |
+| Dereference read | `*p` | Load value through pointer |
+| Dereference write | `*p = v` | Store value through pointer (Ω spec §4.2) |
+| Arithmetic | `p + n`, `p - n` | Advance by `n * sizeof(T)` (Ω spec §4.4) |
+| Null | `null`, `nullptr` | Zero-address pointer (Ω spec §2.2) |
+| Free | `invalidate p` | Deferred `free()` at CFG exit |
 
----
+#### 17.9.2 `alloc<T>` — Smart Typed Allocator
 
-### 17.8 No-aliasing guarantee
+`alloc<T>(n)` decides stack vs heap at compile time:
+- If `n` is a compile-time constant AND `n * sizeof(T) ≤ 4096`: emit `alloca` in function entry block.
+- Otherwise: emit `malloc(n * sizeof(T))`.
 
-**Noalias metadata:** When ownership analysis proves that a pointer does NOT alias any other pointer, LLVM `noalias` metadata is attached to loads/stores and function arguments.
+`alloc<T>()` with no argument allocates exactly 1 element.
 
-**Benefits:**
-- Enables aggressive load/store reordering.
-- Improves vectorization.
-- Allows the optimizer to assume no memory dependences.
-
-**Emission rules:**
-- `Owned` variables: always noalias (no other aliases exist).
-- `Borrowed` variables: noalias with respect to other borrows (rust-style borrow rules).
-- `MutBorrowed` variables: exclusive access (noalias with all other pointers).
-
----
-
-### 17.9 Pointer types (`ptr`, `ptr<T>`)
-
-#### Element-type tracking
-
-**`ptrElemTypes_` map:** Tracks the element type of each pointer variable:
-```cpp
-std::unordered_map<std::string, llvm::Type*> ptrElemTypes_;
-```
-
-**Element-type inference:** From `&x` based on `varTypeAnnotations_`:
-- If `x: T`, then `&x` has element type `T`.
-- If `x` has no annotation, element type is `i64` (default).
-
-**Untyped `ptr` sentinel:** When no element type is known, the pointer is opaque (`ptr` in source, `i8*` in LLVM IR).
-
-#### Heap vs stack origin tracking
-
-**Heap pointers:** Allocated via `malloc`, `calloc`, `realloc`, or `alloc<T>(N)` (when N is dynamic or too large).
-
-**Stack pointers:** Allocated via `alloca` in the function entry block (when escape analysis proves safe).
-
-**Tracking:** `heapPtrs_` set stores names of heap-allocated pointers (enables automatic `free()` on `invalidate`).
-
-#### Stack-allocated `alloc<T>` with backing alloca
-
-**Smart allocator:** `alloc<T>(count)` decides at compile time:
-- If `count` is constant AND `count*sizeof(T) <= 4096`: emit `alloca` in entry block.
-- Otherwise: emit `malloc` call.
-
-**Lifetime.end emission:** Stack-allocated pointers have `llvm.lifetime.end` intrinsic emitted at scope exit (optimization hint).
-
-#### Allowed initializers for `ptr`
-
-**Validation rule** (from `parser.cpp` around line 1530):
-- `ptr` variables MUST be initialized with one of:
-  - `&variable` (address-of)
-  - `malloc(...)`, `calloc(...)`, `realloc(...)`, `alloc<T>(...)`
-  - Another `ptr` variable
-  - A function call that returns `ptr`
-
-**Disallowed:**
 ```omscript
-var p: ptr = 42;  // ERROR: invalid initializer for ptr
+var arr: ptr<i64> = alloc<i64>(4);    // 4-element i64 array (stack if ≤ 4096 bytes)
+var one: ptr<i64> = alloc<i64>();      // 1 element (Ω spec §4.1)
 ```
 
-**Allowed:**
+#### 17.9.3 Pointer Arithmetic
+
+`ptr<T>` arithmetic is type-aware: `p + n` advances by `n * sizeof(T)` bytes.
+
 ```omscript
-var x = 42;
-var p: ptr = &x;  // OK
-var q: ptr = malloc(100);  // OK
+fn main() -> int {
+    var arr: ptr<i64> = alloc<i64>(3);
+    *arr       = 10;
+    *(arr + 1) = 20;
+    *(arr + 2) = 47;
+    var result = *arr + *(arr + 1) + *(arr + 2);  // 77
+    invalidate arr;
+    return result;
+}
 ```
 
+#### 17.9.4 Null Pointers
+
+Both `null` and `nullptr` produce a zero-address `ptr<T>`:
+```omscript
+var p: ptr<i64> = null;     // zero pointer
+var q: ptr<i64> = nullptr;  // identical (Ω spec §2.2)
+if (p == q) { println("both null"); }
+```
+
+#### 17.9.5 Allowed Pointer Initializers
+
+| Initializer | Example | Valid |
+|-------------|---------|-------|
+| Address-of | `&x` | ✓ |
+| `alloc<T>()` | `alloc<i64>(4)` | ✓ |
+| `malloc`/`calloc`/`realloc` | `malloc(100)` | ✓ |
+| Another ptr variable | `q` | ✓ |
+| Function returning ptr | `get_buf()` | ✓ |
+| `null` / `nullptr` | `null` | ✓ |
+| Integer literal | `42` | ✗ (error) |
+
 ---
 
-### 17.10 Scope-based drop (RAII-like)
+### 17.10 `prefetch x;`
 
-**Not implemented.** OmScript does NOT automatically call `invalidate` at scope exit. Heap allocations persist until explicitly invalidated or the program terminates.
+**Variable-level prefetch:** Emit `llvm.prefetch` intrinsic to load the address of `x` into cache.
 
-**Future feature:** Automatic drop at scope exit for owned variables.
+**Use-site annotation:** `@prefetch` on a loop annotation (see §8.12).
 
 ---
 
-### 17.11 Allowed/disallowed conversions
+### 17.11 No-Aliasing Guarantee
 
-**`ptr` → `int`:**
-- Allowed implicitly (pointer values are stored as i64).
-- Use case: Pass pointer across function boundaries.
+When ownership analysis proves a pointer does not alias any other, LLVM `noalias` metadata is attached to loads/stores and function arguments:
 
-**`int` → `ptr`:**
-- Allowed via explicit cast: `IntToPtr`.
-- Use case: Reconstruct pointer from i64 value.
+- `Owned` variables: always `noalias` (no aliases exist).
+- `MutBorrowed` variables: exclusive access (`noalias` with all other pointers).
 
-**`ptr<T>` → `ptr<U>`:**
-- Allowed (all pointers are i8* in LLVM IR).
-- No type safety enforcement at runtime.
+---
+
+### 17.12 Scope-Based Drop
+
+**Not automatically implemented.** OmScript does NOT automatically call `invalidate` at scope exit. Heap allocations persist until explicitly invalidated or the program terminates.
+
+The compiler does, however, emit `llvm.lifetime.end` for stack-allocated `alloc<T>` at scope exit as an LLVM optimization hint.
+
+---
+
+### 17.13 Pointer Conversions
+
+| Conversion | Legality | Notes |
+|------------|----------|-------|
+| `ptr` → `int` | Implicit | Pointer values stored as i64 |
+| `int` → `ptr` | Explicit (`IntToPtr`) | Reconstruct pointer from i64 |
+| `ptr<T>` → `ptr<U>` | Allowed | All ptrs are opaque at LLVM IR level |
+
+---
+
+### 17.14 Borrow Checker Error Codes
+
+| Code | Name | Trigger |
+|------|------|---------|
+| E015 | `USE_AFTER_MOVE` | Read/write of moved or invalidated variable |
+| E016 | `BORROW_WRITE_CONFLICT` | Write to variable with active immutable borrow(s) |
+| E017 | `DOUBLE_MUT_BORROW` | Mutable borrow of already mutably-borrowed variable |
+| E018 | `MOVE_WHILE_BORROWED` | Move/own of variable with active borrow(s) |
+| E019 | `DOUBLE_INVALIDATE` | `invalidate` on already-invalidated variable |
+| E020 | `WRITE_TO_SHARED` | Write to variable in `shared` ownership state |
+
+---
+
+### 17.15 Safety Mode Flags
+
+#### `--no-ownership-checks` (Ω spec §6.2)
+
+Disables the borrow checker entirely. The compiler treats memory as a raw C-like model — no borrow tracking, no invalidation checks, no safety diagnostics.
+
+```
+omsc myprogram.om --no-ownership-checks -o out
+```
+
+**Use case:** Interoperating with C-style code, performance benchmarking, or code that manages memory manually.
+
+#### `--mem-sanitize` (Ω spec §7)
+
+Enables the compile-time path-sensitive memory sanitizer. Detects and reports:
+- Use-after-invalidate
+- Invalid dereference paths
+- Potential out-of-bounds pointer arithmetic
+- Double free
+- Null dereference possibilities
+
+Output format:
+```
+MEM-SANITIZER ERROR
+file.om:42
+
+use-after-invalidate detected
+variable: p
+control path:
+  line 38 -> invalidate p
+  line 41 -> *p (invalid use)
+```
+
+**Properties:**
+- Compile-time only — zero runtime cost
+- Path-sensitive (CFG-based): reports *possible* UB, not just certain UB
+- Does not affect code generation; purely diagnostic
 
 ---
 
@@ -7175,6 +7340,33 @@ Flags are organized by category. Most boolean flags support negation via `-fno-<
 #### Diagnostics
 
 The compiler emits structured diagnostics to stderr. Errors use exit code 1; warnings do not halt compilation.
+
+#### Memory Safety and Ownership
+
+| Flag                      | Short | Default | Description                                                  |
+|---------------------------|-------|---------|--------------------------------------------------------------|
+| `--no-ownership-checks`   | —     | `false` | Disable borrow/ownership checks entirely (unsafe mode, Ω spec §6.2) |
+| `--mem-sanitize`          | —     | `false` | Compile-time path-sensitive memory-safety diagnostics (Ω spec §7) |
+
+**`--no-ownership-checks`**: Disables the borrow checker. The compiler treats memory as a raw C-like model — no E015–E020 errors emitted. Use for interop with C-style pointer code.
+
+**`--mem-sanitize`**: Enables compile-time CFG-based analysis that detects and reports:
+- Use-after-invalidate paths
+- Potential null dereferences
+- Double-free risks
+- Out-of-bounds pointer arithmetic possibilities
+
+Output uses the format:
+```
+MEM-SANITIZER ERROR
+file.om:42
+
+use-after-invalidate detected
+variable: p
+control path:
+  line 38 -> invalidate p
+  line 41 -> *p (invalid use)
+```
 
 #### PGO (Profile-Guided Optimization)
 

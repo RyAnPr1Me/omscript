@@ -519,6 +519,9 @@ ptest_compile_fail "examples/invalid_binary.om"
 ptest_compile_fail "examples/invalid_octal.om"
 ptest_compile_fail "examples/invalid_numeric_underscore.om"
 ptest_compile_fail "examples/unknown_annotation.om"
+# Ω Ownership System negative tests (must be rejected by the compiler)
+ptest_compile_fail "examples/double_invalidate_error_test.om"
+ptest_compile_fail "examples/write_to_shared_error_test.om"
 flush_ptests
 test_cli_output "error-line-info" "line" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "error-includes-filename" "undefined_var.om" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
@@ -533,6 +536,9 @@ test_cli_output "invalid-hex-msg" "Expected hex digit after" 1 ./build/omsc exam
 test_cli_output "invalid-binary-msg" "Expected binary digit after" 1 ./build/omsc examples/invalid_binary.om -o /tmp/test_bin_err
 test_cli_output "invalid-octal-msg" "Expected octal digit after" 1 ./build/omsc examples/invalid_octal.om -o /tmp/test_oct_err
 test_cli_output "invalid-numeric-underscore-msg" "Invalid underscore placement in numeric literal" 1 ./build/omsc examples/invalid_numeric_underscore.om -o /tmp/test_num_uscore_err
+# Ω Ownership error code diagnostics
+test_cli_output "e019-double-invalidate-msg" "E019" 1 ./build/omsc examples/double_invalidate_error_test.om -o /tmp/test_e019
+test_cli_output "e020-write-to-shared-msg" "E020" 1 ./build/omsc examples/write_to_shared_error_test.om -o /tmp/test_e020
 
 echo ""
 echo "============================================"

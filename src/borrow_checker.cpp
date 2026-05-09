@@ -195,7 +195,7 @@ private:
                 std::to_string(s->immutBorrows) + " active immutable borrow(s)", site);
         }
         if (s->shared) {
-            throw makeBorrowError(ErrorCode::E016_BORROW_WRITE_CONFLICT,
+            throw makeBorrowError(ErrorCode::E020_WRITE_TO_SHARED,
                 "cannot write to '" + name + "' — it is in shared ownership state "
                 "(Ω spec §3.1); use 'own " + name + ";' to restore unique ownership first",
                 site);
@@ -579,9 +579,22 @@ private:
         }
         case ASTNodeType::INVALIDATE_STMT: {
             const auto* iv = static_cast<const InvalidateStmt*>(stmt);
-            auto& s = stateOf(iv->varName);
-            s.invalidated = true;
-            s.moved = false;
+            const auto* s = stateOfOpt(iv->varName);
+            if (s) {
+                if (s->invalidated) {
+                    // E019 — double-invalidate: variable already freed at compile time.
+                    throw makeBorrowError(ErrorCode::E019_DOUBLE_INVALIDATE,
+                        "double invalidation of '" + iv->varName +
+                        "' — variable was already invalidated", stmt);
+                }
+                if (s->moved) {
+                    throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
+                        "cannot invalidate '" + iv->varName +
+                        "' — variable was already moved", stmt);
+                }
+            }
+            stateOf(iv->varName).invalidated = true;
+            stateOf(iv->varName).moved = false;
             break;
         }
         case ASTNodeType::FREEZE_STMT: {
