@@ -1,0 +1,8 @@
+fn main() {
+    var upper = str_upper("hello");
+    var lower = str_lower("WORLD");
+    print(str_eq(upper, "HELLO"));
+    print(str_eq(lower, "world"));
+    print(total);
+    return 0;
+}

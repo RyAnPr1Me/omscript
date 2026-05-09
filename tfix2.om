@@ -1,0 +1,6 @@
+fn main() {
+    var parts = str_split("hello,world,foo", ",");
+    var joined = str_join(parts, "-");
+    print(joined);
+    return 0;
+}

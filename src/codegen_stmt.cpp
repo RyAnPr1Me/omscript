@@ -269,9 +269,10 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             allocaType = initValue->getType();
 
         // When a string literal is assigned to a mutable string variable,
-        // ordinarily strdup() is needed to make the copy mutable.  However, if
-        // the variable has only read-only uses throughout its lifetime we can
-        // point it directly at the (read-only) string literal — no heap copy.
+        // ordinarily a copy is needed to make the string mutable.  With the
+        // fat-pointer layout ([ len | cap | data... ]) we cannot use strdup
+        // (which interprets the header bytes as a C string).  Instead allocate
+        // a new fat-pointer block and memcpy the data.
         if (!stmt->isConst &&
             stmt->initializer->type == ASTNodeType::LITERAL_EXPR &&
             static_cast<LiteralExpr*>(stmt->initializer.get())->literalType ==
@@ -279,9 +280,21 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             if (doesVarHaveOnlyReadOnlyUses(stmt->name)) {
                 // Static: use the literal pointer directly — no allocation.
                 staticStringVars_.insert(stmt->name);
-                // initValue is already the literal pointer; no strdup needed.
+                // initValue is already the literal pointer; no copy needed.
             } else {
-                initValue = builder->CreateCall(getOrDeclareStrdup(), {initValue}, "strdup.init");
+                // Duplicate the fat-pointer string:
+                //   1. Read the stored length.
+                //   2. Allocate a new header+data block.
+                //   3. memcpy the char data (len+1 bytes for NUL).
+                llvm::Value* srcLen  = emitStringLen(initValue, "strdup.srclen");
+                llvm::Value* newHdr  = emitAllocString(srcLen, srcLen, "strdup");
+                llvm::Value* dstData = emitStringData(newHdr, "strdup.dstdata");
+                llvm::Value* srcData = emitStringData(initValue, "strdup.srcdata");
+                llvm::Value* cpLen   = builder->CreateAdd(srcLen,
+                    llvm::ConstantInt::get(getDefaultType(), 1),
+                    "strdup.cplen", /*NUW=*/true, /*NSW=*/true);
+                builder->CreateCall(getOrDeclareMemcpy(), {dstData, srcData, cpLen});
+                initValue  = newHdr;
                 allocaType = initValue->getType();
             }
         }

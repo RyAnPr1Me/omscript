@@ -139,7 +139,7 @@ target_compile_options(omsc_bigint PRIVATE -O2 -fPIC)
 # ── HTTP runtime static library (linked into user programs) ──────────────────
 # http_runtime.c wraps libcurl and exposes a secure C API for OmScript's
 # HTTP client builtins (http_get, http_post, http_request, http_status).
-find_package(CURL REQUIRED)
+find_package(CURL)
 add_library(omsc_http STATIC
     src/http_runtime.c
 )
@@ -147,6 +147,10 @@ target_include_directories(omsc_http PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CURL_INCLUDE_DIRS}
 )
+if(CURL_FOUND)
+    target_compile_definitions(omsc_http PRIVATE HAVE_CURL=1)
+    target_link_libraries(omsc_http PRIVATE ${CURL_LIBRARIES})
+endif()
 target_compile_options(omsc_http PRIVATE -O2 -fPIC)
 
 add_executable(omsc ${SRC})
@@ -168,10 +172,12 @@ target_compile_definitions(omsc PRIVATE
 # programs can be linked against it regardless of whether it lives in a
 # standard system directory.  CURL_LIBRARIES may be a list; we take the first
 # element (the shared/static library itself) which is all that is needed here.
-list(GET CURL_LIBRARIES 0 _curl_lib_first)
-target_compile_definitions(omsc PRIVATE
-    OMSC_CURL_LIB_PATH=\"${_curl_lib_first}\"
-)
+if(CURL_FOUND)
+    list(GET CURL_LIBRARIES 0 _curl_lib_first)
+    target_compile_definitions(omsc PRIVATE
+        OMSC_CURL_LIB_PATH=\"${_curl_lib_first}\"
+    )
+endif()
 
 # ── Version define ────────────────────────────────────────────────────────────
 target_compile_definitions(omsc PRIVATE
