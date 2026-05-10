@@ -3759,7 +3759,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             fn->addFnAttr(llvm::Attribute::WillReturn);
             fn->addFnAttr(llvm::Attribute::NoFree);
             fn->addFnAttr(llvm::Attribute::NoSync);
-            // String comparator: load i64 pointers, cast to char*, strcmp
+            // String comparator: load i64 fat-string pointers, GEP to data
+            // (offset 16 = past {len, cap}), then strcmp on the C-string data.
             auto savedIP = builder->saveIP();
             auto* entry = llvm::BasicBlock::Create(*context, "entry", fn);
             builder->SetInsertPoint(entry);
@@ -3769,9 +3770,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             auto* bI64 = builder->CreateAlignedLoad(getDefaultType(), bSlotPtr, llvm::MaybeAlign(8), "b.i64");
             llvm::cast<llvm::Instruction>(aI64)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
             llvm::cast<llvm::Instruction>(bI64)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-            auto* aStr = builder->CreateIntToPtr(aI64, ptrTy, "a.str");
-            auto* bStr = builder->CreateIntToPtr(bI64, ptrTy, "b.str");
-            auto* result = builder->CreateCall(getOrDeclareStrcmp(), {aStr, bStr}, "cmp");
+            auto* aFat = builder->CreateIntToPtr(aI64, ptrTy, "a.fat");
+            auto* bFat = builder->CreateIntToPtr(bI64, ptrTy, "b.fat");
+            // Skip the fat-string header (i64 len + i64 cap = 16 bytes) to reach the char data.
+            auto* off16 = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 16);
+            auto* aData = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), aFat, off16, "a.data");
+            auto* bData = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), bFat, off16, "b.data");
+            auto* result = builder->CreateCall(getOrDeclareStrcmp(), {aData, bData}, "cmp");
             builder->CreateRet(result);
             builder->restoreIP(savedIP);
             return fn;
@@ -4827,9 +4832,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (!arg->getType()->isPointerTy()) {
                 arg = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "println.str.ptr");
             }
-            // Use puts() instead of printf("%s\n", ...) — puts appends a
-            // newline automatically and avoids format-string parsing overhead.
-            builder->CreateCall(getOrDeclarePuts(), {arg});
+            llvm::Value* strData = emitStringData(arg, "println.data");
+            builder->CreateCall(getOrDeclarePuts(), {strData});
         } else {
             // println integer — printf %lld requires a 64-bit argument.
             if (arg->getType()->isIntegerTy() && !arg->getType()->isIntegerTy(64)) {
@@ -4864,8 +4868,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (!arg->getType()->isPointerTy()) {
                 arg = builder->CreateIntToPtr(arg, llvm::PointerType::getUnqual(*context), "write.str.ptr");
             }
-            // Use fputs(str, stdout) instead of printf("%s", str) to avoid
-            builder->CreateCall(getOrDeclareFputs(), {arg, getOrDeclareStdout()});
+            llvm::Value* strData = emitStringData(arg, "write.data");
+            builder->CreateCall(getOrDeclareFputs(), {strData, getOrDeclareStdout()});
         } else {
             // write integer — printf %lld requires a 64-bit argument.
             if (arg->getType()->isIntegerTy() && !arg->getType()->isIntegerTy(64)) {
