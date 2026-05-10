@@ -518,6 +518,20 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     arrayReturningFunctions_.count(call->callee)) {
                     isArray = true;
                 }
+                // `filter` and `std::filter` dispatch to array_filter when the
+                // first argument is an array, or to str_filter when it is a string.
+                // Detect the array case by checking arrayVars_ for the argument.
+                if (!isArray && !call->arguments.empty() &&
+                    (call->callee == "filter" || call->callee == "std::filter")) {
+                    auto* firstArg = call->arguments[0].get();
+                    if (firstArg->type == ASTNodeType::IDENTIFIER_EXPR) {
+                        auto* idArg = static_cast<IdentifierExpr*>(firstArg);
+                        if (arrayVars_.count(idArg->name))
+                            isArray = true;
+                    } else if (firstArg->type == ASTNodeType::ARRAY_EXPR) {
+                        isArray = true;
+                    }
+                }
             }
         }
         if (isArray)
@@ -2526,7 +2540,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         // i8 zero-extended to i64: always in [0, 256) and provably non-negative.
         // Use zext nneg (LLVM 18+) — !range is not valid on zext instructions.
         auto* charExt = builder->CreateZExt(charByte, getDefaultType(), "foreach.charext",
-                                             /*IsNonNeg=*/true);
+                                             /*IsNonNeg=*/false);
         nonNegValues_.insert(charExt);
         elemVal = charExt;
     } else {

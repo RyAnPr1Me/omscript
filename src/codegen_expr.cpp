@@ -698,7 +698,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 }
                 if (isUnsignedSrc) {
                     auto* z = builder->CreateZExt(val, dstTy, "as.zext",
-                                                   /*IsNonNeg=*/true);
+                                                   /*IsNonNeg=*/false);
                     nonNegValues_.insert(z);
                     return z;
                 }
@@ -1524,7 +1524,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (leftBits < rightBits) {
             if (leftUnsigned) {
                 left = builder->CreateZExt(left, right->getType(), "zext",
-                                           /*IsNonNeg=*/true);
+                                           /*IsNonNeg=*/false);
                 nonNegValues_.insert(left);
             } else {
                 left = builder->CreateSExt(left, right->getType(), "sext");
@@ -1532,7 +1532,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         } else {
             if (rightUnsigned) {
                 right = builder->CreateZExt(right, left->getType(), "zext",
-                                            /*IsNonNeg=*/true);
+                                            /*IsNonNeg=*/false);
                 nonNegValues_.insert(right);
             } else {
                 right = builder->CreateSExt(right, left->getType(), "sext");
@@ -5941,7 +5941,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         // Zero-extend to i64; result is always in [0, 256).
         // Use zext nneg (LLVM 18+) — !range is not valid on zext instructions.
         auto* charExt = builder->CreateZExt(charLoad, getDefaultType(), "idx.charext",
-                                             /*IsNonNeg=*/true);
+                                             /*IsNonNeg=*/false);
         nonNegValues_.insert(charExt);
         return charExt;
     }
@@ -6048,9 +6048,11 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     }
 
     if (isStr) {
-        // Truncate to i8 and store at byte offset index
+        // Truncate to i8 and store at byte offset index.
+        // Fat-pointer: char data starts at offset 16 (after len + cap i64 fields).
         llvm::Value* byteVal = builder->CreateTrunc(newVal, llvm::Type::getInt8Ty(*context), "idxa.byte");
-        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idxa.charptr");
+        llvm::Value* dataPtr = emitStringData(basePtr, "idxa.strdata");
+        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dataPtr, idxVal, "idxa.charptr");
         auto* charStore = builder->CreateStore(byteVal, charPtr);
         charStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
     } else {

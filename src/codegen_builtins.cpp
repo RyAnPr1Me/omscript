@@ -615,7 +615,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 // The result is always non-negative (narrow unsigned value).
                 auto toWide = [&](llvm::Value* v) -> llvm::Value* {
                     auto* w = builder->CreateZExt(v, getDefaultType(), "tw.wide",
-                                                   /*IsNonNeg=*/true);
+                                                   /*IsNonNeg=*/false);
                     nonNegValues_.insert(w);
                     return w;
                 };
@@ -891,7 +891,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 const bool isUnsigned = unsignedExprs_.count(arg) || isUnsignedValue(arg);
                 arg = isUnsigned
                     ? builder->CreateZExt(arg, getDefaultType(), "print.zext",
-                                          /*IsNonNeg=*/true)
+                                          /*IsNonNeg=*/false)
                     : builder->CreateSExt(arg, getDefaultType(), "print.sext");
                 if (isUnsigned) nonNegValues_.insert(arg);
             }
@@ -1451,7 +1451,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::Value* byte = builder->CreateLoad(llvm::Type::getInt8Ty(*context), ptr, "pc.byte");
             llvm::cast<llvm::LoadInst>(byte)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
             charCode = builder->CreateZExt(byte, llvm::Type::getInt32Ty(*context), "charval",
-                                           /*IsNonNeg=*/true);
+                                           /*IsNonNeg=*/false);
             nonNegValues_.insert(charCode);
         } else {
             charCode = builder->CreateTrunc(arg, llvm::Type::getInt32Ty(*context), "charval");
@@ -2080,7 +2080,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Use zext nneg (LLVM 18+) to communicate non-negativity; !range is not
         // valid on zext instructions in LLVM 18.
         auto* result = builder->CreateZExt(charVal, getDefaultType(), "charat.ext",
-                                            /*IsNonNeg=*/true);
+                                            /*IsNonNeg=*/false);
         nonNegValues_.insert(result);
         return result;
     }
@@ -2299,7 +2299,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (!fmtStr)
                 fmtStr = builder->CreateGlobalString("%g", "tostr_float_fmt");
             llvm::Value* written = builder->CreateCall(getOrDeclareSnprintf(), {bufData, bufSize, fmtStr, val}, "tostr.written");
-            llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "tostr.len", /*IsNonNeg=*/true);
+            llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "tostr.len", /*IsNonNeg=*/false);
             nonNegValues_.insert(actualLen);
             emitStoreStringLen(actualLen, hdr);
             stringReturningFunctions_.insert("to_string");
@@ -2315,7 +2315,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             fmtStr = builder->CreateGlobalString("%lld", "tostr_fmt");
         }
         llvm::Value* written = builder->CreateCall(getOrDeclareSnprintf(), {bufData, bufSize, fmtStr, val}, "tostr.written");
-        llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "tostr.len", /*IsNonNeg=*/true);
+        llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "tostr.len", /*IsNonNeg=*/false);
         nonNegValues_.insert(actualLen);
         emitStoreStringLen(actualLen, hdr);
         stringReturningFunctions_.insert("to_string");
@@ -2670,7 +2670,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 chLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
                 llvm::Value* ch32 = builder->CreateZExt(
                     chLoad, llvm::Type::getInt32Ty(*context), "upper.ch32",
-                    /*IsNonNeg=*/true);
+                    /*IsNonNeg=*/false);
                 nonNegValues_.insert(ch32);
                 llvm::Value* upper = builder->CreateCall(
                     getOrDeclareToupper(), {ch32}, "upper.toupper");
@@ -2712,7 +2712,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 chLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
                 llvm::Value* ch32 = builder->CreateZExt(
                     chLoad, llvm::Type::getInt32Ty(*context), "lower.ch32",
-                    /*IsNonNeg=*/true);
+                    /*IsNonNeg=*/false);
                 nonNegValues_.insert(ch32);
                 llvm::Value* lower = builder->CreateCall(
                     getOrDeclareTolower(), {ch32}, "lower.tolower");
@@ -3009,7 +3009,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* startCharLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), startCharPtr, "trim.startchar");
         startCharLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* startChar32 = builder->CreateZExt(startCharLoad, llvm::Type::getInt32Ty(*context), "trim.startchar32",
-                                                         /*IsNonNeg=*/true);
+                                                         /*IsNonNeg=*/false);
         nonNegValues_.insert(startChar32);
         llvm::Value* isStartSpace = builder->CreateCall(getOrDeclareIsspace(), {startChar32}, "trim.isspace");
         llvm::Value* isStartSpaceBool = builder->CreateICmpNE(isStartSpace, builder->getInt32(0), "trim.isspacebool");
@@ -3049,7 +3049,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* endCharLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), endCharPtr, "trim.endchar");
         endCharLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* endChar32 = builder->CreateZExt(endCharLoad, llvm::Type::getInt32Ty(*context), "trim.endchar32",
-                                                       /*IsNonNeg=*/true);
+                                                       /*IsNonNeg=*/false);
         nonNegValues_.insert(endChar32);
         llvm::Value* isEndSpace = builder->CreateCall(getOrDeclareIsspace(), {endChar32}, "trim.isendspace");
         llvm::Value* isEndSpaceBool = builder->CreateICmpNE(isEndSpace, builder->getInt32(0), "trim.isendbool");
@@ -3733,13 +3733,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             auto* b = builder->CreateAlignedLoad(getDefaultType(), bPtr, llvm::MaybeAlign(8), "b");
             llvm::cast<llvm::Instruction>(a)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
             llvm::cast<llvm::Instruction>(b)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
-            // zext nneg: i1 sign bit is always 0, so extension is non-negative.
+            // Do NOT use IsNonNeg=true on zext i1: i1 value 1 (true) is -1
+            // as a signed 1-bit integer, so `zext nneg i1 true` = POISON.
             auto* gt = builder->CreateZExt(builder->CreateICmpSGT(a, b, "gt"),
                                            llvm::Type::getInt32Ty(*context), "gt.zext",
-                                           /*IsNonNeg=*/true);
+                                           /*IsNonNeg=*/false);
             auto* lt = builder->CreateZExt(builder->CreateICmpSLT(a, b, "lt"),
                                            llvm::Type::getInt32Ty(*context), "lt.zext",
-                                           /*IsNonNeg=*/true);
+                                           /*IsNonNeg=*/false);
             builder->CreateRet(builder->CreateSub(gt, lt, "cmp"));
             builder->restoreIP(savedIP);
             return fn;
@@ -4835,7 +4836,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 const bool isUnsigned = unsignedExprs_.count(arg) || isUnsignedValue(arg);
                 arg = isUnsigned
                     ? builder->CreateZExt(arg, getDefaultType(), "println.zext",
-                                          /*IsNonNeg=*/true)
+                                          /*IsNonNeg=*/false)
                     : builder->CreateSExt(arg, getDefaultType(), "println.sext");
                 if (isUnsigned) nonNegValues_.insert(arg);
             }
@@ -4871,7 +4872,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 const bool isUnsigned = unsignedExprs_.count(arg) || isUnsignedValue(arg);
                 arg = isUnsigned
                     ? builder->CreateZExt(arg, getDefaultType(), "write.zext",
-                                          /*IsNonNeg=*/true)
+                                          /*IsNonNeg=*/false)
                     : builder->CreateSExt(arg, getDefaultType(), "write.sext");
                 if (isUnsigned) nonNegValues_.insert(arg);
             }
@@ -5022,7 +5023,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* delimCharLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), emitStringData(delimPtr, "split.delimdata"), "split.delimch");
         delimCharLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* delimChar32 = builder->CreateZExt(delimCharLoad, llvm::Type::getInt32Ty(*context), "split.delimch32",
-                                                         /*IsNonNeg=*/true);
+                                                         /*IsNonNeg=*/false);
         nonNegValues_.insert(delimChar32);
 
         // Count delimiters to know array size
@@ -5055,7 +5056,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* splitChLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "split.ch");
         splitChLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* ch32 = builder->CreateZExt(splitChLoad, llvm::Type::getInt32Ty(*context), "split.ch32",
-                                                  /*IsNonNeg=*/true);
+                                                  /*IsNonNeg=*/false);
         nonNegValues_.insert(ch32);
         llvm::Value* isDelim = builder->CreateICmpEQ(ch32, delimChar32, "split.isdelim");
         llvm::Value* inc = builder->CreateSelect(isDelim, one, zero, "split.inc");
@@ -5107,7 +5108,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* bodyChLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), bodyCharPtr, "split.bch");
         bodyChLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* bodyCh32 = builder->CreateZExt(bodyChLoad, llvm::Type::getInt32Ty(*context), "split.bch32",
-                                                      /*IsNonNeg=*/true);
+                                                      /*IsNonNeg=*/false);
         nonNegValues_.insert(bodyCh32);
         llvm::Value* bodyIsDelim = builder->CreateICmpEQ(bodyCh32, delimChar32, "split.bisdelim");
         llvm::Value* shouldSplit = builder->CreateOr(atEnd, bodyIsDelim, "split.shouldsplit");
@@ -5383,10 +5384,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "scount.body", function);
         llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "scount.done", function);
 
-        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
-        // Compute the string data pointer (initial cursor) while still in mainBB,
-        // so it dominates the PHI incoming value and isn't inserted between PHIs.
+        // Compute the string data pointer (initial cursor) BEFORE the branch,
+        // so the instruction is in mainBB where it dominates the PHI incoming value.
+        // The branch must come AFTER the GEP to avoid adding instructions after a terminator.
         llvm::Value* scountStrData = emitStringData(strPtr, "scount.sdata");
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
 
         builder->SetInsertPoint(loopBB);
         llvm::PHINode* cursor = builder->CreatePHI(ptrTy, 2, "scount.cursor");
@@ -5880,7 +5882,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Zero-extend to i64; result is always in [0, 256).
         // Use zext nneg (LLVM 18+) — !range is not valid on zext instructions.
         auto* result = builder->CreateZExt(ch, getDefaultType(), "charcode.result",
-                                            /*IsNonNeg=*/true);
+                                            /*IsNonNeg=*/false);
         nonNegValues_.insert(result);
         return result;
     }
@@ -5911,7 +5913,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             if (!fmtStr)
                 fmtStr = builder->CreateGlobalString("%g", "tostr_float_fmt");
             llvm::Value* written = builder->CreateCall(getOrDeclareSnprintf(), {bufData, bufSize, fmtStr, val}, "numtostr.written");
-            llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "numtostr.len", /*IsNonNeg=*/true);
+            llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "numtostr.len", /*IsNonNeg=*/false);
             nonNegValues_.insert(actualLen);
             emitStoreStringLen(actualLen, hdr);
             stringReturningFunctions_.insert("number_to_string");
@@ -5925,7 +5927,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (!fmtStr)
             fmtStr = builder->CreateGlobalString("%lld", "tostr_fmt");
         llvm::Value* written = builder->CreateCall(getOrDeclareSnprintf(), {bufData, bufSize, fmtStr, val}, "numtostr.written");
-        llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "numtostr.len", /*IsNonNeg=*/true);
+        llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "numtostr.len", /*IsNonNeg=*/false);
         nonNegValues_.insert(actualLen);
         emitStoreStringLen(actualLen, hdr);
         stringReturningFunctions_.insert("number_to_string");
@@ -6921,7 +6923,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* ch8  = builder->CreateAlignedLoad(llvm::Type::getInt8Ty(*context), charPtr, llvm::MaybeAlign(1), "sfilt.ch8");
         llvm::cast<llvm::Instruction>(ch8)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* ch64 = builder->CreateZExt(ch8, getDefaultType(), "sfilt.ch64",
-                                                  /*IsNonNeg=*/true);
+                                                  /*IsNonNeg=*/false);
         nonNegValues_.insert(ch64);
         // Call predicate
         llvm::Value* keep = builder->CreateICmpNE(
@@ -7075,7 +7077,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* mfCh8 = builder->CreateAlignedLoad(llvm::Type::getInt8Ty(*context), mfCp, llvm::MaybeAlign(1), "mf.ch");
         llvm::cast<llvm::LoadInst>(mfCh8)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* mfCh  = builder->CreateZExt(mfCh8, getDefaultType(), "mf.ch64",
-                                                   /*IsNonNeg=*/true);
+                                                   /*IsNonNeg=*/false);
         nonNegValues_.insert(mfCh);
         llvm::Value* mfEnd = builder->CreateICmpEQ(mfCh, mfZero, "mf.end");
         builder->CreateCondBr(mfEnd, mfHashDone, mfHashLoop);
@@ -7208,7 +7210,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* lsCharLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), lsCharPtr, "lstrip.ch");
         lsCharLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* lsCh32 = builder->CreateZExt(lsCharLoad, llvm::Type::getInt32Ty(*context), "lstrip.ch32",
-                                                    /*IsNonNeg=*/true);
+                                                    /*IsNonNeg=*/false);
         nonNegValues_.insert(lsCh32);
         llvm::Value* lsIsSp = builder->CreateCall(getOrDeclareIsspace(), {lsCh32}, "lstrip.issp");
         builder->CreateCondBr(
@@ -7272,7 +7274,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* rsCharLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), rsCharPtr, "rstrip.ch");
         rsCharLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         llvm::Value* rsCh32 = builder->CreateZExt(rsCharLoad, llvm::Type::getInt32Ty(*context), "rstrip.ch32",
-                                                    /*IsNonNeg=*/true);
+                                                    /*IsNonNeg=*/false);
         nonNegValues_.insert(rsCh32);
         llvm::Value* rsIsSp = builder->CreateCall(getOrDeclareIsspace(), {rsCh32}, "rstrip.issp");
         builder->CreateCondBr(
@@ -8133,7 +8135,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // (not counting the null terminator).  Extend to i64 for arithmetic.
         // snprintf returns non-negative on success; zext nneg allows LLVM to infer [0,2^31).
         llvm::Value* neededLen = builder->CreateZExt(probeResult, getDefaultType(), "strfmt.needed",
-                                                     /*IsNonNeg=*/true);
+                                                     /*IsNonNeg=*/false);
         nonNegValues_.insert(neededLen);
 
         // Allocate a fat-pointer string (header + char data + NUL).
@@ -8440,8 +8442,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         b = toDefaultType(b);
         llvm::Type* i128Ty = llvm::Type::getIntNTy(*context, 128);
         // nneg: widening unsigned i64→i128 produces a value in [0, 2^64-1].
-        llvm::Value* aWide = builder->CreateZExt(a, i128Ty, "umulhi.a", /*IsNonNeg=*/true);
-        llvm::Value* bWide = builder->CreateZExt(b, i128Ty, "umulhi.b", /*IsNonNeg=*/true);
+        llvm::Value* aWide = builder->CreateZExt(a, i128Ty, "umulhi.a", /*IsNonNeg=*/false);
+        llvm::Value* bWide = builder->CreateZExt(b, i128Ty, "umulhi.b", /*IsNonNeg=*/false);
         llvm::Value* prod  = builder->CreateMul(aWide, bWide, "umulhi.prod",
                                                  /*HasNUW=*/true, /*HasNSW=*/false);
         llvm::Value* hi128 = builder->CreateLShr(prod,
@@ -9309,7 +9311,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::Value* r;
                 if (castUnsigned) {
                     r = builder->CreateZExt(arg, destTy, cn + ".zext",
-                                            /*IsNonNeg=*/true);
+                                            /*IsNonNeg=*/false);
                     unsignedExprs_.insert(r);
                     nonNegValues_.insert(r);
                 } else {
