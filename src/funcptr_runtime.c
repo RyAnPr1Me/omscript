@@ -6,10 +6,12 @@
 //
 // omsc_funcptr_new(bytes, n):
 //   Allocates a region of executable memory large enough to hold n bytes,
-//   copies the provided machine-code bytes into it, and returns a pointer that
-//   can be called as a function.
+//   copies the provided machine-code bytes into it, marks it read+execute
+//   only (W^X), and returns a pointer that can be called as a function.
 //
-// Platform support: Linux / macOS (mmap with PROT_EXEC), Windows (VirtualAlloc).
+// Platform support: Linux / macOS (mmap + mprotect), Windows (VirtualAlloc +
+// VirtualProtect).  Both paths enforce W^X: the region is writable only
+// during the initial memcpy, then downgraded to read+execute before returning.
 
 #if defined(_WIN32)
 #  include <windows.h>
@@ -22,23 +24,35 @@
 #include <stdlib.h>
 
 /// Allocate executable memory, copy n bytes of machine code from `bytes` into
-/// it, and return a pointer to the executable region.  Returns NULL on failure.
+/// it, enforce W^X (downgrade to read+execute), and return a pointer to the
+/// executable region.  Returns NULL on failure.
 void* omsc_funcptr_new(const void* bytes, int64_t n) {
     if (!bytes || n <= 0) return (void*)0;
 
 #if defined(_WIN32)
+    /* Allocate as read+write first, copy, then switch to execute+read. */
     void* mem = VirtualAlloc(NULL, (size_t)n,
                              MEM_COMMIT | MEM_RESERVE,
-                             PAGE_EXECUTE_READWRITE);
+                             PAGE_READWRITE);
     if (!mem) return (void*)0;
     memcpy(mem, bytes, (size_t)n);
+    DWORD old;
+    if (!VirtualProtect(mem, (size_t)n, PAGE_EXECUTE_READ, &old)) {
+        VirtualFree(mem, 0, MEM_RELEASE);
+        return (void*)0;
+    }
     return mem;
 #else
+    /* Allocate as read+write, copy bytes, then mprotect to read+execute. */
     void* mem = mmap(NULL, (size_t)n,
-                     PROT_READ | PROT_WRITE | PROT_EXEC,
+                     PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (mem == MAP_FAILED) return (void*)0;
     memcpy(mem, bytes, (size_t)n);
+    if (mprotect(mem, (size_t)n, PROT_READ | PROT_EXEC) != 0) {
+        munmap(mem, (size_t)n);
+        return (void*)0;
+    }
     return mem;
 #endif
 }

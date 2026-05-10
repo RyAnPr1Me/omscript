@@ -9110,13 +9110,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Declare or reuse the array-based runtime helper:
         //   void* omsc_funcptr_new_arr(const int64_t* arr, int64_t n)
         // The helper packs the low byte of each i64 element into executable memory.
+        // Returns NULL on allocation failure — do not mark as nonnull.
         auto* ptrTy  = llvm::PointerType::getUnqual(*context);
         auto* helperFnTy = llvm::FunctionType::get(
             ptrTy, {ptrTy, getDefaultType()}, /*isVarArg=*/false);
         auto* helperFn = llvm::cast<llvm::Function>(
             module->getOrInsertFunction("omsc_funcptr_new_arr", helperFnTy).getCallee());
         helperFn->setDoesNotThrow();
-        helperFn->addRetAttr(llvm::Attribute::NonNull);
 
         // Advance past the 8-byte length header to element 0 of the array.
         llvm::Value* arrPtr = arrVal->getType()->isPointerTy()
