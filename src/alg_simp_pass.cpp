@@ -409,8 +409,9 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
 
         // ── Modulo identities ──────────────────────────────────────────────
         if (op == "%") {
-            if (isIntLiteralVal(R, 1)) {
-                // x % 1 → 0
+            if (isIntLiteralVal(R, 1) || isIntLiteralVal(R, -1)) {
+                // x % 1 → 0   (any integer divided by ±1 has remainder 0)
+                // x % -1 → 0  (same: -1 divides every integer evenly)
                 expr = makeIntLiteral(0);
                 ++count;
                 return count;

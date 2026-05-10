@@ -5747,6 +5747,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* diff = builder->CreateSub(endArg, startArg, "range.diff");
         llvm::Value* isPos = builder->CreateICmpSGT(diff, zero, "range.ispos");
         llvm::Value* count = builder->CreateSelect(isPos, diff, zero, "range.count");
+        // count is clamped to ≥ 0 by the select above; inform LLVM.
+        nonNegValues_.insert(count);
 
         // Allocate: (count + 1) * 8
         llvm::Value* arrSlots = builder->CreateAdd(count, one, "range.arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -8764,6 +8766,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                         llvm::Value* epA = matElemPtr(mPtr, rowsV, iIdx, jIdxV, "matt.a");
                         auto* aElem = builder->CreateAlignedLoad(getDefaultType(),
                             epA, llvm::MaybeAlign(8), "matt.aval");
+                        if (optimizationLevel >= OptimizationLevel::O1)
+                            aElem->setMetadata(llvm::LLVMContext::MD_noundef,
+                                llvm::MDNode::get(*context, {}));
                         // Store T[j, i]: T has rowsT=cols, so slot = i*cols + j + 2
                         llvm::Value* epT = matElemPtr(tBuf, colsV, jIdxV, iIdx, "matt.t");
                         builder->CreateAlignedStore(aElem, epT, llvm::MaybeAlign(8));
@@ -8846,6 +8851,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                         llvm::Value* bEp   = matElemPtr(bPtr, kDim, pIdx, jIdx, "matm.b");
                         llvm::Value* b_pj  = builder->CreateAlignedLoad(getDefaultType(),
                             bEp, llvm::MaybeAlign(8), "matm.bpj");
+                        if (optimizationLevel >= OptimizationLevel::O1)
+                            llvm::cast<llvm::LoadInst>(b_pj)->setMetadata(
+                                llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
                         // Inner loop: C[i, j] += b_pj * A[i, p]  (vectorized)
                         emitCountingLoop("matm.i", mDim, zero, 4,
                             [&](llvm::PHINode* iIdx, llvm::BasicBlock* iLoopBB) {
@@ -8853,6 +8861,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                                 llvm::Value* aEp  = matElemPtr(aPtr, mDim, iIdx, pIdx, "matm.a");
                                 llvm::Value* a_ip = builder->CreateAlignedLoad(getDefaultType(),
                                     aEp, llvm::MaybeAlign(8), "matm.aip");
+                                if (optimizationLevel >= OptimizationLevel::O1)
+                                    llvm::cast<llvm::LoadInst>(a_ip)->setMetadata(
+                                        llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
                                 // C[i, j]: slot = j*m + i + 2
                                 llvm::Value* cEp  = matElemPtr(cBuf, mDim, iIdx, jIdx, "matm.c");
                                 llvm::Value* c_ij = builder->CreateAlignedLoad(getDefaultType(),
