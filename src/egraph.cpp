@@ -2514,13 +2514,10 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
         });
 
     // ─────────────────────────────────────────────────────────────────────
-    rules.emplace_back("mul_36_shift",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(36)}),
-        [](EGraph& g, const Subst& s) {
-            ClassId s5 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(5));
-            ClassId s2 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(2));
-            return g.addBinOp(Op::Add, s5, s2);
-        });
+    // NOTE: mul_36_shift, mul_56_shift, mul_72_shift, mul_80_shift, mul_192_shift
+    // are already generated in getAlgebraicRules() and will be deduped by getAllRules();
+    // they are omitted here to avoid redundancy.
+
     // x * 40 → (x<<5) + (x<<3)  [32x + 8x = 40x]
     rules.emplace_back("mul_40_shift",
         P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(40)}),
@@ -2528,30 +2525,6 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
             ClassId s5 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(5));
             ClassId s3 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
             return g.addBinOp(Op::Add, s5, s3);
-        });
-    // x * 56 → (x<<6) - (x<<3)  [64x - 8x = 56x]
-    rules.emplace_back("mul_56_shift",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(56)}),
-        [](EGraph& g, const Subst& s) {
-            ClassId s6 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(6));
-            ClassId s3 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
-            return g.addBinOp(Op::Sub, s6, s3);
-        });
-    // x * 72 → (x<<6) + (x<<3)  [64x + 8x = 72x]
-    rules.emplace_back("mul_72_shift",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(72)}),
-        [](EGraph& g, const Subst& s) {
-            ClassId s6 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(6));
-            ClassId s3 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(3));
-            return g.addBinOp(Op::Add, s6, s3);
-        });
-    // x * 80 → (x<<6) + (x<<4)  [64x + 16x = 80x]
-    rules.emplace_back("mul_80_shift",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(80)}),
-        [](EGraph& g, const Subst& s) {
-            ClassId s6 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(6));
-            ClassId s4 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
-            return g.addBinOp(Op::Add, s6, s4);
         });
     // x * 112 → (x<<7) - (x<<4)  [128x - 16x = 112x]
     rules.emplace_back("mul_112_shift",
@@ -2561,14 +2534,7 @@ std::vector<RewriteRule> getAdvancedAlgebraicRules() {
             ClassId s4 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(4));
             return g.addBinOp(Op::Sub, s7, s4);
         });
-    // x * 192 → (x<<7) + (x<<6)  [128x + 64x = 192x]
-    rules.emplace_back("mul_192_shift",
-        P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(192)}),
-        [](EGraph& g, const Subst& s) {
-            ClassId s7 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(7));
-            ClassId s6 = g.addBinOp(Op::Shl, s.at("x"), g.addConst(6));
-            return g.addBinOp(Op::Add, s7, s6);
-        });
+    // NOTE: mul_192_shift already generated in getAlgebraicRules(); omitted here.
     // x * 511 → (x<<9) - x  [512x - 1x = 511x]
     rules.emplace_back("mul_511_shift",
         P::OpPat(Op::Mul, {P::Wild("x"), P::ConstPat(511)}),

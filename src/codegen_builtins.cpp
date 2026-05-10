@@ -8638,8 +8638,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::PointerType::getUnqual(*context), "matr.ptr");
         llvm::Value* hdr0 = builder->CreateInBoundsGEP(getDefaultType(), mPtr,
             llvm::ConstantInt::get(getDefaultType(), 0), "matr.hdr0");
-        return builder->CreateAlignedLoad(getDefaultType(), hdr0,
+        auto* ld = builder->CreateAlignedLoad(getDefaultType(), hdr0,
             llvm::MaybeAlign(8), "mat.rows.val");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            ld->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        nonNegValues_.insert(ld);
+        return ld;
     }
 
     // ── mat_cols(m) ─────────────────────────────────────────────────────────
@@ -8650,8 +8654,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::PointerType::getUnqual(*context), "matc.ptr");
         llvm::Value* hdr1 = builder->CreateInBoundsGEP(getDefaultType(), mPtr,
             llvm::ConstantInt::get(getDefaultType(), 1), "matc.hdr1");
-        return builder->CreateAlignedLoad(getDefaultType(), hdr1,
+        auto* ld = builder->CreateAlignedLoad(getDefaultType(), hdr1,
             llvm::MaybeAlign(8), "mat.cols.val");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            ld->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        nonNegValues_.insert(ld);
+        return ld;
     }
 
     // ── mat_get(m, i, j) ────────────────────────────────────────────────────
@@ -8662,10 +8670,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* jVal  = toDefaultType(generateExpression(expr->arguments[2].get()));
         llvm::Value* mPtr  = builder->CreateIntToPtr(mVal,
             llvm::PointerType::getUnqual(*context), "matg.ptr");
-        llvm::Value* rowsV = builder->CreateAlignedLoad(getDefaultType(),
+        auto* rowsLd = builder->CreateAlignedLoad(getDefaultType(),
             builder->CreateInBoundsGEP(getDefaultType(), mPtr,
                 llvm::ConstantInt::get(getDefaultType(), 0), "matg.hdr0"),
             llvm::MaybeAlign(8), "matg.rows");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            rowsLd->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        nonNegValues_.insert(rowsLd);
+        llvm::Value* rowsV = rowsLd;
         llvm::Value* ep    = matElemPtr(mPtr, rowsV, iVal, jVal, "matg");
         auto* ld = builder->CreateAlignedLoad(getDefaultType(), ep,
             llvm::MaybeAlign(8), "mat.get.val");
@@ -8685,10 +8697,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* valV  = toDefaultType(generateExpression(expr->arguments[3].get()));
         llvm::Value* mPtr  = builder->CreateIntToPtr(mVal,
             llvm::PointerType::getUnqual(*context), "mats.ptr");
-        llvm::Value* rowsV = builder->CreateAlignedLoad(getDefaultType(),
+        auto* rowsLdS = builder->CreateAlignedLoad(getDefaultType(),
             builder->CreateInBoundsGEP(getDefaultType(), mPtr,
                 llvm::ConstantInt::get(getDefaultType(), 0), "mats.hdr0"),
             llvm::MaybeAlign(8), "mats.rows");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            rowsLdS->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        nonNegValues_.insert(rowsLdS);
+        llvm::Value* rowsV = rowsLdS;
         llvm::Value* ep    = matElemPtr(mPtr, rowsV, iVal, jVal, "mats");
         auto* st = builder->CreateAlignedStore(valV, ep, llvm::MaybeAlign(8));
         if (currentLoopAccessGroup_)
@@ -8702,14 +8718,22 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* mVal   = toDefaultType(generateExpression(expr->arguments[0].get()));
         llvm::Value* mPtr   = builder->CreateIntToPtr(mVal,
             llvm::PointerType::getUnqual(*context), "matt.ptr");
-        llvm::Value* rowsV  = builder->CreateAlignedLoad(getDefaultType(),
+        auto* rowsLdT = builder->CreateAlignedLoad(getDefaultType(),
             builder->CreateInBoundsGEP(getDefaultType(), mPtr,
                 llvm::ConstantInt::get(getDefaultType(), 0), "matt.hdr0"),
             llvm::MaybeAlign(8), "matt.rows");
-        llvm::Value* colsV  = builder->CreateAlignedLoad(getDefaultType(),
+        if (optimizationLevel >= OptimizationLevel::O1)
+            rowsLdT->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        nonNegValues_.insert(rowsLdT);
+        llvm::Value* rowsV = rowsLdT;
+        auto* colsLdT = builder->CreateAlignedLoad(getDefaultType(),
             builder->CreateInBoundsGEP(getDefaultType(), mPtr,
                 llvm::ConstantInt::get(getDefaultType(), 1), "matt.hdr1"),
             llvm::MaybeAlign(8), "matt.cols");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            colsLdT->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        nonNegValues_.insert(colsLdT);
+        llvm::Value* colsV = colsLdT;
         // Allocate transposed matrix: mat_new(cols, rows)
         llvm::Value* elems  = builder->CreateMul(rowsV, colsV, "matt.elems",
                                                   /*HasNUW=*/true, /*HasNSW=*/true);
@@ -8770,18 +8794,29 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* bPtr  = builder->CreateIntToPtr(bVal,
             llvm::PointerType::getUnqual(*context), "matm.bptr");
         // Dimension loads
-        llvm::Value* mDim  = builder->CreateAlignedLoad(getDefaultType(),
+        auto* mDimLd = builder->CreateAlignedLoad(getDefaultType(),
             builder->CreateInBoundsGEP(getDefaultType(), aPtr,
                 llvm::ConstantInt::get(getDefaultType(), 0), "matm.a.hdr0"),
             llvm::MaybeAlign(8), "matm.m");
-        llvm::Value* kDim  = builder->CreateAlignedLoad(getDefaultType(),
+        auto* kDimLd = builder->CreateAlignedLoad(getDefaultType(),
             builder->CreateInBoundsGEP(getDefaultType(), aPtr,
                 llvm::ConstantInt::get(getDefaultType(), 1), "matm.a.hdr1"),
             llvm::MaybeAlign(8), "matm.k");
-        llvm::Value* nDim  = builder->CreateAlignedLoad(getDefaultType(),
+        auto* nDimLd = builder->CreateAlignedLoad(getDefaultType(),
             builder->CreateInBoundsGEP(getDefaultType(), bPtr,
                 llvm::ConstantInt::get(getDefaultType(), 1), "matm.b.hdr1"),
             llvm::MaybeAlign(8), "matm.n");
+        if (optimizationLevel >= OptimizationLevel::O1) {
+            mDimLd->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            kDimLd->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            nDimLd->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        }
+        nonNegValues_.insert(mDimLd);
+        nonNegValues_.insert(kDimLd);
+        nonNegValues_.insert(nDimLd);
+        llvm::Value* mDim = mDimLd;
+        llvm::Value* kDim = kDimLd;
+        llvm::Value* nDim = nDimLd;
         // Allocate result matrix C(m, n) — zero-initialised via calloc
         llvm::Value* cElems = builder->CreateMul(mDim, nDim, "matm.celems",
                                                   /*HasNUW=*/true, /*HasNSW=*/true);

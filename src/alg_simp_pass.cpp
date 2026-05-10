@@ -458,6 +458,18 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 ++count;
                 return count;
             }
+            if (isIntLiteralVal(R, -1)) {
+                // x & -1 → x  (AND with all-ones is identity)
+                expr = std::move(bin->left);
+                ++count;
+                return count;
+            }
+            if (isIntLiteralVal(L, -1)) {
+                // -1 & x → x
+                expr = std::move(bin->right);
+                ++count;
+                return count;
+            }
             // x & x → x
             if (sameIdent(L, R)) {
                 expr = makeIdentifier(static_cast<IdentifierExpr*>(L)->name);
@@ -466,6 +478,12 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             }
         }
         if (op == "|") {
+            if (isIntLiteralVal(R, -1) || isIntLiteralVal(L, -1)) {
+                // x | -1 → -1,  -1 | x → -1  (OR with all-ones is absorbing)
+                expr = makeIntLiteral(-1);
+                ++count;
+                return count;
+            }
             if (isIntLiteralVal(R, 0)) {
                 // x | 0 → x
                 expr = std::move(bin->left);
