@@ -451,7 +451,14 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "to_i16", "to_u16",
                                                                 "to_i32", "to_u32",
                                                                 "to_i64", "to_u64",
-                                                                "to_f32", "to_f64"};
+                                                                "to_f32", "to_f64",
+                                                                "store_ptr",
+                                                                "pslice_len",
+                                                                "pslice_ptr",
+                                                                "funcptr_from",
+                                                                "funcptr_new",
+                                                                "malloc",
+                                                                "free"};
 
 bool isStdlibFunction(const std::string& name) {
     return stdlibFunctions.find(name) != stdlibFunctions.end();

@@ -1211,6 +1211,7 @@ fn main() -> int {
 - **Pointer arithmetic**: `p + n`, `p - n` — advances by `n * sizeof(T)` bytes (Ω spec §4.4)
 - **Null literal**: `null` or `nullptr` (both are zero address, Ω spec §2.2)
 - **Allocation**: `alloc<T>(n)` — allocate `n` elements of type `T`; `alloc<T>()` allocates exactly 1 element (Ω spec §4.1)
+- **Boxing**: `store_ptr(value)` — allocate a stack slot, store `value` into it, return a `ptr<typeof(value)>`. The type of the returned pointer matches the expression type (i64, ptr, etc.). The slot is placed in the function entry block so `mem2reg`/SROA can promote it.
 - **Deallocation**: `invalidate p` — free the heap allocation and mark `p` dead
 
 **Safety**: In safe mode (default), the borrow checker enforces:
@@ -1235,6 +1236,26 @@ fn main() -> int {
 
     invalidate q;  // free heap allocation
     return sum;    // 30
+}
+```
+
+**Boxing with `store_ptr`**:
+```omscript
+fn main() -> int {
+    // Box an integer literal onto the stack and get a pointer to it
+    var p: ptr<i64> = store_ptr(99);
+    println(*p);   // 99
+
+    // Write through the boxed pointer
+    *p = 200;
+    println(*p);   // 200
+
+    // Box the value of any expression
+    var a: i64 = 10;
+    var b: ptr<i64> = store_ptr(a * 3 + 5);
+    println(*b);   // 35
+
+    return 0;
 }
 ```
 

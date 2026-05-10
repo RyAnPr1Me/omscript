@@ -2044,7 +2044,10 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
             case ASTNodeType::CALL_EXPR: {
                 const std::string& callee = static_cast<const CallExpr*>(init)->callee;
                 valid = (callee == "malloc" || callee == "realloc" || callee == "calloc" ||
-                         (callee.rfind("alloc<", 0) == 0 && callee.back() == '>'));
+                         callee == "store_ptr" || callee == "funcptr_from" ||
+                         callee == "funcptr_new" ||
+                         (callee.rfind("alloc<",      0) == 0 && callee.back() == '>') ||
+                         (callee.rfind("pslice_new<", 0) == 0 && callee.back() == '>'));
                 break;
             }
             case ASTNodeType::LITERAL_EXPR: {
@@ -2068,7 +2071,8 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
         }
         if (!valid) {
             error("Pointer variable '" + name.lexeme + "' must be initialized with "
-                  "&var, &arr, malloc(...), realloc(...), calloc(...), null, "
+                  "&var, &arr, malloc(...), realloc(...), calloc(...), alloc<T>(...), "
+                  "store_ptr(...), funcptr_from(...), funcptr_new(...), null, "
                   "pointer arithmetic (p+n), or another pointer variable");
         }
     }

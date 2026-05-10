@@ -149,6 +149,8 @@ enum class BuiltinId : uint8_t {
     // ── Pointer slice builtins ───────────────────────────────────────────────
     PSLICE_LEN,   ///< pslice_len(s)            → length of the slice
     PSLICE_PTR,   ///< pslice_ptr(s)            → raw pointer from the slice
+    // ── Generic boxing builtin ───────────────────────────────────────────────
+    STORE_PTR,    ///< store_ptr(value)          → box value onto stack, return ptr<typeof(value)>
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -392,6 +394,7 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"funcptr_new",  BuiltinId::FUNCPTR_NEW},
     {"pslice_len",   BuiltinId::PSLICE_LEN},
     {"pslice_ptr",   BuiltinId::PSLICE_PTR},
+    {"store_ptr",    BuiltinId::STORE_PTR},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -9243,6 +9246,65 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // ptrtoint is only done here because the user explicitly requested the
         // integer address; internal pslice codegen never converts ptr→int.
         return builder->CreatePtrToInt(ptrLoad, getDefaultType(), "pslice.ptr.i64");
+    }
+
+    // ── store_ptr(value) ── box any value onto the stack, return ptr<typeof(value)>
+    // Allocates an appropriately-typed slot in the function entry block,
+    // stores the value, and returns a pointer to it.  The allocation is always
+    // in the entry block so mem2reg / SROA can fully reason about it.
+    //
+    // Supported value types:
+    //   • i64  (or any integer) → stores as i64
+    //   • ptr                   → stores as ptr (pointer to pointer)
+    //   • f64  (floating-point) → stores as f64
+    //
+    // Example:  var p: ptr<i64>  = store_ptr(42)
+    //           var q: ptr<ptr>  = store_ptr(some_ptr_var)
+    if (bid == BuiltinId::STORE_PTR) {
+        validateArgCount(expr, "store_ptr", 1);
+        llvm::Value* val = generateExpression(expr->arguments[0].get());
+
+        // Determine the storage type from the value's LLVM type.
+        llvm::Type* slotTy;
+        llvm::Value* storeVal = val;
+        if (val->getType()->isPointerTy()) {
+            // Pointer value → store as ptr (pointer-to-pointer result).
+            slotTy = llvm::PointerType::getUnqual(*context);
+        } else if (val->getType()->isDoubleTy()) {
+            // f64 value → store as f64.
+            slotTy = llvm::Type::getDoubleTy(*context);
+        } else {
+            // Integer value (i64 or narrower) → widen to i64 and store.
+            storeVal = toDefaultType(val);
+            slotTy = getDefaultType();
+        }
+
+        // Place the alloca in the function entry block so mem2reg / SROA
+        // can promote it to a register where possible.
+        llvm::Function* fn = builder->GetInsertBlock()->getParent();
+        llvm::IRBuilder<> entryB(&fn->getEntryBlock(),
+                                 fn->getEntryBlock().begin());
+        auto* slot = entryB.CreateAlloca(slotTy, nullptr, "sptr.slot");
+        const llvm::DataLayout& DL = module->getDataLayout();
+        slot->setAlignment(DL.getABITypeAlign(slotTy));
+
+        // Emit lifetime.start so DSE / LICM can bound the allocation.
+        auto* lifeSz = llvm::ConstantInt::get(
+            llvm::Type::getInt64Ty(*context),
+            DL.getTypeAllocSize(slotTy));
+        auto* lifetimeStart = OMSC_GET_INTRINSIC(
+            module.get(), llvm::Intrinsic::lifetime_start,
+            {llvm::PointerType::getUnqual(*context)});
+        builder->CreateCall(lifetimeStart, {lifeSz, slot});
+
+        // Store the value with proper alignment.
+        auto* st = builder->CreateAlignedStore(storeVal, slot,
+                                               DL.getABITypeAlign(slotTy));
+        if (tbaaScalar_)
+            st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+
+        // The alloca itself is provably nonnull.
+        return slot;
     }
 
     if (inOptMaxFunction) {
