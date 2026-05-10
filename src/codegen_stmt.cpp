@@ -250,6 +250,26 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     }
                 }
             }
+            // Pre-detect `filter`/`std::filter` → array case BEFORE calling
+            // generateExpression.  The FILTER codegen handler moves the CallExpr
+            // arguments (std::move) which would make them inaccessible to the
+            // post-generateExpression arrayVars_ tracking block below.
+            if (stmt->initializer->type == ASTNodeType::CALL_EXPR) {
+                auto* call = static_cast<CallExpr*>(stmt->initializer.get());
+                if (!call->arguments.empty() &&
+                    (call->callee == "filter" || call->callee == "std::filter")) {
+                    auto* firstArg = call->arguments[0].get();
+                    if (firstArg) {
+                        if (firstArg->type == ASTNodeType::IDENTIFIER_EXPR) {
+                            auto* idArg = static_cast<IdentifierExpr*>(firstArg);
+                            if (arrayVars_.count(idArg->name))
+                                arrayVars_.insert(stmt->name);
+                        } else if (firstArg->type == ASTNodeType::ARRAY_EXPR) {
+                            arrayVars_.insert(stmt->name);
+                        }
+                    }
+                }
+            }
             initValue = generateExpression(stmt->initializer.get());
             if (useReadOnlyGlobal) {
                 pendingArrayReadOnlyGlobal_ = false;
@@ -513,6 +533,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     call->callee == "array_remove" || call->callee == "array_reduce" ||
                     call->callee == "array_insert" || call->callee == "array_unique" ||
                     call->callee == "array_rotate" || call->callee == "array_zip" ||
+                    call->callee == "array_take" || call->callee == "array_drop" ||
                     call->callee == "range" || call->callee == "range_step" ||
                     call->callee == "str_split" || call->callee == "str_chars" ||
                     arrayReturningFunctions_.count(call->callee)) {
@@ -521,15 +542,25 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 // `filter` and `std::filter` dispatch to array_filter when the
                 // first argument is an array, or to str_filter when it is a string.
                 // Detect the array case by checking arrayVars_ for the argument.
+                // NOTE: generateExpression (called before this block) moves the
+                // arguments out of the CallExpr via the FILTER handler, so
+                // call->arguments[0] may be null here.  We guard against that and
+                // fall back to the pre-detection result already stored in arrayVars_.
                 if (!isArray && !call->arguments.empty() &&
                     (call->callee == "filter" || call->callee == "std::filter")) {
                     auto* firstArg = call->arguments[0].get();
-                    if (firstArg->type == ASTNodeType::IDENTIFIER_EXPR) {
-                        auto* idArg = static_cast<IdentifierExpr*>(firstArg);
-                        if (arrayVars_.count(idArg->name))
+                    if (firstArg) {
+                        if (firstArg->type == ASTNodeType::IDENTIFIER_EXPR) {
+                            auto* idArg = static_cast<IdentifierExpr*>(firstArg);
+                            if (arrayVars_.count(idArg->name))
+                                isArray = true;
+                        } else if (firstArg->type == ASTNodeType::ARRAY_EXPR) {
                             isArray = true;
-                    } else if (firstArg->type == ASTNodeType::ARRAY_EXPR) {
-                        isArray = true;
+                        }
+                    } else {
+                        // Arguments were moved by the FILTER codegen handler.
+                        // Preserve the pre-detection result from arrayVars_.
+                        isArray = arrayVars_.count(stmt->name) > 0;
                     }
                 }
             }

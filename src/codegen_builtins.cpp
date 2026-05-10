@@ -5170,7 +5170,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* slots = builder->CreateAdd(strLen, one, "chars.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* bytes = builder->CreateMul(slots, eight, "chars.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "chars.buf");
-        builder->CreateStore(strLen, buf);
+        emitStoreArrayLen(strLen, buf);
 
         // Fill loop
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -5191,18 +5191,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* charP = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), charsStrData, idx, "chars.cptr");
         auto* charsChLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charP, "chars.ch");
         charsChLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-        // Create a fat-ptr string for this single character
-        llvm::Value* chOne = llvm::ConstantInt::get(getDefaultType(), 1);
-        llvm::Value* chHdr = emitAllocString(chOne, chOne, "chars.elhdr");
-        llvm::Value* chDst = emitStringData(chHdr, "chars.eldst");
-        builder->CreateStore(charsChLoad, chDst);
-        llvm::Value* chNulPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), chDst, chOne, "chars.elnul");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), chNulPtr)
-            ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-        llvm::Value* chHdrInt = builder->CreatePtrToInt(chHdr, getDefaultType(), "chars.elint");
+        // Store the unsigned char code (zero-extended to i64) in the array slot.
+        llvm::Value* chCode = builder->CreateZExt(charsChLoad, getDefaultType(), "chars.code");
+        nonNegValues_.insert(chCode);
         llvm::Value* arrSlot = builder->CreateAdd(idx, one, "chars.slot", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* arrSlotPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, arrSlot, "chars.slotptr");
-        builder->CreateStore(chHdrInt, arrSlotPtr);
+        builder->CreateStore(chCode, arrSlotPtr);
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "chars.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, bodyBB);
         {
@@ -5429,14 +5423,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             pathArg->getType()->isPointerTy()
                 ? pathArg
                 : builder->CreateIntToPtr(pathArg, llvm::PointerType::getUnqual(*context), "fread.path");
+        // pathPtr is a fat-string {i64 len, i64 cap, i8[] data}; fopen needs
+        // a plain C string (null-terminated), which starts at offset 16.
+        llvm::Value* pathData = emitStringData(pathPtr, "fread.pathdata");
 
         // mode = "rb"
         llvm::GlobalVariable* mode = module->getGlobalVariable("__fread_mode", true);
         if (!mode)
             mode = builder->CreateGlobalString("rb", "__fread_mode");
 
-        // FILE* fp = fopen(path, "rb")
-        llvm::Value* fp = builder->CreateCall(getOrDeclareFopen(), {pathPtr, mode}, "fread.fp");
+        // FILE* fp = fopen(pathData, "rb")
+        llvm::Value* fp = builder->CreateCall(getOrDeclareFopen(), {pathData, mode}, "fread.fp");
 
         // Check for null
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
@@ -5451,15 +5448,17 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* freadW = llvm::MDBuilder(*context).createBranchWeights(1, 100);
         builder->CreateCondBr(isNull, nullBB, okBB, freadW);
 
-        // Null path: return empty string
+        // Null path: return empty fat-string
+        llvm::Value* emptyResult = nullptr;
         builder->SetInsertPoint(nullBB);
-        llvm::Value* emptyBuf = builder->CreateCall(getOrDeclareMalloc(),
-            {llvm::ConstantInt::get(getDefaultType(), 1)}, "fread.empty");
-        llvm::cast<llvm::CallInst>(emptyBuf)->addRetAttr(
-            llvm::Attribute::getWithDereferenceableBytes(*context, 1));
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), emptyBuf)
-            ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-        llvm::Value* emptyResult = emptyBuf;
+        {
+            llvm::Value* z64 = llvm::ConstantInt::get(getDefaultType(), 0);
+            llvm::Value* eh  = emitAllocString(z64, z64, "fread.empty");
+            builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0),
+                emitStringData(eh, "fread.empty.data"))
+                ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+            emptyResult = eh;
+        }
         builder->CreateBr(mergeBB);
         llvm::BasicBlock* nullEndBB = builder->GetInsertBlock();
 
@@ -5482,15 +5481,18 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* ftellW = llvm::MDBuilder(*context).createBranchWeights(1, 1000);
         builder->CreateCondBr(ftellFailed, ftellBadBB, ftellOkBB, ftellW);
 
-        // ftell error path: close file, return empty string
+        // ftell error path: close file, return empty fat-string
         builder->SetInsertPoint(ftellBadBB);
         builder->CreateCall(getOrDeclareFclose(), {fp});
-        llvm::Value* ftellEmptyBuf = builder->CreateCall(getOrDeclareMalloc(),
-            {llvm::ConstantInt::get(getDefaultType(), 1)}, "fread.ftempty");
-        llvm::cast<llvm::CallInst>(ftellEmptyBuf)->addRetAttr(
-            llvm::Attribute::getWithDereferenceableBytes(*context, 1));
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), ftellEmptyBuf)
-            ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        llvm::Value* ftellEmptyBuf = nullptr;
+        {
+            llvm::Value* z64 = llvm::ConstantInt::get(getDefaultType(), 0);
+            llvm::Value* eh  = emitAllocString(z64, z64, "fread.ftempty");
+            builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0),
+                emitStringData(eh, "fread.ftempty.data"))
+                ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+            ftellEmptyBuf = eh;
+        }
         builder->CreateBr(mergeBB);
         llvm::BasicBlock* ftellBadEndBB = builder->GetInsertBlock();
 
@@ -5500,20 +5502,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCall(getOrDeclareFseek(),
             {fp, llvm::ConstantInt::get(getDefaultType(), 0),
              llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0)});
-        // buf = malloc(size + 1)
-        llvm::Value* bufSize = builder->CreateAdd(fileSize,
-            llvm::ConstantInt::get(getDefaultType(), 1), "fread.bufsize", /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* buf = builder->CreateCall(getOrDeclareMalloc(), {bufSize}, "fread.buf");
-        // fread(buf, 1, size, fp)
+        // Allocate fat-string header + file content + NUL in one block.
+        llvm::Value* okHdr  = emitAllocString(fileSize, fileSize, "fread.hdr");
+        llvm::Value* okData = emitStringData(okHdr, "fread.hdrdata");
+        // fread(data, 1, size, fp)
         builder->CreateCall(getOrDeclareFread(),
-            {buf, llvm::ConstantInt::get(getDefaultType(), 1), fileSize, fp});
-        // null terminate
-        llvm::Value* nullTermPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), buf, fileSize, "fread.nullterm");
+            {okData, llvm::ConstantInt::get(getDefaultType(), 1), fileSize, fp});
+        // null terminate (emitAllocString allocates cap+1 bytes, so the slot is there)
+        llvm::Value* nullTermPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), okData, fileSize, "fread.nullterm");
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nullTermPtr)
             ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         // fclose(fp)
         builder->CreateCall(getOrDeclareFclose(), {fp});
-        llvm::Value* okResult = buf;
+        llvm::Value* okResult = okHdr;
         builder->CreateBr(mergeBB);
         llvm::BasicBlock* okEndBB = builder->GetInsertBlock();
 
@@ -5534,6 +5535,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* pathPtr = pathArg->getType()->isPointerTy()
             ? pathArg : builder->CreateIntToPtr(pathArg, ptrTy, "fwrite.path");
+        // pathPtr is a fat-string; extract the C-string data at offset 16.
+        llvm::Value* pathData = emitStringData(pathPtr, "fwrite.pathdata");
         llvm::Value* contentPtr = contentArg->getType()->isPointerTy()
             ? contentArg : builder->CreateIntToPtr(contentArg, ptrTy, "fwrite.content");
 
@@ -5541,7 +5544,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (!mode)
             mode = builder->CreateGlobalString("wb", "__fwrite_mode");
 
-        llvm::Value* fp = builder->CreateCall(getOrDeclareFopen(), {pathPtr, mode}, "fwrite.fp");
+        llvm::Value* fp = builder->CreateCall(getOrDeclareFopen(), {pathData, mode}, "fwrite.fp");
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(ptrTy);
         llvm::Value* isNull = builder->CreateICmpEQ(fp, nullPtr, "fwrite.isnull");
 
@@ -5580,6 +5583,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* pathPtr = pathArg->getType()->isPointerTy()
             ? pathArg : builder->CreateIntToPtr(pathArg, ptrTy, "fappend.path");
+        // pathPtr is a fat-string; extract the C-string data at offset 16.
+        llvm::Value* pathDataFa = emitStringData(pathPtr, "fappend.pathdata");
         llvm::Value* contentPtr = contentArg->getType()->isPointerTy()
             ? contentArg : builder->CreateIntToPtr(contentArg, ptrTy, "fappend.content");
 
@@ -5587,7 +5592,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (!mode)
             mode = builder->CreateGlobalString("a", "__fappend_mode");
 
-        llvm::Value* fp = builder->CreateCall(getOrDeclareFopen(), {pathPtr, mode}, "fappend.fp");
+        llvm::Value* fp = builder->CreateCall(getOrDeclareFopen(), {pathDataFa, mode}, "fappend.fp");
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(ptrTy);
         llvm::Value* isNull = builder->CreateICmpEQ(fp, nullPtr, "fappend.isnull");
 
@@ -5625,9 +5630,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* pathPtr = pathArg->getType()->isPointerTy()
             ? pathArg : builder->CreateIntToPtr(pathArg, ptrTy, "fexists.path");
-        // access(path, F_OK=0) returns 0 on success, -1 on failure
+        // pathPtr is a fat-string; extract the C-string data at offset 16.
+        llvm::Value* pathDataFe = emitStringData(pathPtr, "fexists.pathdata");
+        // access(pathData, F_OK=0) returns 0 on success, -1 on failure
         llvm::Value* result = builder->CreateCall(getOrDeclareAccess(),
-            {pathPtr, llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0)}, "fexists.access");
+            {pathDataFe, llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0)}, "fexists.access");
         llvm::Value* isZero = builder->CreateICmpEQ(result,
             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "fexists.cmp");
         return emitBoolZExt(isZero, "fexists.result");
@@ -6747,6 +6754,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             cmdArg->getType()->isPointerTy()
                 ? cmdArg
                 : builder->CreateIntToPtr(cmdArg, ptrTy, "cmd.ptr");
+        // cmdPtr points to the fat-string header {i64 len, i64 cap, i8[] data}.
+        // popen/sh needs a plain C string (null-terminated), which starts at
+        // offset 16 (after the two i64 header fields).
+        llvm::Value* cmdData = emitStringData(cmdPtr, "cmd.data");
 
         // Declare popen
         auto* popenFn = llvm::dyn_cast_or_null<llvm::Function>(
@@ -6768,7 +6779,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::GlobalVariable* modeR = module->getGlobalVariable("__popen_mode_r", true);
         if (!modeR) modeR = builder->CreateGlobalString("r", "__popen_mode_r");
 
-        llvm::Value* fp = builder->CreateCall(popenFn, {cmdPtr, modeR}, "cmd.fp");
+        llvm::Value* fp = builder->CreateCall(popenFn, {cmdData, modeR}, "cmd.fp");
 
         llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(ptrTy);
@@ -6781,13 +6792,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(isNull, nullBB, readBB,
             llvm::MDBuilder(*context).createBranchWeights(1, 100));
 
-        // Null path → empty string
+        // Null path → empty fat-string (len=0, NUL-terminated data)
         builder->SetInsertPoint(nullBB);
-        llvm::Value* emptyBuf = builder->CreateCall(getOrDeclareMalloc(),
-            {llvm::ConstantInt::get(getDefaultType(), 1)}, "cmd.empty");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), emptyBuf)
+        llvm::Value* emptyZero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* emptyHdr  = emitAllocString(emptyZero, emptyZero, "cmd.empty");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0),
+            emitStringData(emptyHdr, "cmd.empty.data"))
             ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-        llvm::Value* emptyI64 = emptyBuf;
         builder->CreateBr(mergeBB);
         llvm::BasicBlock* nullEndBB = builder->GetInsertBlock();
 
@@ -6859,16 +6870,26 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCall(getOrDeclareFree(), {chunkBuf});
         llvm::Value* finalSz  = builder->CreateAlignedLoad(getDefaultType(), sizePtr, llvm::MaybeAlign(8), "cmd.fsz");
         llvm::Value* finalBuf = builder->CreateAlignedLoad(ptrTy, bufPtr, llvm::MaybeAlign(8), "cmd.fbuf");
+        // NUL-terminate the raw data buffer.
         llvm::Value* ntPtr    = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), finalBuf, finalSz, "cmd.nt");
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), ntPtr)
             ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-        llvm::Value* readResult = finalBuf;
+        // Wrap the raw buffer into a fat-string header {len, cap, data}.
+        // The raw buffer holds only the character data; allocate a proper
+        // fat-string, copy the data, and free the temporary raw buffer.
+        llvm::Value* readHdr  = emitAllocString(finalSz, finalSz, "cmd.rhdr");
+        builder->CreateCall(getOrDeclareMemcpy(),
+            {emitStringData(readHdr, "cmd.rhdrdata"), finalBuf,
+             builder->CreateAdd(finalSz, llvm::ConstantInt::get(getDefaultType(), 1),
+                                "cmd.cplen", /*nuw=*/true, /*nsw=*/true)});
+        builder->CreateCall(getOrDeclareFree(), {finalBuf});
+        llvm::Value* readResult = readHdr;
         builder->CreateBr(mergeBB);
         llvm::BasicBlock* readEndBB = builder->GetInsertBlock();
 
         builder->SetInsertPoint(mergeBB);
         llvm::PHINode* cmdPhi = builder->CreatePHI(llvm::PointerType::getUnqual(*context), 2, "cmd.phi");
-        cmdPhi->addIncoming(emptyI64, nullEndBB);
+        cmdPhi->addIncoming(emptyHdr, nullEndBB);
         cmdPhi->addIncoming(readResult, readEndBB);
         stringReturningFunctions_.insert("command");
         stringReturningFunctions_.insert("shell");
@@ -7989,9 +8010,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* namePtr = nameArg->getType()->isPointerTy()
             ? nameArg
             : builder->CreateIntToPtr(nameArg, ptrTy, "env_get.name");
-        // Call getenv(name) — returns char* or NULL
-        llvm::Value* envPtr = builder->CreateCall(getOrDeclareGetenv(), {namePtr}, "env_get.res");
-        // If NULL, return empty string constant; otherwise return the pointer as i64
+        // namePtr is a fat-string; extract the C-string data at offset 16.
+        llvm::Value* nameData = emitStringData(namePtr, "env_get.namedata");
+        // Call getenv(nameData) — returns char* or NULL
+        llvm::Value* envPtr = builder->CreateCall(getOrDeclareGetenv(), {nameData}, "env_get.res");
+        // If NULL, return empty fat-string; otherwise wrap the C-string in a fat-string
         llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* nullBB  = llvm::BasicBlock::Create(*context, "env_get.null",    parentFn);
         llvm::BasicBlock* okBB    = llvm::BasicBlock::Create(*context, "env_get.ok",      parentFn);
@@ -8002,23 +8025,36 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::MDNode* egW = llvm::MDBuilder(*context).createBranchWeights(1, 99);
         builder->CreateCondBr(isNull, nullBB, okBB, egW);
 
+        // Null path: return empty fat-string
         builder->SetInsertPoint(nullBB);
-        // Return a heap-allocated empty string when the variable is not set.
-        llvm::Value* emptyBuf = builder->CreateCall(getOrDeclareMalloc(),
-            {llvm::ConstantInt::get(getDefaultType(), 1)}, "env_get.empty");
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), emptyBuf)
-            ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-        llvm::Value* emptyI64 = emptyBuf;
+        llvm::Value* egEmptyHdr = nullptr;
+        {
+            llvm::Value* z64 = llvm::ConstantInt::get(getDefaultType(), 0);
+            egEmptyHdr = emitAllocString(z64, z64, "env_get.empty");
+            builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0),
+                emitStringData(egEmptyHdr, "env_get.empty.data"))
+                ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        }
         builder->CreateBr(mergeBB);
+        llvm::BasicBlock* nullEndBB = builder->GetInsertBlock();
 
+        // OK path: getenv returned a raw C-string; wrap it in a fat-string.
         builder->SetInsertPoint(okBB);
-        llvm::Value* okI64 = envPtr;
+        llvm::Value* egOkLen = builder->CreateCall(getOrDeclareStrlen(), {envPtr}, "env_get.oklen");
+        nonNegValues_.insert(egOkLen);
+        llvm::Value* egOkHdr = emitAllocString(egOkLen, egOkLen, "env_get.okhdr");
+        llvm::Value* egOkData = emitStringData(egOkHdr, "env_get.okdata");
+        llvm::Value* egCpLen = builder->CreateAdd(egOkLen,
+            llvm::ConstantInt::get(getDefaultType(), 1), "env_get.cplen",
+            /*HasNUW=*/true, /*HasNSW=*/true);
+        builder->CreateCall(getOrDeclareMemcpy(), {egOkData, envPtr, egCpLen});
         builder->CreateBr(mergeBB);
+        llvm::BasicBlock* okEndBB = builder->GetInsertBlock();
 
         builder->SetInsertPoint(mergeBB);
         llvm::PHINode* phi = builder->CreatePHI(llvm::PointerType::getUnqual(*context), 2, "env_get.phi");
-        phi->addIncoming(emptyI64, nullBB);
-        phi->addIncoming(okI64, okBB);
+        phi->addIncoming(egEmptyHdr, nullEndBB);
+        phi->addIncoming(egOkHdr, okEndBB);
         stringReturningFunctions_.insert("env_get");
         return phi;
     }
@@ -8033,9 +8069,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             ? nameArg : builder->CreateIntToPtr(nameArg, ptrTy, "env_set.name");
         llvm::Value* valPtr = valArg->getType()->isPointerTy()
             ? valArg : builder->CreateIntToPtr(valArg, ptrTy, "env_set.val");
-        // setenv(name, value, 1) — overwrite = 1
+        // Both are fat-strings; extract the C-string data at offset 16.
+        llvm::Value* nameDataEs = emitStringData(namePtr, "env_set.namedata");
+        llvm::Value* valDataEs  = emitStringData(valPtr,  "env_set.valdata");
+        // setenv(nameData, valData, 1) — overwrite = 1
         llvm::Value* overwrite = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1);
-        llvm::Value* rc = builder->CreateCall(getOrDeclareSetenv(), {namePtr, valPtr, overwrite}, "env_set.rc");
+        llvm::Value* rc = builder->CreateCall(getOrDeclareSetenv(), {nameDataEs, valDataEs, overwrite}, "env_set.rc");
         // setenv returns 0 on success, -1 on failure; convert to 1/0
         llvm::Value* success = builder->CreateICmpEQ(rc,
             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "env_set.ok");
