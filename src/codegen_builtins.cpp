@@ -574,7 +574,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::Value* mask = llvm::ConstantInt::get(getDefaultType(),
                                                         static_cast<int64_t>(~(alignBytes - 1)));
             llvm::Value* roundedSize = builder->CreateAnd(
-                builder->CreateAdd(totalSize, alignMinus1, "halloc.roundup", /*HasNUW=*/true, /*HasNSW=*/false),
+                builder->CreateAdd(totalSize, alignMinus1, "halloc.roundup", /*HasNUW=*/false, /*HasNSW=*/false),
                 mask, "halloc.rounded");
             heapPtr = builder->CreateCall(getOrDeclareAlignedAlloc(),
                                           {alignV, roundedSize}, "halloc.ptr");
