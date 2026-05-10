@@ -674,7 +674,8 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     if (!ann.empty() && ann[0] == '&') {
         ann = ann.substr(1);
     }
-    if (ann == "ptr" || (ann.rfind("ptr<", 0) == 0 && ann.back() == '>'))
+    if (ann == "ptr" || (ann.rfind("ptr<", 0) == 0 && ann.back() == '>') ||
+        (ann.rfind("pslice<", 0) == 0 && ann.back() == '>'))
         return llvm::PointerType::getUnqual(*context);
     if (ann == "float" || ann == "double" || ann == "f64" || ann == "float64")
         return getFloatType();                                  // f64 (double)

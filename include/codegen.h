@@ -681,6 +681,22 @@ class CodeGenerator {
     /// Variables with type `ptr`/`ptr<T>` (excluded from isStringExpr).
     llvm::StringSet<> ptrVarNames_;
 
+    /// Variables with type `pslice<T>` — a fat pointer bundling a raw pointer
+    /// and a length.  Indexing emits compile-time or runtime bounds checks.
+    llvm::StringSet<> psliceVarNames_;
+
+    /// Element type string for pslice variables (`pslice<T>` → `T`).
+    llvm::StringMap<std::string> psliceElemTypes_;
+
+    /// Per-variable alloca (i64) holding the length for pslice variables.
+    llvm::StringMap<llvm::AllocaInst*> psliceLenAllocas_;
+
+    /// Compile-time-constant length for pslice variables, or -1 if dynamic.
+    llvm::StringMap<int64_t> psliceCompTimeLens_;
+
+    /// Scratch: length value stashed by pslice_new<T> for VarDecl to store.
+    llvm::Value* lastPsliceNewLen_ = nullptr;
+
     /// Element type string for typed pointer variables (`ptr<T>`).
     /// Maps variable name → inner type annotation (e.g., "i64", "i32[]").
     /// Empty for untyped `ptr` variables.

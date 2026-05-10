@@ -5851,7 +5851,108 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     idxVal = toDefaultType(idxVal);
 
-    // ── Fast path: range-to-pointer-arithmetic mode ──────────────────────────
+    // ── pslice indexed access: bounds-checked element load ───────────────────
+    // For a variable declared as `pslice<T>`, p[i] emits a compile-time check
+    // when both i and the slice length are constants; otherwise emits a runtime
+    // bounds check (printf + abort on OOB, matching the existing array style).
+    if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const std::string& sliceName =
+            static_cast<IdentifierExpr*>(expr->array.get())->name;
+        if (psliceVarNames_.count(sliceName)) {
+            // Load the stored pointer directly — alloca type is ptr (native LLVM
+            // pointer), so no ptrtoint/inttoptr cast is needed here.
+            auto ptrAllocaIt = namedValues.find(sliceName);
+            if (ptrAllocaIt == namedValues.end())
+                codegenError("pslice: undefined variable '" + sliceName + "'", expr);
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            auto* basePtr2 = builder->CreateAlignedLoad(
+                ptrTy, ptrAllocaIt->second, llvm::MaybeAlign(8), "pslice.ptr");
+            if (tbaaScalar_)
+                basePtr2->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+
+            // Resolve element type.
+            llvm::Type* elemTy = getDefaultType();
+            auto elemIt = psliceElemTypes_.find(sliceName);
+            if (elemIt != psliceElemTypes_.end())
+                elemTy = resolveAnnotatedType(elemIt->second);
+
+            // Bounds check.
+            auto ctLenIt = psliceCompTimeLens_.find(sliceName);
+            const bool hasCtLen = (ctLenIt != psliceCompTimeLens_.end() &&
+                                   ctLenIt->second >= 0);
+            if (hasCtLen) {
+                const int64_t ctLen = ctLenIt->second;
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(idxVal)) {
+                    // Compile-time index + compile-time length → check now.
+                    const int64_t idx = ci->getSExtValue();
+                    if (idx < 0 || idx >= ctLen)
+                        codegenError("pslice index " + std::to_string(idx) +
+                                     " is out of bounds (slice length=" +
+                                     std::to_string(ctLen) + ")", expr);
+                    // Proven in-bounds at compile time — skip runtime check.
+                } else {
+                    // Runtime index, compile-time length → constant upper bound check.
+                    auto* limitVal = llvm::ConstantInt::get(getDefaultType(), ctLen);
+                    llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                    llvm::BasicBlock* okBB  = llvm::BasicBlock::Create(*context, "pslice.ok",   fn);
+                    llvm::BasicBlock* failBB= llvm::BasicBlock::Create(*context, "pslice.fail", fn);
+                    auto* valid = builder->CreateICmpULT(idxVal, limitVal, "pslice.valid");
+                    llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
+                    builder->CreateCondBr(valid, okBB, failBB, brW);
+                    builder->SetInsertPoint(failBB);
+                    {
+                        std::string msg = expr->line > 0
+                            ? "Runtime error: pslice index out of bounds at line " +
+                              std::to_string(expr->line) + "\n"
+                            : "Runtime error: pslice index out of bounds\n";
+                        builder->CreateCall(getPrintfFunction(),
+                            {builder->CreateGlobalString(msg, "pslice_oob_msg")});
+                    }
+                    builder->CreateCall(getOrDeclareAbort());
+                    builder->CreateUnreachable();
+                    builder->SetInsertPoint(okBB);
+                }
+            } else {
+                // Runtime length: load from the len alloca and check.
+                auto lenAllocaIt = psliceLenAllocas_.find(sliceName);
+                if (lenAllocaIt != psliceLenAllocas_.end()) {
+                    auto* lenVal = builder->CreateAlignedLoad(
+                        getDefaultType(), lenAllocaIt->second, llvm::MaybeAlign(8), "pslice.dynlen");
+                    if (tbaaScalar_)
+                        lenVal->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+                    llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                    llvm::BasicBlock* okBB  = llvm::BasicBlock::Create(*context, "pslice.ok",   fn);
+                    llvm::BasicBlock* failBB= llvm::BasicBlock::Create(*context, "pslice.fail", fn);
+                    auto* valid = builder->CreateICmpULT(idxVal, lenVal, "pslice.valid");
+                    llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
+                    builder->CreateCondBr(valid, okBB, failBB, brW);
+                    builder->SetInsertPoint(failBB);
+                    {
+                        std::string msg = expr->line > 0
+                            ? "Runtime error: pslice index out of bounds at line " +
+                              std::to_string(expr->line) + "\n"
+                            : "Runtime error: pslice index out of bounds\n";
+                        builder->CreateCall(getPrintfFunction(),
+                            {builder->CreateGlobalString(msg, "pslice_oob_msg")});
+                    }
+                    builder->CreateCall(getOrDeclareAbort());
+                    builder->CreateUnreachable();
+                    builder->SetInsertPoint(okBB);
+                }
+            }
+
+            // GEP into the element and load — pointer is already a native ptr.
+            auto* elemPtr = builder->CreateInBoundsGEP(elemTy, basePtr2, idxVal, "pslice.elem.ptr");
+            auto* elemLoad = builder->CreateLoad(elemTy, elemPtr, "pslice.elem");
+            elemLoad->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
+            // Widen narrower integers to i64 for uniform type handling.
+            if (elemTy->isIntegerTy() && elemTy != getDefaultType())
+                return builder->CreateSExt(elemLoad, getDefaultType(), "pslice.elem.widen");
+            return elemLoad;
+        }
+    }
+
+
     if (!isStringExpr(expr->array.get())
             && !loopPtrModeDataPtrs_.empty()
             && expr->array->type == ASTNodeType::IDENTIFIER_EXPR
@@ -6003,7 +6104,101 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     newVal = toDefaultType(newVal);
     idxVal = toDefaultType(idxVal);
 
-    // ── Fast path: range-to-pointer-arithmetic mode (store) ─────────────────
+    // ── pslice indexed store: p[i] = val with bounds check ───────────────────
+    if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const std::string& sliceName =
+            static_cast<IdentifierExpr*>(expr->array.get())->name;
+        if (psliceVarNames_.count(sliceName)) {
+            // Load the stored pointer directly (native LLVM ptr, no i64 cast).
+            auto ptrAllocaIt = namedValues.find(sliceName);
+            if (ptrAllocaIt == namedValues.end())
+                codegenError("pslice: undefined variable '" + sliceName + "'", expr);
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            auto* basePtr2 = builder->CreateAlignedLoad(
+                ptrTy, ptrAllocaIt->second, llvm::MaybeAlign(8), "pslice.st.ptr");
+            if (tbaaScalar_)
+                basePtr2->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+
+            llvm::Type* elemTy = getDefaultType();
+            auto elemIt = psliceElemTypes_.find(sliceName);
+            if (elemIt != psliceElemTypes_.end())
+                elemTy = resolveAnnotatedType(elemIt->second);
+
+            // Bounds check (compile-time or runtime, mirroring the load path).
+            auto ctLenIt = psliceCompTimeLens_.find(sliceName);
+            const bool hasCtLen = (ctLenIt != psliceCompTimeLens_.end() &&
+                                   ctLenIt->second >= 0);
+            if (hasCtLen) {
+                const int64_t ctLen = ctLenIt->second;
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(idxVal)) {
+                    const int64_t idx = ci->getSExtValue();
+                    if (idx < 0 || idx >= ctLen)
+                        codegenError("pslice index " + std::to_string(idx) +
+                                     " is out of bounds (slice length=" +
+                                     std::to_string(ctLen) + ")", expr);
+                } else {
+                    auto* limitVal = llvm::ConstantInt::get(getDefaultType(), ctLen);
+                    llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                    llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "pslice.st.ok",   fn);
+                    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "pslice.st.fail", fn);
+                    auto* valid = builder->CreateICmpULT(idxVal, limitVal, "pslice.st.valid");
+                    llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
+                    builder->CreateCondBr(valid, okBB, failBB, brW);
+                    builder->SetInsertPoint(failBB);
+                    {
+                        std::string msg = expr->line > 0
+                            ? "Runtime error: pslice index out of bounds at line " +
+                              std::to_string(expr->line) + "\n"
+                            : "Runtime error: pslice index out of bounds\n";
+                        builder->CreateCall(getPrintfFunction(),
+                            {builder->CreateGlobalString(msg, "pslice_st_oob_msg")});
+                    }
+                    builder->CreateCall(getOrDeclareAbort());
+                    builder->CreateUnreachable();
+                    builder->SetInsertPoint(okBB);
+                }
+            } else {
+                auto lenAllocaIt = psliceLenAllocas_.find(sliceName);
+                if (lenAllocaIt != psliceLenAllocas_.end()) {
+                    auto* lenVal = builder->CreateAlignedLoad(
+                        getDefaultType(), lenAllocaIt->second, llvm::MaybeAlign(8), "pslice.st.dynlen");
+                    if (tbaaScalar_)
+                        lenVal->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+                    llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                    llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "pslice.st.ok",   fn);
+                    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "pslice.st.fail", fn);
+                    auto* valid = builder->CreateICmpULT(idxVal, lenVal, "pslice.st.valid");
+                    llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
+                    builder->CreateCondBr(valid, okBB, failBB, brW);
+                    builder->SetInsertPoint(failBB);
+                    {
+                        std::string msg = expr->line > 0
+                            ? "Runtime error: pslice index out of bounds at line " +
+                              std::to_string(expr->line) + "\n"
+                            : "Runtime error: pslice index out of bounds\n";
+                        builder->CreateCall(getPrintfFunction(),
+                            {builder->CreateGlobalString(msg, "pslice_st_oob_msg")});
+                    }
+                    builder->CreateCall(getOrDeclareAbort());
+                    builder->CreateUnreachable();
+                    builder->SetInsertPoint(okBB);
+                }
+            }
+
+            // Truncate/extend value to match element type, then store.
+            if (newVal->getType() != elemTy) {
+                if (elemTy->isIntegerTy() && newVal->getType()->isIntegerTy())
+                    newVal = builder->CreateIntCast(newVal, elemTy, /*isSigned=*/true, "pslice.st.cast");
+                else if (elemTy->isFloatingPointTy() && newVal->getType()->isIntegerTy())
+                    newVal = builder->CreateSIToFP(newVal, elemTy, "pslice.st.itofp");
+            }
+            // basePtr2 is already a native pointer — GEP directly.
+            auto* elemPtr = builder->CreateInBoundsGEP(elemTy, basePtr2, idxVal, "pslice.st.elem.ptr");
+            builder->CreateStore(newVal, elemPtr);
+            return newVal;
+        }
+    }
+
     if (!isStringExpr(expr->array.get())
             && !loopPtrModeDataPtrs_.empty()
             && expr->array->type == ASTNodeType::IDENTIFIER_EXPR

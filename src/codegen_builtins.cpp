@@ -145,7 +145,10 @@ enum class BuiltinId : uint8_t {
     HTTP_STATUS,  ///< http_status(url)                → HTTP status code (int)
     // ── Function pointer builtins ────────────────────────────────────────────
     FUNCPTR_FROM, ///< funcptr_from(fn_name_str) → address of named fn as i64
-    FUNCPTR_NEW   ///< funcptr_new(byte_arr, n)  → executable-memory funcptr from raw bytes
+    FUNCPTR_NEW,  ///< funcptr_new(byte_arr, n)  → executable-memory funcptr from raw bytes
+    // ── Pointer slice builtins ───────────────────────────────────────────────
+    PSLICE_LEN,   ///< pslice_len(s)            → length of the slice
+    PSLICE_PTR,   ///< pslice_ptr(s)            → raw pointer from the slice
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -387,6 +390,8 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"http_status",  BuiltinId::HTTP_STATUS},
     {"funcptr_from", BuiltinId::FUNCPTR_FROM},
     {"funcptr_new",  BuiltinId::FUNCPTR_NEW},
+    {"pslice_len",   BuiltinId::PSLICE_LEN},
+    {"pslice_ptr",   BuiltinId::PSLICE_PTR},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -409,6 +414,31 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     const BuiltinId bid = lookupBuiltin(expr->callee);
     // Builtins are accepted whether they were parsed as std::foo() or bare
     // foo() to preserve compatibility with existing programs and tests.
+
+    // ── pslice_new<T>(ptr, len) — create a fat pointer slice ─────────────────
+    // Bundles a raw pointer with a length for compile-time bounds checking.
+    // Usage:  var s: pslice<i64> = pslice_new<i64>(raw_ptr, count)
+    //
+    // Returns the raw pointer as a native LLVM pointer (no ptrtoint) so that
+    // LLVM alias analysis can track provenance through the stored pointer.
+    // The length is stashed in lastPsliceNewLen_ so VarDecl can populate
+    // the companion len alloca.
+    if (expr->callee.size() > 11 &&
+        expr->callee.rfind("pslice_new<", 0) == 0 && expr->callee.back() == '>') {
+        validateArgCount(expr, "pslice_new<T>", 2);
+        llvm::Value* ptrVal = generateExpression(expr->arguments[0].get());
+        llvm::Value* lenVal = generateExpression(expr->arguments[1].get());
+        lenVal = toDefaultType(lenVal);
+        // Keep the value as a native pointer — avoids ptrtoint which would
+        // break alias analysis.  Integer addresses are wrapped via inttoptr.
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        if (!ptrVal->getType()->isPointerTy())
+            ptrVal = builder->CreateIntToPtr(
+                toDefaultType(ptrVal), ptrTy, "pslice.new.itoptr");
+        // Stash the length so VarDecl can store it into the companion alloca.
+        lastPsliceNewLen_ = lenVal;
+        return ptrVal;
+    }
 
     // ── alloc<T>(x) — compile-time smart allocator ───────────────────────────
     // Three compile-time tiers; no runtime branches are emitted:
@@ -9175,6 +9205,47 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* addr = builder->CreatePtrToInt(exeMem, getDefaultType(), "funcptr.new.addr");
         nonNegValues_.insert(addr);
         return addr;
+    }
+
+    // ── pslice_len(s) ── return the length stored in a pslice ────────────────
+    if (bid == BuiltinId::PSLICE_LEN) {
+        validateArgCount(expr, "pslice_len", 1);
+        if (expr->arguments[0]->type != ASTNodeType::IDENTIFIER_EXPR)
+            codegenError("pslice_len: argument must be a pslice variable name", expr);
+        const std::string& varName =
+            static_cast<IdentifierExpr*>(expr->arguments[0].get())->name;
+        auto it = psliceLenAllocas_.find(varName);
+        if (it == psliceLenAllocas_.end())
+            codegenError("pslice_len: '" + varName + "' is not a pslice variable", expr);
+        auto* lenLoad = builder->CreateAlignedLoad(
+            getDefaultType(), it->second, llvm::MaybeAlign(8), "pslice.len");
+        if (tbaaScalar_)
+            lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+        nonNegValues_.insert(lenLoad);
+        return lenLoad;
+    }
+
+    // ── pslice_ptr(s) ── return the raw pointer address from a pslice ─────────
+    // Returns the address as i64 (ptrtoint), the only place we cast pointer→int
+    // for pslice; all internal accesses work with native LLVM pointer values.
+    if (bid == BuiltinId::PSLICE_PTR) {
+        validateArgCount(expr, "pslice_ptr", 1);
+        if (expr->arguments[0]->type != ASTNodeType::IDENTIFIER_EXPR)
+            codegenError("pslice_ptr: argument must be a pslice variable name", expr);
+        const std::string& varName =
+            static_cast<IdentifierExpr*>(expr->arguments[0].get())->name;
+        if (!psliceVarNames_.count(varName))
+            codegenError("pslice_ptr: '" + varName + "' is not a pslice variable", expr);
+        auto it = namedValues.find(varName);
+        if (it == namedValues.end())
+            codegenError("pslice_ptr: undefined variable '" + varName + "'", expr);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        auto* ptrLoad = builder->CreateAlignedLoad(ptrTy, it->second, llvm::MaybeAlign(8), "pslice.ptr");
+        if (tbaaScalar_)
+            ptrLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+        // ptrtoint is only done here because the user explicitly requested the
+        // integer address; internal pslice codegen never converts ptr→int.
+        return builder->CreatePtrToInt(ptrLoad, getDefaultType(), "pslice.ptr.i64");
     }
 
     if (inOptMaxFunction) {

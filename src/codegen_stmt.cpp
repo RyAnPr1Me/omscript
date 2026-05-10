@@ -510,6 +510,33 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         }
     }
 
+    // Track `pslice<T>` variables: fat pointers (raw pointer + length) with
+    // compile-time or runtime bounds checks on element access.
+    {
+        const std::string& tn = stmt->typeName;
+        if (tn.size() > 8 && tn.rfind("pslice<", 0) == 0 && tn.back() == '>') {
+            psliceVarNames_.insert(stmt->name);
+            // Also excluded from isStringExpr via ptrVarNames_.
+            ptrVarNames_.insert(stmt->name);
+            psliceElemTypes_[stmt->name] = tn.substr(7, tn.size() - 8);
+            // Create a companion alloca for the length in the entry block.
+            llvm::Function* fn = builder->GetInsertBlock()->getParent();
+            llvm::IRBuilder<> entryB(&fn->getEntryBlock(), fn->getEntryBlock().begin());
+            auto* lenAlloca = entryB.CreateAlloca(getDefaultType(), nullptr,
+                                                   stmt->name + ".pslice.len");
+            lenAlloca->setAlignment(llvm::Align(8));
+            psliceLenAllocas_[stmt->name] = lenAlloca;
+            // Zero-init the len alloca so it is defined even without initializer.
+            builder->CreateAlignedStore(
+                llvm::ConstantInt::get(getDefaultType(), 0), lenAlloca, llvm::Align(8));
+        } else {
+            psliceVarNames_.erase(stmt->name);
+            psliceElemTypes_.erase(stmt->name);
+            psliceLenAllocas_.erase(stmt->name);
+            psliceCompTimeLens_.erase(stmt->name);
+        }
+    }
+
     // Track array variables so isStringExpr() can distinguish array pointers
     // from string pointers (both now use pointer-typed allocas).
     {
@@ -622,6 +649,24 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 (allocaType->isIntegerTy() || allocaType->isFloatTy() ||
                  allocaType->isDoubleTy()  || allocaType->isPointerTy()))
                 initStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+        }
+        // For pslice variables, also store the length stashed by pslice_new<T>.
+        if (psliceVarNames_.count(stmt->name) && lastPsliceNewLen_) {
+            auto lenIt = psliceLenAllocas_.find(stmt->name);
+            if (lenIt != psliceLenAllocas_.end()) {
+                llvm::Value* lenToStore = builder->CreateIntCast(
+                    lastPsliceNewLen_, getDefaultType(), /*isSigned=*/false, "pslice.len.cast");
+                auto* lenStore = builder->CreateAlignedStore(
+                    lenToStore, lenIt->second, llvm::Align(8));
+                if (tbaaScalar_)
+                    lenStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+                // Record compile-time constant length if available.
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(lastPsliceNewLen_))
+                    psliceCompTimeLens_[stmt->name] = static_cast<int64_t>(ci->getZExtValue());
+                else
+                    psliceCompTimeLens_[stmt->name] = -1;
+            }
+            lastPsliceNewLen_ = nullptr;
         }
         // Track non-negativity: if a variable is initialized with a
         if (allocaType->isIntegerTy()) {
@@ -3325,6 +3370,10 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     heapPtrVarNames_.erase(name);
     arenaPtrVarNames_.erase(name);
     funcptrVarNames_.erase(name);
+    psliceVarNames_.erase(name);
+    psliceElemTypes_.erase(name);
+    psliceLenAllocas_.erase(name);
+    psliceCompTimeLens_.erase(name);
     structVars_.erase(name);
     simdVars_.erase(name);
     registerVars_.erase(name);
