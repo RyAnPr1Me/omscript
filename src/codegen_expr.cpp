@@ -1485,6 +1485,53 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         left  = builder->CreatePtrToInt(left,  getDefaultType(), "ptoi");
         right = builder->CreatePtrToInt(right, getDefaultType(), "ptoi");
     } else {
+        // Mixed ptr/int: for comparison operators, convert the integer operand
+        // to a pointer (inttoptr) so the comparison stays in pointer space and
+        // preserves alias-analysis provenance.  For non-comparison ops, keep
+        // the legacy ptrtoint path (arithmetic needs integer operands).
+        const bool isCmpOp = (expr->op == "==" || expr->op == "!=" ||
+                               expr->op == "<"  || expr->op == "<=" ||
+                               expr->op == ">"  || expr->op == ">=");
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        if (isCmpOp) {
+            if (left->getType()->isPointerTy() && right->getType()->isIntegerTy()) {
+                // Integer 0 → null pointer (common null-check idiom); others inttoptr.
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+                    right = ci->isZero()
+                        ? llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ptrTy))
+                        : builder->CreateIntToPtr(right, ptrTy, "pcmp.itop");
+                } else {
+                    right = builder->CreateIntToPtr(right, ptrTy, "pcmp.itop");
+                }
+                llvm::Value* cmpBool = nullptr;
+                if (expr->op == "==")       cmpBool = builder->CreateICmpEQ (left, right, "pcmp.eq");
+                else if (expr->op == "!=")  cmpBool = builder->CreateICmpNE (left, right, "pcmp.ne");
+                else if (expr->op == "<")   cmpBool = builder->CreateICmpULT(left, right, "pcmp.lt");
+                else if (expr->op == "<=")  cmpBool = builder->CreateICmpULE(left, right, "pcmp.le");
+                else if (expr->op == ">")   cmpBool = builder->CreateICmpUGT(left, right, "pcmp.gt");
+                else if (expr->op == ">=")  cmpBool = builder->CreateICmpUGE(left, right, "pcmp.ge");
+                if (cmpBool)
+                    return emitBoolZExt(cmpBool, "pcmp.result");
+            } else if (right->getType()->isPointerTy() && left->getType()->isIntegerTy()) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
+                    left = ci->isZero()
+                        ? llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ptrTy))
+                        : builder->CreateIntToPtr(left, ptrTy, "pcmp.itop");
+                } else {
+                    left = builder->CreateIntToPtr(left, ptrTy, "pcmp.itop");
+                }
+                llvm::Value* cmpBool = nullptr;
+                if (expr->op == "==")       cmpBool = builder->CreateICmpEQ (left, right, "pcmp.eq");
+                else if (expr->op == "!=")  cmpBool = builder->CreateICmpNE (left, right, "pcmp.ne");
+                else if (expr->op == "<")   cmpBool = builder->CreateICmpULT(left, right, "pcmp.lt");
+                else if (expr->op == "<=")  cmpBool = builder->CreateICmpULE(left, right, "pcmp.le");
+                else if (expr->op == ">")   cmpBool = builder->CreateICmpUGT(left, right, "pcmp.gt");
+                else if (expr->op == ">=")  cmpBool = builder->CreateICmpUGE(left, right, "pcmp.ge");
+                if (cmpBool)
+                    return emitBoolZExt(cmpBool, "pcmp.result");
+            }
+        }
+        // Non-comparison (or unmatched): ptrtoint fallback.
         if (left->getType()->isPointerTy())
             left = builder->CreatePtrToInt(left, getDefaultType(), "ptoi");
         if (right->getType()->isPointerTy())
@@ -4667,12 +4714,13 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
         if (expr->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
             const auto* id = static_cast<IdentifierExpr*>(expr->operand.get());
             if (funcptrVarNames_.count(id->name)) {
-                // Load the stored integer address and interpret it as a
-                // function pointer: fn() -> i64.
-                llvm::Value* addrVal = operand;
-                addrVal = toDefaultType(addrVal);
-                llvm::Value* fnPtr = builder->CreateIntToPtr(
-                    addrVal, llvm::PointerType::getUnqual(*context), "funcptr.deref.itop");
+                // funcptr alloca is now ptr-typed, so `operand` is already a
+                // native LLVM pointer — no inttoptr needed.
+                llvm::Value* fnPtr = operand->getType()->isPointerTy()
+                    ? operand
+                    : builder->CreateIntToPtr(
+                          toDefaultType(operand),
+                          llvm::PointerType::getUnqual(*context), "funcptr.deref.itop");
                 // Build the function type: () -> i64
                 llvm::FunctionType* fnTy = llvm::FunctionType::get(
                     getDefaultType(), /*Params=*/{}, /*isVarArg=*/false);

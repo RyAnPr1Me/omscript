@@ -1135,6 +1135,13 @@ std::string Parser::parseTypeAnnotation() {
         consume(TokenType::GT, "Expected '>' to close ptr<T> type parameter");
         typeName = "ptr<" + inner + ">";
     }
+    // Support pslice<T> fat-pointer slice annotation: pslice<i64>, pslice<f64>, etc.
+    if (typeName == "pslice" && check(TokenType::LT)) {
+        advance(); // consume '<'
+        std::string inner = parseTypeAnnotation(); // recursively parse element type
+        consume(TokenType::GT, "Expected '>' to close pslice<T> type parameter");
+        typeName = "pslice<" + inner + ">";
+    }
     // Support dict[KeyType, ValType] generic annotation (e.g., dict[str, int])
     // Only activates when the type name is exactly "dict" followed by '[' with
     // non-empty content — avoids any collision with the existing type[] handling.
@@ -4153,7 +4160,26 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         return call;
     }
 
-    // sizeof(T) — compile-time byte size of a type.
+    // pslice_new<T>(ptr, len) — create a fat pointer slice over T elements.
+    // The <T> type parameter is encoded into the callee name for codegen recovery.
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "pslice_new" &&
+        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LT) {
+        const Token kw = advance(); // consume 'pslice_new'
+        advance();                  // consume '<'
+        std::string elemTypeName = parseTypeAnnotation();
+        consume(TokenType::GT, "Expected '>' after type in pslice_new<T>(...)");
+        consume(TokenType::LPAREN, "Expected '(' after pslice_new<T>");
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(parseExpression());   // ptr argument
+        consume(TokenType::COMMA, "Expected ',' between pslice_new<T> arguments");
+        args.push_back(parseExpression());   // len argument
+        consume(TokenType::RPAREN, "Expected ')' after pslice_new<T>(...) arguments");
+        auto call = std::make_unique<CallExpr>("pslice_new<" + elemTypeName + ">", std::move(args));
+        call->line   = kw.line;
+        call->column = kw.column;
+        return call;
+    }
+
     // The argument MUST be a type name (identifier), not an expression.
     // Produces an integer literal equal to the byte size of T.
     if (check(TokenType::IDENTIFIER) && peek().lexeme == "sizeof" &&

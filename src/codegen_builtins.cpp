@@ -9135,9 +9135,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return builder->CreateCall(getOrDeclareHttpGetStatus(), {urlPtr}, "hstat.code");
     }
 
-    // funcptr_from(fn_name) → address of named function as i64.
-    // Returns the raw machine-code address of a function so it can be stored
-    // in a `funcptr` variable and later called via `*f`.
+    // funcptr_from(fn_name) → native function pointer (stored as ptr in funcptr alloca).
+    // Returns the function's address as a native LLVM pointer — no ptrtoint needed
+    // because funcptr allocas are now ptr-typed (resolveAnnotatedType returns ptr).
     if (bid == BuiltinId::FUNCPTR_FROM) {
         validateArgCount(expr, "funcptr_from", 1);
         // Argument must be a string literal holding the function name.
@@ -9159,18 +9159,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             targetFn = llvm::Function::Create(
                 fty, llvm::Function::ExternalLinkage, fnName, module.get());
         }
-        // Convert the function pointer to an integer address.
-        llvm::Value* addr = builder->CreatePtrToInt(
-            targetFn, getDefaultType(), "funcptr.from.addr");
-        nonNegValues_.insert(addr);
-        return addr;
+        // Return the function pointer directly as a native LLVM ptr value.
+        // This avoids the ptrtoint+inttoptr round-trip that harmed alias analysis.
+        return targetFn;
     }
 
     // funcptr_new(byte_array, n) → executable funcptr from an array of machine-code bytes.
     // Each element of byte_array is an i64 whose low 8 bits are one byte of machine code.
     // Allocates a region of executable memory (mmap/VirtualAlloc), packs the low bytes
-    // of the array elements into it, and returns the base address as an i64 that can be
-    // stored in a `funcptr` variable and called with `*f`.
+    // of the array elements into it, and returns the native ptr (no ptrtoint).
     //
     // Example (x86-64: mov rax, 99; ret):
     //   var code = [0x48, 0xb8, 99, 0, 0, 0, 0, 0, 0, 0, 0xc3];
@@ -9179,7 +9176,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "funcptr_new", 2);
         llvm::Value* arrVal = generateExpression(expr->arguments[0].get());
         llvm::Value* nBytes = generateExpression(expr->arguments[1].get());
-        arrVal  = toDefaultType(arrVal);
+        // Only convert nBytes to i64; keep arrVal as a native pointer when possible
+        // to avoid a ptrtoint+inttoptr round-trip in the array-pointer path.
         nBytes  = toDefaultType(nBytes);
 
         // Declare or reuse the array-based runtime helper:
@@ -9194,17 +9192,16 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         helperFn->setDoesNotThrow();
 
         // Advance past the 8-byte length header to element 0 of the array.
+        // If arrVal is already a native pointer, use it directly (no ptrtoint).
         llvm::Value* arrPtr = arrVal->getType()->isPointerTy()
             ? arrVal
-            : builder->CreateIntToPtr(arrVal, ptrTy, "fnew.arrptr");
+            : builder->CreateIntToPtr(toDefaultType(arrVal), ptrTy, "fnew.arrptr");
         llvm::Value* dataPtr = builder->CreateInBoundsGEP(
             getDefaultType(), arrPtr, llvm::ConstantInt::get(getDefaultType(), 1), "fnew.data");
 
-        llvm::Value* exeMem = builder->CreateCall(helperFn, {dataPtr, nBytes}, "funcptr.new");
-        // Return the executable memory address as i64.
-        llvm::Value* addr = builder->CreatePtrToInt(exeMem, getDefaultType(), "funcptr.new.addr");
-        nonNegValues_.insert(addr);
-        return addr;
+        // Return the executable memory pointer directly (native ptr).
+        // The funcptr alloca is ptr-typed, so no ptrtoint round-trip is needed.
+        return builder->CreateCall(helperFn, {dataPtr, nBytes}, "funcptr.new");
     }
 
     // ── pslice_len(s) ── return the length stored in a pslice ────────────────
