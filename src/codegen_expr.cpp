@@ -4661,6 +4661,26 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
         // Fallback: evaluate operand and return it (handles other lvalue forms).
         return operand;
     } else if (expr->op == "deref") {
+        // Check for funcptr dereference: *f where f has type `funcptr`.
+        // Dereferencing a funcptr calls the machine code at the stored address
+        // as a zero-argument function returning i64.
+        if (expr->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const auto* id = static_cast<IdentifierExpr*>(expr->operand.get());
+            if (funcptrVarNames_.count(id->name)) {
+                // Load the stored integer address and interpret it as a
+                // function pointer: fn() -> i64.
+                llvm::Value* addrVal = operand;
+                addrVal = toDefaultType(addrVal);
+                llvm::Value* fnPtr = builder->CreateIntToPtr(
+                    addrVal, llvm::PointerType::getUnqual(*context), "funcptr.deref.itop");
+                // Build the function type: () -> i64
+                llvm::FunctionType* fnTy = llvm::FunctionType::get(
+                    getDefaultType(), /*Params=*/{}, /*isVarArg=*/false);
+                llvm::CallInst* ci = builder->CreateCall(fnTy, fnPtr, {}, "funcptr.call");
+                ci->addFnAttr(llvm::Attribute::NoUnwind);
+                return ci;
+            }
+        }
         // Pointer dereference (*p): load the value pointed to by p.
         llvm::Value* ptr = operand;
         if (!ptr->getType()->isPointerTy())

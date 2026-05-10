@@ -477,6 +477,19 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         }
     }
 
+    // Track `funcptr` variables: pointers to executable machine code.
+    // Dereferencing a funcptr calls the code at the stored address.
+    {
+        const std::string& tn = stmt->typeName;
+        if (tn == "funcptr") {
+            funcptrVarNames_.insert(stmt->name);
+            // Also add to ptrVarNames_ so isStringExpr() excludes it.
+            ptrVarNames_.insert(stmt->name);
+        } else {
+            funcptrVarNames_.erase(stmt->name);
+        }
+    }
+
     // Track array variables so isStringExpr() can distinguish array pointers
     // from string pointers (both now use pointer-typed allocas).
     {
@@ -498,6 +511,9 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     call->callee == "shift" || call->callee == "unshift" ||
                     call->callee == "sort" || call->callee == "reverse" ||
                     call->callee == "array_remove" || call->callee == "array_reduce" ||
+                    call->callee == "array_insert" || call->callee == "array_unique" ||
+                    call->callee == "array_rotate" || call->callee == "array_zip" ||
+                    call->callee == "range" || call->callee == "range_step" ||
                     call->callee == "str_split" || call->callee == "str_chars" ||
                     arrayReturningFunctions_.count(call->callee)) {
                     isArray = true;
@@ -3263,6 +3279,7 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     ptrElemTypes_.erase(name);
     heapPtrVarNames_.erase(name);
     arenaPtrVarNames_.erase(name);
+    funcptrVarNames_.erase(name);
     structVars_.erase(name);
     simdVars_.erase(name);
     registerVars_.erase(name);

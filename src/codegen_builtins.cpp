@@ -142,7 +142,10 @@ enum class BuiltinId : uint8_t {
     HTTP_GET,     ///< http_get(url)                   → response body string
     HTTP_POST,    ///< http_post(url, body[, ct])       → response body string
     HTTP_REQUEST, ///< http_request(method,url,body,hdr)→ response body string
-    HTTP_STATUS   ///< http_status(url)                → HTTP status code (int)
+    HTTP_STATUS,  ///< http_status(url)                → HTTP status code (int)
+    // ── Function pointer builtins ────────────────────────────────────────────
+    FUNCPTR_FROM, ///< funcptr_from(fn_name_str) → address of named fn as i64
+    FUNCPTR_NEW   ///< funcptr_new(byte_arr, n)  → executable-memory funcptr from raw bytes
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -382,6 +385,8 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"http_post",    BuiltinId::HTTP_POST},
     {"http_request", BuiltinId::HTTP_REQUEST},
     {"http_status",  BuiltinId::HTTP_STATUS},
+    {"funcptr_from", BuiltinId::FUNCPTR_FROM},
+    {"funcptr_new",  BuiltinId::FUNCPTR_NEW},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -9053,6 +9058,78 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             ? urlVal
             : builder->CreateIntToPtr(urlVal, ptrTy, "hstat.url");
         return builder->CreateCall(getOrDeclareHttpGetStatus(), {urlPtr}, "hstat.code");
+    }
+
+    // funcptr_from(fn_name) → address of named function as i64.
+    // Returns the raw machine-code address of a function so it can be stored
+    // in a `funcptr` variable and later called via `*f`.
+    if (bid == BuiltinId::FUNCPTR_FROM) {
+        validateArgCount(expr, "funcptr_from", 1);
+        // Argument must be a string literal holding the function name.
+        Expression* nameExpr = expr->arguments[0].get();
+        std::string fnName;
+        if (nameExpr->type == ASTNodeType::LITERAL_EXPR) {
+            auto* lit = static_cast<LiteralExpr*>(nameExpr);
+            if (lit->literalType == LiteralExpr::LiteralType::STRING)
+                fnName = lit->stringValue;
+        }
+        if (fnName.empty())
+            codegenError("funcptr_from: argument must be a string literal function name", expr);
+        // Look up or declare the target function with signature () -> i64.
+        llvm::Function* targetFn = module->getFunction(fnName);
+        if (!targetFn) {
+            // Forward-declare with the default return type; the linker will resolve it.
+            llvm::FunctionType* fty = llvm::FunctionType::get(
+                getDefaultType(), /*Params=*/{}, /*isVarArg=*/false);
+            targetFn = llvm::Function::Create(
+                fty, llvm::Function::ExternalLinkage, fnName, module.get());
+        }
+        // Convert the function pointer to an integer address.
+        llvm::Value* addr = builder->CreatePtrToInt(
+            targetFn, getDefaultType(), "funcptr.from.addr");
+        nonNegValues_.insert(addr);
+        return addr;
+    }
+
+    // funcptr_new(byte_array, n) → executable funcptr from an array of machine-code bytes.
+    // Each element of byte_array is an i64 whose low 8 bits are one byte of machine code.
+    // Allocates a region of executable memory (mmap/VirtualAlloc), packs the low bytes
+    // of the array elements into it, and returns the base address as an i64 that can be
+    // stored in a `funcptr` variable and called with `*f`.
+    //
+    // Example (x86-64: mov rax, 99; ret):
+    //   var code = [0x48, 0xb8, 99, 0, 0, 0, 0, 0, 0, 0, 0xc3];
+    //   var f: funcptr = funcptr_new(code, 11);
+    if (bid == BuiltinId::FUNCPTR_NEW) {
+        validateArgCount(expr, "funcptr_new", 2);
+        llvm::Value* arrVal = generateExpression(expr->arguments[0].get());
+        llvm::Value* nBytes = generateExpression(expr->arguments[1].get());
+        arrVal  = toDefaultType(arrVal);
+        nBytes  = toDefaultType(nBytes);
+
+        // Declare or reuse the array-based runtime helper:
+        //   void* omsc_funcptr_new_arr(const int64_t* arr, int64_t n)
+        // The helper packs the low byte of each i64 element into executable memory.
+        auto* ptrTy  = llvm::PointerType::getUnqual(*context);
+        auto* helperFnTy = llvm::FunctionType::get(
+            ptrTy, {ptrTy, getDefaultType()}, /*isVarArg=*/false);
+        auto* helperFn = llvm::cast<llvm::Function>(
+            module->getOrInsertFunction("omsc_funcptr_new_arr", helperFnTy).getCallee());
+        helperFn->setDoesNotThrow();
+        helperFn->addRetAttr(llvm::Attribute::NonNull);
+
+        // Advance past the 8-byte length header to element 0 of the array.
+        llvm::Value* arrPtr = arrVal->getType()->isPointerTy()
+            ? arrVal
+            : builder->CreateIntToPtr(arrVal, ptrTy, "fnew.arrptr");
+        llvm::Value* dataPtr = builder->CreateInBoundsGEP(
+            getDefaultType(), arrPtr, llvm::ConstantInt::get(getDefaultType(), 1), "fnew.data");
+
+        llvm::Value* exeMem = builder->CreateCall(helperFn, {dataPtr, nBytes}, "funcptr.new");
+        // Return the executable memory address as i64.
+        llvm::Value* addr = builder->CreatePtrToInt(exeMem, getDefaultType(), "funcptr.new.addr");
+        nonNegValues_.insert(addr);
+        return addr;
     }
 
     if (inOptMaxFunction) {

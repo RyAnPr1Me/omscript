@@ -674,6 +674,10 @@ class CodeGenerator {
     /// Dict/map variable names (routes dict["key"] through map_get IR).
     llvm::StringSet<> dictVarNames_;
 
+    /// Variables with type `funcptr` — a pointer to executable machine code.
+    /// Dereferencing a funcptr (`*f`) calls the code at the stored address.
+    llvm::StringSet<> funcptrVarNames_;
+
     /// Variables with type `ptr`/`ptr<T>` (excluded from isStringExpr).
     llvm::StringSet<> ptrVarNames_;
 
