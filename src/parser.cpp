@@ -1997,6 +1997,13 @@ std::unique_ptr<BlockStmt> Parser::parseBlock() {
 }
 
 std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
+    // Allow `var mut name: &T = &expr;` as shorthand for `borrow mut name: &T = &expr;`.
+    // Consume an optional leading `mut` before the name.
+    bool isBorrowMut = false;
+    if (check(TokenType::MUT)) {
+        isBorrowMut = true;
+        advance(); // consume 'mut'
+    }
     const Token name = consume(TokenType::IDENTIFIER, "Expected variable name");
     std::string typeName;
     if (match(TokenType::COLON)) {
@@ -2025,6 +2032,17 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
               "(e.g., 'var " + name.lexeme + ":i64 = ...'). "
               "Untyped variables are not allowed; the compiler no longer "
               "silently defaults to 'i64'.");
+    }
+
+    // Shorthand borrow: `var name: &T = &expr;` → equivalent to `borrow var name: &T = &expr;`
+    // If the type annotation is a reference type (&T) and an initializer is present,
+    // automatically wrap the initializer in a BorrowExpr so the reference codegen path fires.
+    if (!typeName.empty() && typeName[0] == '&' && initializer &&
+        initializer->type != ASTNodeType::BORROW_EXPR) {
+        auto borrowExpr = std::make_unique<BorrowExpr>(std::move(initializer), isBorrowMut);
+        borrowExpr->line = name.line;
+        borrowExpr->column = name.column;
+        initializer = std::move(borrowExpr);
     }
 
     // Compile-time validation: `ptr` variables may only be initialized with
