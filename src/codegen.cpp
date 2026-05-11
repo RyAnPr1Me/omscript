@@ -1694,7 +1694,8 @@ llvm::Function* CodeGenerator::getOrDeclareSnprintf() {
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
     // snprintf: dest is writeonly+nocapture, format string is readonly+nocapture.
-    fn->addParamAttr(0, llvm::Attribute::NonNull);   // dest is never null
+    // NOTE: do NOT add NonNull to param 0 — the probe call pattern passes null
+    // with n=0 (valid per POSIX) to measure the required buffer length.
     fn->addParamAttr(0, llvm::Attribute::WriteOnly); // only written, never read back
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(2, llvm::Attribute::ReadOnly);

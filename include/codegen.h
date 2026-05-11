@@ -1307,6 +1307,11 @@ class CodeGenerator {
   public:
     // Per-function optimization for targeted optimization of individual functions
     void optimizeFunction(llvm::Function* func);
+
+    /// Returns the raw CTEngine pointer (may be null before runCFCTRE runs).
+    /// Used by OptimizationOrchestrator to re-sync OptimizationContext after
+    /// runCFCTRE recreates ctEngine_ (freeing the old instance).
+    CTEngine* getCTEngine() const noexcept { return ctEngine_.get(); }
 };
 
 } // namespace omscript
