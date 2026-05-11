@@ -6,12 +6,12 @@
 1. [Overview](#1-overview)
 2. [Lexical Structure](#2-lexical-structure)
 3. [Preprocessor](#3-preprocessor)
-4. [Type System Overview](#4-type-system-overview)
-5. [Variables, Constants, and Comptime](#5-variables-constants-and-comptime) — `var`, `const`, `register var`, `atomic var`, `volatile var`, `global`, `comptime`
+4. [Type System Overview](#4-type-system-overview) — scalar types, composite types, `ptr<T>`, `pslice<T>`, `funcptr`, `bigint`, SIMD
+5. [Variables, Constants, and Comptime](#5-variables-constants-and-comptime) — `var`, `const`, `register var`, `atomic var`, `volatile var`, `global`, `comptime`, predefined constants (`INT_MAX`, `I8_MIN`, `U32_MAX`, …)
 6. [Functions](#6-functions)
 7. [Control Flow](#7-control-flow)
 8. [Loops](#8-loops)
-9. [Operators and Expressions](#9-operators-and-expressions)
+9. [Operators and Expressions](#9-operators-and-expressions) — arithmetic, comparison, logical, bitwise, `as` cast, `??`, `in`, range, spread, pipe `|>`, precedence table
 10. [Collection Literals and Indexing](#10-collection-literals-and-indexing)
 
 **Part 2 — Standard Library and Semantics**
@@ -1438,6 +1438,93 @@ var sum: bigint = bigint_add(big1, big2);
 println(bigint_tostring(sum));  // "111111111111111111110"
 ```
 
+#### 4.4.9 Slice Pointer Type: `pslice<T>`
+
+**Syntax**: `pslice<T>` where `T` is an element type (e.g., `i64`, `f64`).
+
+**Representation**: A *fat pointer* — two machine words stored in two separate allocas:
+- **ptr alloca**: holds the raw `ptr` to the data buffer (element type `T`).
+- **len alloca**: holds an `i64` with the number of elements.
+
+Unlike a plain `ptr<T>`, a `pslice<T>` carries its length alongside the pointer so that bounds checking and iteration do not require a separate length variable.
+
+**LLVM type**: The ptr alloca is `ptr`; the len alloca is `i64`. There is no single LLVM struct — the compiler tracks the two allocas via the `psliceVarNames_` / `psliceLenAllocas_` internal tables.
+
+**Operations**:
+- **Creation**: `pslice_new<T>(rawPtr, count)` — wraps an existing raw pointer and a length into a `pslice<T>`.
+- **Length query**: `pslice_len(s)` — returns the number of elements (i64).
+- **Pointer extraction**: `pslice_ptr(s)` — returns the underlying raw pointer (ptr).
+- **Indexing**: `s[i]` — compile-time bounds-check if both `s` and `i` are constants; otherwise emits a runtime `abort()` guard before the load.
+
+**Example**:
+```omscript
+fn main() -> int {
+    var buf: ptr<i64> = alloc<i64>(4);
+    *buf = 10;
+    *(buf + 1) = 20;
+    *(buf + 2) = 30;
+    *(buf + 3) = 40;
+
+    var s: pslice<i64> = pslice_new<i64>(buf, 4);
+    println(pslice_len(s));  // 4
+    println(s[0]);           // 10
+    println(s[2]);           // 30
+    return 0;
+}
+```
+
+**Restrictions**:
+- `pslice<T>` variables cannot be passed directly across user-defined function boundaries (there is no single LLVM type to pass them as). Use `pslice_ptr` + `pslice_len` to unpack before calling.
+- `pslice_new<T>` requires the explicit type parameter — `pslice_new(ptr, len)` (without `<T>`) is a parse error.
+
+#### 4.4.10 Executable Pointer Type: `funcptr`
+
+**Syntax**: `funcptr` (no type parameter — always represents a callable native function pointer).
+
+**Representation**: An opaque `ptr` to executable machine code. Internally the compiler tracks `funcptr` variables in a separate `funcptrVarNames_` set so that the dereference operator `*f` is dispatched as a call rather than a memory load.
+
+**LLVM type**: `ptr` (same as other pointer types; the distinction is in how the compiler handles `*f`).
+
+**Operations**:
+- **Obtain from a named function**: `funcptr_from("name")` — resolves the OmScript/C function named `name` and returns its address as a `funcptr`. The argument must be a string literal.
+- **Create from machine-code bytes**: `funcptr_new(byteArray, n)` — allocates a W^X (write-then-execute) page of executable memory, copies `n` bytes from the `i64[]` byte array into it, and returns a `funcptr` to the executable copy.
+- **Call**: `*f` — calls the function pointer as `fn() -> i64` with no arguments. The result is `i64`.
+
+**Valid initializers** (accepted in `var f: funcptr = …`):
+- `funcptr_from("name")` — function address
+- `funcptr_new(arr, n)` — JIT-compiled bytes
+- Another `funcptr` variable
+
+**Example — wrapping an existing function**:
+```omscript
+fn double(x: int) -> int { return x * 2; }
+
+fn main() -> int {
+    var f: funcptr = funcptr_from("double");
+    // Calls double() via the native pointer (no arguments passed —
+    // funcptr call is fn()->i64; pass data via globals for full JIT use).
+    var result: int = *f;
+    return 0;
+}
+```
+
+**Example — JIT from raw bytes (x86-64)**:
+```omscript
+fn main() -> int {
+    // x86-64: mov rax, 42 ; ret
+    var code: int[] = [0xB8, 42, 0, 0, 0, 0xC3];
+    var f: funcptr = funcptr_new(code, 6);
+    var result: int = *f;   // Calls the JIT'd bytes → 42
+    println(result);         // 42
+    return 0;
+}
+```
+
+**Platform notes**:
+- `funcptr_new` requires the process to map a page with both `PROT_WRITE` and `PROT_EXEC` (W^X; two mmap calls). This may be blocked by system policies (e.g., SELinux, `sysctl vm.mmap_min_addr`).
+- `funcptr_from` uses LLVM's function address — works for any function visible at link time.
+- The `funcptr` type is only available in OmScript; it has no automatic C FFI bridge.
+
 ### 4.5 Type Inference
 
 OmScript supports **limited type inference**:
@@ -1800,6 +1887,94 @@ println(x);  // 10
 ```
 
 **Loop iteration variables**: For-loop iteration variables (`for (i in ...)`) are scoped to the loop body.
+
+### 5.13 Predefined Integer Constants
+
+OmScript provides a set of built-in identifier constants for the minimum and maximum values of every integer type. These identifiers are resolved at code-generation time and do **not** require any import.
+
+#### 5.13.1 Canonical names
+
+| Constant | Type | Value |
+|---|---|---|
+| `I1_MAX` | signed 1-bit | `0` (largest non-negative 1-bit signed = 0) |
+| `I1_MIN` | signed 1-bit | `-1` |
+| `I8_MAX` | signed 8-bit | `127` |
+| `I8_MIN` | signed 8-bit | `-128` |
+| `I16_MAX` | signed 16-bit | `32767` |
+| `I16_MIN` | signed 16-bit | `-32768` |
+| `I32_MAX` | signed 32-bit | `2147483647` |
+| `I32_MIN` | signed 32-bit | `-2147483648` |
+| `I64_MAX` | signed 64-bit | `9223372036854775807` |
+| `I64_MIN` | signed 64-bit | `-9223372036854775808` |
+| `I128_MAX` | signed 128-bit | `2^127 - 1` |
+| `I128_MIN` | signed 128-bit | `-2^127` |
+| `I256_MAX` | signed 256-bit | `2^255 - 1` |
+| `I256_MIN` | signed 256-bit | `-2^255` |
+| `U1_MAX` | unsigned 1-bit | `1` |
+| `U1_MIN` | unsigned 1-bit | `0` |
+| `U8_MAX` | unsigned 8-bit | `255` |
+| `U8_MIN` | unsigned 8-bit | `0` |
+| `U16_MAX` | unsigned 16-bit | `65535` |
+| `U16_MIN` | unsigned 16-bit | `0` |
+| `U32_MAX` | unsigned 32-bit | `4294967295` |
+| `U32_MIN` | unsigned 32-bit | `0` |
+| `U64_MAX` | unsigned 64-bit | `18446744073709551615` |
+| `U64_MIN` | unsigned 64-bit | `0` |
+| `U128_MAX` | unsigned 128-bit | `2^128 - 1` |
+| `U128_MIN` | unsigned 128-bit | `0` |
+| `U256_MAX` | unsigned 256-bit | `2^256 - 1` |
+| `U256_MIN` | unsigned 256-bit | `0` |
+
+The pattern `I{N}_MAX`, `I{N}_MIN`, `U{N}_MAX`, `U{N}_MIN` extends to **any bit width from 1 to 256** (e.g., `I3_MAX = 3`, `U7_MAX = 127`).
+
+#### 5.13.2 Convenience aliases
+
+| Alias | Equivalent |
+|---|---|
+| `INT_MAX` | `I64_MAX` |
+| `INT_MIN` | `I64_MIN` |
+| `UINT_MAX` | `U64_MAX` |
+| `UINT_MIN` | `U64_MIN` |
+| `BOOL_MAX` | `U1_MAX` = `1` |
+| `BOOL_MIN` | `U1_MIN` = `0` |
+
+#### 5.13.3 C-style aliases (INT8_MAX, UINT32_MAX, …)
+
+The C standard-library naming convention is also accepted:
+
+| C-style alias | Equivalent |
+|---|---|
+| `INT8_MAX` / `INT8_MIN` | `I8_MAX` / `I8_MIN` |
+| `INT16_MAX` / `INT16_MIN` | `I16_MAX` / `I16_MIN` |
+| `INT32_MAX` / `INT32_MIN` | `I32_MAX` / `I32_MIN` |
+| `INT64_MAX` / `INT64_MIN` | `I64_MAX` / `I64_MIN` |
+| `UINT8_MAX` | `U8_MAX` |
+| `UINT16_MAX` | `U16_MAX` |
+| `UINT32_MAX` | `U32_MAX` |
+| `UINT64_MAX` | `U64_MAX` |
+
+#### 5.13.4 Usage examples
+
+```omscript
+fn main() -> int {
+    var a: int = INT_MAX;          // 9223372036854775807
+    var b: int = I32_MAX;          // 2147483647
+    var c: int = U8_MAX;           // 255
+    var d: int = BOOL_MAX;         // 1
+    var e: i128 = I128_MAX;        // 2^127 - 1
+
+    // Use in comparisons / guards
+    if (a == I64_MAX) { println("maxed out"); }
+
+    // Boundary checks
+    var x: int = 200;
+    if (x > U8_MAX) { println("overflow u8"); }
+
+    return 0;
+}
+```
+
+**Note on narrow types**: Wide constants like `I128_MAX` have their native LLVM bit-width (128 or 256 bits) so they can be used in comparisons with `i128`/`i256` variables. All constants with width ≤ 64 are returned as 64-bit integers (`i64`) so they work seamlessly in ordinary arithmetic.
 
 ---
 
@@ -2223,11 +2398,38 @@ fn loop_with_tail_call(n: int) -> int {
 - Tail calls require the calling convention to support it (default conventions do)
 - Complex stack frames (e.g., exception handlers, destructors) may prevent tail-call optimization
 
-### 6.9 First-Class Functions / Function Pointers
+### 6.9 First-Class Functions / `funcptr`
 
-**Status**: First-class functions (storing function pointers in variables, passing functions as arguments) are **not fully formalized** in the current type system. This is a future feature.
+OmScript provides the `funcptr` type for storing and calling native function pointers at runtime. See §4.4.10 for the complete type description.
 
-**Current capability**: Functions can be passed by name to higher-order functions (e.g., `array_map(arr, lambda)` where `lambda` is a lambda expression or function reference).
+**Summary of operations**:
+
+| Operation | Syntax | Semantics |
+|---|---|---|
+| Obtain address of a named function | `funcptr_from("name")` | Resolves the function `name` visible at link time and returns its address as a `funcptr`. |
+| Create from raw machine-code bytes | `funcptr_new(byteArr, n)` | Allocates a W^X page, copies `n` bytes from the `i64[]` array, returns a `funcptr`. |
+| Call | `*f` | Invokes the function as `fn() → i64`. |
+
+**Passing functions to higher-order builtins**: Higher-order functions such as `array_map`, `array_filter`, and `array_reduce` accept functions by **name** (a string literal), not as `funcptr` values. Pass a lambda expression or a quoted function name:
+
+```omscript
+var doubled: int[] = array_map(arr, |x| x * 2);
+var doubled2: int[] = array_map(arr, "my_doubler");
+```
+
+**Quick example**:
+```omscript
+fn square() -> int { return 7 * 7; }  // funcptr call passes no args
+
+fn main() -> int {
+    var f: funcptr = funcptr_from("square");
+    var result: int = *f;  // 49
+    println(result);
+    return 0;
+}
+```
+
+For a complete description including JIT usage and platform notes, see §4.4.10.
 
 ### 6.10 Lambdas — Anonymous Functions
 
@@ -3355,6 +3557,121 @@ var n: int = int(s);  // Parse string to int (may fail at runtime)
 **Built-in casts**:
 - `int(x)`, `float(x)`, `string(x)`, `bool(x)`: Convert `x` to target type
 - Type conversion may involve parsing (e.g., `int("42")`) or formatting (e.g., `string(42)`)
+
+### 9.16 Type Cast Operator `as`
+
+**Syntax**: `expr as TargetType`
+
+**Semantics**: Explicitly converts `expr` to `TargetType`. The conversion is decided at codegen time based on the source and target types. This is a *coercion* — not a runtime function call — and emits a single LLVM instruction.
+
+**Operator precedence**: `as` binds tighter than most binary operators. `x + y as i32` parses as `x + (y as i32)`.
+
+#### 9.16.1 Integer ↔ Integer
+
+| Source width vs. Target width | Direction | LLVM instruction | Signedness rule |
+|---|---|---|---|
+| Narrower → wider | Widening | `sext` (signed source) or `zext` (unsigned source) | Determined by the **source** variable's declared type (`u*` = unsigned → `zext`; `i*` or unqualified = signed → `sext`) |
+| Wider → narrower | Truncation | `trunc` | Wraps (no trap) |
+| Same width | Identity | None (SSA forwarded) | — |
+
+```omscript
+var a: i8  = 100;
+var b: i32 = a as i32;  // sign-extend → 100
+
+var c: u8  = 200;        // unsigned: 200 as signed = -56
+var d: i32 = c as i32;  // zero-extend → 200 (not -56)
+
+var e: i64 = 0xFFFF_FFFF_FFFF;
+var f: i8  = e as i8;   // truncate → low 8 bits
+```
+
+#### 9.16.2 Integer ↔ Float
+
+| Conversion | LLVM instruction | Notes |
+|---|---|---|
+| signed int → float | `sitofp` | Default for `i*`-typed / unqualified variables |
+| unsigned int → float | `uitofp` | When source variable is declared with `u*` annotation |
+| float → signed int | `fptosi` | Default for `i*` target types |
+| float → unsigned int | `fptoui` | When target type starts with `u` (e.g., `u32`, `u8`) |
+
+```omscript
+var i: int   = 42;
+var f: float = i as f64;   // sitofp → 42.0
+
+var u: u32   = 200;
+var g: float = u as f64;   // uitofp → 200.0  (not -56.0)
+
+var pi: float = 3.14;
+var n: int   = pi as i64;  // fptosi → 3
+var m: u8    = pi as u8;   // fptoui → 3
+```
+
+#### 9.16.3 Float ↔ Float
+
+| Conversion | LLVM instruction |
+|---|---|
+| `f32` → `f64` (widening) | `fpext` |
+| `f64` → `f32` (narrowing) | `fptrunc` |
+| Same width | Identity |
+
+```omscript
+var a: f32 = 1.5;
+var b: f64 = a as f64;  // fpext → 1.5 (double precision)
+var c: f32 = b as f32;  // fptrunc → 1.5 (single precision)
+```
+
+#### 9.16.4 Any → `string`
+
+`expr as string` formats the value to a heap-allocated OmScript string using `snprintf`:
+
+| Source type | Format used | Example result |
+|---|---|---|
+| Integer (`i*` / `u*`) | `%lld` | `42 as string` → `"42"` |
+| Float (`f32` / `f64`) | `%g` | `3.14 as f64 as string` → `"3.14"` |
+| Pointer (`ptr`) | `%llu` (address as unsigned decimal) | `p as string` → `"140732…"` |
+
+```omscript
+var n: int = -99;
+var s: string = n as string;    // "-99"
+
+var f: float = 2.718;
+var t: string = f as string;    // "2.718"
+
+var p: ptr<int> = &n;
+var addr: string = p as string; // unsigned decimal address
+```
+
+#### 9.16.5 Pointer ↔ Integer
+
+| Conversion | LLVM instruction |
+|---|---|
+| `ptr` → integer | `ptrtoint` |
+| integer → `ptr` | `inttoptr` |
+| `ptr` → `ptr` (any) | identity (opaque pointers) |
+
+```omscript
+var p: ptr<int> = &n;
+var addr: int = p as int;        // ptrtoint
+var q: ptr<int> = addr as ptr;   // inttoptr (unsafe!)
+```
+
+#### 9.16.6 Complete cast table
+
+| Source | Target | Instruction |
+|---|---|---|
+| `iN` (signed) | `iM` (M > N) | `sext` |
+| `uN` (unsigned) | `iM`/`uM` (M > N) | `zext` |
+| `iN`/`uN` | `iM`/`uM` (M < N) | `trunc` |
+| `i*`/`u*` | `f32`/`f64` | `sitofp` / `uitofp` |
+| `f32`/`f64` | `i*` | `fptosi` |
+| `f32`/`f64` | `u*` | `fptoui` |
+| `f32` | `f64` | `fpext` |
+| `f64` | `f32` | `fptrunc` |
+| any | `string` | `snprintf` into heap buffer |
+| `ptr` | `int` | `ptrtoint` |
+| `int` | `ptr` | `inttoptr` |
+| `ptr` | `ptr` | identity |
+| same type | same type | identity |
 
 ---
 
