@@ -3361,6 +3361,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::Value* pushLenLoad = emitLoadArrayLen(arrPtr, "push.oldlen");
         llvm::Value* oldLen = pushLenLoad;
         llvm::Value* newLen = builder->CreateAdd(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "push.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
+        // oldLen ≥ 0 (from emitLoadArrayLen range metadata), so newLen = oldLen+1 ≥ 1.
+        nonNegValues_.insert(newLen);
         // Only call realloc when the new slot count crosses a power-of-2
         llvm::Value* one64 = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* oldSlots = builder->CreateAdd(oldLen, one64, "push.oldslots", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -3470,6 +3472,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
         // Decrease length in-place
         llvm::Value* newLen = builder->CreateSub(oldLen, llvm::ConstantInt::get(getDefaultType(), 1), "pop.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
+        // Guard above ensures oldLen ≥ 1, so newLen = oldLen-1 ≥ 0.
+        nonNegValues_.insert(newLen);
         auto* popLenSt = builder->CreateAlignedStore(newLen, arrPtr, llvm::MaybeAlign(8));
         popLenSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
         return lastVal;
@@ -3514,8 +3518,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         // Move arr[2..oldLen+1) → arr[1..oldLen).  Source and dest overlap, so use memmove.
         // Byte count = (oldLen - 1) * 8.
-        llvm::Value* newLen = builder->CreateSub(oldLen, one, "shift.newlen", /*HasNUW=*/false, /*HasNSW=*/true);
-        llvm::Value* moveBytes = builder->CreateMul(newLen, eight, "shift.movebytes", /*HasNUW=*/false, /*HasNSW=*/true);
+        llvm::Value* newLen = builder->CreateSub(oldLen, one, "shift.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
+        // We are in okBB (oldLen ≥ 1), so newLen = oldLen-1 ≥ 0. HasNUW is safe.
+        nonNegValues_.insert(newLen);
+        llvm::Value* moveBytes = builder->CreateMul(newLen, eight, "shift.movebytes", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* dst = firstPtr;  // arr + 1
         llvm::Value* src = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
             llvm::ConstantInt::get(getDefaultType(), 2), "shift.src");
@@ -3540,6 +3546,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* eight  = llvm::ConstantInt::get(getDefaultType(), 8);
         llvm::Value* zero64 = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* newLen = builder->CreateAdd(oldLen, one64, "ush.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
+        // oldLen ≥ 0 (range metadata), so newLen = oldLen+1 ≥ 1.
+        nonNegValues_.insert(newLen);
 
         // Same growth policy as push: realloc only at power-of-2 boundary or
         // first time we cross the minimum capacity (16 slots).
