@@ -620,6 +620,41 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             heapPtr = builder->CreateCall(getOrDeclareMalloc(),
                                           {totalSize}, "halloc.ptr");
         }
+        // Annotate the heap pointer with nonnull + dereferenceable (when size is
+        // known at compile time).  This allows LLVM's alias analysis, load-store
+        // forwarding, and inliner to reason about the returned memory without
+        // emitting any runtime overhead.
+        if (auto* ci = llvm::dyn_cast<llvm::CallInst>(heapPtr)) {
+            ci->addRetAttr(llvm::Attribute::NonNull);
+            // When count is a compile-time constant, the dereferenceable byte
+            // count is also known at compile time.
+            if (auto* cntCi = llvm::dyn_cast<llvm::ConstantInt>(countVal)) {
+                const uint64_t derefBytes = cntCi->getZExtValue() * elemSize;
+                if (derefBytes > 0)
+                    ci->addRetAttr(llvm::Attribute::getWithDereferenceableBytes(
+                        *context, derefBytes));
+            }
+            // Emit llvm.assume(ptr != null) so that GVN / IndVars / LICM can
+            // treat any load/store through heapPtr as non-speculative.
+            auto* notNull = builder->CreateIsNotNull(heapPtr, "halloc.nonnull");
+            auto* assumeFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::assume,
+                                                 {});
+            builder->CreateCall(assumeFn, {notNull});
+            // Emit llvm.assume(alignmentok) to let the vectorizer and load/store
+            // legalization use the strongest safe alignment.
+            const uint64_t alignBytes = elemAlign.value();
+            if (alignBytes >= 2) {
+                // alignmentok: (ptr & (alignBytes-1)) == 0
+                auto* ptrAsInt = builder->CreatePtrToInt(heapPtr, getDefaultType(),
+                                                          "halloc.ptrint");
+                auto* alignMask = llvm::ConstantInt::get(getDefaultType(),
+                                                          static_cast<int64_t>(alignBytes - 1));
+                auto* andVal = builder->CreateAnd(ptrAsInt, alignMask, "halloc.alignchk");
+                auto* zero64 = llvm::ConstantInt::get(getDefaultType(), 0);
+                auto* alignOk = builder->CreateICmpEQ(andVal, zero64, "halloc.aligned");
+                builder->CreateCall(assumeFn, {alignOk});
+            }
+        }
         return heapPtr;
     }
 

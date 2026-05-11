@@ -1070,7 +1070,43 @@ OmScript provides signed and unsigned integer types of various widths:
 
 #### Character and Byte Types
 
-OmScript **does not have dedicated `char` or `byte` types**. Characters are represented as:
+OmScript provides a `byte` type as an alias for `u8` (unsigned 8-bit integer, range 0–255).
+
+| Type | Width | Signedness | Range | LLVM Type | Notes |
+|------|-------|------------|-------|-----------|-------|
+| `byte` | 8 bits | Unsigned | 0 to 255 | `i8` | Alias for `u8` |
+
+**Array of bytes**: `byte[]` denotes an array of byte values (same representation as `u8[]`).
+
+```omscript
+var b: byte = 0xFF;          // single byte
+var buf: byte[] = [1, 2, 3]; // byte array literal
+```
+
+**Casting to `byte` and `byte[]`**:
+
+- `expr as byte` — truncate any integer/float/pointer to a single byte (0–255).
+- `expr as byte[]` — extract the raw little-endian bytes of a value:
+  - **Integer**: `numBytes = bitWidth / 8` elements (e.g. `i64` → 8 bytes)
+  - **Float**: bitcast to same-width integer, then extract bytes (`f32` → 4, `f64` → 8)
+  - **Pointer**: 8 bytes (little-endian 64-bit address)
+  - **String variable**: one element per UTF-8 byte of the string's character data
+
+```omscript
+var n: i64 = 0x0102030405060708;
+var bytes: byte[] = n as byte[];
+// bytes[0] = 8, bytes[1] = 7, ... bytes[7] = 1  (little-endian)
+
+var x: f64 = 1.0;
+var raw: byte[] = x as byte[];  // 8 bytes — IEEE 754 representation
+
+var s: string = "Hi";
+var sb: byte[] = s as byte[];   // [72, 105]  ('H', 'i')
+```
+
+**`sizeof(byte)`** → 1
+
+Characters are also represented as:
 - Single-character strings: `"A"`
 - Integer ASCII/UTF-8 codes: `65`
 
@@ -1210,7 +1246,7 @@ fn main() -> int {
 - **Dereference write**: `*p = v` — stores `v` through pointer `p` (Ω spec §4.2)
 - **Pointer arithmetic**: `p + n`, `p - n` — advances by `n * sizeof(T)` bytes (Ω spec §4.4)
 - **Null literal**: `null` or `nullptr` (both are zero address, Ω spec §2.2)
-- **Allocation**: `alloc<T>(n)` — allocate `n` elements of type `T`; `alloc<T>()` allocates exactly 1 element (Ω spec §4.1)
+- **Allocation**: `alloc<T>(n)` or `new<T>(n)` — allocate `n` elements of type `T`; `alloc<T>()` / `new<T>()` allocates exactly 1 element (Ω spec §4.1)
 - **Boxing**: `store_ptr(value)` — allocate a stack slot, store `value` into it, return a `ptr<typeof(value)>`. The type of the returned pointer matches the expression type (i64, ptr, etc.). The slot is placed in the function entry block so `mem2reg`/SROA can promote it.
 - **Deallocation**: `invalidate p` — free the heap allocation and mark `p` dead
 
@@ -1228,8 +1264,9 @@ Use `--no-ownership-checks` for raw C-like pointer semantics (unsafe mode).
 ```omscript
 fn main() -> int {
     var x: i64 = 42;
-    var p: ptr<i64> = &x;       // address-of: stack pointer
-    var q: ptr<i64> = alloc<i64>(4);  // heap: 4 i64 elements
+    var p: ptr<i64> = &x;             // address-of: stack pointer
+    var q: ptr<i64> = alloc<i64>(4);  // allocate 4 i64 elements (stack, T1)
+    var r: ptr<i64> = new<i64>(4);    // identical to alloc<i64>(4)
 
     // Typed dereference write and read
     *q = 10;
@@ -5994,25 +6031,38 @@ println(r2);  // 42
 |-----------|--------|-------------|
 | Declare | `var p: ptr<T> = ...` | Typed pointer variable |
 | Address-of | `&x` | Take address of `x`; produces `ptr<T>` |
-| Allocate | `alloc<T>(n)` | Heap-allocate `n` elements of type `T` |
-| Allocate 1 | `alloc<T>()` | Heap-allocate exactly 1 element (Ω spec §4.1) |
+| Allocate | `alloc<T>(n)` / `new<T>(n)` | Allocate `n` elements of type `T` |
+| Allocate 1 | `alloc<T>()` / `new<T>()` | Allocate exactly 1 element (Ω spec §4.1) |
 | Dereference read | `*p` | Load value through pointer |
 | Dereference write | `*p = v` | Store value through pointer (Ω spec §4.2) |
 | Arithmetic | `p + n`, `p - n` | Advance by `n * sizeof(T)` (Ω spec §4.4) |
 | Null | `null`, `nullptr` | Zero-address pointer (Ω spec §2.2) |
 | Free | `invalidate p` | Deferred `free()` at CFG exit |
 
-#### 17.9.2 `alloc<T>` — Smart Typed Allocator
+#### 17.9.2 `alloc<T>` / `new<T>` — Compile-Time Smart Allocator
 
-`alloc<T>(n)` decides stack vs heap at compile time:
-- If `n` is a compile-time constant AND `n * sizeof(T) ≤ 4096`: emit `alloca` in function entry block.
-- Otherwise: emit `malloc(n * sizeof(T))`.
+`alloc<T>(n)` and its alias `new<T>(n)` decide allocation strategy entirely at **compile time** — no runtime branching is emitted. Three tiers:
 
-`alloc<T>()` with no argument allocates exactly 1 element.
+| Tier | Condition | Strategy | Notes |
+|------|-----------|----------|-------|
+| **T1 Stack** | Constant `n` AND `n × sizeof(T) ≤ 8 KiB` | `alloca` in entry block | SROA/mem2reg eligible; `lifetime.start`/`end` scoped |
+| **T2 Arena** | Constant `n` AND fits in 64 KiB per-function slab | GEP into shared static slab | Zero heap involvement; all sub-allocations are compile-time GEPs |
+| **T3 Heap** | Dynamic `n` OR size exceeds slab | `malloc` / `aligned_alloc` | `nonnull` + `dereferenceable(N)` + alignment `llvm.assume` annotations emitted for LLVM AA |
+
+`alloc<T>()` / `new<T>()` with no argument allocates exactly 1 element.
+
+**Safety improvements in T3 (heap)**:
+- Return pointer annotated `nonnull` — LLVM may assume malloc succeeds (consistent with `-fno-rtti` environments).
+- When `n` is a compile-time constant, `dereferenceable(n × sizeof(T))` is emitted — enables load-store forwarding and alias analysis.
+- `llvm.assume(ptr != null)` and `llvm.assume(ptr % alignof(T) == 0)` are emitted — vectorizer and IndVars can exploit alignment without runtime checks.
 
 ```omscript
-var arr: ptr<i64> = alloc<i64>(4);    // 4-element i64 array (stack if ≤ 4096 bytes)
-var one: ptr<i64> = alloc<i64>();      // 1 element (Ω spec §4.1)
+var arr: ptr<i64> = alloc<i64>(4);    // T1: stack alloca (32 bytes ≤ 8 KiB)
+var big: ptr<i64> = alloc<i64>(2048); // T2: arena GEP (16 KiB ≤ 64 KiB slab)
+fn dyn(n: int) -> ptr<i64> {
+    return new<i64>(n);               // T3: malloc (n is dynamic)
+}
+var one: ptr<i64> = new<i64>();       // 1 element (Ω spec §4.1)
 ```
 
 #### 17.9.3 Pointer Arithmetic

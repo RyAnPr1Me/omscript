@@ -4157,6 +4157,26 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         return call;
     }
 
+    // new<T>(count) — alias for alloc<T>(count).
+    // Provides a familiar keyword form: var p:ptr<i32> = new<i32>(10)
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "new" &&
+        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LT) {
+        const Token kw = advance(); // consume 'new'
+        advance();                  // consume '<'
+        std::string elemTypeName = parseTypeAnnotation();
+        consume(TokenType::GT, "Expected '>' after type in new<T>(...)");
+        consume(TokenType::LPAREN, "Expected '(' after new<T>");
+        std::vector<std::unique_ptr<Expression>> args;
+        if (!check(TokenType::RPAREN)) {
+            args.push_back(parseExpression());
+        }
+        consume(TokenType::RPAREN, "Expected ')' after new<T>(...) arguments");
+        auto call = std::make_unique<CallExpr>("alloc<" + elemTypeName + ">", std::move(args));
+        call->line   = kw.line;
+        call->column = kw.column;
+        return call;
+    }
+
     // pslice_new<T>(ptr, len) — create a fat pointer slice over T elements.
     // The <T> type parameter is encoded into the callee name for codegen recovery.
     if (check(TokenType::IDENTIFIER) && peek().lexeme == "pslice_new" &&
@@ -4188,7 +4208,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         consume(TokenType::RPAREN, "Expected ')' after type name in sizeof(...)");
         // Compute size at parse time using known bit widths.
         long long byteSize = 8; // default (pointer/int64)
-        if (typeName == "bool" || typeName == "i8" || typeName == "u8")
+        if (typeName == "bool" || typeName == "i8" || typeName == "u8" || typeName == "byte")
             byteSize = 1;
         else if (typeName == "i16" || typeName == "u16")
             byteSize = 2;
