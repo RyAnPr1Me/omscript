@@ -4157,20 +4157,22 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         return call;
     }
 
-    // new<T>(count) — alias for alloc<T>(count).
-    // Provides a familiar keyword form: var p:ptr<i32> = new<i32>(10)
+    // new T(count) — C++-style alias for alloc<T>(count).
+    // Syntax: new <TypeAnnotation>(n)  or  new <TypeAnnotation>  (no parens = 1 element)
+    // Examples: new i64(5)   new ptr<i32>   new byte(256)
     if (check(TokenType::IDENTIFIER) && peek().lexeme == "new" &&
-        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LT) {
+        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::IDENTIFIER) {
         const Token kw = advance(); // consume 'new'
-        advance();                  // consume '<'
-        std::string elemTypeName = parseTypeAnnotation();
-        consume(TokenType::GT, "Expected '>' after type in new<T>(...)");
-        consume(TokenType::LPAREN, "Expected '(' after new<T>");
+        std::string elemTypeName = parseTypeAnnotation(); // consume the type (e.g. "i64", "ptr<i32>")
         std::vector<std::unique_ptr<Expression>> args;
-        if (!check(TokenType::RPAREN)) {
-            args.push_back(parseExpression());
+        if (check(TokenType::LPAREN)) {
+            advance(); // consume '('
+            if (!check(TokenType::RPAREN)) {
+                args.push_back(parseExpression());
+            }
+            consume(TokenType::RPAREN, "Expected ')' after new T(...) argument");
         }
-        consume(TokenType::RPAREN, "Expected ')' after new<T>(...) arguments");
+        // No parens → alloc<T>() → 1 element
         auto call = std::make_unique<CallExpr>("alloc<" + elemTypeName + ">", std::move(args));
         call->line   = kw.line;
         call->column = kw.column;
