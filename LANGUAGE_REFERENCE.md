@@ -1896,7 +1896,7 @@ OmScript provides a set of built-in identifier constants for the minimum and max
 
 | Constant | Type | Value |
 |---|---|---|
-| `I1_MAX` | signed 1-bit | `0` (largest non-negative 1-bit signed = 0) |
+| `I1_MAX` | signed 1-bit | `0` (only representable non-negative value in signed 1-bit two's complement) |
 | `I1_MIN` | signed 1-bit | `-1` |
 | `I8_MAX` | signed 8-bit | `127` |
 | `I8_MIN` | signed 8-bit | `-128` |
