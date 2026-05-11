@@ -3067,6 +3067,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
 
+        // Compute the character data pointer once, before any loops, so it
+        // dominates all uses in startBodyBB, endBodyBB, and the final block.
+        llvm::Value* trimStrData = emitStringData(strPtr, "trim.data");
+
         // Find start (skip leading whitespace)
         llvm::BasicBlock* preheader = builder->GetInsertBlock();
         llvm::BasicBlock* startLoopBB = llvm::BasicBlock::Create(*context, "trim.startloop", function);
@@ -3083,7 +3087,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(startCond, startBodyBB, startDoneBB);
 
         builder->SetInsertPoint(startBodyBB);
-        llvm::Value* trimStrData = emitStringData(strPtr, "trim.data");
         llvm::Value* startCharPtr =
             builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), trimStrData, startIdx, "trim.startcharptr");
         auto* startCharLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), startCharPtr, "trim.startchar");
@@ -6012,10 +6015,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* strPtr = strArg->getType()->isPointerTy()
             ? strArg : builder->CreateIntToPtr(strArg, ptrTy, "charcode.ptr");
-        llvm::Value* ch = builder->CreateLoad(llvm::Type::getInt8Ty(*context), strPtr, "charcode.ch");
-        llvm::cast<llvm::LoadInst>(ch)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        // Must load from the character data (offset 16), not from the fat-pointer
+        // header (offset 0 = len field).  emitStringData adds the 16-byte GEP.
+        llvm::Value* strData = emitStringData(strPtr, "charcode.data");
+        auto* ch = builder->CreateLoad(llvm::Type::getInt8Ty(*context), strData, "charcode.ch");
+        ch->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         // Zero-extend to i64; result is always in [0, 256).
-        // Use zext nneg (LLVM 18+) — !range is not valid on zext instructions.
+        // !range is not valid on zext instructions (LLVM 18); use nonNegValues_ instead.
         auto* result = builder->CreateZExt(ch, getDefaultType(), "charcode.result",
                                             /*IsNonNeg=*/false);
         nonNegValues_.insert(result);
@@ -7351,6 +7357,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::BasicBlock* lsDoneBB = llvm::BasicBlock::Create(*context, "lstrip.done", lsParentFn);
         llvm::Value* lsZero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* lsOne  = llvm::ConstantInt::get(getDefaultType(), 1);
+        // Compute the data pointer before the loop so it dominates all uses
+        // in lsBodyBB (char load) and lsDoneBB (memcpy src).
+        llvm::Value* lsStrData = emitStringData(strPtr, "lstrip.data");
         attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(lsLoopBB)));
 
         builder->SetInsertPoint(lsLoopBB);
@@ -7360,7 +7369,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateICmpULT(lsIdx, strLen, "lstrip.cond"), lsBodyBB, lsDoneBB);
 
         builder->SetInsertPoint(lsBodyBB);
-        llvm::Value* lsStrData = emitStringData(strPtr, "lstrip.data");
         llvm::Value* lsCharPtr = builder->CreateInBoundsGEP(
             llvm::Type::getInt8Ty(*context), lsStrData, lsIdx, "lstrip.cp");
         auto* lsCharLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), lsCharPtr, "lstrip.ch");

@@ -463,7 +463,7 @@ ptest_program "examples/quality_improvements_test.om" 0
 ptest_program "examples/swap_oob.om" 134
 ptest_program "examples/char_at_oob.om" 134
 ptest_program "examples/overflow_wrap_test.om" 42
-ptest_program "examples/benchmark_loops_math.om" 192
+ptest_program "examples/benchmark_loops_math.om" 64
 ptest_program "examples/try_catch_test.om" 88
 ptest_program "examples/throw_in_called_fn_test.om" 147
 ptest_program "examples/len_string_test.om" 8
