@@ -23,7 +23,7 @@
 16. [Error Handling](#16-error-handling)
 17. [Memory and Ownership System](#17-memory-and-ownership-system) — Ω Ownership spec v1.0: `move`, `borrow`, `shared`, `own`, `freeze`, `invalidate`, `ptr<T>`, `alloc<T>`, `nullptr`, `*p = v`, E015–E022, constraint matrix, `--no-ownership-checks`, `--mem-sanitize`
 18. [OPTMAX](#18-optmax)
-19. [Built-in Functions](#19-built-in-functions)
+19. [Built-in Functions](#19-built-in-functions) — I/O, math, type conversions, `random`, character predicates, HTTP, `range`/`range_step`, matrix, bigint, optimizer hints
 20. [Concurrency](#20-concurrency)
 21. [File I/O](#21-file-io)
 22. [Lambda Expressions](#22-lambda-expressions)
@@ -1074,7 +1074,7 @@ OmScript **does not have dedicated `char` or `byte` types**. Characters are repr
 - Single-character strings: `"A"`
 - Integer ASCII/UTF-8 codes: `65`
 
-The `char_at(s, i)` function extracts a single-character string from `s[i]`. The `char_code(s)` function returns the integer code of the first byte.
+The `char_at(s, i)` function returns the integer ASCII code of the character at position `i` in string `s`. The `char_code(s)` function returns the integer code of the first byte of `s`. Use `to_char(code)` to convert an integer code back to a single-character string.
 
 #### Void Type
 
@@ -2780,8 +2780,8 @@ These three constructs feed information to the optimizer. They emit **no runtime
 
 **Bare form — statement or expression:**
 ```omscript
-assume(b != 0);          // statement
-let q = a / assume(b != 0); // expression position also accepted
+assume(b != 0);                     // statement
+var q: int = a / assume(b != 0);    // expression position also accepted
 ```
 Tells the optimizer to treat `cond` as true — implemented by lowering to `llvm.assume(cond)`. **No runtime check is emitted.** If `cond` is actually false at runtime, the program has undefined behaviour (the optimizer may have deleted code, mis-folded values, etc.). Use only for invariants you can prove.
 
@@ -4228,6 +4228,25 @@ println(a[0]);  // 10
 
 ---
 
+#### `swap(array, i, j) → i64`
+
+**Signature:** `swap(array, i64, i64) → i64`  
+**Semantics:** Swap the elements at indices `i` and `j` in the array IN-PLACE. Returns 0. Runtime error if either index is out of bounds.  
+**Time:** O(1)  
+**Side effects:** Mutates the array.  
+
+> **Note:** `swap a, b;` is a separate statement syntax (§8.14) that swaps two scalar variables. `swap(arr, i, j)` is the built-in function for swapping array elements.
+
+**Example:**
+```omscript
+var a = [10, 20, 30, 40];
+swap(a, 0, 3);
+println(a[0]);  // 40
+println(a[3]);  // 10
+```
+
+---
+
 #### `array_fill(n, value) → array`
 
 See section 11.2.
@@ -5030,7 +5049,38 @@ println(s);  // "x=10, y=3.140000"
 
 ---
 
-### 12.9 String interning (when applies)
+### 12.9 String ↔ number conversion
+
+#### `str_to_int(string) → i64`
+
+**Signature:** `str_to_int(string) → i64`  
+**Semantics:** Parse the string as a decimal (or hex with `0x`/`0X` prefix) integer. Returns 0 if the string is not a valid number.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+var n: int = str_to_int("42");      // 42
+var h: int = str_to_int("0xFF");    // 255
+var bad: int = str_to_int("abc");   // 0
+```
+
+---
+
+#### `str_to_float(string) → f64`
+
+**Signature:** `str_to_float(string) → f64`  
+**Semantics:** Parse the string as a 64-bit float. Returns 0.0 if not valid.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+var f: float = str_to_float("3.14");   // 3.14
+var g: float = str_to_float("1e5");    // 100000.0
+```
+
+---
+
+### 12.10 String interning (when applies)
 
 **Not explicitly implemented** in the current code generation. String literals are global constants, but runtime string deduplication is not performed. Future optimization may add interning for frequently used strings.
 
@@ -6260,7 +6310,7 @@ print("hello");  // "hello\n"
 
 #### `println(any) → i64`
 
-Alias for `print`.
+Print value followed by newline to stdout (same behavior as `print`). Returns 0. Both `print` and `println` add a trailing newline; use `write` to print without one.
 
 ---
 
@@ -6646,6 +6696,291 @@ var y = u8(x);  // 1 (257 % 256)
 ```
 
 **Deep-dive table:** Deferred to Part 3.
+
+---
+
+### 19.5.2 Value conversion functions
+
+#### `to_string(any) → string`
+
+Convert any value to its string representation.
+
+- Integer → decimal string via `snprintf("%lld", ...)`.
+- Float → string via `snprintf("%g", ...)`.
+- String → returned as-is.
+
+**Example:**
+```omscript
+var s: string = to_string(42);       // "42"
+var f: string = to_string(3.14);     // "3.14"
+```
+
+---
+
+#### `to_int(any) → i64`
+
+Convert a value to an integer.
+
+- Float → truncates via `fptosi`.
+- String → parse as decimal (same as `str_to_int`).
+- Integer → identity.
+
+**Example:**
+```omscript
+var n: int = to_int(3.7);     // 3 (truncated)
+var m: int = to_int("42");    // 42
+```
+
+---
+
+#### `to_float(any) → f64`
+
+Convert a value to a 64-bit float.
+
+- Integer → exact conversion via `sitofp`.
+- String → parse as float (same as `str_to_float`).
+- Float → identity.
+
+**Example:**
+```omscript
+var f: float = to_float(10);    // 10.0
+var g: float = to_float("3.14"); // 3.14
+```
+
+---
+
+#### `to_char(i64) → string`
+
+Convert an ASCII code to a single-character string.
+
+**Example:**
+```omscript
+var c: string = to_char(65);   // "A"
+var d: string = to_char(97);   // "a"
+```
+
+---
+
+#### `char_code(string) → i64`
+
+Return the ASCII integer code of the first character of the string.
+
+**Example:**
+```omscript
+var code: int = char_code("A");   // 65
+var code2: int = char_code("hello"); // 104 (code of 'h')
+```
+
+---
+
+#### `number_to_string(i64) → string`
+
+Format an integer as a decimal string. Equivalent to `to_string` for integer inputs.
+
+**Example:**
+```omscript
+var s: string = number_to_string(12345);   // "12345"
+```
+
+---
+
+#### `string_to_number(string) → i64`
+
+Parse a decimal string as an integer. Equivalent to `str_to_int` for decimal strings.
+
+**Example:**
+```omscript
+var n: int = string_to_number("12345");   // 12345
+```
+
+---
+
+#### `str_to_int(string) → i64`
+
+Parse a decimal (or hex with `0x` prefix) string as a signed 64-bit integer. Returns 0 if the string is not a valid number.
+
+**Example:**
+```omscript
+var n: int = str_to_int("42");     // 42
+var h: int = str_to_int("0xFF");   // 255
+var z: int = str_to_int("abc");    // 0
+```
+
+---
+
+#### `str_to_float(string) → f64`
+
+Parse a string as a 64-bit floating-point value. Returns 0.0 if not valid.
+
+**Example:**
+```omscript
+var f: float = str_to_float("3.14");   // 3.14
+var g: float = str_to_float("1e5");    // 100000.0
+```
+
+---
+
+### 19.5.3 Random number generation
+
+#### `random() → i64`
+
+Return a pseudo-random non-negative integer. Uses the C `rand()` function, seeded once per process with `srand(time(NULL))`. The seed is set on the first call.
+
+**Range:** `[0, RAND_MAX]` (typically `[0, 2147483647]` on POSIX).
+
+**Example:**
+```omscript
+var r: int = random();
+println(r);
+
+var die: int = random() % 6 + 1;   // simulated dice roll [1, 6]
+```
+
+---
+
+### 19.5.4 Character classification predicates
+
+These functions test a single character passed as an ASCII integer code (as returned by `char_code` or `char_at`). All return `1` (true) or `0` (false).
+
+#### `is_alpha(i64) → bool`
+
+Return 1 if the character is a letter (`a-z` or `A-Z`).
+
+---
+
+#### `is_digit(i64) → bool`
+
+Return 1 if the character is a decimal digit (`0-9`).
+
+---
+
+#### `is_upper(i64) → bool`
+
+Return 1 if the character is an uppercase letter (`A-Z`).
+
+---
+
+#### `is_lower(i64) → bool`
+
+Return 1 if the character is a lowercase letter (`a-z`).
+
+---
+
+#### `is_space(i64) → bool`
+
+Return 1 if the character is whitespace (space, tab, newline, carriage return, etc.).
+
+---
+
+#### `is_alnum(i64) → bool`
+
+Return 1 if the character is alphanumeric (`a-z`, `A-Z`, or `0-9`).
+
+**Example:**
+```omscript
+var c: int = char_code("A");
+println(is_alpha(c));    // 1
+println(is_upper(c));    // 1
+println(is_digit(c));    // 0
+println(is_alnum(c));    // 1
+
+var d: int = char_code("5");
+println(is_digit(d));    // 1
+println(is_alpha(d));    // 0
+```
+
+---
+
+### 19.5.5 Range array constructors
+
+#### `range(start: i64, end: i64) → array`
+
+Return a new array `[start, start+1, ..., end-1]` (exclusive upper bound). Length is `max(0, end - start)`.
+
+**Example:**
+```omscript
+var a: int[] = range(0, 5);    // [0, 1, 2, 3, 4]
+var b: int[] = range(3, 7);    // [3, 4, 5, 6]
+```
+
+---
+
+#### `range_step(start: i64, end: i64, step: i64) → array`
+
+Return a new array `[start, start+step, start+2*step, ...]` stopping before `end`. `step` must be positive.
+
+**Example:**
+```omscript
+var evens: int[] = range_step(0, 10, 2);   // [0, 2, 4, 6, 8]
+var tens: int[] = range_step(10, 50, 10);  // [10, 20, 30, 40]
+```
+
+---
+
+### 19.5.6 HTTP client builtins
+
+The HTTP builtins perform synchronous HTTP requests via libcurl (linked at compile time when the `http_*` builtins are used). All functions return a heap-allocated string.
+
+#### `http_get(url: string) → string`
+
+Perform an HTTP GET request and return the response body.
+
+**Example:**
+```omscript
+var body: string = http_get("https://example.com/api/data");
+println(body);
+```
+
+---
+
+#### `http_post(url: string, body: string) → string`
+
+Perform an HTTP POST request with `body` as the request body (Content-Type: `application/x-www-form-urlencoded`). Returns the response body.
+
+**Example:**
+```omscript
+var resp: string = http_post("https://example.com/submit", "key=value");
+println(resp);
+```
+
+---
+
+#### `http_post(url: string, body: string, content_type: string) → string`
+
+Overload with explicit Content-Type header.
+
+**Example:**
+```omscript
+var resp: string = http_post("https://api.example.com/json", "{\"key\":\"val\"}", "application/json");
+```
+
+---
+
+#### `http_request(method: string, url: string, body: string, headers: string) → string`
+
+Full-control HTTP request. `method` is the HTTP verb (`"GET"`, `"POST"`, `"PUT"`, `"DELETE"`, etc.). `headers` is a newline-separated list of `Header: Value` strings. Returns the response body.
+
+**Example:**
+```omscript
+var resp: string = http_request("PUT", "https://api.example.com/item/1",
+                                "{\"name\":\"test\"}", "Content-Type: application/json");
+```
+
+---
+
+#### `http_status(url: string) → i64`
+
+Perform an HTTP GET and return only the HTTP status code (e.g., `200`, `404`).
+
+**Example:**
+```omscript
+var code: int = http_status("https://example.com");
+if code == 200 {
+    println("OK");
+} else {
+    println("Error: " + to_string(code));
+}
+```
 
 ---
 
@@ -8268,7 +8603,7 @@ The supported operation set is fixed by the `Op` enum (`egraph.h:55-98`): consta
 
 **Example**:
 ```omscript
-let x = (a + 0) * 1;
+var x: int = (a + 0) * 1;
 ```
 The e-graph after saturation contains:
 ```
@@ -8412,7 +8747,7 @@ After saturation, the extractor builds the output AST by recursively choosing th
 
 **Example 1: Constant folding**
 ```omscript
-let x = (3 + 5) * 2;
+var x: int = (3 + 5) * 2;
 ```
 After saturation:
 ```
@@ -8426,7 +8761,7 @@ Extracted: `Const(16)`.
 
 **Example 2: Algebraic simplification**
 ```omscript
-let y = x * 1 + 0 - 0;
+var y: int = x * 1 + 0 - 0;
 ```
 After saturation:
 ```
@@ -8703,7 +9038,8 @@ RecMII = latency(`fadd`) = 4 cycles. Scheduler ensures loop II ≥ 4.
 
 **Example**:
 ```omscript
-let y = x * 10 + x * 5;
+var x: int = 3;
+var y: int = x * 10 + x * 5;
 ```
 OPTMAX combines to `x * 15` before e-graph sees it.
 
@@ -8768,8 +9104,8 @@ LLVM's **SROA** (Scalar Replacement of Aggregates) pass:
 **Example**:
 ```omscript
 struct Point { x: int, y: int }
-let p = Point { x: 3, y: 4 };
-let z = p.x + p.y;
+var p: Point = Point { x: 3, y: 4 };
+var z: int = p.x + p.y;
 ```
 After SROA:
 ```llvm
@@ -8790,7 +9126,7 @@ After `mem2reg`:
 
 **Loop vectorizer** recognizes reductions:
 ```omscript
-let sum = 0;
+var sum: int = 0;
 for i in 0..n {
     sum += arr[i];
 }
@@ -8823,8 +9159,8 @@ and (per-pass timings are recorded but printed only when verbose mode is on; see
 
 CF-CTRE evaluates array operations at compile time:
 ```omscript
-const arr = comptime {
-    let a = [1, 2, 3];
+const arr: int[] = comptime {
+    var a: int[] = [1, 2, 3];
     push(a, 4);
     a
 };
@@ -8851,13 +9187,13 @@ RLC merges disjoint region lifetimes to eliminate redundant allocations:
 
 ```omscript
 fn process() {
-    let r1 = newRegion();
-    let data1 = alloc(r1, 1024);
+    var r1: int = newRegion();
+    var data1: ptr = alloc(r1, 1024);
     // ... use data1 ...
     invalidate(r1);
 
-    let r2 = newRegion();          // RLC merges r2 into r1
-    let data2 = alloc(r2, 512);    // reuses r1's memory
+    var r2: int = newRegion();          // RLC merges r2 into r1
+    var data2: ptr = alloc(r2, 512);    // reuses r1's memory
     // ... use data2 ...
     invalidate(r2);
 }
@@ -8866,13 +9202,13 @@ fn process() {
 After RLC:
 ```omscript
 fn process() {
-    let r1 = newRegion();
-    let data1 = alloc(r1, 1024);
+    var r1: int = newRegion();
+    var data1: ptr = alloc(r1, 1024);
     // ... use data1 ...
     // invalidate(r1) removed
 
     // r2 eliminated
-    let data2 = alloc(r1, 512);    // reuses r1
+    var data2: ptr = alloc(r1, 512);    // reuses r1
     // ... use data2 ...
     invalidate(r1);
 }
@@ -8968,8 +9304,8 @@ OmScript provides explicit integer type casts as built-in functions. These are c
 
 **Example**:
 ```omscript
-let x: int = 42;
-let y = u64(x);   // y == 42, no IR generated
+var x: int = 42;
+var y: u64 = u64(x);   // y == 42, no IR generated
 ```
 
 ### 27.3 `u32(x)`, `i32(x)`
@@ -8992,8 +9328,8 @@ let y = u64(x);   // y == 42, no IR generated
 
 **Example**:
 ```omscript
-let a = u32(-1);         // a = 4294967295 (0xFFFFFFFF)
-let b = u32(0x1_0000_0000);  // b = 0 (wraps)
+var a: u32 = u32(-1);             // a = 4294967295 (0xFFFFFFFF)
+var b: u32 = u32(0x1_0000_0000);  // b = 0 (wraps)
 ```
 
 #### `i32(x)` — Signed 32-bit truncation + sign-extend
@@ -9018,9 +9354,9 @@ return (int64_t)tmp;       // sign-extend
 
 **Example**:
 ```omscript
-let c = i32(0x8000_0000);   // c = -2147483648 (sign bit set)
-let d = i32(0x7FFF_FFFF);   // d = 2147483647
-let e = i32(0x1_8000_0000); // e = -2147483648 (wraps, bit 31 set)
+var c: i32 = i32(0x8000_0000);   // c = -2147483648 (sign bit set)
+var d: i32 = i32(0x7FFF_FFFF);   // d = 2147483647
+var e: i32 = i32(0x1_8000_0000); // e = -2147483648 (wraps, bit 31 set)
 ```
 
 ### 27.4 `u16(x)`, `i16(x)`
@@ -9039,8 +9375,8 @@ let e = i32(0x1_8000_0000); // e = -2147483648 (wraps, bit 31 set)
 
 **Example**:
 ```omscript
-let f = u16(0x1_FFFF);   // f = 0xFFFF = 65535
-let g = u16(-1);         // g = 65535 (0xFFFF)
+var f: u16 = u16(0x1_FFFF);   // f = 0xFFFF = 65535
+var g: u16 = u16(-1);         // g = 65535 (0xFFFF)
 ```
 
 #### `i16(x)` — Signed 16-bit truncation + sign-extend
@@ -9057,8 +9393,8 @@ let g = u16(-1);         // g = 65535 (0xFFFF)
 
 **Example**:
 ```omscript
-let h = i16(0x8000);     // h = -32768 (0x8000 sign-extends to 0xFFFF_FFFF_FFFF_8000)
-let i = i16(0x7FFF);     // i = 32767
+var h: i16 = i16(0x8000);     // h = -32768 (0x8000 sign-extends to 0xFFFF_FFFF_FFFF_8000)
+var i2: i16 = i16(0x7FFF);    // i2 = 32767
 ```
 
 ### 27.5 `u8(x)`, `i8(x)`
@@ -9077,9 +9413,9 @@ let i = i16(0x7FFF);     // i = 32767
 
 **Example**:
 ```omscript
-let j = u8(255);    // j = 255
-let k = u8(256);    // k = 0 (wraps)
-let l = u8(-1);     // l = 255 (0xFF)
+var j: u8 = u8(255);    // j = 255
+var k: u8 = u8(256);    // k = 0 (wraps)
+var l: u8 = u8(-1);     // l = 255 (0xFF)
 ```
 
 #### `i8(x)` — Signed 8-bit truncation + sign-extend
@@ -9096,9 +9432,9 @@ let l = u8(-1);     // l = 255 (0xFF)
 
 **Example**:
 ```omscript
-let m = i8(127);    // m = 127
-let n = i8(128);    // n = -128 (0x80 sign-extends to 0xFFFF_FFFF_FFFF_FF80)
-let o = i8(-1);     // o = -1 (0xFF sign-extends to 0xFFFF_FFFF_FFFF_FFFF)
+var m: i8 = i8(127);    // m = 127
+var n: i8 = i8(128);    // n = -128 (0x80 sign-extends to 0xFFFF_FFFF_FFFF_FF80)
+var o: i8 = i8(-1);     // o = -1 (0xFF sign-extends to 0xFFFF_FFFF_FFFF_FFFF)
 ```
 
 ### 27.6 `bool(x)`
@@ -9117,9 +9453,9 @@ let o = i8(-1);     // o = -1 (0xFF sign-extends to 0xFFFF_FFFF_FFFF_FFFF)
 
 **Example**:
 ```omscript
-let p = bool(42);   // p = 1
-let q = bool(0);    // q = 0
-let r = bool(-5);   // r = 1
+var p: bool = bool(42);   // p = 1
+var q: bool = bool(0);    // q = 0
+var r: bool = bool(-5);   // r = 1
 ```
 
 ### 27.7 Compile-time folding rules table
@@ -9146,7 +9482,7 @@ Casts are **codegen-time operations**, not type annotations. OmScript has a sing
 
 **Contrast with C**:
 - In C: `uint32_t x = (uint32_t)y;` — type-level constraint enforced at compile time.
-- In OmScript: `let x: int = u32(y);` — codegen-time truncation + zero-extension; result is stored as `i64`.
+- In OmScript: `var x: int = u32(y);` — codegen-time truncation + zero-extension; result is stored as `i64`.
 
 ### 27.9 Worked examples
 
@@ -9154,13 +9490,13 @@ Casts are **codegen-time operations**, not type annotations. OmScript has a sing
 
 ```omscript
 fn pack_rgb(r: int, g: int, b: int) -> int {
-    let r8 = u8(r);
-    let g8 = u8(g);
-    let b8 = u8(b);
+    var r8: int = u8(r);
+    var g8: int = u8(g);
+    var b8: int = u8(b);
     return (r8 << 16) | (g8 << 8) | b8;
 }
 
-let color = pack_rgb(255, 128, 64);   // color = 0xFF8040
+var color: int = pack_rgb(255, 128, 64);   // color = 0xFF8040
 ```
 
 **LLVM IR** (simplified):
@@ -9180,10 +9516,10 @@ define i64 @pack_rgb(i64 %r, i64 %g, i64 %b) {
 #### Example 2: Signed vs. unsigned 32-bit
 
 ```omscript
-let val = 0xFFFF_FFFF;
+var val: int = 0xFFFF_FFFF;
 
-let unsigned = u32(val);   // unsigned = 4294967295 (0xFFFFFFFF, zero-extended)
-let signed   = i32(val);   // signed   = -1 (0xFFFFFFFF, sign-extended to 0xFFFF_FFFF_FFFF_FFFF)
+var unsigned: int = u32(val);   // unsigned = 4294967295 (0xFFFFFFFF, zero-extended)
+var signed: int   = i32(val);   // signed   = -1 (0xFFFFFFFF, sign-extended to 0xFFFF_FFFF_FFFF_FFFF)
 
 print(unsigned);  // 4294967295
 print(signed);    // -1
@@ -9192,11 +9528,11 @@ print(signed);    // -1
 #### Example 3: Overflow wrapping
 
 ```omscript
-let big = 0x1_0000_0000;   // 2^32
-let wrapped = u32(big);    // wrapped = 0 (wraps modulo 2^32)
+var big: int = 0x1_0000_0000;    // 2^32
+var wrapped: int = u32(big);     // wrapped = 0 (wraps modulo 2^32)
 
-let neg = -1;
-let byte = u8(neg);        // byte = 255 (wraps: -1 mod 256 = 255)
+var neg: int = -1;
+var byte: int = u8(neg);         // byte = 255 (wraps: -1 mod 256 = 255)
 ```
 
 #### Example 4: `bool` for conditionals
@@ -10022,9 +10358,9 @@ omsc pkg list            # shows installed packages
 
 ### Variables
 ```omscript
-let x = 42;               // mutable
-const y = 100;            // immutable
-let z: int = 0;           // explicit type (optional)
+var x: int = 42;          // mutable, type annotation required
+const y: int = 100;       // immutable
+var z: int = 0;           // explicit type annotation
 ```
 
 ### Functions
@@ -10042,13 +10378,13 @@ fn greet(name: string) {  // no return type
 ```omscript
 if x > 0 {
     print("positive");
-} else if x < 0 {
+} elif x < 0 {
     print("negative");
 } else {
     print("zero");
 }
 
-let result = x > 0 ? "pos" : "neg";   // ternary
+var result: string = x > 0 ? "pos" : "neg";   // ternary
 ```
 
 ### Loops
@@ -10068,47 +10404,47 @@ while x > 0 {
 
 ### Operators
 ```omscript
-let sum = a + b;         // arithmetic
-let prod = a * b;
-let rem = a % b;
-let pow = a ** b;        // exponentiation
+var s: int = a + b;      // arithmetic
+var prod: int = a * b;
+var rem: int = a % b;
+var pw: int = a ** b;    // exponentiation
 
-let eq = a == b;         // comparison
-let ne = a != b;
+var eq: bool = a == b;   // comparison
+var ne: bool = a != b;
 
-let and = a && b;        // logical
-let or = a || b;
+var a2: bool = a && b;   // logical
+var or2: bool = a || b;
 
-let band = a & b;        // bitwise
-let bor = a | b;
-let shl = a << 2;
+var band: int = a & b;   // bitwise
+var bor: int = a | b;
+var shl: int = a << 2;
 ```
 
 ### Arrays
 ```omscript
-let arr = [1, 2, 3];
-let first = arr[0];
+var arr: int[] = [1, 2, 3];
+var first: int = arr[0];
 arr[1] = 42;
-let length = len(arr);
+var length: int = len(arr);
 push(arr, 4);
-let last = pop(arr);
+var last: int = pop(arr);
 ```
 
 ### Strings
 ```omscript
-let s = "hello";
-let len = str_len(s);
-let upper = str_upper(s);
-let concat = s + " world";
-let sub = str_substr(s, 0, 3);   // "hel"
+var s: string = "hello";
+var slen: int = str_len(s);
+var upper: string = str_upper(s);
+var concat: string = s + " world";
+var sub: string = str_substr(s, 0, 3);   // "hel"
 ```
 
 ### Ownership
 ```omscript
-let r = newRegion();         // create region
-let data = alloc(r, 1024);   // allocate in region
+var r: int = newRegion();       // create region
+var data: ptr = alloc(r, 1024); // allocate in region
 // ... use data ...
-invalidate(r);               // free region
+invalidate(r);                  // free region
 ```
 
 ### Comptime
@@ -10125,7 +10461,8 @@ const factorial_10 = comptime {
 ### OPTMAX
 ```omscript
 // Automatic: enabled at O1+
-let y = x * 10 + x * 5;   // optimized to x * 15 by OPTMAX
+var x: int = 3;
+var y: int = x * 10 + x * 5;   // optimized to x * 15 by OPTMAX
 ```
 
 ### CLI
