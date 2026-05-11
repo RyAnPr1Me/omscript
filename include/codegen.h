@@ -792,6 +792,9 @@ class CodeGenerator {
 
     [[gnu::hot]] llvm::Value* generateLiteral(LiteralExpr* expr);
     [[gnu::hot]] llvm::Value* generateIdentifier(IdentifierExpr* expr);
+    /// Resolve a built-in integer range constant (I8_MAX, U32_MIN, INT_MAX …).
+    /// Returns nullptr if the name is not a predefined constant.
+    llvm::Value* tryResolvePredefinedConstant(const std::string& name, ASTNode* ctx);
     [[gnu::hot]] llvm::Value* generateBinary(BinaryExpr* expr);
     /// Fold a chain of string literal concatenations to a compile-time constant.
     bool tryFoldStringConcat(Expression* expr, std::string& out) const;

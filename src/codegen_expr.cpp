@@ -431,6 +431,154 @@ llvm::Value* CodeGenerator::generateScopeResolution(ScopeResolutionExpr* expr) {
     codegenError(msg, expr);
 }
 
+// ---------------------------------------------------------------------------
+// tryResolvePredefinedConstant — return an LLVM constant for built-in integer
+// range identifiers, or nullptr if the name isn't one of them.
+//
+// Supported naming conventions:
+//   I{N}_MAX, I{N}_MIN  — signed   N-bit extremes (N = 1..256)
+//   U{N}_MAX            — unsigned N-bit max      (U{N}_MIN is always 0)
+//   U{N}_MIN            — 0 (explicit for clarity)
+//   BOOL_MAX, BOOL_MIN  — aliases for I1_MAX / I1_MIN (1 / 0)
+//   INT_MAX,  INT_MIN   — aliases for I64_MAX / I64_MIN
+//   UINT_MAX            — alias  for U64_MAX
+//   INT{N}_MAX / INT{N}_MIN / UINT{N}_MAX  — C-style aliases (N in bits)
+// ---------------------------------------------------------------------------
+llvm::Value* CodeGenerator::tryResolvePredefinedConstant(const std::string& name,
+                                                          ASTNode* ctx) {
+    // Helper: build a constant with the right bit width, auto-widening to i64
+    // for narrow types so callers get a usable value in normal arithmetic.
+    // Wide types (>64 bits) keep their native width so the caller can use them
+    // in comparisons with i128/i256 variables.
+    auto makeConst = [&](unsigned bits, llvm::APInt value, bool unsign) -> llvm::Value* {
+        llvm::IntegerType* ty = llvm::IntegerType::get(*context, bits);
+        auto* c = llvm::ConstantInt::get(ty, value);
+        if (value.isNonNegative() || unsign) nonNegValues_.insert(c);
+        if (unsign) unsignedExprs_.insert(c);
+        return c;
+    };
+
+    // ── Resolve name to (bits, isSigned, isMax) ────────────────────────────
+    unsigned bits = 0;
+    bool isSigned = true;
+    bool isMax    = true; // false → MIN
+
+    const std::string n = name; // local alias
+
+    // BOOL_MAX / BOOL_MIN — booleans are unsigned i1 (0 or 1)
+    if (n == "BOOL_MAX") { bits = 1; isSigned = false; isMax = true;  goto build; }
+    if (n == "BOOL_MIN") { bits = 1; isSigned = false; isMax = false; goto build; }
+
+    // INT_MAX / INT_MIN / UINT_MAX / UINT_MIN — 64-bit aliases
+    if (n == "INT_MAX")  { bits = 64; isSigned = true;  isMax = true;  goto build; }
+    if (n == "INT_MIN")  { bits = 64; isSigned = true;  isMax = false; goto build; }
+    if (n == "UINT_MAX") { bits = 64; isSigned = false; isMax = true;  goto build; }
+    if (n == "UINT_MIN") { bits = 64; isSigned = false; isMax = false; goto build; }
+
+    // I{N}_MAX / I{N}_MIN  (signed)
+    if (n.size() >= 6 && n[0] == 'I') {
+        // find _MAX or _MIN suffix
+        auto suffixPos = n.rfind("_MAX");
+        bool isMaxSuffix = (suffixPos != std::string::npos);
+        if (!isMaxSuffix) suffixPos = n.rfind("_MIN");
+        if (suffixPos != std::string::npos && suffixPos > 1) {
+            const std::string numStr = n.substr(1, suffixPos - 1);
+            bool allDig = !numStr.empty();
+            int bitsI = 0;
+            for (char c : numStr) {
+                if (!std::isdigit((unsigned char)c)) { allDig = false; break; }
+                bitsI = bitsI * 10 + (c - '0');
+                if (bitsI > 256) { allDig = false; break; }
+            }
+            if (allDig && bitsI >= 1 && bitsI <= 256) {
+                bits = static_cast<unsigned>(bitsI);
+                isSigned = true;
+                isMax = isMaxSuffix;
+                goto build;
+            }
+        }
+    }
+
+    // U{N}_MAX / U{N}_MIN  (unsigned)
+    if (n.size() >= 6 && n[0] == 'U') {
+        auto suffixPos = n.rfind("_MAX");
+        bool isMaxSuffix = (suffixPos != std::string::npos);
+        if (!isMaxSuffix) suffixPos = n.rfind("_MIN");
+        if (suffixPos != std::string::npos && suffixPos > 1) {
+            const std::string numStr = n.substr(1, suffixPos - 1);
+            bool allDig = !numStr.empty();
+            int bitsI = 0;
+            for (char c : numStr) {
+                if (!std::isdigit((unsigned char)c)) { allDig = false; break; }
+                bitsI = bitsI * 10 + (c - '0');
+                if (bitsI > 256) { allDig = false; break; }
+            }
+            if (allDig && bitsI >= 1 && bitsI <= 256) {
+                bits = static_cast<unsigned>(bitsI);
+                isSigned = false;
+                isMax = isMaxSuffix;
+                goto build;
+            }
+        }
+    }
+
+    // C-style aliases: INT8_MAX, INT16_MIN, UINT32_MAX, etc.
+    // Pattern: "INT" digits "_MAX"/"_MIN" or "UINT" digits "_MAX"/"_MIN"
+    {
+        bool isU = (n.rfind("UINT", 0) == 0);
+        bool isI = !isU && (n.rfind("INT", 0) == 0);
+        if (isI || isU) {
+            const size_t pfxLen = isU ? 4 : 3; // "UINT" vs "INT"
+            auto suffixPos = n.rfind("_MAX");
+            bool isMaxSuffix = (suffixPos != std::string::npos);
+            if (!isMaxSuffix) suffixPos = n.rfind("_MIN");
+            if (suffixPos != std::string::npos && suffixPos > pfxLen) {
+                const std::string numStr = n.substr(pfxLen, suffixPos - pfxLen);
+                bool allDig = !numStr.empty();
+                int bitsI = 0;
+                for (char c : numStr) {
+                    if (!std::isdigit((unsigned char)c)) { allDig = false; break; }
+                    bitsI = bitsI * 10 + (c - '0');
+                    if (bitsI > 256) { allDig = false; break; }
+                }
+                if (allDig && bitsI >= 1 && bitsI <= 256) {
+                    bits = static_cast<unsigned>(bitsI);
+                    isSigned = !isU;
+                    isMax = isMaxSuffix;
+                    goto build;
+                }
+            }
+        }
+    }
+
+    return nullptr; // not a predefined constant
+
+build:
+    {
+        llvm::APInt val;
+        if (!isMax) {
+            // MIN value
+            if (!isSigned) {
+                // unsigned MIN is always 0
+                val = llvm::APInt(bits, 0);
+            } else {
+                // signed MIN = -2^(bits-1) = 10...0 in two's complement
+                val = llvm::APInt::getSignedMinValue(bits);
+            }
+        } else {
+            // MAX value
+            if (!isSigned) {
+                // unsigned MAX = 2^bits - 1 = 11...1
+                val = llvm::APInt::getMaxValue(bits);
+            } else {
+                // signed MAX = 2^(bits-1) - 1 = 011...1
+                val = llvm::APInt::getSignedMaxValue(bits);
+            }
+        }
+        return makeConst(bits, val, !isSigned);
+    }
+}
+
 llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     // Check for use-after-move, use-after-invalidate, or read-while-mut-borrowed.
     checkVariableReadable(expr->name, expr);
@@ -458,6 +606,13 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
                 auto* gv = gvIt->second;
                 return builder->CreateLoad(gv->getValueType(), gv, expr->name);
             }
+        }
+        // Predefined integer range constants: INTTYPE_MAX, INTTYPE_MIN, UINTTYPE_MAX.
+        // Supported names: I{N}_MAX, I{N}_MIN, U{N}_MAX, INT_MAX, INT_MIN, UINT_MAX,
+        // BOOL_MAX, BOOL_MIN, and common aliases (INT8_MAX etc.).
+        {
+            llvm::Value* rangeConst = tryResolvePredefinedConstant(expr->name, expr);
+            if (rangeConst) return rangeConst;
         }
         // Build "did you mean?" suggestion from known variables.
         std::string msg = "Unknown variable: " + expr->name;
