@@ -2162,6 +2162,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* len2 = emitStringLen(rhsPtr, "concat.len2");
         llvm::Value* totalLen = builder->CreateAdd(
             len1, len2, "concat.totallen", /*HasNUW=*/true, /*HasNSW=*/true);
+        nonNegValues_.insert(totalLen);
 
         // Allocate a new string header + data: {len, cap, chars...}
         llvm::Value* hdr = emitAllocString(totalLen, totalLen, "concat");
@@ -2659,16 +2660,21 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Clamp start: max(0, min(start, strLen))
         llvm::Value* startNeg = builder->CreateICmpSLT(startArg, zero, "substr.startneg");
         startArg = builder->CreateSelect(startNeg, zero, startArg, "substr.startclamp");
+        nonNegValues_.insert(startArg);
         llvm::Value* startOverflow = builder->CreateICmpSGT(startArg, strLen, "substr.startover");
         startArg = builder->CreateSelect(startOverflow, strLen, startArg, "substr.startfinal");
+        nonNegValues_.insert(startArg);
         // Clamp length: max(0, min(len, strLen - start))
         // After clamping: startArg ∈ [0, strLen], so remaining is nuw+nsw.
         llvm::Value* remaining = builder->CreateSub(strLen, startArg, "substr.remaining",
                                                      /*HasNUW=*/true, /*HasNSW=*/true);
+        nonNegValues_.insert(remaining);
         llvm::Value* lenNeg = builder->CreateICmpSLT(lenArg, zero, "substr.lenneg");
         lenArg = builder->CreateSelect(lenNeg, zero, lenArg, "substr.lenclamp");
+        nonNegValues_.insert(lenArg);
         llvm::Value* lenOverflow = builder->CreateICmpSGT(lenArg, remaining, "substr.lenover");
         lenArg = builder->CreateSelect(lenOverflow, remaining, lenArg, "substr.lenfinal");
+        nonNegValues_.insert(lenArg);
 
         llvm::Value* hdr = emitAllocString(lenArg, lenArg, "substr");
         llvm::Value* substrData = emitStringData(strPtr, "substr.data");
@@ -2998,6 +3004,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // consumed ≤ strLen (bSrc never exceeds strPtr+strLen), so sub is nuw+nsw.
         llvm::Value* tail     = builder->CreateSub(strLen, consumed, "replace.tail",
                                                     /*HasNUW=*/true, /*HasNSW=*/true);
+        nonNegValues_.insert(tail);
         builder->CreateCall(getOrDeclareMemcpy(), {bDst, bSrc, tail});
         llvm::Value* endPtr   = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), bDst, tail, "replace.end");
         builder->CreateStore(i8zero, endPtr);
@@ -3252,12 +3259,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* isNeg = builder->CreateICmpSLT(countArg, zero, "repeat.isneg");
         countArg = builder->CreateSelect(isNeg, zero, countArg, "repeat.clamp");
+        nonNegValues_.insert(countArg);
         llvm::Value* strPtr =
             strArg->getType()->isPointerTy()
                 ? strArg
                 : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "repeat.ptr");
         llvm::Value* strLen = emitStringLen(strPtr, "repeat.len");
         llvm::Value* totalLen = builder->CreateMul(strLen, countArg, "repeat.total", /*HasNUW=*/true, /*HasNSW=*/true);
+        nonNegValues_.insert(totalLen);
         llvm::Value* hdr = emitAllocString(totalLen, totalLen, "repeat");
         llvm::Value* buf = emitStringData(hdr, "repeat.data");
         llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -3899,6 +3908,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::Value* zeroClamp = llvm::ConstantInt::get(getDefaultType(), 0);
             llvm::Value* isNeg = builder->CreateICmpSLT(sizeArg, zeroClamp, "fill.isneg");
             sizeArg = builder->CreateSelect(isNeg, zeroClamp, sizeArg, "fill.clamp");
+            nonNegValues_.insert(sizeArg);
         }
         // Allocate: (size + 1) * 8 bytes.  Header slot stores the length.
         llvm::Value* slots = builder->CreateAdd(sizeArg, llvm::ConstantInt::get(getDefaultType(), 1), "fill.slots", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -4146,10 +4156,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* srcPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, srcOffset, "aremove.srcptr");
         llvm::Value* shiftCount =
             builder->CreateSub(arrLen, builder->CreateAdd(idxArg, one, "aremove.idxp1", /*HasNUW=*/true, /*HasNSW=*/true), "aremove.shiftcnt", /*HasNUW=*/true, /*HasNSW=*/true);
+        // shiftCount = arrLen - idx - 1 ≥ 0 (since idx < arrLen guarantees arrLen ≥ idx+1).
+        nonNegValues_.insert(shiftCount);
         llvm::Value* shiftBytes = builder->CreateMul(shiftCount, eight, "aremove.shiftbytes", /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateCall(getOrDeclareMemmove(), {elemPtr, srcPtr, shiftBytes});
-        // Decrement length
+        // Decrement length: arrLen ≥ 1 since a valid index exists, so sub is nuw+nsw.
         llvm::Value* newLen = builder->CreateSub(arrLen, one, "aremove.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
+        nonNegValues_.insert(newLen);
         emitStoreArrayLen(newLen, arrPtr);
         return removedVal;
     }
@@ -5893,6 +5906,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* count = builder->CreateSDiv(adjDiff, stepArg, "rstep.count");
         llvm::Value* isPos = builder->CreateICmpSGT(count, zero, "rstep.ispos");
         count = builder->CreateSelect(isPos, count, zero, "rstep.clampcount");
+        // count is clamped to ≥ 0 by the select above; inform LLVM.
+        nonNegValues_.insert(count);
 
         llvm::Value* arrSlots = builder->CreateAdd(count, one, "rstep.arrslots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* arrSize = builder->CreateMul(arrSlots, eight, "rstep.arrsize", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -6654,6 +6669,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(okBB);
         llvm::Value* newLen = builder->CreateAdd(arrLen, one, "ains.newlen", /*HasNUW=*/true, /*HasNSW=*/true);
+        // newLen = arrLen + 1 ≥ 1 since arrLen ≥ 0.
+        nonNegValues_.insert(newLen);
         // Allocate: (newLen + 1) * 8 bytes
         llvm::Value* slots = builder->CreateAdd(newLen, one, "ains.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* bytes = builder->CreateMul(slots, eight, "ains.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -6680,6 +6697,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* postDstIdx = builder->CreateAdd(idxArg, llvm::ConstantInt::get(getDefaultType(), 2), "ains.postdstidx", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* postDst = builder->CreateInBoundsGEP(getDefaultType(), buf, postDstIdx, "ains.postdst");
         llvm::Value* postCount = builder->CreateSub(arrLen, idxArg, "ains.postcnt", /*HasNUW=*/true, /*HasNSW=*/true);
+        // postCount = arrLen - idx ≥ 0 since idx ≤ arrLen (ULE bounds check).
+        nonNegValues_.insert(postCount);
         llvm::Value* postBytes = builder->CreateMul(postCount, eight, "ains.postbytes", /*HasNUW=*/true, /*HasNSW=*/true);
         builder->CreateCall(getOrDeclareMemcpy(), {postDst, postSrc, postBytes});
 
@@ -6739,6 +6758,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* negWidth = builder->CreateICmpSLT(widthArg, zero, "strpad.negw");
         llvm::Value* effectiveWidth = builder->CreateSelect(negWidth, zero, widthArg, "strpad.width");
+        nonNegValues_.insert(effectiveWidth);
 
         // If slen >= width, return str unchanged
         llvm::Value* needsPad = builder->CreateICmpULT(slen, effectiveWidth, "strpad.needs");
@@ -6764,6 +6784,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::cast<llvm::LoadInst>(fillByte)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
 
         llvm::Value* padLen = builder->CreateSub(effectiveWidth, slen, "strpad.padlen", /*HasNUW=*/true, /*HasNSW=*/true);
+        // In padBB: effectiveWidth > slen, so padLen ≥ 1.
+        nonNegValues_.insert(padLen);
         // Allocate (effectiveWidth + 1) bytes for result
         llvm::Value* padHdr = emitAllocString(effectiveWidth, effectiveWidth, "strpad");
         llvm::Value* padData = emitStringData(padHdr, "strpad.data");
