@@ -1087,7 +1087,7 @@ var buf: byte[] = [1, 2, 3]; // byte array literal
 
 - `expr as byte` — truncate any integer/float/pointer to a single byte (0–255).
 - `expr as byte[]` — extract the raw little-endian bytes of a value:
-  - **Integer**: `numBytes = bitWidth / 8` elements (e.g. `i64` → 8 bytes)
+  - **Integer**: `numBytes = bitWidth / 8` elements (e.g. `i64` → 8, `i128` → 16, `i256` → 32)
   - **Float**: bitcast to same-width integer, then extract bytes (`f32` → 4, `f64` → 8)
   - **Pointer**: 8 bytes (little-endian 64-bit address)
   - **String variable**: one element per UTF-8 byte of the string's character data
@@ -1100,8 +1100,11 @@ var bytes: byte[] = n as byte[];
 var x: f64 = 1.0;
 var raw: byte[] = x as byte[];  // 8 bytes — IEEE 754 representation
 
-var s: string = "Hi";
+var s: str = "Hi";
 var sb: byte[] = s as byte[];   // [72, 105]  ('H', 'i')
+
+var big: i128 = 1 as i128;
+var bb: byte[] = big as byte[];  // 16 bytes; bb[0]=1, bb[1..15]=0
 ```
 
 **`sizeof(byte)`** → 1
@@ -6729,6 +6732,11 @@ Return the byte size of a type as a compile-time constant.
 ```omscript
 println(sizeof(int));    // 8
 println(sizeof(float));  // 8
+println(sizeof(f32));    // 4
+println(sizeof(i32));    // 4
+println(sizeof(i128));   // 16
+println(sizeof(bool));   // 1
+println(sizeof(byte));   // 1
 ```
 
 ---

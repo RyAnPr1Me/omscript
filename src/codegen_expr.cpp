@@ -824,7 +824,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Type* dstTy = resolveAnnotatedType(targetType);
         if (!dstTy) dstTy = getDefaultType();
         llvm::Type* srcTy = val->getType();
-        if (srcTy == dstTy) return val;
+        // byte[] must be checked BEFORE the srcTy==dstTy early-return because
+        // both strings and arrays have pointer (ptr) LLVM type — if we returned
+        // early here, a string as byte[] would just hand back the string pointer.
+        if (targetType != "byte[]" && srcTy == dstTy) return val;
         // Integer widening / narrowing
         if (srcTy->isIntegerTy() && dstTy->isIntegerTy()) {
             unsigned srcBits = srcTy->getIntegerBitWidth();
@@ -987,9 +990,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                         ? builder->CreateZExt(val, getDefaultType(), "as.bytes.zext")
                         : val;
                 } else {
-                    // Wide integers (i128, i256…): expose only the low 8 bytes.
-                    asInt = builder->CreateTrunc(val, getDefaultType(), "as.bytes.trunc");
-                    numBytes = 8;
+                    // Wide integers (i128, i256…): keep the full value so
+                    // all bytes are extracted.  The shift/mask loop below uses
+                    // the actual type of asInt, so numBytes=bits/8 is correct.
+                    asInt = val;
                 }
             } else if (srcTy->isFloatingPointTy()) {
                 unsigned bits = srcTy->getPrimitiveSizeInBits();
@@ -1001,12 +1005,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     : (llvm::Value*)bitInt;
             } else if (srcTy->isPointerTy()) {
                 // Check source annotation: if it's a string, emit per-char copy.
-                bool isStr = false;
-                if (const auto* srcId = asIdentifier(expr->left.get())) {
-                    auto annIt = varTypeAnnotations_.find(srcId->name);
-                    if (annIt != varTypeAnnotations_.end() && annIt->second == "string")
-                        isStr = true;
-                }
+                // Use isStringExpr() which checks stringVars_ (populated from the
+                // initializer of the variable, handles both "str" and "string" and
+                // string-returning function calls).
+                const bool isStr = isStringExpr(expr->left.get());
                 if (isStr) {
                     // String → byte[]: one element per UTF-8 byte of the string data.
                     llvm::Value* strData = emitStringData(val, "as.bytes.data");
@@ -1066,8 +1068,16 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                                                       static_cast<uint64_t>(i) * 8),
                               "as.bytes.shr");
                     llvm::Value* byteVal = builder->CreateAnd(shifted, mask, "as.bytes.mask");
-                    if (byteVal->getType() != getDefaultType())
-                        byteVal = builder->CreateZExt(byteVal, getDefaultType(), "as.bytes.ext");
+                    if (byteVal->getType() != getDefaultType()) {
+                        // After masking with 0xFF the value fits in 8 bits; the
+                        // containing type may be narrower than i64 (use ZExt) or
+                        // wider than i64 — e.g. i128/i256 — (use Trunc).
+                        const unsigned byteValBits =
+                            byteVal->getType()->getIntegerBitWidth();
+                        byteVal = (byteValBits < 64)
+                            ? builder->CreateZExt(byteVal, getDefaultType(), "as.bytes.ext")
+                            : builder->CreateTrunc(byteVal, getDefaultType(), "as.bytes.ext");
+                    }
                     llvm::Value* idxV = llvm::ConstantInt::get(getDefaultType(),
                                                                 static_cast<uint64_t>(i) + 1);
                     llvm::Value* ep = builder->CreateInBoundsGEP(getDefaultType(), buf, idxV,

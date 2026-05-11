@@ -4214,10 +4214,11 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             byteSize = 1;
         else if (typeName == "i16" || typeName == "u16")
             byteSize = 2;
-        else if (typeName == "i32" || typeName == "u32")
+        else if (typeName == "i32" || typeName == "u32" || typeName == "f32" || typeName == "float32")
             byteSize = 4;
         else if (typeName == "i64" || typeName == "u64" || typeName == "int" ||
                  typeName == "uint" || typeName == "float" || typeName == "double" ||
+                 typeName == "f64" || typeName == "float64" ||
                  typeName == "ptr" || typeName.rfind("ptr<", 0) == 0 ||
                  typeName == "string" || typeName == "bigint")
             byteSize = 8;
