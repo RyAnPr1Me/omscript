@@ -929,16 +929,16 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 stringReturningFunctions_.insert("as");
                 return hdr;
             }
-            // Pointer → string: format the pointer as a hex address
+            // Pointer → string: format the address as an unsigned decimal integer
             if (srcTy->isPointerTy()) {
                 llvm::Value* asInt = builder->CreatePtrToInt(val, getDefaultType(), "as.str.ptrtoint");
-                llvm::Value* maxLen = llvm::ConstantInt::get(getDefaultType(), 18);
+                llvm::Value* maxLen = llvm::ConstantInt::get(getDefaultType(), 20);
                 llvm::Value* hdr = emitAllocString(maxLen, maxLen, "as.tostr");
                 llvm::Value* bufData = emitStringData(hdr, "as.tostr.data");
-                llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 19);
+                llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 21);
                 llvm::GlobalVariable* fmtStr = module->getGlobalVariable("as_tostr_ptr_fmt", true);
                 if (!fmtStr)
-                    fmtStr = builder->CreateGlobalString("%p", "as_tostr_ptr_fmt");
+                    fmtStr = builder->CreateGlobalString("%llu", "as_tostr_ptr_fmt");
                 llvm::Value* written = builder->CreateCall(getOrDeclareSnprintf(),
                     {bufData, bufSize, fmtStr, asInt}, "as.tostr.written");
                 llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "as.tostr.len", false);
