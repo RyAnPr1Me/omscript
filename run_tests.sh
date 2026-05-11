@@ -898,6 +898,10 @@ ptest_program "examples/ternary_positions_test.om" 150
 ptest_program "examples/function_call_patterns_test.om" 10
 # ── HTTP client builtins ──────────────────────────────────────────────────
 ptest_program "examples/http_test.om" 0
+# ── New language features ─────────────────────────────────────────────────
+ptest_program "examples/predefined_constants_test.om" 23
+ptest_program "examples/addr_of_test.om" 5
+ptest_program "examples/as_operator_test.om" 10
 flush_ptests
 
 echo ""

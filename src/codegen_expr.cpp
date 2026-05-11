@@ -907,6 +907,70 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return builder->CreateUIToFP(val, dstTy, "as.uitofp");
             return builder->CreateSIToFP(val, dstTy, "as.sitofp");
         }
+        // Integer / Float / Pointer → string  (produces a heap-allocated OmScript string)
+        if (targetType == "string") {
+            // Float → string
+            if (srcTy->isFloatingPointTy()) {
+                llvm::Value* fval = srcTy->isDoubleTy()
+                    ? val
+                    : builder->CreateFPExt(val, getFloatType(), "as.str.fpext");
+                llvm::Value* maxLen = llvm::ConstantInt::get(getDefaultType(), 31);
+                llvm::Value* hdr = emitAllocString(maxLen, maxLen, "as.tostr");
+                llvm::Value* bufData = emitStringData(hdr, "as.tostr.data");
+                llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 32);
+                llvm::GlobalVariable* fmtStr = module->getGlobalVariable("as_tostr_float_fmt", true);
+                if (!fmtStr)
+                    fmtStr = builder->CreateGlobalString("%g", "as_tostr_float_fmt");
+                llvm::Value* written = builder->CreateCall(getOrDeclareSnprintf(),
+                    {bufData, bufSize, fmtStr, fval}, "as.tostr.written");
+                llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "as.tostr.len", false);
+                nonNegValues_.insert(actualLen);
+                emitStoreStringLen(actualLen, hdr);
+                stringReturningFunctions_.insert("as");
+                return hdr;
+            }
+            // Pointer → string: format the pointer as a hex address
+            if (srcTy->isPointerTy()) {
+                llvm::Value* asInt = builder->CreatePtrToInt(val, getDefaultType(), "as.str.ptrtoint");
+                llvm::Value* maxLen = llvm::ConstantInt::get(getDefaultType(), 18);
+                llvm::Value* hdr = emitAllocString(maxLen, maxLen, "as.tostr");
+                llvm::Value* bufData = emitStringData(hdr, "as.tostr.data");
+                llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 19);
+                llvm::GlobalVariable* fmtStr = module->getGlobalVariable("as_tostr_ptr_fmt", true);
+                if (!fmtStr)
+                    fmtStr = builder->CreateGlobalString("%p", "as_tostr_ptr_fmt");
+                llvm::Value* written = builder->CreateCall(getOrDeclareSnprintf(),
+                    {bufData, bufSize, fmtStr, asInt}, "as.tostr.written");
+                llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "as.tostr.len", false);
+                nonNegValues_.insert(actualLen);
+                emitStoreStringLen(actualLen, hdr);
+                stringReturningFunctions_.insert("as");
+                return hdr;
+            }
+            // Integer → string (including wide ints: truncate to i64 for %lld)
+            llvm::Value* ival = val;
+            if (srcTy->isIntegerTy()) {
+                unsigned bits = srcTy->getIntegerBitWidth();
+                if (bits > 64)
+                    ival = builder->CreateTrunc(val, getDefaultType(), "as.str.trunc");
+                else if (bits < 64)
+                    ival = builder->CreateSExt(val, getDefaultType(), "as.str.sext");
+            }
+            llvm::Value* maxLen = llvm::ConstantInt::get(getDefaultType(), 20);
+            llvm::Value* hdr = emitAllocString(maxLen, maxLen, "as.tostr");
+            llvm::Value* bufData = emitStringData(hdr, "as.tostr.data");
+            llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 21);
+            llvm::GlobalVariable* fmtStr = module->getGlobalVariable("as_tostr_int_fmt", true);
+            if (!fmtStr)
+                fmtStr = builder->CreateGlobalString("%lld", "as_tostr_int_fmt");
+            llvm::Value* written = builder->CreateCall(getOrDeclareSnprintf(),
+                {bufData, bufSize, fmtStr, ival}, "as.tostr.written");
+            llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "as.tostr.len", false);
+            nonNegValues_.insert(actualLen);
+            emitStoreStringLen(actualLen, hdr);
+            stringReturningFunctions_.insert("as");
+            return hdr;
+        }
         // Pointer ↔ integer
         if (srcTy->isPointerTy() && dstTy->isIntegerTy())
             return builder->CreatePtrToInt(val, dstTy, "as.ptrtoint");

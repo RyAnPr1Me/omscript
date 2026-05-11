@@ -1,0 +1,42 @@
+// Test predefined integer range constants: I{N}_MAX/MIN, U{N}_MAX/MIN,
+// INT_MAX/MIN, UINT_MAX, BOOL_MAX/MIN.
+fn main() {
+    var total = 0;
+
+    // BOOL bounds
+    total = total + (BOOL_MAX == 1);     // 1
+    total = total + (BOOL_MIN == 0);     // 1
+
+    // i8 / u8
+    total = total + (I8_MAX == 127);     // 1
+    total = total + (I8_MIN == -128);    // 1
+    total = total + (U8_MAX == 255);     // 1
+    total = total + (U8_MIN == 0);       // 1
+
+    // i16 / u16
+    total = total + (I16_MAX == 32767);  // 1
+    total = total + (I16_MIN == -32768); // 1
+    total = total + (U16_MAX == 65535);  // 1
+    total = total + (U16_MIN == 0);      // 1
+
+    // i32 / u32
+    total = total + (I32_MAX == 2147483647);   // 1
+    total = total + (I32_MIN == -2147483648);  // 1
+    total = total + (U32_MAX == 4294967295);   // 1
+    total = total + (U32_MIN == 0);            // 1
+
+    // i64 / INT_MAX (same value)
+    total = total + (I64_MAX == 9223372036854775807);  // 1
+    total = total + (INT_MAX == 9223372036854775807);  // 1
+    total = total + (INT_MIN == I64_MIN);              // 1
+    total = total + (U64_MIN == 0);                    // 1
+
+    // C-style aliases (INT8_MAX, UINT16_MAX, etc.)
+    total = total + (INT8_MAX == 127);     // 1
+    total = total + (UINT8_MAX == 255);    // 1
+    total = total + (INT16_MAX == 32767);  // 1
+    total = total + (INT32_MAX == 2147483647);   // 1
+    total = total + (INT64_MAX == 9223372036854775807);  // 1
+
+    return total;  // 23
+}

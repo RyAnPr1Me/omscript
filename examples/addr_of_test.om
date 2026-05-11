@@ -1,0 +1,29 @@
+// Test &x address-of operator: var p:ptr = &x
+// The & operator takes the address of a stack variable, returning a raw ptr.
+fn main() {
+    var total = 0;
+
+    // Basic: taking address of int variable gives non-null ptr
+    var x: int = 42;
+    var p: ptr = &x;
+    total = total + (p != 0);       // 1 — ptr is non-null
+
+    // Two different variables have different addresses
+    var y: int = 100;
+    var q: ptr = &y;
+    total = total + (q != 0);       // 1
+    total = total + (p != q);       // 1 — different stack slots
+
+    // Works with other types
+    var f: f64 = 3.14;
+    var pf: ptr = &f;
+    total = total + (pf != 0);      // 1
+
+    // &x == &x (same variable, same address)
+    var z: int = 7;
+    var r1: ptr = &z;
+    var r2: ptr = &z;
+    total = total + (r1 == r2);     // 1 — both point to z
+
+    return total;  // 5
+}

@@ -1,0 +1,54 @@
+// Test `as` operator with all supported type conversions.
+fn main() {
+    var total = 0;
+
+    // Integer → integer widening
+    var small: i8 = 100 as i8;
+    var wide: i64 = small as i64;
+    total = total + (wide == 100);   // 1
+
+    // Integer → integer narrowing (truncation)
+    var big: i64 = 300;
+    var narrow: i8 = big as i8;
+    total = total + (narrow == 44);  // 300 & 0xFF = 44
+
+    // Unsigned widening
+    var u8v: u8 = 200 as u8;
+    var u64v: u64 = u8v as u64;
+    total = total + (u64v == 200);   // 1 — zero-extend (not sign-extend)
+
+    // Float → integer (truncation toward zero)
+    var f: f64 = 3.9;
+    var fi: int = f as int;
+    total = total + (fi == 3);       // 1
+
+    // Integer → float
+    var n: int = 10;
+    var nf: f64 = n as f64;
+    total = total + (nf == 10.0);    // 1
+
+    // f32 ↔ f64
+    var f32v: f32 = 1.5 as f32;
+    var f64v: f64 = f32v as f64;
+    total = total + (f64v == 1.5);   // 1
+
+    // Integer → string
+    var s: string = 42 as string;
+    total = total + (s == "42");     // 1
+
+    // Float → string
+    var sf: string = 3.14 as string;
+    total = total + (len(sf) > 0);   // 1 — has content
+
+    // Integer → ptr
+    var p: ptr = 0 as ptr;
+    total = total + (p == 0);        // 1 — null ptr
+
+    // ptr → integer
+    var x: int = 42;
+    var px: ptr = &x;
+    var addr: int = px as int;
+    total = total + (addr != 0);     // 1 — non-null address
+
+    return total;  // 10
+}
