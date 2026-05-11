@@ -3314,11 +3314,12 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
                 if (!heapPtr->getType()->isPointerTy()) {
                     heapPtr = builder->CreateIntToPtr(heapPtr, ptrTy, name + ".heapptr");
                 }
-                // Defer the free() to the function exit so all invalidated
-                // pointers are freed in a single batch at the optimal CFG
-                // point.  The variable is already logically dead (deadVars_);
-                // any use before then is a compile-time error.
-                deferredFreeQueue_.push_back(heapPtr);
+                // Emit free() immediately at the invalidate point.
+                // Deferring to function exit is incorrect when the variable
+                // is declared inside a loop body: the loaded IR value only
+                // dominates the loop's basic block, not the exit block,
+                // which causes an LLVM verifier domination violation.
+                builder->CreateCall(getOrDeclareFree(), {heapPtr});
             }
         }
     }
