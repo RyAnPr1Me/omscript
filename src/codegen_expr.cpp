@@ -712,10 +712,39 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
         // Float → integer
         if (srcTy->isFloatingPointTy() && dstTy->isIntegerTy()) {
+            // Use fptoui for unsigned target types (u8/u16/u32/u64/uN).
+            const std::string& tgtName = typeExpr->name;
+            if (!tgtName.empty() && tgtName[0] == 'u')
+                return builder->CreateFPToUI(val, dstTy, "as.fptoui");
             return builder->CreateFPToSI(val, dstTy, "as.fptosi");
+        }
+        // Float → float (different widths): fpext (widening) or fptrunc (narrowing).
+        if (srcTy->isFloatingPointTy() && dstTy->isFloatingPointTy()) {
+            unsigned srcBits = srcTy->getPrimitiveSizeInBits();
+            unsigned dstBits = dstTy->getPrimitiveSizeInBits();
+            if (dstBits > srcBits)
+                return builder->CreateFPExt(val, dstTy, "as.fpext");
+            if (dstBits < srcBits)
+                return builder->CreateFPTrunc(val, dstTy, "as.fptrunc");
+            return val; // same width, identity
         }
         // Integer → float
         if (srcTy->isIntegerTy() && dstTy->isFloatingPointTy()) {
+            // Use uitofp when the source variable's declared type is unsigned.
+            bool isUnsignedSrc = false;
+            if (const auto* srcId = asIdentifier(expr->left.get())) {
+                auto annIt = varTypeAnnotations_.find(srcId->name);
+                if (annIt != varTypeAnnotations_.end())
+                    isUnsignedSrc = isUnsignedAnnot(annIt->second);
+            } else if (expr->left->type == ASTNodeType::BINARY_EXPR) {
+                const auto* inner = static_cast<const BinaryExpr*>(expr->left.get());
+                if (inner->op == "as" && inner->right) {
+                    if (const auto* typeId = asIdentifier(inner->right.get()))
+                        isUnsignedSrc = isUnsignedAnnot(typeId->name);
+                }
+            }
+            if (isUnsignedSrc)
+                return builder->CreateUIToFP(val, dstTy, "as.uitofp");
             return builder->CreateSIToFP(val, dstTy, "as.sitofp");
         }
         // Pointer ↔ integer
