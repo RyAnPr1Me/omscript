@@ -1566,6 +1566,12 @@ llvm::Function* CodeGenerator::getOrDeclarePutchar() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(inaccessiblemem: readwrite): putchar writes to stdout's internal
+    // buffer, which is not accessible through any argument pointer.  This lets
+    // the optimizer hoist pure loads past putchar calls without worrying about
+    // interference with user-visible memory.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleMemOnly()));
     return fn;
 }
 
@@ -1582,6 +1588,10 @@ llvm::Function* CodeGenerator::getOrDeclarePuts() {
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(argmem: read, inaccessiblemem: readwrite): puts reads the string
+    // via its pointer argument and writes to stdout's internal buffer.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -1601,6 +1611,10 @@ llvm::Function* CodeGenerator::getOrDeclareFputs() {
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     OMSC_ADD_NOCAPTURE(fn, 1);  // stream pointer is not captured
+    // memory(argmem: read, inaccessiblemem: readwrite): fputs reads the string
+    // via param 0 and writes to the stream's internal stdio buffer.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -1631,10 +1645,16 @@ llvm::Function* CodeGenerator::getOrDeclareScanf() {
         llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::PointerType::getUnqual(*context)}, true);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "scanf", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(argmem: readwrite, inaccessiblemem: readwrite): scanf reads the
+    // format string (arg 0) and variadic pointer args (argmem write), plus
+    // reads from stdin's internal buffer (inaccessible).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -1674,9 +1694,15 @@ llvm::Function* CodeGenerator::getOrDeclareSnprintf() {
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
     // snprintf: dest is writeonly+nocapture, format string is readonly+nocapture.
+    fn->addParamAttr(0, llvm::Attribute::NonNull);   // dest is never null
+    fn->addParamAttr(0, llvm::Attribute::WriteOnly); // only written, never read back
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(2, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 2);
+    // memory(argmem: readwrite): snprintf only reads/writes through its
+    // argument pointers (dest buffer and format/variadic args).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::argMemOnly()));
     return fn;
 }
 
@@ -2088,6 +2114,10 @@ llvm::Function* CodeGenerator::getOrDeclareFwrite() {
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(3, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 3);
+    // memory(argmem: read, inaccessiblemem: readwrite): fwrite reads the data
+    // buffer via param 0 and writes to the FILE* stream's internal buffer.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -2101,6 +2131,10 @@ llvm::Function* CodeGenerator::getOrDeclareFflush() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(inaccessiblemem: readwrite): fflush only operates on the FILE*
+    // stream's internal buffer state, which is not visible to the caller.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -2117,6 +2151,11 @@ llvm::Function* CodeGenerator::getOrDeclareFgets() {
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(2, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 2);
+    // memory(argmem: write, inaccessiblemem: readwrite): fgets writes the read
+    // characters into the buffer (param 0, argmem write) and advances the FILE*
+    // stream's internal read position (inaccessible state).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -2137,6 +2176,11 @@ llvm::Function* CodeGenerator::getOrDeclareFopen() {
     fn->addParamAttr(1, llvm::Attribute::NonNull);
     fn->addParamAttr(1, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 1);
+    // memory(argmem: read, inaccessiblemem: readwrite): fopen reads the path
+    // and mode strings (argmem read) and allocates/initialises a FILE* through
+    // the runtime's internal allocator (inaccessible memory).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -2150,6 +2194,11 @@ llvm::Function* CodeGenerator::getOrDeclareFclose() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(inaccessiblemem: readwrite): fclose flushes and frees the FILE*'s
+    // internal buffer (all state is inside the opaque FILE struct — not directly
+    // accessible to the caller).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -2166,6 +2215,11 @@ llvm::Function* CodeGenerator::getOrDeclareFread() {
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(3, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 3);
+    // memory(argmem: write, inaccessiblemem: readwrite): fread writes data into
+    // the caller-supplied buffer (param 0, argmem) and advances the FILE*
+    // stream's read position (inaccessible internal state).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -2181,6 +2235,10 @@ llvm::Function* CodeGenerator::getOrDeclareFseek() {
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(inaccessiblemem: readwrite): fseek modifies the FILE* stream's
+    // internal position — all state is inside the opaque FILE struct.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -2195,6 +2253,10 @@ llvm::Function* CodeGenerator::getOrDeclareFtell() {
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(inaccessiblemem: read): ftell reads the FILE* stream's current
+    // position from its internal state — a read-only query of opaque state.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly(llvm::ModRefInfo::Ref)));
     return fn;
 }
 
@@ -2212,6 +2274,11 @@ llvm::Function* CodeGenerator::getOrDeclareAccess() {
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(argmem: read, inaccessiblemem: read): access() reads the pathname
+    // string through param 0 (argmem) and performs a read-only filesystem
+    // query through the kernel (inaccessible to the LLVM optimizer).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly(llvm::ModRefInfo::Ref)));
     return fn;
 }
 
@@ -2313,6 +2380,11 @@ llvm::Function* CodeGenerator::getOrDeclareGetenv() {
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(argmem: read, inaccessiblemem: read): getenv reads the name string
+    // via param 0 (argmem) and searches the process environment table, which is
+    // inaccessible memory from the optimizer's perspective.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly(llvm::ModRefInfo::Ref)));
     return fn;
 }
 
@@ -2324,10 +2396,16 @@ llvm::Function* CodeGenerator::getOrDeclareSetenv() {
     auto* ty = llvm::FunctionType::get(i32Ty, {ptrTy, ptrTy, i32Ty}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "setenv", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(1, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     OMSC_ADD_NOCAPTURE(fn, 1);
+    // memory(argmem: read, inaccessiblemem: readwrite): setenv reads the name
+    // and value strings (argmem read) and writes to the process environment
+    // table (inaccessible allocator-managed memory).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 // ── BigInt runtime helper declarations ──────────────────────────────────────

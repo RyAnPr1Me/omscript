@@ -3997,6 +3997,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::Value* acatLen2Load = emitLoadArrayLen(arr2Ptr, "aconcat.len2");
         llvm::Value* len2 = acatLen2Load;
         llvm::Value* totalLen = builder->CreateAdd(len1, len2, "aconcat.total", /*HasNUW=*/true, /*HasNSW=*/true);
+        // Both len1 and len2 are non-negative (range metadata), so their sum is too.
+        nonNegValues_.insert(totalLen);
         // Allocate: (totalLen + 1) * 8
         llvm::Value* slots = builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "aconcat.slots", /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* bytes = builder->CreateMul(slots, llvm::ConstantInt::get(getDefaultType(), 8), "aconcat.bytes", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -4086,6 +4088,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // endArg ≥ startArg is guaranteed by all clamp paths above — nuw+nsw.
         llvm::Value* sliceLen = builder->CreateSub(endArg, startArg, "slice.len",
                                                    /*HasNUW=*/true, /*HasNSW=*/true);
+        // All clamp paths guarantee endArg ≥ startArg, so sliceLen ≥ 0.
+        nonNegValues_.insert(sliceLen);
         llvm::Value* buf = emitAllocArray(sliceLen, "slice");
         // Copy elements: arr[start+1..end+1) to buf[1..)
         llvm::Value* srcIdx = builder->CreateAdd(startArg, one, "slice.srcidx", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -4288,6 +4292,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         idx->addIncoming(zero, preheader);
         llvm::PHINode* outIdx = builder->CreatePHI(getDefaultType(), 2, "afilt.outidx");
         outIdx->addIncoming(zero, preheader);
+        // outIdx counts accepted elements: starts at 0, incremented by 1 each accepted
+        // element, so it is always in [0, arrLen] — non-negative.
+        nonNegValues_.insert(outIdx);
         // Unsigned: idx starts at 0, arrLen ≥ 0 (range metadata).
         llvm::Value* cond = builder->CreateICmpULT(idx, arrLen, "afilt.cond");
         builder->CreateCondBr(cond, testBB, doneBB);
@@ -4320,6 +4327,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* outIdxMerge = builder->CreatePHI(getDefaultType(), 2, "afilt.outmerge");
         outIdxMerge->addIncoming(outIdx, testBB);
         outIdxMerge->addIncoming(newOutIdx, addBB);
+        // outIdxMerge ∈ [0, arrLen] by the same argument as outIdx.
+        nonNegValues_.insert(outIdxMerge);
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "afilt.next", /*HasNUW=*/true, /*HasNSW=*/true);
         idx->addIncoming(nextIdx, incBB);
         outIdx->addIncoming(outIdxMerge, incBB);
@@ -4836,6 +4845,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "acnt.idx");
         acc->addIncoming(zero, entryBB);
         idx->addIncoming(zero, entryBB);
+        // acc counts matching elements: starts at 0, incremented by {0,1} — always ≥ 0.
+        nonNegValues_.insert(acc);
         // Unsigned: idx starts at 0, length ≥ 0 (range metadata).
         llvm::Value* doneCheck = builder->CreateICmpUGE(idx, length, "acnt.donecheck");
         builder->CreateCondBr(doneCheck, doneBB, bodyBB);
@@ -4854,6 +4865,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // acnt.newacc: acc is in [0, length], incr in {0,1}; sum ≤ INT64_MAX so
         // both nsw and nuw are safe and let SCEV prove the accumulator is non-negative.
         llvm::Value* newAcc = builder->CreateAdd(acc, incr, "acnt.newacc", /*HasNUW=*/true, /*HasNSW=*/true);
+        nonNegValues_.insert(newAcc); // newAcc = acc + {0,1} ≥ 0
         // Reuse offset (= idx+1, nsw+nuw) as the loop induction increment.
         acc->addIncoming(newAcc, bodyBB);
         idx->addIncoming(offset, bodyBB);
@@ -5464,6 +5476,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         cursor->addIncoming(scountStrData, mainBB);
         llvm::PHINode* count = builder->CreatePHI(getDefaultType(), 2, "scount.count");
         count->addIncoming(zero, mainBB);
+        // count starts at 0 and is incremented by 1 per match — always ≥ 0.
+        nonNegValues_.insert(count);
 
         llvm::Value* found = builder->CreateCall(getOrDeclareStrstr(), {cursor, emitStringData(subPtr, "scount.subdata")}, "scount.found");
         llvm::Value* isNull = builder->CreateICmpEQ(found, nullPtr, "scount.isnull");
@@ -5472,6 +5486,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->SetInsertPoint(bodyBB);
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         llvm::Value* newCount = builder->CreateAdd(count, one, "scount.newcount", /*HasNUW=*/true, /*HasNSW=*/true);
+        // newCount = count + 1 ≥ 1 since count ≥ 0.
+        nonNegValues_.insert(newCount);
         llvm::Value* nextCursor = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), found, subLen, "scount.next");
         cursor->addIncoming(nextCursor, bodyBB);
         count->addIncoming(newCount, bodyBB);
