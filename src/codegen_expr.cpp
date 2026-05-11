@@ -1074,9 +1074,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                         // wider than i64 — e.g. i128/i256 — (use Trunc).
                         const unsigned byteValBits =
                             byteVal->getType()->getIntegerBitWidth();
-                        byteVal = (byteValBits < 64)
-                            ? builder->CreateZExt(byteVal, getDefaultType(), "as.bytes.ext")
-                            : builder->CreateTrunc(byteVal, getDefaultType(), "as.bytes.ext");
+                        byteVal = (byteValBits > 64)
+                            ? builder->CreateTrunc(byteVal, getDefaultType(), "as.bytes.ext")
+                            : builder->CreateZExt(byteVal, getDefaultType(), "as.bytes.ext");
                     }
                     llvm::Value* idxV = llvm::ConstantInt::get(getDefaultType(),
                                                                 static_cast<uint64_t>(i) + 1);
