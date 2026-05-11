@@ -1745,13 +1745,25 @@ struct RangeBoundsCheckHoistPass
             llvm::BasicBlock* checkBB = llvm::BasicBlock::Create(
                 F.getContext(), "rbch.check", &F, loopHeader);
             // Move the preheader's original terminator into checkBB.
+            // Important: do this BEFORE creating the new preheader terminator,
+            // because phBuilder's insert point tracks origBr.  After
+            // removeFromParent() + insertInto(checkBB), phBuilder would insert
+            // into checkBB instead of the preheader.  Use BranchInst::Create
+            // to append the new conditional branch directly to the preheader.
             auto* origBr = preheader->getTerminator();
             origBr->removeFromParent();
-            llvm::IRBuilder<> checkBBBuilder(checkBB);
-            checkBB->getTerminator(); // ensure empty
             origBr->insertInto(checkBB, checkBB->end());
             // New preheader terminator: condBr safe → checkBB, failBB.
-            phBuilder.CreateCondBr(safeCheck, checkBB, existingFailBB, weights);
+            llvm::BranchInst::Create(checkBB, existingFailBB, safeCheck,
+                                     preheader)->setMetadata(
+                llvm::LLVMContext::MD_prof, weights);
+            // Update PHI nodes in the loop header that referenced the preheader:
+            // checkBB is now the direct predecessor of the loop header.
+            for (auto& phi : loopHeader->phis()) {
+                int idx = phi.getBasicBlockIndex(preheader);
+                if (idx >= 0)
+                    phi.setIncomingBlock(static_cast<unsigned>(idx), checkBB);
+            }
 
             // Remove per-iteration bounds checks.
             for (auto& [BI, okBB] : checkBranches) {

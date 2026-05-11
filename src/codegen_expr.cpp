@@ -1801,11 +1801,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         auto tryNarrowLiteral = [&](llvm::Value*& constVal, llvm::Value* otherVal) {
             auto* ci = llvm::dyn_cast<llvm::ConstantInt>(constVal);
             if (!ci) return;
+            auto* intTy = llvm::dyn_cast<llvm::IntegerType>(otherVal->getType());
+            if (!intTy) return; // otherVal is not an integer (e.g. pointer); skip
             const unsigned constBits = constVal->getType()->getIntegerBitWidth();
-            const unsigned otherBits = otherVal->getType()->getIntegerBitWidth();
+            const unsigned otherBits = intTy->getBitWidth();
             if (constBits <= otherBits) return; // already narrower/same
             // Narrow the constant only when the value round-trips exactly.
-            auto* intTy = llvm::cast<llvm::IntegerType>(otherVal->getType());
             auto* narrowed = llvm::ConstantInt::getSigned(intTy, ci->getSExtValue());
             if (narrowed->getSExtValue() == ci->getSExtValue())
                 constVal = narrowed;
