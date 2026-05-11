@@ -971,7 +971,113 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             stringReturningFunctions_.insert("as");
             return hdr;
         }
-        // Pointer ↔ integer
+        // Any value → byte[]  (raw bytes of the value, little-endian)
+        // Produces an OmScript int[] array whose elements are the individual
+        // bytes (0..255) of the source value's binary representation.
+        if (targetType == "byte[]") {
+            // Determine the raw integer bit-pattern to slice into bytes.
+            llvm::Value* asInt = nullptr;
+            unsigned numBytes = 0;
+
+            if (srcTy->isIntegerTy()) {
+                unsigned bits = srcTy->getIntegerBitWidth();
+                numBytes = (bits + 7) / 8;
+                if (bits <= 64) {
+                    asInt = (bits < 64)
+                        ? builder->CreateZExt(val, getDefaultType(), "as.bytes.zext")
+                        : val;
+                } else {
+                    // Wide integers (i128, i256…): expose only the low 8 bytes.
+                    asInt = builder->CreateTrunc(val, getDefaultType(), "as.bytes.trunc");
+                    numBytes = 8;
+                }
+            } else if (srcTy->isFloatingPointTy()) {
+                unsigned bits = srcTy->getPrimitiveSizeInBits();
+                numBytes = bits / 8;
+                llvm::Type* intTy = llvm::IntegerType::get(*context, bits);
+                llvm::Value* bitInt = builder->CreateBitCast(val, intTy, "as.bytes.bitcast");
+                asInt = (bits < 64)
+                    ? builder->CreateZExt(bitInt, getDefaultType(), "as.bytes.zext")
+                    : (llvm::Value*)bitInt;
+            } else if (srcTy->isPointerTy()) {
+                // Check source annotation: if it's a string, emit per-char copy.
+                bool isStr = false;
+                if (const auto* srcId = asIdentifier(expr->left.get())) {
+                    auto annIt = varTypeAnnotations_.find(srcId->name);
+                    if (annIt != varTypeAnnotations_.end() && annIt->second == "string")
+                        isStr = true;
+                }
+                if (isStr) {
+                    // String → byte[]: one element per UTF-8 byte of the string data.
+                    llvm::Value* strData = emitStringData(val, "as.bytes.data");
+                    llvm::Value* strLen  = builder->CreateCall(getOrDeclareStrlen(), {strData},
+                                                                "as.bytes.strlen");
+                    nonNegValues_.insert(llvm::cast<llvm::CallInst>(strLen));
+                    llvm::Value* buf = emitAllocArray(strLen, "as.bytes.str");
+                    llvm::Function* curFn = builder->GetInsertBlock()->getParent();
+                    llvm::BasicBlock* preheader = builder->GetInsertBlock();
+                    llvm::BasicBlock* loopHdr  = llvm::BasicBlock::Create(*context, "as.bytes.lhdr", curFn);
+                    llvm::BasicBlock* loopBody = llvm::BasicBlock::Create(*context, "as.bytes.lbody", curFn);
+                    llvm::BasicBlock* loopExit = llvm::BasicBlock::Create(*context, "as.bytes.lexit", curFn);
+                    builder->CreateBr(loopHdr);
+                    builder->SetInsertPoint(loopHdr);
+                    llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "as.bytes.i");
+                    phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), preheader);
+                    llvm::Value* cond = builder->CreateICmpSLT(phi, strLen, "as.bytes.cond");
+                    builder->CreateCondBr(cond, loopBody, loopExit);
+                    builder->SetInsertPoint(loopBody);
+                    llvm::Value* charPtr = builder->CreateInBoundsGEP(
+                        llvm::Type::getInt8Ty(*context), strData, phi, "as.bytes.cp");
+                    llvm::LoadInst* charByte = builder->CreateLoad(
+                        llvm::Type::getInt8Ty(*context), charPtr, "as.bytes.cb");
+                    charByte->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+                    llvm::Value* charExt = builder->CreateZExt(charByte, getDefaultType(),
+                                                                "as.bytes.cext", /*IsNonNeg=*/false);
+                    nonNegValues_.insert(charExt);
+                    llvm::Value* arrIdx = builder->CreateAdd(phi,
+                        llvm::ConstantInt::get(getDefaultType(), 1),
+                        "as.bytes.ai", /*nuw=*/true, /*nsw=*/true);
+                    llvm::Value* ep = builder->CreateInBoundsGEP(getDefaultType(), buf, arrIdx,
+                                                                   "as.bytes.ep");
+                    emitStoreArrayElem(charExt, ep);
+                    llvm::Value* next = builder->CreateAdd(phi,
+                        llvm::ConstantInt::get(getDefaultType(), 1),
+                        "as.bytes.next", /*nuw=*/true, /*nsw=*/true);
+                    phi->addIncoming(next, loopBody);
+                    builder->CreateBr(loopHdr);
+                    builder->SetInsertPoint(loopExit);
+                    arrayVars_.insert("as");
+                    return buf;
+                }
+                // Generic pointer → 8 raw bytes (pointer value, little-endian).
+                numBytes = 8;
+                asInt = builder->CreatePtrToInt(val, getDefaultType(), "as.bytes.ptrtoint");
+            }
+
+            if (asInt && numBytes > 0) {
+                llvm::Value* lenV = llvm::ConstantInt::get(getDefaultType(), numBytes);
+                llvm::Value* buf  = emitAllocArray(lenV, "as.bytes");
+                llvm::Value* mask = llvm::ConstantInt::get(asInt->getType(), 0xFF);
+                for (unsigned i = 0; i < numBytes; ++i) {
+                    llvm::Value* shifted = (i == 0)
+                        ? asInt
+                        : builder->CreateLShr(asInt,
+                              llvm::ConstantInt::get(asInt->getType(),
+                                                      static_cast<uint64_t>(i) * 8),
+                              "as.bytes.shr");
+                    llvm::Value* byteVal = builder->CreateAnd(shifted, mask, "as.bytes.mask");
+                    if (byteVal->getType() != getDefaultType())
+                        byteVal = builder->CreateZExt(byteVal, getDefaultType(), "as.bytes.ext");
+                    llvm::Value* idxV = llvm::ConstantInt::get(getDefaultType(),
+                                                                static_cast<uint64_t>(i) + 1);
+                    llvm::Value* ep = builder->CreateInBoundsGEP(getDefaultType(), buf, idxV,
+                                                                   "as.bytes.ep");
+                    emitStoreArrayElem(byteVal, ep);
+                }
+                arrayVars_.insert("as");
+                return buf;
+            }
+        }
         if (srcTy->isPointerTy() && dstTy->isIntegerTy())
             return builder->CreatePtrToInt(val, dstTy, "as.ptrtoint");
         if (srcTy->isIntegerTy() && dstTy->isPointerTy())

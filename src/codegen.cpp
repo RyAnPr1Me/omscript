@@ -256,9 +256,9 @@ static constexpr SimdTypeRow kSimdTypeRegistry[] = {
 };
 
 /// Returns true if a type-annotation string represents an unsigned integer
-/// (uint, or any uN for N in [1..256]).
+/// (uint, byte, or any uN for N in [1..256]).
 static bool isUnsignedAnnotation(const std::string& tn) {
-    if (tn == "uint") return true;
+    if (tn == "uint" || tn == "byte") return true;
     if (tn.size() >= 2 && tn[0] == 'u') {
         for (size_t j = 1; j < tn.size(); ++j)
             if (!std::isdigit(static_cast<unsigned char>(tn[j]))) return false;
@@ -691,8 +691,8 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
         return llvm::Type::getFloatTy(*context);                // f32 (single)
     if (ann == "bool")
         return llvm::Type::getInt1Ty(*context);                 // i1
-    if (ann == "i8" || ann == "u8")
-        return llvm::Type::getInt8Ty(*context);                 // i8/u8
+    if (ann == "i8" || ann == "u8" || ann == "byte")
+        return llvm::Type::getInt8Ty(*context);                 // i8/u8/byte
     if (ann == "i16" || ann == "u16")
         return llvm::Type::getInt16Ty(*context);                // i16/u16
     if (ann == "i32" || ann == "u32")
@@ -1081,7 +1081,7 @@ void CodeGenerator::bindVariableAnnotated(const std::string& name, llvm::Value* 
 }
 
 bool CodeGenerator::isUnsignedAnnot(const std::string& annot) {
-    if (annot == "uint") return true;
+    if (annot == "uint" || annot == "byte") return true;
     if (annot.size() >= 2 && annot[0] == 'u') {
         for (size_t j = 1; j < annot.size(); ++j)
             if (!std::isdigit(static_cast<unsigned char>(annot[j]))) return false;
