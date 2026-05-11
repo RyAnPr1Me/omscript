@@ -1214,6 +1214,8 @@ fn main() -> int {
 - **Boxing**: `store_ptr(value)` — allocate a stack slot, store `value` into it, return a `ptr<typeof(value)>`. The type of the returned pointer matches the expression type (i64, ptr, etc.). The slot is placed in the function entry block so `mem2reg`/SROA can promote it.
 - **Deallocation**: `invalidate p` — free the heap allocation and mark `p` dead
 
+**Valid initializers for `ptr`-typed variables**: Any expression that could produce a pointer at runtime is accepted: `&var`, function calls (builtin or user-defined), `null`/`nullptr`, pointer arithmetic (`p + n`), identifiers, or any complex expression. The only rejected initializers are non-zero integer literals, float literals, and string literals (e.g. `var p: ptr = 42` is an error).
+
 **Safety**: In safe mode (default), the borrow checker enforces:
 - No use-after-invalidate
 - No double-invalidate (E019)

@@ -2028,52 +2028,27 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
     }
 
     // Compile-time validation: `ptr` variables may only be initialized with
-    //   &var / &arr[...]  (UnaryExpr op == "&")
-    //   malloc/realloc/calloc(...) (CallExpr)
-    //   null              (LiteralExpr intValue == 0)
-    //   ptr-arithmetic    (BinaryExpr e.g. p + n, p - n)
-    //   another ptr var   (IdentifierExpr)
-    // Literal non-zero integers, floats, and strings are always rejected.
+    // expressions that could plausibly produce a pointer at runtime.
+    // We reject only the most obvious misuse: a non-zero integer literal
+    // (e.g. `var p: ptr = 42`) or a float/string literal, which can never
+    // be a valid pointer in OmScript.
+    // Everything else — function calls (builtins or user-defined), address-of,
+    // identifiers, binary expressions, if-expressions, casts, etc. — is
+    // accepted here and any type mismatch is caught by the code generator.
     if ((typeName == "ptr" || typeName.rfind("ptr<", 0) == 0) && initializer) {
-        bool valid = false;
+        bool valid = true;
         const Expression* init = initializer.get();
-        switch (init->type) {
-            case ASTNodeType::UNARY_EXPR:
-                valid = (static_cast<const UnaryExpr*>(init)->op == "&");
-                break;
-            case ASTNodeType::CALL_EXPR: {
-                const std::string& callee = static_cast<const CallExpr*>(init)->callee;
-                valid = (callee == "malloc" || callee == "realloc" || callee == "calloc" ||
-                         callee == "store_ptr" || callee == "funcptr_from" ||
-                         callee == "funcptr_new" ||
-                         (callee.rfind("alloc<",      0) == 0 && callee.back() == '>') ||
-                         (callee.rfind("pslice_new<", 0) == 0 && callee.back() == '>'));
-                break;
-            }
-            case ASTNodeType::LITERAL_EXPR: {
-                const auto* lit = static_cast<const LiteralExpr*>(init);
-                // Only null (integer 0) is valid; any other literal is rejected.
-                valid = (lit->literalType == LiteralExpr::LiteralType::INTEGER &&
-                         lit->intValue == 0);
-                break;
-            }
-            case ASTNodeType::BINARY_EXPR:
-                // Pointer arithmetic (p + n, p - n) or other ptr-producing ops.
-                valid = true;
-                break;
-            case ASTNodeType::IDENTIFIER_EXPR:
-                // Pointer-to-pointer assignment (var q:ptr = p).
-                valid = true;
-                break;
-            default:
-                valid = false;
-                break;
+        if (init->type == ASTNodeType::LITERAL_EXPR) {
+            const auto* lit = static_cast<const LiteralExpr*>(init);
+            // Only null (integer 0) is valid; non-zero integers, floats, and
+            // string literals are rejected.
+            valid = (lit->literalType == LiteralExpr::LiteralType::INTEGER &&
+                     lit->intValue == 0);
         }
         if (!valid) {
-            error("Pointer variable '" + name.lexeme + "' must be initialized with "
-                  "&var, &arr, malloc(...), realloc(...), calloc(...), alloc<T>(...), "
-                  "store_ptr(...), funcptr_from(...), funcptr_new(...), null, "
-                  "pointer arithmetic (p+n), or another pointer variable");
+            error("Pointer variable '" + name.lexeme + "' cannot be initialized "
+                  "with a non-pointer literal. Use &var, a function call, null, "
+                  "or another pointer expression.");
         }
     }
 
