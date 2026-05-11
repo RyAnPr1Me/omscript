@@ -2065,7 +2065,7 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
         }
         if (!valid) {
             error("Pointer variable '" + name.lexeme + "' cannot be initialized "
-                  "with a non-pointer literal. Use &var, a function call, null, "
+                  "with a non-pointer literal. Use &var, a function call, null/nullptr, "
                   "or another pointer expression.");
         }
     }

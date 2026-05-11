@@ -606,8 +606,13 @@ private:
                         " active; end all borrows before invalidating (Ω spec §6.2)", stmt);
                 }
             }
-            stateOf(iv->varName).invalidated = true;
-            stateOf(iv->varName).moved = false;
+            // Use stateOf() to upsert the entry once — if s was non-null above
+            // the entry already exists; if s was null we create a fresh entry.
+            // Calling stateOf() twice would insert two default entries if the
+            // map reallocates between the two calls.
+            auto& ms = stateOf(iv->varName);
+            ms.invalidated = true;
+            ms.moved = false;
             break;
         }
         case ASTNodeType::FREEZE_STMT: {

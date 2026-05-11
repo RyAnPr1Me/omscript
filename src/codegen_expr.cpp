@@ -697,6 +697,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     }
                 }
                 if (isUnsignedSrc) {
+                    // IsNonNeg=false: LLVM's `nneg` flag asserts the *source*
+                    // integer is non-negative in a signed sense, which is false
+                    // for unsigned types with MSB set (e.g. u8 value 200 = -56
+                    // signed).  We communicate non-negativity via nonNegValues_
+                    // for OmScript-level alias analysis instead.
                     auto* z = builder->CreateZExt(val, dstTy, "as.zext",
                                                    /*IsNonNeg=*/false);
                     nonNegValues_.insert(z);

@@ -2613,8 +2613,13 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         // character loads within bounds are always defined.
         if (optimizationLevel >= OptimizationLevel::O1)
             charByte->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
-        // i8 zero-extended to i64: always in [0, 256) and provably non-negative.
-        // Use zext nneg (LLVM 18+) — !range is not valid on zext instructions.
+        // i8 zero-extended to i64: the value is in [0, 255] and therefore
+        // non-negative, but IsNonNeg must be false here — LLVM's `nneg` flag
+        // on zext asserts the *source* i8 is non-negative (≥ 0 in signed
+        // terms), which is false for bytes 128–255. We communicate the range
+        // via nonNegValues_ instead, which is used by the OmScript-level
+        // alias analysis rather than an LLVM IR attribute.
+        // Use zext — !range is not valid on zext instructions in LLVM 18.
         auto* charExt = builder->CreateZExt(charByte, getDefaultType(), "foreach.charext",
                                              /*IsNonNeg=*/false);
         nonNegValues_.insert(charExt);

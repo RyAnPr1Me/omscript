@@ -919,14 +919,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             return llvm::ConstantInt::get(getDefaultType(), 0);
         } else {
             // Print integer — printf %lld requires a 64-bit argument.
-            // Widen narrow integers using the correct sign extension.
+            // Widen narrow integers; truncate integers wider than i64 (e.g. i128).
             if (arg->getType()->isIntegerTy() && !arg->getType()->isIntegerTy(64)) {
-                const bool isUnsigned = unsignedExprs_.count(arg) || isUnsignedValue(arg);
-                arg = isUnsigned
-                    ? builder->CreateZExt(arg, getDefaultType(), "print.zext",
-                                          /*IsNonNeg=*/false)
-                    : builder->CreateSExt(arg, getDefaultType(), "print.sext");
-                if (isUnsigned) nonNegValues_.insert(arg);
+                const unsigned bits = arg->getType()->getIntegerBitWidth();
+                if (bits > 64) {
+                    arg = builder->CreateTrunc(arg, getDefaultType(), "print.trunc");
+                } else {
+                    const bool isUnsigned = unsignedExprs_.count(arg) || isUnsignedValue(arg);
+                    arg = isUnsigned
+                        ? builder->CreateZExt(arg, getDefaultType(), "print.zext",
+                                              /*IsNonNeg=*/false)
+                        : builder->CreateSExt(arg, getDefaultType(), "print.sext");
+                    if (isUnsigned) nonNegValues_.insert(arg);
+                }
             }
             llvm::GlobalVariable* formatStr = module->getGlobalVariable("print_fmt", true);
             if (!formatStr) {
@@ -4869,13 +4874,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateCall(getOrDeclarePuts(), {strData});
         } else {
             // println integer — printf %lld requires a 64-bit argument.
+            // Widen narrow integers; truncate integers wider than i64 (e.g. i128).
             if (arg->getType()->isIntegerTy() && !arg->getType()->isIntegerTy(64)) {
-                const bool isUnsigned = unsignedExprs_.count(arg) || isUnsignedValue(arg);
-                arg = isUnsigned
-                    ? builder->CreateZExt(arg, getDefaultType(), "println.zext",
-                                          /*IsNonNeg=*/false)
-                    : builder->CreateSExt(arg, getDefaultType(), "println.sext");
-                if (isUnsigned) nonNegValues_.insert(arg);
+                const unsigned bits = arg->getType()->getIntegerBitWidth();
+                if (bits > 64) {
+                    arg = builder->CreateTrunc(arg, getDefaultType(), "println.trunc");
+                } else {
+                    const bool isUnsigned = unsignedExprs_.count(arg) || isUnsignedValue(arg);
+                    arg = isUnsigned
+                        ? builder->CreateZExt(arg, getDefaultType(), "println.zext",
+                                              /*IsNonNeg=*/false)
+                        : builder->CreateSExt(arg, getDefaultType(), "println.sext");
+                    if (isUnsigned) nonNegValues_.insert(arg);
+                }
             }
             llvm::GlobalVariable* formatStr = module->getGlobalVariable("println_fmt", true);
             if (!formatStr) {
@@ -4905,13 +4916,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             builder->CreateCall(getOrDeclareFputs(), {strData, getOrDeclareStdout()});
         } else {
             // write integer — printf %lld requires a 64-bit argument.
+            // Widen narrow integers; truncate integers wider than i64 (e.g. i128).
             if (arg->getType()->isIntegerTy() && !arg->getType()->isIntegerTy(64)) {
-                const bool isUnsigned = unsignedExprs_.count(arg) || isUnsignedValue(arg);
-                arg = isUnsigned
-                    ? builder->CreateZExt(arg, getDefaultType(), "write.zext",
-                                          /*IsNonNeg=*/false)
-                    : builder->CreateSExt(arg, getDefaultType(), "write.sext");
-                if (isUnsigned) nonNegValues_.insert(arg);
+                const unsigned bits = arg->getType()->getIntegerBitWidth();
+                if (bits > 64) {
+                    arg = builder->CreateTrunc(arg, getDefaultType(), "write.trunc");
+                } else {
+                    const bool isUnsigned = unsignedExprs_.count(arg) || isUnsignedValue(arg);
+                    arg = isUnsigned
+                        ? builder->CreateZExt(arg, getDefaultType(), "write.zext",
+                                              /*IsNonNeg=*/false)
+                        : builder->CreateSExt(arg, getDefaultType(), "write.sext");
+                    if (isUnsigned) nonNegValues_.insert(arg);
+                }
             }
             llvm::GlobalVariable* formatStr = module->getGlobalVariable("write_fmt", true);
             if (!formatStr) {
