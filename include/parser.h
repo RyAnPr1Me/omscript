@@ -146,9 +146,14 @@ class Parser {
     /// Known struct names for parsing struct literals.
     std::unordered_set<std::string> structNames_;
 
-    /// Compile-time constants defined by top-level `comptime { const X: T = val; }` blocks.
+    /// Compile-time integer constants defined by top-level `comptime { const X = val; }` blocks.
     /// Used to resolve constant references in type annotations (@loop(unroll=N), u64x{N}, etc.)
     std::unordered_map<std::string, long long> comptimeConstants_;
+
+    /// Compile-time string constants defined by top-level `comptime { const X: string = "v"; }`
+    /// blocks.  Kept separately so the evaluator can distinguish int-valued from string-valued
+    /// comptime vars when resolving `if (COND)` branches.
+    std::unordered_map<std::string, std::string> comptimeStrings_;
 
     /// Type aliases defined by top-level `type X = Y` declarations.
     /// Used to resolve type names in variable declarations and function signatures.

@@ -336,47 +336,490 @@ std::unique_ptr<Program> Parser::parse() {
             }
             continue;
         }
-        // Top-level `comptime { const X: T = val; ... }` — extracts compile-time constants
-        // into comptimeConstants_ for use in type aliases and loop annotations.
-        // Also emits a global const VarDecl so the constant is accessible inside functions.
+        // Top-level `comptime { ... }` — compile-time constant block.
+        //
+        // Supported statements inside the block:
+        //   const NAME [: TYPE] = VALUE;        — define a comptime constant
+        //   if (COND) { ... } [else if (...) { ... }]* [else { ... }]
+        //                                        — conditional compilation
+        //   error("message");                   — abort compilation with a message
+        //   warning("message");                 — emit a diagnostic and continue
+        //
+        // VALUE may be an integer, float, string, boolean literal, or a reference
+        // to another comptime constant already defined in this or an earlier block.
+        //
+        // COND may use: integer/string literals, comptime const names, the built-in
+        // identifiers OS / ARCH / VERSION (matching __OS__ / __ARCH__ / __VERSION__
+        // from the preprocessor), defined(NAME) to test whether a comptime const
+        // exists, comparison operators (==, !=, <, <=, >, >=), and logical
+        // operators (&&, ||, !).
+        //
+        // Every const definition that survives an active branch is also injected as
+        // a global const VarDecl so the name is accessible inside function bodies.
         if (check(TokenType::COMPTIME)) {
             try {
                 advance(); // consume 'comptime'
                 consume(TokenType::LBRACE, "Expected '{' after 'comptime'");
-                while (!check(TokenType::RBRACE) && !isAtEnd()) {
-                    // Only handle `const NAME: TYPE = LITERAL;` declarations
-                    if (match(TokenType::CONST)) {
-                        const Token cname = consume(TokenType::IDENTIFIER, "Expected constant name");
-                        std::string typeName;
-                        if (match(TokenType::COLON)) {
-                            typeName = parseTypeAnnotation(); // consume type annotation
-                        }
-                        consume(TokenType::ASSIGN, "Expected '=' in comptime const");
-                        // Accept integer literal or a negative literal
-                        long long val = 0;
-                        bool neg = false;
-                        if (match(TokenType::MINUS)) neg = true;
-                        if (check(TokenType::INTEGER)) {
-                            val = static_cast<long long>(advance().intValue);
-                            if (neg) val = -val;
-                        }
-                        consume(TokenType::SEMICOLON, "Expected ';' after comptime const");
-                        comptimeConstants_[cname.lexeme] = val;
-                        // Inject as a global const so the constant is visible inside functions
-                        auto initExpr = std::make_unique<LiteralExpr>(val);
-                        auto gv = std::make_unique<VarDecl>(cname.lexeme, std::move(initExpr),
-                                                            /*isConst=*/true, typeName.empty() ? "int" : typeName);
-                        gv->isCompilerGenerated = true;
-                        gv->line = cname.line;
-                        gv->column = cname.column;
-                        globals.push_back(std::move(gv));
-                    } else {
-                        // Skip non-const statements inside comptime
-                        while (!check(TokenType::SEMICOLON) && !check(TokenType::RBRACE) && !isAtEnd())
-                            advance();
-                        if (check(TokenType::SEMICOLON)) advance();
+
+                // ── comptime condition-value helper ──────────────────────────
+                // A value in a condition expression — either a signed integer or
+                // a string.  Boolean results are represented as i64 0/1.
+                struct CVal {
+                    bool isStr = false;
+                    long long i = 0;
+                    std::string s;
+                    bool asBool() const {
+                        return isStr ? !s.empty() : (i != 0);
                     }
-                }
+                };
+
+                // Retrieve a comptime value by name.  Checks the built-in
+                // OS/ARCH/VERSION symbols first, then the int constant map,
+                // then the string constant map.  Returns an empty optional if
+                // the name is not defined.
+                auto getComptimeVar = [&](const std::string& name) -> std::optional<CVal> {
+#if defined(_WIN32) || defined(_WIN64)
+                    static constexpr const char* kOS   = "windows";
+#elif defined(__APPLE__)
+                    static constexpr const char* kOS   = "macos";
+#else
+                    static constexpr const char* kOS   = "linux";
+#endif
+#if defined(__x86_64__) || defined(_M_X64)
+                    static constexpr const char* kArch = "x86_64";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+                    static constexpr const char* kArch = "aarch64";
+#elif defined(__arm__) || defined(_M_ARM)
+                    static constexpr const char* kArch = "arm";
+#else
+                    static constexpr const char* kArch = "unknown";
+#endif
+                    if (name == "OS")      return CVal{true,  0, kOS};
+                    if (name == "ARCH")    return CVal{true,  0, kArch};
+                    if (name == "VERSION") return CVal{true,  0, OMSC_VERSION};
+                    {
+                        auto it = comptimeConstants_.find(name);
+                        if (it != comptimeConstants_.end())
+                            return CVal{false, it->second, ""};
+                    }
+                    {
+                        auto it = comptimeStrings_.find(name);
+                        if (it != comptimeStrings_.end())
+                            return CVal{true, 0, it->second};
+                    }
+                    return std::nullopt;
+                };
+
+                // ── condition evaluator ──────────────────────────────────────
+                // Precedence (low → high): || > && > comparison > primary
+                //
+                // primary: literal | identifier | defined(name) | (expr) | !primary
+                // comparison: primary  (== | != | < | <= | > | >=)  primary
+                // and-expr: comparison (&&  comparison)*
+                // or-expr:  and-expr   (||  and-expr)*
+                //
+                // evalOr is declared first so that evalPrimary can capture it
+                // by reference for parenthesised sub-expressions.
+                std::function<bool()>  evalOr;
+                std::function<bool()>  evalAnd;
+                std::function<CVal()>  evalCmp;
+                std::function<CVal()>  evalPrimary;
+
+                evalPrimary = [&]() -> CVal {
+                    // Logical NOT
+                    if (match(TokenType::NOT)) {
+                        CVal v = evalPrimary();
+                        return CVal{false, v.asBool() ? 0LL : 1LL, ""};
+                    }
+                    // Parenthesised sub-expression
+                    if (match(TokenType::LPAREN)) {
+                        bool r = evalOr();
+                        if (check(TokenType::RPAREN)) advance();
+                        return CVal{false, r ? 1LL : 0LL, ""};
+                    }
+                    // String literal
+                    if (check(TokenType::STRING)) {
+                        return CVal{true, 0, advance().lexeme};
+                    }
+                    // Integer literal (optionally negated)
+                    if (check(TokenType::MINUS)) {
+                        advance();
+                        if (check(TokenType::INTEGER)) {
+                            return CVal{false, -(long long)advance().intValue, ""};
+                        }
+                        return CVal{false, 0, ""};
+                    }
+                    if (check(TokenType::INTEGER)) {
+                        return CVal{false, (long long)advance().intValue, ""};
+                    }
+                    // Float literal — coerce to int for comptime comparisons
+                    if (check(TokenType::FLOAT)) {
+                        return CVal{false, (long long)advance().floatValue, ""};
+                    }
+                    // Boolean literals
+                    if (match(TokenType::TRUE))  return CVal{false, 1, ""};
+                    if (match(TokenType::FALSE)) return CVal{false, 0, ""};
+                    // Identifier — comptime var ref or defined(name) predicate
+                    if (check(TokenType::IDENTIFIER)) {
+                        const std::string name = advance().lexeme;
+                        // defined(NAME) — tests whether the name exists in
+                        // either the int or the string comptime constant maps.
+                        if (name == "defined" && check(TokenType::LPAREN)) {
+                            advance(); // consume '('
+                            std::string dname;
+                            if (check(TokenType::IDENTIFIER)) dname = advance().lexeme;
+                            if (check(TokenType::RPAREN)) advance(); // consume ')'
+                            const bool isDef = comptimeConstants_.count(dname) > 0 ||
+                                               comptimeStrings_.count(dname)    > 0;
+                            return CVal{false, isDef ? 1LL : 0LL, ""};
+                        }
+                        auto v = getComptimeVar(name);
+                        return v.value_or(CVal{false, 0, ""});
+                    }
+                    return CVal{false, 0, ""};
+                };
+
+                evalCmp = [&]() -> CVal {
+                    CVal lhs = evalPrimary();
+                    if (!check(TokenType::EQ) && !check(TokenType::NE) &&
+                        !check(TokenType::LT) && !check(TokenType::LE) &&
+                        !check(TokenType::GT) && !check(TokenType::GE)) {
+                        return lhs;
+                    }
+                    const TokenType op = advance().type; // consume comparison operator
+                    CVal rhs = evalPrimary();
+                    bool result = false;
+                    if (lhs.isStr && rhs.isStr) {
+                        if      (op == TokenType::EQ) result = lhs.s == rhs.s;
+                        else if (op == TokenType::NE) result = lhs.s != rhs.s;
+                        else if (op == TokenType::LT) result = lhs.s <  rhs.s;
+                        else if (op == TokenType::LE) result = lhs.s <= rhs.s;
+                        else if (op == TokenType::GT) result = lhs.s >  rhs.s;
+                        else if (op == TokenType::GE) result = lhs.s >= rhs.s;
+                    } else {
+                        const long long l = lhs.isStr ? 0LL : lhs.i;
+                        const long long r = rhs.isStr ? 0LL : rhs.i;
+                        if      (op == TokenType::EQ) result = l == r;
+                        else if (op == TokenType::NE) result = l != r;
+                        else if (op == TokenType::LT) result = l <  r;
+                        else if (op == TokenType::LE) result = l <= r;
+                        else if (op == TokenType::GT) result = l >  r;
+                        else if (op == TokenType::GE) result = l >= r;
+                    }
+                    return CVal{false, result ? 1LL : 0LL, ""};
+                };
+
+                evalAnd = [&]() -> bool {
+                    bool result = evalCmp().asBool();
+                    while (check(TokenType::AND)) {
+                        advance();
+                        // Always evaluate the RHS (no short-circuit; this is
+                        // a constant evaluator, so no side-effects).
+                        bool rhs = evalCmp().asBool();
+                        result = result && rhs;
+                    }
+                    return result;
+                };
+
+                evalOr = [&]() -> bool {
+                    bool result = evalAnd();
+                    while (check(TokenType::OR)) {
+                        advance();
+                        bool rhs = evalAnd();
+                        result = result || rhs;
+                    }
+                    return result;
+                };
+
+                // ── body parser ───────────────────────────────────────────────
+                // parseBody(active) processes comptime statements until '}'.
+                // When active==false the branch is inactive (dead): constants
+                // are NOT registered and VarDecls are NOT emitted, but the
+                // tokens are consumed so the parser stays in sync.
+                std::function<void(bool)> parseBody;
+                parseBody = [&](bool active) {
+                    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+                        // ── const declaration ──────────────────────────────
+                        if (match(TokenType::CONST)) {
+                            const Token cname = consume(TokenType::IDENTIFIER,
+                                "Expected constant name after 'const' in comptime block");
+                            std::string typeName;
+                            if (match(TokenType::COLON)) {
+                                typeName = parseTypeAnnotation();
+                            }
+                            consume(TokenType::ASSIGN,
+                                "Expected '=' in comptime const declaration");
+                            // Determine the value's kind.
+                            const bool neg = match(TokenType::MINUS);
+                            if (check(TokenType::INTEGER)) {
+                                const long long val = neg
+                                    ? -(long long)advance().intValue
+                                    :  (long long)advance().intValue;
+                                consume(TokenType::SEMICOLON,
+                                    "Expected ';' after comptime const");
+                                if (active) {
+                                    comptimeConstants_[cname.lexeme] = val;
+                                    const std::string tn =
+                                        typeName.empty() ? "int" : typeName;
+                                    auto initExpr = std::make_unique<LiteralExpr>(val);
+                                    auto gv = std::make_unique<VarDecl>(
+                                        cname.lexeme, std::move(initExpr),
+                                        /*isConst=*/true, tn);
+                                    gv->isCompilerGenerated = true;
+                                    gv->line   = cname.line;
+                                    gv->column = cname.column;
+                                    globals.push_back(std::move(gv));
+                                }
+                            } else if (check(TokenType::FLOAT)) {
+                                const double fval = neg
+                                    ? -advance().floatValue
+                                    :  advance().floatValue;
+                                consume(TokenType::SEMICOLON,
+                                    "Expected ';' after comptime const");
+                                if (active) {
+                                    // Store truncated integer for numeric
+                                    // comptime-if comparisons.
+                                    comptimeConstants_[cname.lexeme] =
+                                        (long long)fval;
+                                    const std::string tn =
+                                        typeName.empty() ? "float" : typeName;
+                                    auto initExpr =
+                                        std::make_unique<LiteralExpr>(fval);
+                                    auto gv = std::make_unique<VarDecl>(
+                                        cname.lexeme, std::move(initExpr),
+                                        /*isConst=*/true, tn);
+                                    gv->isCompilerGenerated = true;
+                                    gv->line   = cname.line;
+                                    gv->column = cname.column;
+                                    globals.push_back(std::move(gv));
+                                }
+                            } else if (!neg && check(TokenType::STRING)) {
+                                const std::string sval = advance().lexeme;
+                                consume(TokenType::SEMICOLON,
+                                    "Expected ';' after comptime const");
+                                if (active) {
+                                    comptimeStrings_[cname.lexeme] = sval;
+                                    const std::string tn =
+                                        typeName.empty() ? "string" : typeName;
+                                    auto initExpr =
+                                        std::make_unique<LiteralExpr>(sval);
+                                    auto gv = std::make_unique<VarDecl>(
+                                        cname.lexeme, std::move(initExpr),
+                                        /*isConst=*/true, tn);
+                                    gv->isCompilerGenerated = true;
+                                    gv->line   = cname.line;
+                                    gv->column = cname.column;
+                                    globals.push_back(std::move(gv));
+                                }
+                            } else if (!neg && match(TokenType::TRUE)) {
+                                consume(TokenType::SEMICOLON,
+                                    "Expected ';' after comptime const");
+                                if (active) {
+                                    comptimeConstants_[cname.lexeme] = 1;
+                                    const std::string tn =
+                                        typeName.empty() ? "bool" : typeName;
+                                    auto initExpr =
+                                        std::make_unique<LiteralExpr>(1LL);
+                                    auto gv = std::make_unique<VarDecl>(
+                                        cname.lexeme, std::move(initExpr),
+                                        /*isConst=*/true, tn);
+                                    gv->isCompilerGenerated = true;
+                                    gv->line   = cname.line;
+                                    gv->column = cname.column;
+                                    globals.push_back(std::move(gv));
+                                }
+                            } else if (!neg && match(TokenType::FALSE)) {
+                                consume(TokenType::SEMICOLON,
+                                    "Expected ';' after comptime const");
+                                if (active) {
+                                    comptimeConstants_[cname.lexeme] = 0;
+                                    const std::string tn =
+                                        typeName.empty() ? "bool" : typeName;
+                                    auto initExpr =
+                                        std::make_unique<LiteralExpr>(0LL);
+                                    auto gv = std::make_unique<VarDecl>(
+                                        cname.lexeme, std::move(initExpr),
+                                        /*isConst=*/true, tn);
+                                    gv->isCompilerGenerated = true;
+                                    gv->line   = cname.line;
+                                    gv->column = cname.column;
+                                    globals.push_back(std::move(gv));
+                                }
+                            } else if (!neg && check(TokenType::IDENTIFIER)) {
+                                // Reference to an already-defined comptime const.
+                                const std::string refName = advance().lexeme;
+                                consume(TokenType::SEMICOLON,
+                                    "Expected ';' after comptime const");
+                                if (active) {
+                                    const auto itI =
+                                        comptimeConstants_.find(refName);
+                                    const auto itS =
+                                        comptimeStrings_.find(refName);
+                                    auto bv = getComptimeVar(refName);
+                                    if (bv && !bv->isStr) {
+                                        // Integer or built-in numeric
+                                        comptimeConstants_[cname.lexeme] =
+                                            bv->i;
+                                        const std::string tn =
+                                            typeName.empty() ? "int" : typeName;
+                                        auto initExpr =
+                                            std::make_unique<LiteralExpr>(bv->i);
+                                        auto gv = std::make_unique<VarDecl>(
+                                            cname.lexeme, std::move(initExpr),
+                                            /*isConst=*/true, tn);
+                                        gv->isCompilerGenerated = true;
+                                        gv->line   = cname.line;
+                                        gv->column = cname.column;
+                                        globals.push_back(std::move(gv));
+                                    } else if (bv && bv->isStr) {
+                                        // String (user-defined or built-in
+                                        // OS/ARCH/VERSION)
+                                        comptimeStrings_[cname.lexeme] = bv->s;
+                                        const std::string tn =
+                                            typeName.empty() ? "string" : typeName;
+                                        auto initExpr =
+                                            std::make_unique<LiteralExpr>(bv->s);
+                                        auto gv = std::make_unique<VarDecl>(
+                                            cname.lexeme, std::move(initExpr),
+                                            /*isConst=*/true, tn);
+                                        gv->isCompilerGenerated = true;
+                                        gv->line   = cname.line;
+                                        gv->column = cname.column;
+                                        globals.push_back(std::move(gv));
+                                    } else if (itI != comptimeConstants_.end()) {
+                                        // Already checked via getComptimeVar but
+                                        // keep as fallback for non-builtin ints.
+                                        comptimeConstants_[cname.lexeme] =
+                                            itI->second;
+                                        const std::string tn =
+                                            typeName.empty() ? "int" : typeName;
+                                        auto initExpr =
+                                            std::make_unique<LiteralExpr>(
+                                                itI->second);
+                                        auto gv = std::make_unique<VarDecl>(
+                                            cname.lexeme, std::move(initExpr),
+                                            /*isConst=*/true, tn);
+                                        gv->isCompilerGenerated = true;
+                                        gv->line   = cname.line;
+                                        gv->column = cname.column;
+                                        globals.push_back(std::move(gv));
+                                    } else if (itS != comptimeStrings_.end()) {
+                                        comptimeStrings_[cname.lexeme] =
+                                            itS->second;
+                                        const std::string tn =
+                                            typeName.empty() ? "string" : typeName;
+                                        auto initExpr =
+                                            std::make_unique<LiteralExpr>(
+                                                itS->second);
+                                        auto gv = std::make_unique<VarDecl>(
+                                            cname.lexeme, std::move(initExpr),
+                                            /*isConst=*/true, tn);
+                                        gv->isCompilerGenerated = true;
+                                        gv->line   = cname.line;
+                                        gv->column = cname.column;
+                                        globals.push_back(std::move(gv));
+                                    } else {
+                                        errors_.push_back(
+                                            "comptime const '" + cname.lexeme +
+                                            "': undefined reference to comptime "
+                                            "constant '" + refName + "'");
+                                    }
+                                }
+                            } else {
+                                // Unrecognised value form — skip to semicolon.
+                                while (!check(TokenType::SEMICOLON) &&
+                                       !check(TokenType::RBRACE) && !isAtEnd())
+                                    advance();
+                                if (check(TokenType::SEMICOLON)) advance();
+                            }
+                        }
+                        // ── comptime if / else if / else ───────────────────
+                        else if (match(TokenType::IF)) {
+                            consume(TokenType::LPAREN,
+                                "Expected '(' after 'if' in comptime block");
+                            const bool cond = evalOr();
+                            consume(TokenType::RPAREN,
+                                "Expected ')' after condition in comptime if");
+                            consume(TokenType::LBRACE,
+                                "Expected '{' after comptime if condition");
+                            parseBody(active && cond);
+                            consume(TokenType::RBRACE,
+                                "Expected '}' to close comptime if block");
+                            bool handled = cond; // true branch was taken
+                            while (check(TokenType::ELSE)) {
+                                advance(); // consume 'else'
+                                if (match(TokenType::IF)) {
+                                    // else if (COND) { ... }
+                                    consume(TokenType::LPAREN,
+                                        "Expected '(' after 'else if' in "
+                                        "comptime block");
+                                    const bool elseIfCond = evalOr();
+                                    consume(TokenType::RPAREN,
+                                        "Expected ')' after comptime else if "
+                                        "condition");
+                                    consume(TokenType::LBRACE,
+                                        "Expected '{' after comptime else if "
+                                        "condition");
+                                    parseBody(active && !handled && elseIfCond);
+                                    consume(TokenType::RBRACE,
+                                        "Expected '}' to close comptime else if "
+                                        "block");
+                                    if (elseIfCond) handled = true;
+                                } else {
+                                    // plain else { ... }
+                                    consume(TokenType::LBRACE,
+                                        "Expected '{' after 'else' in comptime "
+                                        "block");
+                                    parseBody(active && !handled);
+                                    consume(TokenType::RBRACE,
+                                        "Expected '}' to close comptime else "
+                                        "block");
+                                    break; // no more branches after else
+                                }
+                            }
+                        }
+                        // ── error("msg") / warning("msg") ─────────────────
+                        else if (check(TokenType::IDENTIFIER) &&
+                                 (tokens[current].lexeme == "error" ||
+                                  tokens[current].lexeme == "warning")) {
+                            const std::string fname = advance().lexeme;
+                            if (match(TokenType::LPAREN)) {
+                                std::string msg;
+                                if (check(TokenType::STRING))
+                                    msg = advance().lexeme;
+                                if (check(TokenType::RPAREN)) advance();
+                                if (check(TokenType::SEMICOLON)) advance();
+                                if (active) {
+                                    if (fname == "error") {
+                                        errors_.push_back(
+                                            "comptime error: " + msg);
+                                    } else {
+                                        warnings_.push_back(
+                                            "comptime warning: " + msg);
+                                    }
+                                }
+                            } else {
+                                while (!check(TokenType::SEMICOLON) &&
+                                       !check(TokenType::RBRACE) && !isAtEnd())
+                                    advance();
+                                if (check(TokenType::SEMICOLON)) advance();
+                            }
+                        }
+                        // ── skip anything else (future-proofing) ──────────
+                        else {
+                            while (!check(TokenType::SEMICOLON) &&
+                                   !check(TokenType::RBRACE)    &&
+                                   !check(TokenType::IF)        &&
+                                   !check(TokenType::ELSE)      &&
+                                   !check(TokenType::CONST)     &&
+                                   !isAtEnd())
+                                advance();
+                            if (check(TokenType::SEMICOLON)) advance();
+                        }
+                    }
+                };
+
+                parseBody(/*active=*/true);
                 consume(TokenType::RBRACE, "Expected '}' to close comptime block");
             } catch (const std::exception& e) {
                 errors_.push_back(e.what());
