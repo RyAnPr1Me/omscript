@@ -1126,6 +1126,28 @@ static void collectWrittenVars(const Statement* stmt,
         collectWrittenVars(fe->body.get(), out);
         break;
     }
+    case ASTNodeType::DO_WHILE_STMT:
+        collectWrittenVars(static_cast<const DoWhileStmt*>(stmt)->body.get(), out);
+        break;
+    case ASTNodeType::SWITCH_STMT: {
+        const auto* sw = static_cast<const SwitchStmt*>(stmt);
+        for (const auto& sc : sw->cases)
+            for (const auto& s : sc.body)
+                collectWrittenVars(s.get(), out);
+        break;
+    }
+    case ASTNodeType::CATCH_STMT:
+        collectWrittenVars(static_cast<const CatchStmt*>(stmt)->body.get(), out);
+        break;
+    case ASTNodeType::DEFER_STMT:
+        collectWrittenVars(static_cast<const DeferStmt*>(stmt)->body.get(), out);
+        break;
+    case ASTNodeType::PIPELINE_STMT: {
+        const auto* pl = static_cast<const PipelineStmt*>(stmt);
+        for (const auto& stage : pl->stages)
+            collectWrittenVars(stage.body.get(), out);
+        break;
+    }
     default:
         break;
     }

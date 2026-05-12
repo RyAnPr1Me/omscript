@@ -264,6 +264,12 @@ const std::unordered_map<std::string_view, BuiltinEffects>& BuiltinEffectTable::
         // ── Program synthesis stdlib ──────────────────────────────────────────
         {"std_synthesize",  {false, false, false, false}},  // internal compiler hook
         {"std__synthesize", {false, false, false, false}},
+
+        // ── funcptr builtins ─────────────────────────────────────────────────
+        // funcptr_from: reads only the function table — no heap side effects.
+        {"funcptr_from",    {true,  true,  false, false, false, false, false, false}},
+        // funcptr_new: allocates executable memory (writes via OS, allocates).
+        {"funcptr_new",     {false, false, true,  false, false, false, true,  false}},
     };
     // clang-format on
     return kTable;

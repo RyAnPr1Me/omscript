@@ -250,6 +250,26 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     }
                 }
             }
+            // Pre-detect `filter`/`std::filter` → array case BEFORE calling
+            // generateExpression.  The FILTER codegen handler moves the CallExpr
+            // arguments (std::move) which would make them inaccessible to the
+            // post-generateExpression arrayVars_ tracking block below.
+            if (stmt->initializer->type == ASTNodeType::CALL_EXPR) {
+                auto* call = static_cast<CallExpr*>(stmt->initializer.get());
+                if (!call->arguments.empty() &&
+                    (call->callee == "filter" || call->callee == "std::filter")) {
+                    auto* firstArg = call->arguments[0].get();
+                    if (firstArg) {
+                        if (firstArg->type == ASTNodeType::IDENTIFIER_EXPR) {
+                            auto* idArg = static_cast<IdentifierExpr*>(firstArg);
+                            if (arrayVars_.count(idArg->name))
+                                arrayVars_.insert(stmt->name);
+                        } else if (firstArg->type == ASTNodeType::ARRAY_EXPR) {
+                            arrayVars_.insert(stmt->name);
+                        }
+                    }
+                }
+            }
             initValue = generateExpression(stmt->initializer.get());
             if (useReadOnlyGlobal) {
                 pendingArrayReadOnlyGlobal_ = false;
@@ -477,6 +497,46 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         }
     }
 
+    // Track `funcptr` variables: pointers to executable machine code.
+    // Dereferencing a funcptr calls the code at the stored address.
+    {
+        const std::string& tn = stmt->typeName;
+        if (tn == "funcptr") {
+            funcptrVarNames_.insert(stmt->name);
+            // Also add to ptrVarNames_ so isStringExpr() excludes it.
+            ptrVarNames_.insert(stmt->name);
+        } else {
+            funcptrVarNames_.erase(stmt->name);
+        }
+    }
+
+    // Track `pslice<T>` variables: fat pointers (raw pointer + length) with
+    // compile-time or runtime bounds checks on element access.
+    {
+        const std::string& tn = stmt->typeName;
+        if (tn.size() > 8 && tn.rfind("pslice<", 0) == 0 && tn.back() == '>') {
+            psliceVarNames_.insert(stmt->name);
+            // Also excluded from isStringExpr via ptrVarNames_.
+            ptrVarNames_.insert(stmt->name);
+            psliceElemTypes_[stmt->name] = tn.substr(7, tn.size() - 8);
+            // Create a companion alloca for the length in the entry block.
+            llvm::Function* fn = builder->GetInsertBlock()->getParent();
+            llvm::IRBuilder<> entryB(&fn->getEntryBlock(), fn->getEntryBlock().begin());
+            auto* lenAlloca = entryB.CreateAlloca(getDefaultType(), nullptr,
+                                                   stmt->name + ".pslice.len");
+            lenAlloca->setAlignment(llvm::Align(8));
+            psliceLenAllocas_[stmt->name] = lenAlloca;
+            // Zero-init the len alloca so it is defined even without initializer.
+            builder->CreateAlignedStore(
+                llvm::ConstantInt::get(getDefaultType(), 0), lenAlloca, llvm::Align(8));
+        } else {
+            psliceVarNames_.erase(stmt->name);
+            psliceElemTypes_.erase(stmt->name);
+            psliceLenAllocas_.erase(stmt->name);
+            psliceCompTimeLens_.erase(stmt->name);
+        }
+    }
+
     // Track array variables so isStringExpr() can distinguish array pointers
     // from string pointers (both now use pointer-typed allocas).
     {
@@ -498,9 +558,37 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     call->callee == "shift" || call->callee == "unshift" ||
                     call->callee == "sort" || call->callee == "reverse" ||
                     call->callee == "array_remove" || call->callee == "array_reduce" ||
+                    call->callee == "array_insert" || call->callee == "array_unique" ||
+                    call->callee == "array_rotate" || call->callee == "array_zip" ||
+                    call->callee == "array_take" || call->callee == "array_drop" ||
+                    call->callee == "range" || call->callee == "range_step" ||
                     call->callee == "str_split" || call->callee == "str_chars" ||
                     arrayReturningFunctions_.count(call->callee)) {
                     isArray = true;
+                }
+                // `filter` and `std::filter` dispatch to array_filter when the
+                // first argument is an array, or to str_filter when it is a string.
+                // Detect the array case by checking arrayVars_ for the argument.
+                // NOTE: generateExpression (called before this block) moves the
+                // arguments out of the CallExpr via the FILTER handler, so
+                // call->arguments[0] may be null here.  We guard against that and
+                // fall back to the pre-detection result already stored in arrayVars_.
+                if (!isArray && !call->arguments.empty() &&
+                    (call->callee == "filter" || call->callee == "std::filter")) {
+                    auto* firstArg = call->arguments[0].get();
+                    if (firstArg) {
+                        if (firstArg->type == ASTNodeType::IDENTIFIER_EXPR) {
+                            auto* idArg = static_cast<IdentifierExpr*>(firstArg);
+                            if (arrayVars_.count(idArg->name))
+                                isArray = true;
+                        } else if (firstArg->type == ASTNodeType::ARRAY_EXPR) {
+                            isArray = true;
+                        }
+                    } else {
+                        // Arguments were moved by the FILTER codegen handler.
+                        // Preserve the pre-detection result from arrayVars_.
+                        isArray = arrayVars_.count(stmt->name) > 0;
+                    }
                 }
             }
         }
@@ -561,6 +649,24 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 (allocaType->isIntegerTy() || allocaType->isFloatTy() ||
                  allocaType->isDoubleTy()  || allocaType->isPointerTy()))
                 initStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+        }
+        // For pslice variables, also store the length stashed by pslice_new<T>.
+        if (psliceVarNames_.count(stmt->name) && lastPsliceNewLen_) {
+            auto lenIt = psliceLenAllocas_.find(stmt->name);
+            if (lenIt != psliceLenAllocas_.end()) {
+                llvm::Value* lenToStore = builder->CreateIntCast(
+                    lastPsliceNewLen_, getDefaultType(), /*isSigned=*/false, "pslice.len.cast");
+                auto* lenStore = builder->CreateAlignedStore(
+                    lenToStore, lenIt->second, llvm::Align(8));
+                if (tbaaScalar_)
+                    lenStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+                // Record compile-time constant length if available.
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(lastPsliceNewLen_))
+                    psliceCompTimeLens_[stmt->name] = static_cast<int64_t>(ci->getZExtValue());
+                else
+                    psliceCompTimeLens_[stmt->name] = -1;
+            }
+            lastPsliceNewLen_ = nullptr;
         }
         // Track non-negativity: if a variable is initialized with a
         if (allocaType->isIntegerTy()) {
@@ -2507,10 +2613,15 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         // character loads within bounds are always defined.
         if (optimizationLevel >= OptimizationLevel::O1)
             charByte->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
-        // i8 zero-extended to i64: always in [0, 256) and provably non-negative.
-        // Use zext nneg (LLVM 18+) — !range is not valid on zext instructions.
+        // i8 zero-extended to i64: the value is in [0, 255] and therefore
+        // non-negative, but IsNonNeg must be false here — LLVM's `nneg` flag
+        // on zext asserts the *source* i8 is non-negative (≥ 0 in signed
+        // terms), which is false for bytes 128–255. We communicate the range
+        // via nonNegValues_ instead, which is used by the OmScript-level
+        // alias analysis rather than an LLVM IR attribute.
+        // Use zext — !range is not valid on zext instructions in LLVM 18.
         auto* charExt = builder->CreateZExt(charByte, getDefaultType(), "foreach.charext",
-                                             /*IsNonNeg=*/true);
+                                             /*IsNonNeg=*/false);
         nonNegValues_.insert(charExt);
         elemVal = charExt;
     } else {
@@ -3144,8 +3255,19 @@ void CodeGenerator::emitDeferredFrees() {
         return;
     }
     llvm::Function* freeFn = getOrDeclareFree();
-    for (llvm::Value* ptr : deferredFreeQueue_) {
-        builder->CreateCall(freeFn, {ptr});
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    for (const DeferredFreeEntry& entry : deferredFreeQueue_) {
+        // Load the heap pointer from the alloca at this (exit) point.
+        // The alloca is created at function entry and dominates every block,
+        // so this load is always valid regardless of where invalidate() was
+        // called (e.g. inside a loop body).
+        llvm::Value* heapPtr = builder->CreateLoad(
+            entry.elemType, entry.alloca, entry.alloca->getName() + ".dfree");
+        if (!heapPtr->getType()->isPointerTy()) {
+            heapPtr = builder->CreateIntToPtr(heapPtr, ptrTy,
+                                              entry.alloca->getName() + ".dfreeptr");
+        }
+        builder->CreateCall(freeFn, {heapPtr});
     }
     deferredFreeQueue_.clear();
 }
@@ -3193,21 +3315,19 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
         // Arena-backed pointers must NOT be individually freed; the entire
         // slab is freed once at every function return.
         if (!isArenaPtr) {
-            // Load the heap pointer from the alloca (i64 stored as int, ptr cast needed).
             auto* allocaInst2 = llvm::dyn_cast<llvm::AllocaInst>(alloca);
             if (allocaInst2) {
-                auto* ptrTy = llvm::PointerType::getUnqual(*context);
-                llvm::Value* heapPtr = builder->CreateLoad(
-                    allocaInst2->getAllocatedType(), allocaInst2, name + ".ptr");
-                // Cast i64 → ptr if necessary (OmScript stores heap pointers as i64)
-                if (!heapPtr->getType()->isPointerTy()) {
-                    heapPtr = builder->CreateIntToPtr(heapPtr, ptrTy, name + ".heapptr");
-                }
-                // Defer the free() to the function exit so all invalidated
-                // pointers are freed in a single batch at the optimal CFG
-                // point.  The variable is already logically dead (deadVars_);
-                // any use before then is a compile-time error.
-                deferredFreeQueue_.push_back(heapPtr);
+                // Capture (alloca, elemType) for deferred emission.
+                // The alloca dominates every basic block in this function, so
+                // loading from it in emitDeferredFrees() — just before each
+                // return/throw edge — is always valid, even when this
+                // invalidate() call is inside a loop body.  Storing the alloca
+                // here (not the loaded value) avoids IR domination violations
+                // that would arise if we pushed the loaded i64/ptr value and
+                // later used it outside its defining basic block.
+                deferredFreeQueue_.push_back(
+                    {allocaInst2,
+                     allocaInst2->getAllocatedType()});
             }
         }
     }
@@ -3263,6 +3383,11 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     ptrElemTypes_.erase(name);
     heapPtrVarNames_.erase(name);
     arenaPtrVarNames_.erase(name);
+    funcptrVarNames_.erase(name);
+    psliceVarNames_.erase(name);
+    psliceElemTypes_.erase(name);
+    psliceLenAllocas_.erase(name);
+    psliceCompTimeLens_.erase(name);
     structVars_.erase(name);
     simdVars_.erase(name);
     registerVars_.erase(name);
@@ -3825,6 +3950,9 @@ OwnershipState CodeGenerator::getOwnershipState(const std::string& varName) cons
 }
 
 void CodeGenerator::checkVariableReadable(const std::string& varName, ASTNode* site) {
+    // Ω spec §6.2: --no-ownership-checks disables all safety validation.
+    if (noOwnershipChecks_) return;
+
     // Dead check (moved / invalidated)
     auto deadIt = deadVars_.find(varName);
     if (deadIt != deadVars_.end()) {
@@ -3910,10 +4038,170 @@ void CodeGenerator::generateFreeze(FreezeStmt* stmt) {
     }
 }
 
-// generatePipeline: desugar a pipeline { stage ... } block into a for-loop
+// ── generateShared ────────────────────────────────────────────────────────────
+// `shared x;` — transition variable x to read-only aliasable ownership (Ω §3.1).
+void CodeGenerator::generateShared(SharedStmt* stmt) {
+    const std::string& name = stmt->varName;
 
-// Helper: collect all unique array-identifier bases from a statement subtree.
-// Used by generatePipeline to know which arrays to auto-prefetch.
+    // Validate variable exists.
+    if (namedValues.find(name) == namedValues.end()) {
+        codegenError("Unknown variable '" + name + "' in shared statement", stmt);
+    }
+
+    // Validate ownership state.
+    auto state = getOwnershipState(name);
+    if (state == OwnershipState::Moved) {
+        codegenError("Cannot mark moved variable '" + name + "' as shared", stmt);
+    }
+    if (state == OwnershipState::Invalidated) {
+        codegenError("Cannot mark invalidated variable '" + name + "' as shared", stmt);
+    }
+    if (state == OwnershipState::MutBorrowed) {
+        codegenError("Cannot mark '" + name +
+                     "' as shared — it has an active mutable borrow", stmt);
+    }
+
+    // Update codegen ownership state to Shared.
+    varBorrowStates_[name].shared = true;
+}
+
+// ── generateOwn ──────────────────────────────────────────────────────────────
+// `own x;` — assert unique ownership of x, clearing shared state (Ω §3.1).
+void CodeGenerator::generateOwn(OwnStmt* stmt) {
+    const std::string& name = stmt->varName;
+
+    // Validate variable exists.
+    if (namedValues.find(name) == namedValues.end()) {
+        codegenError("Unknown variable '" + name + "' in own statement", stmt);
+    }
+
+    // Validate ownership state.
+    auto state = getOwnershipState(name);
+    if (state == OwnershipState::Moved) {
+        codegenError("Cannot assert ownership of moved variable '" + name + "'", stmt);
+    }
+    if (state == OwnershipState::Invalidated) {
+        codegenError("Cannot assert ownership of invalidated variable '" + name + "'", stmt);
+    }
+    if (state == OwnershipState::Borrowed || state == OwnershipState::MutBorrowed) {
+        codegenError("Cannot assert unique ownership of '" + name +
+                     "' — it has active borrow(s)", stmt);
+    }
+
+    // Clear shared flag — frozen remains (freeze is a stronger invariant).
+    auto it = varBorrowStates_.find(name);
+    if (it != varBorrowStates_.end()) {
+        it->second.shared = false;
+    }
+}
+
+// ── generateConstructFields (shared helper) ──────────────────────────────────
+// Emit one typed GEP + aligned store per field entry for a construct statement
+// or new-construct expression.  basePtr is the already-loaded pointer value;
+// structHint is a (possibly empty) struct-type name used by resolveField.
+void CodeGenerator::emitConstructFieldsInto(
+    llvm::Value* basePtr,
+    const std::string& structHint,
+    const std::vector<std::pair<std::string,
+                                std::unique_ptr<Expression>>>& fields,
+    const ASTNode* errorNode)
+{
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    if (!basePtr->getType()->isPointerTy())
+        basePtr = builder->CreateIntToPtr(basePtr, ptrTy, "construct.baseptr");
+
+    for (const auto& [fieldName, valueExpr] : fields) {
+        const ResolvedField rf = resolveField(structHint, fieldName, errorNode);
+
+        llvm::Value* val = generateExpression(valueExpr.get());
+        llvm::Type*  elemTy = rf.fieldType ? rf.fieldType : getDefaultType();
+        val = convertTo(val, elemTy);
+
+        llvm::Value* elemPtr;
+        if (rf.structType) {
+            elemPtr = builder->CreateStructGEP(
+                rf.structType, basePtr,
+                static_cast<unsigned>(rf.index), "construct.field.ptr");
+        } else {
+            elemPtr = builder->CreateInBoundsGEP(
+                getDefaultType(), basePtr,
+                llvm::ConstantInt::get(getDefaultType(), rf.index),
+                "construct.field.ptr");
+        }
+
+        // Choose alignment from field attributes (respects @align annotation)
+        // or fall back to the ABI alignment of the element type.
+        const auto declIt = structFieldDecls_.find(rf.structName);
+        llvm::Align fieldAlign;
+        if (declIt != structFieldDecls_.end() &&
+            rf.index < declIt->second.size() &&
+            declIt->second[rf.index].attrs.align > 0) {
+            fieldAlign = llvm::Align(
+                static_cast<unsigned>(declIt->second[rf.index].attrs.align));
+        } else {
+            fieldAlign = module->getDataLayout().getABITypeAlign(elemTy);
+        }
+
+        llvm::StoreInst* store =
+            builder->CreateAlignedStore(val, elemPtr, fieldAlign);
+
+        // Per-field TBAA metadata (matches generateFieldAssign's convention).
+        store->setMetadata(llvm::LLVMContext::MD_tbaa,
+                           getOrCreateFieldTBAA(rf.structName, rf.index));
+
+        // !nontemporal hint for cold fields.
+        if (declIt != structFieldDecls_.end() &&
+            rf.index < declIt->second.size() &&
+            declIt->second[rf.index].attrs.cold) {
+            llvm::Metadata* one[] = {
+                llvm::ConstantAsMetadata::get(
+                    llvm::ConstantInt::get(
+                        llvm::Type::getInt32Ty(*context), 1))
+            };
+            store->setMetadata(llvm::LLVMContext::MD_nontemporal,
+                               llvm::MDNode::get(*context, one));
+        }
+    }
+}
+
+// ── generateConstruct ─────────────────────────────────────────────────────────
+// `construct ptr { field: val, ... };`
+// In-place field initialisation of already-allocated memory.  Lowers to a
+// sequence of CreateStructGEP + CreateAlignedStore pairs with per-field TBAA
+// metadata — identical to writing `ptr->x = v; ptr->y = v; …` by hand.
+void CodeGenerator::generateConstruct(ConstructStmt* stmt) {
+    llvm::Value* ptr = generateExpression(stmt->target.get());
+
+    // Determine the struct-type hint from the target expression.
+    const std::string hint = stmt->typeName.empty()
+        ? resolveStructType(stmt->target.get())
+        : stmt->typeName;
+
+    emitConstructFieldsInto(ptr, hint, stmt->fields, stmt);
+}
+
+// ── generateNewConstruct ──────────────────────────────────────────────────────
+// `new T { field: val, ... }` expression.
+// 1. Allocate one T via the existing alloc<T>(1) builtin path.
+// 2. Initialise each listed field via emitConstructFieldsInto.
+// 3. Return the pointer (same type as alloc<T>(1)).
+llvm::Value* CodeGenerator::generateNewConstruct(NewConstructExpr* expr) {
+    // Build a temporary CallExpr("alloc<T>", {}) so we go through the
+    // existing smart-allocator path (T1 stack / T2 arena / T3 heap tiers).
+    std::vector<std::unique_ptr<Expression>> allocArgs; // empty → alloc<T>(1)
+    CallExpr allocCall("alloc<" + expr->typeName + ">", std::move(allocArgs));
+    allocCall.line   = expr->line;
+    allocCall.column = expr->column;
+    llvm::Value* ptr = generateExpression(&allocCall);
+
+    emitConstructFieldsInto(ptr, expr->typeName, expr->fields, expr);
+    return ptr;
+}
+
+// ── collectArrayBases ─────────────────────────────────────────────────────────
+// Helper used by generatePipeline to know which arrays to auto-prefetch.
+// Walks statement/expression trees and collects all base array names accessed
+// via INDEX_EXPR into @p out (deduplicating via @p seen).
 static void collectArrayBases(const Statement* s, std::vector<std::string>& out) {
     if (!s) return;
     std::unordered_set<std::string> seen(out.begin(), out.end());
@@ -4036,6 +4324,13 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
             const auto* as = static_cast<const AssumeStmt*>(s);
             if (as->condition) scanExpr(as->condition.get());
             if (as->deoptBody) scanStmt(as->deoptBody.get());
+            break;
+        }
+        case ASTNodeType::CONSTRUCT_STMT: {
+            const auto* cs = static_cast<const ConstructStmt*>(s);
+            scanExpr(cs->target.get());
+            for (const auto& [fn, fv] : cs->fields)
+                scanExpr(fv.get());
             break;
         }
         default: break;

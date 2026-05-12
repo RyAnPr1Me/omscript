@@ -1,0 +1,11 @@
+// write_to_shared_error_test.om — verify E020 write-to-shared is a compile error
+// This test is expected to FAIL at compile time with:
+//   [E020] cannot write to 'x' — it is in shared ownership state
+// It is used as a negative test (the compiler must reject this program).
+
+fn main() -> int {
+    var x = 42;
+    shared x;
+    x = 99;   // ERROR: E020 — write to shared variable
+    return x;
+}

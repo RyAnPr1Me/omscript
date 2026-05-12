@@ -1012,6 +1012,11 @@ void OptimizationOrchestrator::runSynthesis(Program* program, OptimizationContex
 
 void OptimizationOrchestrator::runCFCTRE(Program* program, OptimizationContext& ctx) {
     codegen_->runCFCTRE(program);
+    // runCFCTRE() replaces codegen_->ctEngine_ with a fresh CTEngine instance.
+    // Re-sync the raw pointer in ctx so that syncFactsToContext() (which runs
+    // immediately after this call in runPrepasses) sees the new engine instead
+    // of the stale (freed) pointer from the previous generate() call.
+    ctx.setCTEngine(codegen_->getCTEngine());
     ctx.validity().cfctre = true;
 }
 
@@ -1348,7 +1353,7 @@ void OptimizationOrchestrator::runBorrowCheck(Program* program,
         ctx.validity().borrowCheck = true;
         return;
     }
-    omscript::runBorrowCheck(*program, verbose_);
+    omscript::runBorrowCheck(*program, verbose_, noOwnershipChecks_, memSanitize_);
     ctx.validity().borrowCheck = true;
 }
 

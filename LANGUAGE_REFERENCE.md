@@ -6,12 +6,12 @@
 1. [Overview](#1-overview)
 2. [Lexical Structure](#2-lexical-structure)
 3. [Preprocessor](#3-preprocessor)
-4. [Type System Overview](#4-type-system-overview)
-5. [Variables, Constants, and Comptime](#5-variables-constants-and-comptime) — `var`, `const`, `register var`, `atomic var`, `volatile var`, `global`, `comptime`
+4. [Type System Overview](#4-type-system-overview) — scalar types, composite types, `ptr<T>`, `pslice<T>`, `funcptr`, `bigint`, SIMD
+5. [Variables, Constants, and Comptime](#5-variables-constants-and-comptime) — `var`, `const`, `register var`, `atomic var`, `volatile var`, `global`, `comptime`, predefined constants (`INT_MAX`, `I8_MIN`, `U32_MAX`, …)
 6. [Functions](#6-functions)
 7. [Control Flow](#7-control-flow)
 8. [Loops](#8-loops)
-9. [Operators and Expressions](#9-operators-and-expressions)
+9. [Operators and Expressions](#9-operators-and-expressions) — arithmetic, comparison, logical, bitwise, `as` cast, `??`, `in`, range, spread, pipe `|>`, precedence table
 10. [Collection Literals and Indexing](#10-collection-literals-and-indexing)
 
 **Part 2 — Standard Library and Semantics**
@@ -21,9 +21,9 @@
 14. [Structs](#14-structs)
 15. [Enums](#15-enums)
 16. [Error Handling](#16-error-handling)
-17. [Memory and Ownership System](#17-memory-and-ownership-system)
+17. [Memory and Ownership System](#17-memory-and-ownership-system) — Ω Ownership spec v1.0: `move`, `borrow`, `shared`, `own`, `freeze`, `invalidate`, `ptr<T>`, `alloc<T>`, `nullptr`, `*p = v`, E015–E022, constraint matrix, `--no-ownership-checks`, `--mem-sanitize`
 18. [OPTMAX](#18-optmax)
-19. [Built-in Functions](#19-built-in-functions)
+19. [Built-in Functions](#19-built-in-functions) — I/O, math, type conversions, `random`, character predicates, HTTP, `range`/`range_step`, matrix, bigint, optimizer hints
 20. [Concurrency](#20-concurrency)
 21. [File I/O](#21-file-io)
 22. [Lambda Expressions](#22-lambda-expressions)
@@ -193,15 +193,19 @@ The following identifiers are reserved as keywords. They are grouped by category
 | `borrow` | Borrow reference |
 | `reborrow` | Re-borrow from existing borrow |
 | `mut` | Mutable borrow annotation |
-| `invalidate` | Explicit invalidation |
-| `freeze` | Mark variable read-only |
+| `invalidate` | Explicit invalidation (schedule deferred free) |
+| `freeze` | Mark variable permanently read-only |
+| `shared` | Transition variable to shared (read-only aliasable) ownership (Ω spec §3.1) |
+| `own` | Restore unique ownership from shared state (Ω spec §3.1) |
+| `construct` | In-place field initialisation of a `ptr<T>` (see §17.9.2a) |
 
 **Literals:**
 | Keyword | Purpose |
 |---------|---------|
 | `true` | Boolean true |
 | `false` | Boolean false |
-| `null` | Null literal |
+| `null` | Null pointer literal (zero address) |
+| `nullptr` | Alias for `null` — null pointer literal (Ω spec §2.2) |
 
 **Operators and punctuation:**
 | Keyword | Purpose |
@@ -561,7 +565,14 @@ These do not appear in the keyword table in §2.4 and you may shadow them, but d
 
 ## 3. Preprocessor
 
-The **preprocessor** runs before lexical analysis, transforming source text by expanding macros, resolving conditional compilation directives, and performing file inclusion. Preprocessor directives begin with `#` at the start of a line (leading whitespace is allowed).
+The **preprocessor** runs before lexical analysis, transforming source text by expanding macros, resolving conditional compilation directives, and handling file inclusion. Preprocessor directives begin with `#` at the start of a line (leading whitespace is allowed).
+
+> **Recommendation for new code**: Prefer `comptime {}` blocks over preprocessor macros for constant definitions and conditional compilation. `comptime {}` is fully type-checked, IDE-friendly, scope-aware, and integrates with the language's constant folding and CF-CTRE engine. See §5.9 for the `comptime {}` reference and a preprocessor migration guide.
+>
+> Use the preprocessor for:
+> - Cross-language compatibility (bridging with C headers or build systems that emit `#define`)
+> - Textual macro expansion not expressible in the type system
+> - Legacy codebases
 
 ### 3.1 Directive List
 
@@ -1067,11 +1078,50 @@ OmScript provides signed and unsigned integer types of various widths:
 
 #### Character and Byte Types
 
-OmScript **does not have dedicated `char` or `byte` types**. Characters are represented as:
+OmScript provides a `byte` type as an alias for `u8` (unsigned 8-bit integer, range 0–255).
+
+| Type | Width | Signedness | Range | LLVM Type | Notes |
+|------|-------|------------|-------|-----------|-------|
+| `byte` | 8 bits | Unsigned | 0 to 255 | `i8` | Alias for `u8` |
+
+**Array of bytes**: `byte[]` denotes an array of byte values (same representation as `u8[]`).
+
+```omscript
+var b: byte = 0xFF;          // single byte
+var buf: byte[] = [1, 2, 3]; // byte array literal
+```
+
+**Casting to `byte` and `byte[]`**:
+
+- `expr as byte` — truncate any integer/float/pointer to a single byte (0–255).
+- `expr as byte[]` — extract the raw little-endian bytes of a value:
+  - **Integer**: `numBytes = bitWidth / 8` elements (e.g. `i64` → 8, `i128` → 16, `i256` → 32)
+  - **Float**: bitcast to same-width integer, then extract bytes (`f32` → 4, `f64` → 8)
+  - **Pointer**: 8 bytes (little-endian 64-bit address)
+  - **String variable**: one element per UTF-8 byte of the string's character data
+
+```omscript
+var n: i64 = 0x0102030405060708;
+var bytes: byte[] = n as byte[];
+// bytes[0] = 8, bytes[1] = 7, ... bytes[7] = 1  (little-endian)
+
+var x: f64 = 1.0;
+var raw: byte[] = x as byte[];  // 8 bytes — IEEE 754 representation
+
+var s: str = "Hi";
+var sb: byte[] = s as byte[];   // [72, 105]  ('H', 'i')
+
+var big: i128 = 1 as i128;
+var bb: byte[] = big as byte[];  // 16 bytes; bb[0]=1, bb[1..15]=0
+```
+
+**`sizeof(byte)`** → 1
+
+Characters are also represented as:
 - Single-character strings: `"A"`
 - Integer ASCII/UTF-8 codes: `65`
 
-The `char_at(s, i)` function extracts a single-character string from `s[i]`. The `char_code(s)` function returns the integer code of the first byte.
+The `char_at(s, i)` function returns the integer ASCII code of the character at position `i` in string `s`. The `char_code(s)` function returns the integer code of the first byte of `s`. Use `to_char(code)` to convert an integer code back to a single-character string.
 
 #### Void Type
 
@@ -1194,24 +1244,76 @@ fn main() -> int {
 #### 4.4.4 Pointer Type: `ptr` / `ptr<T>`
 
 **Syntax**:
-- `ptr` — Generic pointer (element type unknown)
+- `ptr` — Generic pointer (element type unknown, treated as opaque)
 - `ptr<T>` — Typed pointer to elements of type `T`
 
-**Representation**: Raw memory address (64-bit on most architectures).
+**Representation**: Raw memory address (64-bit on all supported architectures). No hidden metadata.
 
 **LLVM type**: `ptr` (LLVM opaque pointer)
 
 **Operations**:
-- Address-of: `&x` (produces `ptr<T>` if `x` is type `T`)
-- Dereference: **Not directly supported** (use runtime functions)
-- Null: `null` literal
+- **Address-of**: `&x` — produces `ptr<T>` when `x` has type `T`
+- **Dereference read**: `*p` — loads the value pointed to by `p` using the element type of `ptr<T>`
+- **Dereference write**: `*p = v` — stores `v` through pointer `p` (Ω spec §4.2)
+- **Pointer arithmetic**: `p + n`, `p - n` — advances by `n * sizeof(T)` bytes (Ω spec §4.4)
+- **Null literal**: `null` or `nullptr` (both are zero address, Ω spec §2.2)
+- **Allocation**: `alloc<T>(n)` or `new T(n)` — allocate `n` elements of type `T`; `alloc<T>()` / `new T` (no parens) allocates exactly 1 element (Ω spec §4.1)
+- **Boxing**: `store_ptr(value)` — allocate a stack slot, store `value` into it, return a `ptr<typeof(value)>`. The type of the returned pointer matches the expression type (i64, ptr, etc.). The slot is placed in the function entry block so `mem2reg`/SROA can promote it.
+- **Deallocation**: `invalidate p` — free the heap allocation and mark `p` dead
 
-**Safety**: Pointers are **unsafe**. The compiler does not track aliasing or lifetime. Use `borrow` and `move` for safer alternatives.
+**Valid initializers for `ptr`-typed variables**: Any expression that could produce a pointer at runtime is accepted: `&var`, function calls (builtin or user-defined), `null`/`nullptr`, pointer arithmetic (`p + n`), identifiers, or any complex expression. The only rejected initializers are non-zero integer literals, float literals, and string literals (e.g. `var p: ptr = 42` is an error).
+
+**Safety**: In safe mode (default), the borrow checker enforces:
+- No use-after-invalidate
+- No double-invalidate (E019)
+- No write to `shared` pointer (E020)
+- Null dereference paths detected by `--mem-sanitize`
+
+Use `--no-ownership-checks` for raw C-like pointer semantics (unsafe mode).
 
 **Example**:
 ```omscript
-var x: int = 42;
-var p: ptr<int> = &x;  // Pointer to x
+fn main() -> int {
+    var x: i64 = 42;
+    var p: ptr<i64> = &x;             // address-of: stack pointer
+    var q: ptr<i64> = alloc<i64>(4);  // allocate 4 i64 elements (stack, T1)
+    var r: ptr<i64> = new i64(4);     // identical to alloc<i64>(4)
+
+    // Typed dereference write and read
+    *q = 10;
+    *(q + 1) = 20;
+    var sum = *q + *(q + 1);   // 30
+
+    invalidate q;  // free heap allocation
+    return sum;    // 30
+}
+```
+
+**Boxing with `store_ptr`**:
+```omscript
+fn main() -> int {
+    // Box an integer literal onto the stack and get a pointer to it
+    var p: ptr<i64> = store_ptr(99);
+    println(*p);   // 99
+
+    // Write through the boxed pointer
+    *p = 200;
+    println(*p);   // 200
+
+    // Box the value of any expression
+    var a: i64 = 10;
+    var b: ptr<i64> = store_ptr(a * 3 + 5);
+    println(*b);   // 35
+
+    return 0;
+}
+```
+
+**Null pointer**:
+```omscript
+var p: ptr<i64> = null;    // zero pointer
+var q: ptr<i64> = nullptr; // identical to null (Ω spec §2.2)
+if (p == q) { println("both null"); }
 ```
 
 #### 4.4.5 Reference Type: `ref` / `&T`
@@ -1383,6 +1485,93 @@ var big2: bigint = bigint("11111111111111111111");
 var sum: bigint = bigint_add(big1, big2);
 println(bigint_tostring(sum));  // "111111111111111111110"
 ```
+
+#### 4.4.9 Slice Pointer Type: `pslice<T>`
+
+**Syntax**: `pslice<T>` where `T` is an element type (e.g., `i64`, `f64`).
+
+**Representation**: A *fat pointer* — two machine words stored in two separate allocas:
+- **ptr alloca**: holds the raw `ptr` to the data buffer (element type `T`).
+- **len alloca**: holds an `i64` with the number of elements.
+
+Unlike a plain `ptr<T>`, a `pslice<T>` carries its length alongside the pointer so that bounds checking and iteration do not require a separate length variable.
+
+**LLVM type**: The ptr alloca is `ptr`; the len alloca is `i64`. There is no single LLVM struct — the compiler tracks the two allocas via the `psliceVarNames_` / `psliceLenAllocas_` internal tables.
+
+**Operations**:
+- **Creation**: `pslice_new<T>(rawPtr, count)` — wraps an existing raw pointer and a length into a `pslice<T>`.
+- **Length query**: `pslice_len(s)` — returns the number of elements (i64).
+- **Pointer extraction**: `pslice_ptr(s)` — returns the underlying raw pointer (ptr).
+- **Indexing**: `s[i]` — compile-time bounds-check if both `s` and `i` are constants; otherwise emits a runtime `abort()` guard before the load.
+
+**Example**:
+```omscript
+fn main() -> int {
+    var buf: ptr<i64> = alloc<i64>(4);
+    *buf = 10;
+    *(buf + 1) = 20;
+    *(buf + 2) = 30;
+    *(buf + 3) = 40;
+
+    var s: pslice<i64> = pslice_new<i64>(buf, 4);
+    println(pslice_len(s));  // 4
+    println(s[0]);           // 10
+    println(s[2]);           // 30
+    return 0;
+}
+```
+
+**Restrictions**:
+- `pslice<T>` variables cannot be passed directly across user-defined function boundaries (there is no single LLVM type to pass them as). Use `pslice_ptr` + `pslice_len` to unpack before calling.
+- `pslice_new<T>` requires the explicit type parameter — `pslice_new(ptr, len)` (without `<T>`) is a parse error.
+
+#### 4.4.10 Executable Pointer Type: `funcptr`
+
+**Syntax**: `funcptr` (no type parameter — always represents a callable native function pointer).
+
+**Representation**: An opaque `ptr` to executable machine code. Internally the compiler tracks `funcptr` variables in a separate `funcptrVarNames_` set so that the dereference operator `*f` is dispatched as a call rather than a memory load.
+
+**LLVM type**: `ptr` (same as other pointer types; the distinction is in how the compiler handles `*f`).
+
+**Operations**:
+- **Obtain from a named function**: `funcptr_from("name")` — resolves the OmScript/C function named `name` and returns its address as a `funcptr`. The argument must be a string literal.
+- **Create from machine-code bytes**: `funcptr_new(byteArray, n)` — allocates a W^X (write-then-execute) page of executable memory, copies `n` bytes from the `i64[]` byte array into it, and returns a `funcptr` to the executable copy.
+- **Call**: `*f` — calls the function pointer as `fn() -> i64` with no arguments. The result is `i64`.
+
+**Valid initializers** (accepted in `var f: funcptr = …`):
+- `funcptr_from("name")` — function address
+- `funcptr_new(arr, n)` — JIT-compiled bytes
+- Another `funcptr` variable
+
+**Example — wrapping an existing function**:
+```omscript
+fn double(x: int) -> int { return x * 2; }
+
+fn main() -> int {
+    var f: funcptr = funcptr_from("double");
+    // Calls double() via the native pointer (no arguments passed —
+    // funcptr call is fn()->i64; pass data via globals for full JIT use).
+    var result: int = *f;
+    return 0;
+}
+```
+
+**Example — JIT from raw bytes (x86-64)**:
+```omscript
+fn main() -> int {
+    // x86-64: mov rax, 42 ; ret
+    var code: int[] = [0xB8, 42, 0, 0, 0, 0xC3];
+    var f: funcptr = funcptr_new(code, 6);
+    var result: int = *f;   // Calls the JIT'd bytes → 42
+    println(result);         // 42
+    return 0;
+}
+```
+
+**Platform notes**:
+- `funcptr_new` requires the process to map a page with both `PROT_WRITE` and `PROT_EXEC` (W^X; two mmap calls). This may be blocked by system policies (e.g., SELinux, `sysctl vm.mmap_min_addr`).
+- `funcptr_from` uses LLVM's function address — works for any function visible at link time.
+- The `funcptr` type is only available in OmScript; it has no automatic C FFI bridge.
 
 ### 4.5 Type Inference
 
@@ -1622,13 +1811,128 @@ fn setup() {
 
 ### 5.9 `comptime { ... }` Blocks — Compile-Time Evaluation
 
-**Syntax**: `comptime { statements return expr; }`
+OmScript's `comptime` keyword has two distinct but related forms:
+
+1. **Top-level `comptime {}` block** — defines compile-time constants, provides conditional compilation, and replaces preprocessor patterns.
+2. **Expression-context `comptime { ... }` block** — evaluates code at compile time via CF-CTRE and replaces the block with the resulting value.
+
+---
+
+#### 5.9.1 Top-level `comptime {}` — Constant Definitions and Conditional Compilation
+
+Placed at the top level of a source file (not inside a function), a `comptime {}` block is processed entirely at parse time. Its primary use is to define compile-time constants and to select platform-specific code paths — the same role that `#define` and `#if` play in C.
+
+**Supported statements inside a top-level comptime block:**
+
+| Statement | Description |
+|---|---|
+| `const NAME [: TYPE] = VALUE;` | Define a compile-time constant |
+| `if (COND) { ... } [else if (...) { ... }]* [else { ... }]` | Conditional inclusion |
+| `error("message");` | Abort compilation with a diagnostic |
+| `warning("message");` | Emit a diagnostic and continue |
+
+**Supported value types** for `const`:
+
+| Form | Example | Stored as |
+|---|---|---|
+| Integer literal | `const MAX: int = 1024;` | `int` |
+| Float literal | `const PI: float = 3.14159;` | `float` |
+| String literal | `const GREETING: string = "hello";` | `string` |
+| Boolean literal | `const DEBUG: bool = true;` | `bool` (stored as `int` 0/1) |
+| Reference to comptime const | `const ALIAS = MAX;` | same type as source |
+
+**Built-in comptime identifiers** (read-only, string-valued):
+
+| Name | Example value | Equivalent preprocessor macro |
+|---|---|---|
+| `OS` | `"linux"` / `"windows"` / `"macos"` | `__OS__` |
+| `ARCH` | `"x86_64"` / `"aarch64"` / `"arm"` | `__ARCH__` |
+| `VERSION` | `"4.4.0"` | `__VERSION__` |
+
+**Condition expression syntax** for `if (COND)`:
+- Comparison: `NAME == "value"`, `COUNT >= 100`, `FLAG != 0`
+- Logical: `COND1 && COND2`, `COND1 || COND2`, `!COND`
+- Existence test: `defined(NAME)` — true if `NAME` is a defined comptime constant
+- Parenthesised: `(COND1 && COND2) || COND3`
+
+Every `const` that survives an active branch is also injected as a **global `const` variable** accessible inside function bodies — no extra annotation required.
+
+**Example — platform constants and conditional selection:**
+```omscript
+comptime {
+    const VERSION_MAJOR: int = 4;
+    const VERSION_MINOR: int = 4;
+    const GREETING: string = "Hello";
+
+    if (OS == "linux") {
+        const PLATFORM_NAME: string = "Linux";
+        const USE_EPOLL: int = 1;
+    } else if (OS == "windows") {
+        const PLATFORM_NAME: string = "Windows";
+        const USE_EPOLL: int = 0;
+    } else {
+        const PLATFORM_NAME: string = "Other";
+        const USE_EPOLL: int = 0;
+    }
+
+    if (defined(DEBUG) && DEBUG) {
+        warning("building in debug mode");
+    }
+}
+
+fn main() -> int {
+    println(PLATFORM_NAME);   // "Linux" / "Windows" / "Other"
+    println(USE_EPOLL);       // 1 or 0
+    return 0;
+}
+```
+
+**Preprocessor migration guide:**
+
+| C/C++ preprocessor | OmScript `comptime {}` equivalent | Notes |
+|---|---|---|
+| `#define MAX 1024` | `comptime { const MAX: int = 1024; }` | Fully typed |
+| `#define PI 3.14159` | `comptime { const PI: float = 3.14159; }` | |
+| `#define NAME "hello"` | `comptime { const NAME: string = "hello"; }` | |
+| `#define DEBUG` (flag) | `comptime { const DEBUG: bool = true; }` | |
+| `#undef DEBUG` | not needed — omit the const or use `false` | |
+| `#ifdef DEBUG` / `#endif` | `comptime { if (defined(DEBUG)) { ... } }` | |
+| `#ifndef NDEBUG` | `comptime { if (!defined(NDEBUG)) { ... } }` | |
+| `#if defined(__linux__)` | `comptime { if (OS == "linux") { ... } }` | |
+| `#if defined(_WIN32)` | `comptime { if (OS == "windows") { ... } }` | |
+| `#if MAJOR >= 4` | `comptime { if (VERSION_MAJOR >= 4) { ... } }` | |
+| `#if X == 0 && Y != 0` | `comptime { if (X == 0 && Y != 0) { ... } }` | Full boolean logic |
+| `#error "message"` | `comptime { error("message"); }` | |
+| `#warning "message"` | `comptime { warning("message"); }` | |
+| `#assert COND` | `comptime { if (!COND) { error("assertion failed"); } }` | |
+| `__LINE__` | not available (use `@line` diagnostic annotation) | |
+| `__FILE__` | not available (use `import` path instead) | |
+| `__VERSION__` | `comptime { const VER = VERSION; }` where `VERSION` is built-in | |
+| `__OS__` | built-in `OS` comptime string | `"linux"`, `"windows"`, `"macos"` |
+| `__ARCH__` | built-in `ARCH` comptime string | `"x86_64"`, `"aarch64"`, `"arm"` |
+| `#define MAX(a,b) ((a)>(b)?(a):(b))` | `fn max(a: int, b: int) -> int { ... }` | Use a typed function — no macros needed |
+| `#define SQUARE(x) ((x)*(x))` | `fn square(x: int) -> int { return x*x; }` | Inlined at O1+ automatically |
+
+**Why `comptime {}` is better:**
+1. **Type safety** — `const MAX: int = 1024` is an `int`, not an untyped text substitution.
+2. **Scope awareness** — comptime constants obey file scope, no global pollution.
+3. **IDE support** — comptime constants appear in hover, completion, and cross-references.
+4. **No order dependency** — preprocessor macros must be defined before use; comptime constants are visible to the entire file regardless of order.
+5. **Readable diagnostics** — error messages use the constant name, not the substituted text.
+6. **Integration with CF-CTRE** — comptime constants feed directly into the compile-time reasoning engine, enabling deeper constant folding across function call boundaries.
+
+---
+
+#### 5.9.2 Expression-context `comptime { ... }` — Compile-Time Value Computation
+
+Used as an **expression** (inside a function or initialiser), a `comptime { ... }` block is evaluated at compile time by the CF-CTRE engine and replaced with the resulting constant value.
+
+**Syntax**: `comptime { statements; return expr; }`
 
 **Semantics**:
 - Executes code at **compile time** and replaces the block with the resulting value
-- Useful for computing constants, configuration, or metaprogramming
 - The block must end with `return expr;` where `expr` is the compile-time value
-- Only constant expressions and control flow (no I/O, no heap allocation, no function calls to runtime functions) are allowed
+- Only constant expressions and control flow (no I/O, no heap allocation, no calls to runtime-only functions) are allowed
 
 **Example**:
 ```omscript
@@ -1646,7 +1950,7 @@ var factorial_5: int = comptime {
 - No calls to runtime-only functions (e.g., `println`, `file_read`)
 - No mutable global state (each `comptime` block is isolated)
 - No recursion (evaluation is iterative within the block)
-- If evaluation fails (e.g., infinite loop, runtime-only operation), compilation error occurs
+- If evaluation fails (e.g., infinite loop, runtime-only operation), the expression remains dynamic
 
 **Use cases**:
 - Precompute lookup tables
@@ -1746,6 +2050,94 @@ println(x);  // 10
 ```
 
 **Loop iteration variables**: For-loop iteration variables (`for (i in ...)`) are scoped to the loop body.
+
+### 5.13 Predefined Integer Constants
+
+OmScript provides a set of built-in identifier constants for the minimum and maximum values of every integer type. These identifiers are resolved at code-generation time and do **not** require any import.
+
+#### 5.13.1 Canonical names
+
+| Constant | Type | Value |
+|---|---|---|
+| `I1_MAX` | signed 1-bit | `0` (only representable non-negative value in signed 1-bit two's complement) |
+| `I1_MIN` | signed 1-bit | `-1` |
+| `I8_MAX` | signed 8-bit | `127` |
+| `I8_MIN` | signed 8-bit | `-128` |
+| `I16_MAX` | signed 16-bit | `32767` |
+| `I16_MIN` | signed 16-bit | `-32768` |
+| `I32_MAX` | signed 32-bit | `2147483647` |
+| `I32_MIN` | signed 32-bit | `-2147483648` |
+| `I64_MAX` | signed 64-bit | `9223372036854775807` |
+| `I64_MIN` | signed 64-bit | `-9223372036854775808` |
+| `I128_MAX` | signed 128-bit | `2^127 - 1` |
+| `I128_MIN` | signed 128-bit | `-2^127` |
+| `I256_MAX` | signed 256-bit | `2^255 - 1` |
+| `I256_MIN` | signed 256-bit | `-2^255` |
+| `U1_MAX` | unsigned 1-bit | `1` |
+| `U1_MIN` | unsigned 1-bit | `0` |
+| `U8_MAX` | unsigned 8-bit | `255` |
+| `U8_MIN` | unsigned 8-bit | `0` |
+| `U16_MAX` | unsigned 16-bit | `65535` |
+| `U16_MIN` | unsigned 16-bit | `0` |
+| `U32_MAX` | unsigned 32-bit | `4294967295` |
+| `U32_MIN` | unsigned 32-bit | `0` |
+| `U64_MAX` | unsigned 64-bit | `18446744073709551615` |
+| `U64_MIN` | unsigned 64-bit | `0` |
+| `U128_MAX` | unsigned 128-bit | `2^128 - 1` |
+| `U128_MIN` | unsigned 128-bit | `0` |
+| `U256_MAX` | unsigned 256-bit | `2^256 - 1` |
+| `U256_MIN` | unsigned 256-bit | `0` |
+
+The pattern `I{N}_MAX`, `I{N}_MIN`, `U{N}_MAX`, `U{N}_MIN` extends to **any bit width from 1 to 256** (e.g., `I3_MAX = 3`, `U7_MAX = 127`).
+
+#### 5.13.2 Convenience aliases
+
+| Alias | Equivalent |
+|---|---|
+| `INT_MAX` | `I64_MAX` |
+| `INT_MIN` | `I64_MIN` |
+| `UINT_MAX` | `U64_MAX` |
+| `UINT_MIN` | `U64_MIN` |
+| `BOOL_MAX` | `U1_MAX` = `1` |
+| `BOOL_MIN` | `U1_MIN` = `0` |
+
+#### 5.13.3 C-style aliases (INT8_MAX, UINT32_MAX, …)
+
+The C standard-library naming convention is also accepted:
+
+| C-style alias | Equivalent |
+|---|---|
+| `INT8_MAX` / `INT8_MIN` | `I8_MAX` / `I8_MIN` |
+| `INT16_MAX` / `INT16_MIN` | `I16_MAX` / `I16_MIN` |
+| `INT32_MAX` / `INT32_MIN` | `I32_MAX` / `I32_MIN` |
+| `INT64_MAX` / `INT64_MIN` | `I64_MAX` / `I64_MIN` |
+| `UINT8_MAX` | `U8_MAX` |
+| `UINT16_MAX` | `U16_MAX` |
+| `UINT32_MAX` | `U32_MAX` |
+| `UINT64_MAX` | `U64_MAX` |
+
+#### 5.13.4 Usage examples
+
+```omscript
+fn main() -> int {
+    var a: int = INT_MAX;          // 9223372036854775807
+    var b: int = I32_MAX;          // 2147483647
+    var c: int = U8_MAX;           // 255
+    var d: int = BOOL_MAX;         // 1
+    var e: i128 = I128_MAX;        // 2^127 - 1
+
+    // Use in comparisons / guards
+    if (a == I64_MAX) { println("maxed out"); }
+
+    // Boundary checks
+    var x: int = 200;
+    if (x > U8_MAX) { println("overflow u8"); }
+
+    return 0;
+}
+```
+
+**Note on narrow types**: Wide constants like `I128_MAX` have their native LLVM bit-width (128 or 256 bits) so they can be used in comparisons with `i128`/`i256` variables. All constants with width ≤ 64 are returned as 64-bit integers (`i64`) so they work seamlessly in ordinary arithmetic.
 
 ---
 
@@ -2169,11 +2561,38 @@ fn loop_with_tail_call(n: int) -> int {
 - Tail calls require the calling convention to support it (default conventions do)
 - Complex stack frames (e.g., exception handlers, destructors) may prevent tail-call optimization
 
-### 6.9 First-Class Functions / Function Pointers
+### 6.9 First-Class Functions / `funcptr`
 
-**Status**: First-class functions (storing function pointers in variables, passing functions as arguments) are **not fully formalized** in the current type system. This is a future feature.
+OmScript provides the `funcptr` type for storing and calling native function pointers at runtime. See §4.4.10 for the complete type description.
 
-**Current capability**: Functions can be passed by name to higher-order functions (e.g., `array_map(arr, lambda)` where `lambda` is a lambda expression or function reference).
+**Summary of operations**:
+
+| Operation | Syntax | Semantics |
+|---|---|---|
+| Obtain address of a named function | `funcptr_from("name")` | Resolves the function `name` visible at link time and returns its address as a `funcptr`. |
+| Create from raw machine-code bytes | `funcptr_new(byteArr, n)` | Allocates a W^X page, copies `n` bytes from the `i64[]` array, returns a `funcptr`. |
+| Call | `*f` | Invokes the function as `fn() → i64`. |
+
+**Passing functions to higher-order builtins**: Higher-order functions such as `array_map`, `array_filter`, and `array_reduce` accept functions by **name** (a string literal), not as `funcptr` values. Pass a lambda expression or a quoted function name:
+
+```omscript
+var doubled: int[] = array_map(arr, |x| x * 2);
+var doubled2: int[] = array_map(arr, "my_doubler");
+```
+
+**Quick example**:
+```omscript
+fn square() -> int { return 7 * 7; }  // funcptr call passes no args
+
+fn main() -> int {
+    var f: funcptr = funcptr_from("square");
+    var result: int = *f;  // 49
+    println(result);
+    return 0;
+}
+```
+
+For a complete description including JIT usage and platform notes, see §4.4.10.
 
 ### 6.10 Lambdas — Anonymous Functions
 
@@ -2524,8 +2943,8 @@ These three constructs feed information to the optimizer. They emit **no runtime
 
 **Bare form — statement or expression:**
 ```omscript
-assume(b != 0);          // statement
-let q = a / assume(b != 0); // expression position also accepted
+assume(b != 0);                     // statement
+var q: int = a / assume(b != 0);    // expression position also accepted
 ```
 Tells the optimizer to treat `cond` as true — implemented by lowering to `llvm.assume(cond)`. **No runtime check is emitted.** If `cond` is actually false at runtime, the program has undefined behaviour (the optimizer may have deleted code, mis-folded values, etc.). Use only for invariants you can prove.
 
@@ -3302,6 +3721,121 @@ var n: int = int(s);  // Parse string to int (may fail at runtime)
 - `int(x)`, `float(x)`, `string(x)`, `bool(x)`: Convert `x` to target type
 - Type conversion may involve parsing (e.g., `int("42")`) or formatting (e.g., `string(42)`)
 
+### 9.16 Type Cast Operator `as`
+
+**Syntax**: `expr as TargetType`
+
+**Semantics**: Explicitly converts `expr` to `TargetType`. The conversion is decided at codegen time based on the source and target types. This is a *coercion* — not a runtime function call — and emits a single LLVM instruction.
+
+**Operator precedence**: `as` binds tighter than most binary operators. `x + y as i32` parses as `x + (y as i32)`.
+
+#### 9.16.1 Integer ↔ Integer
+
+| Source width vs. Target width | Direction | LLVM instruction | Signedness rule |
+|---|---|---|---|
+| Narrower → wider | Widening | `sext` (signed source) or `zext` (unsigned source) | Determined by the **source** variable's declared type (`u*` = unsigned → `zext`; `i*` or unqualified = signed → `sext`) |
+| Wider → narrower | Truncation | `trunc` | Wraps (no trap) |
+| Same width | Identity | None (SSA forwarded) | — |
+
+```omscript
+var a: i8  = 100;
+var b: i32 = a as i32;  // sign-extend → 100
+
+var c: u8  = 200;        // unsigned: 200 as signed = -56
+var d: i32 = c as i32;  // zero-extend → 200 (not -56)
+
+var e: i64 = 0xFFFF_FFFF_FFFF;
+var f: i8  = e as i8;   // truncate → low 8 bits
+```
+
+#### 9.16.2 Integer ↔ Float
+
+| Conversion | LLVM instruction | Notes |
+|---|---|---|
+| signed int → float | `sitofp` | Default for `i*`-typed / unqualified variables |
+| unsigned int → float | `uitofp` | When source variable is declared with `u*` annotation |
+| float → signed int | `fptosi` | Default for `i*` target types |
+| float → unsigned int | `fptoui` | When target type starts with `u` (e.g., `u32`, `u8`) |
+
+```omscript
+var i: int   = 42;
+var f: float = i as f64;   // sitofp → 42.0
+
+var u: u32   = 200;
+var g: float = u as f64;   // uitofp → 200.0  (not -56.0)
+
+var pi: float = 3.14;
+var n: int   = pi as i64;  // fptosi → 3
+var m: u8    = pi as u8;   // fptoui → 3
+```
+
+#### 9.16.3 Float ↔ Float
+
+| Conversion | LLVM instruction |
+|---|---|
+| `f32` → `f64` (widening) | `fpext` |
+| `f64` → `f32` (narrowing) | `fptrunc` |
+| Same width | Identity |
+
+```omscript
+var a: f32 = 1.5;
+var b: f64 = a as f64;  // fpext → 1.5 (double precision)
+var c: f32 = b as f32;  // fptrunc → 1.5 (single precision)
+```
+
+#### 9.16.4 Any → `string`
+
+`expr as string` formats the value to a heap-allocated OmScript string using `snprintf`:
+
+| Source type | Format used | Example result |
+|---|---|---|
+| Integer (`i*` / `u*`) | `%lld` | `42 as string` → `"42"` |
+| Float (`f32` / `f64`) | `%g` | `3.14 as f64 as string` → `"3.14"` |
+| Pointer (`ptr`) | `%llu` (address as unsigned decimal) | `p as string` → `"140732…"` |
+
+```omscript
+var n: int = -99;
+var s: string = n as string;    // "-99"
+
+var f: float = 2.718;
+var t: string = f as string;    // "2.718"
+
+var p: ptr<int> = &n;
+var addr: string = p as string; // unsigned decimal address
+```
+
+#### 9.16.5 Pointer ↔ Integer
+
+| Conversion | LLVM instruction |
+|---|---|
+| `ptr` → integer | `ptrtoint` |
+| integer → `ptr` | `inttoptr` |
+| `ptr` → `ptr` (any) | identity (opaque pointers) |
+
+```omscript
+var p: ptr<int> = &n;
+var addr: int = p as int;        // ptrtoint
+var q: ptr<int> = addr as ptr;   // inttoptr (unsafe!)
+```
+
+#### 9.16.6 Complete cast table
+
+| Source | Target | Instruction |
+|---|---|---|
+| `iN` (signed) | `iM` (M > N) | `sext` |
+| `uN` (unsigned) | `iM`/`uM` (M > N) | `zext` |
+| `iN`/`uN` | `iM`/`uM` (M < N) | `trunc` |
+| `i*`/`u*` | `f32`/`f64` | `sitofp` / `uitofp` |
+| `f32`/`f64` | `i*` | `fptosi` |
+| `f32`/`f64` | `u*` | `fptoui` |
+| `f32` | `f64` | `fpext` |
+| `f64` | `f32` | `fptrunc` |
+| any | `string` | `snprintf` into heap buffer |
+| `ptr` | `int` | `ptrtoint` |
+| `int` | `ptr` | `inttoptr` |
+| `ptr` | `ptr` | identity |
+| same type | same type | identity |
+
 ---
 
 ## 10. Collection Literals and Indexing
@@ -3853,6 +4387,25 @@ println(a[0]);  // 4
 var a = [30, 10, 40, 20];
 sort(a);
 println(a[0]);  // 10
+```
+
+---
+
+#### `swap(array, i, j) → i64`
+
+**Signature:** `swap(array, i64, i64) → i64`  
+**Semantics:** Swap the elements at indices `i` and `j` in the array IN-PLACE. Returns 0. Runtime error if either index is out of bounds.  
+**Time:** O(1)  
+**Side effects:** Mutates the array.  
+
+> **Note:** `swap a, b;` is a separate statement syntax (§8.14) that swaps two scalar variables. `swap(arr, i, j)` is the built-in function for swapping array elements.
+
+**Example:**
+```omscript
+var a = [10, 20, 30, 40];
+swap(a, 0, 3);
+println(a[0]);  // 40
+println(a[3]);  // 10
 ```
 
 ---
@@ -4659,7 +5212,38 @@ println(s);  // "x=10, y=3.140000"
 
 ---
 
-### 12.9 String interning (when applies)
+### 12.9 String ↔ number conversion
+
+#### `str_to_int(string) → i64`
+
+**Signature:** `str_to_int(string) → i64`  
+**Semantics:** Parse the string as a decimal (or hex with `0x`/`0X` prefix) integer. Returns 0 if the string is not a valid number.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+var n: int = str_to_int("42");      // 42
+var h: int = str_to_int("0xFF");    // 255
+var bad: int = str_to_int("abc");   // 0
+```
+
+---
+
+#### `str_to_float(string) → f64`
+
+**Signature:** `str_to_float(string) → f64`  
+**Semantics:** Parse the string as a 64-bit float. Returns 0.0 if not valid.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+var f: float = str_to_float("3.14");   // 3.14
+var g: float = str_to_float("1e5");    // 100000.0
+```
+
+---
+
+### 12.10 String interning (when applies)
 
 **Not explicitly implemented** in the current code generation. String literals are global constants, but runtime string deduplication is not performed. Future optimization may add interning for frequently used strings.
 
@@ -4999,7 +5583,7 @@ fn local_point() {
 
 ### 14.9 `invalidate` on struct
 
-**Semantics:** `invalidate s;` frees the heap allocation immediately.  
+**Semantics:** `invalidate s;` schedules a deferred free for the struct's heap allocation; the physical `free()` is emitted just before each function return.  
 **Effect:** Struct pointer becomes invalid; subsequent access is undefined behavior.
 
 **Example:**
@@ -5263,67 +5847,94 @@ Errors are reported in two tiers:
 
 ## 17. Memory and Ownership System
 
-### 17.0 Ownership states
+> **Ω Ownership & Memory System — Spec v1.0**
+>
+> A pure compile-time memory management model with deterministic ownership tracking, full pointer arithmetic support, CFG-based lifetime resolution, and zero runtime overhead memory safety (in safe mode).
+>
+> Core principle: **All memory safety is resolved at compile time** unless explicitly disabled by compiler flags.
 
-**Enum definition** (from `codegen.h`):
-```cpp
-enum class OwnershipState {
-    Owned,        // Variable owns its value — full read/write access
-    Borrowed,     // Has ≥1 immutable borrows — readable but not writable
-    MutBorrowed,  // Has one mutable alias — source is completely locked
-    Frozen,       // Permanently immutable — all loads are invariant
-    Moved,        // Ownership transferred out — use is a compile error
-    Invalidated   // Explicitly killed — use is a compile error
-};
-```
+---
 
-**Tracking:** Per-variable borrow state stored in `VarBorrowState`:
+### 17.0 Overview and Design Philosophy
+
+OmScript's ownership system is designed as:
+
+> *"C-level performance with Rust-level safety, but fully resolved at compile time using CFG-based lifetime computation and explicit invalidation semantics."*
+
+**Key guarantees (safe mode):**
+- No use-after-free
+- No double-free (E019 compile error)
+- No invalid dereference
+- No memory leaks (when `invalidate` is used)
+- Deterministic memory lifetime
+- **Zero runtime overhead** — all ownership/safety checks eliminated before code generation
+
+---
+
+### 17.1 Ownership States
+
+Every variable is in one of six ownership states, tracked per-variable by the borrow checker:
+
+| State | Description | Read | Write | Move |
+|-------|-------------|------|-------|------|
+| `Owned` | Unique owner — full read/write access | ✓ | ✓ | ✓ |
+| `Borrowed` | Has ≥1 immutable borrows — readable but not writable | ✓ | ✗ | ✗ |
+| `MutBorrowed` | Has one mutable alias — source is completely locked | ✗ | ✗ | ✗ |
+| `Shared` | Read-only aliasable ownership (Ω spec §3.1) | ✓ | ✗ | ✗ |
+| `Frozen` | Permanently immutable — LLVM `!invariant` loads | ✓ | ✗ | ✓¹ |
+| `Moved` | Ownership transferred out — **compile error on use** | ✗ | ✗ | ✗ |
+| `Invalidated` | Explicitly killed — **compile error on use** | ✗ | ✗ | ✗ |
+
+¹ Frozen variables may be moved; the destination becomes the new frozen owner.
+
+**Per-variable tracking struct** (from `borrow_checker.h`):
 ```cpp
 struct VarBorrowState {
-    int  immutBorrowCount = 0;
-    bool mutBorrowed = false;
-    bool moved = false;
-    bool invalidated = false;
-    bool frozen = false;
+    int  immutBorrows   = 0;    // number of active immutable borrows
+    bool mutBorrowed    = false; // mutable borrow active
+    bool moved          = false; // ownership transferred
+    bool invalidated    = false; // explicitly freed
+    bool frozen         = false; // permanently immutable
+    bool shared         = false; // shared ownership state (Ω spec §3.1)
+    int  reborrows      = 0;    // reborrow alias count
 };
 ```
 
 **State transitions:**
-- `Owned` → `Borrowed` (immutable borrow)
-- `Owned` → `MutBorrowed` (mutable borrow)
-- `Owned` → `Frozen` (freeze permanently)
-- `Owned` → `Moved` (move ownership)
-- Any → `Invalidated` (explicit kill)
+- `Owned` → `Borrowed` (via `borrow var r = x`)
+- `Owned` → `MutBorrowed` (via `borrow mut var r = x`)
+- `Owned` → `Shared` (via `shared x;`)
+- `Owned`/`Shared` → `Frozen` (via `freeze x;`)
+- `Owned` → `Moved` (via `move var y = x;`)
+- Any live state → `Invalidated` (via `invalidate x;`)
+- `Shared` → `Owned` (via `own x;`)
 
 ---
 
-### 17.1 Move semantics — `move var x = expr;`
+### 17.2 Move Semantics — `move var x = expr;`
 
 **Syntax:**
 ```omscript
-move var x = expr;
+move var x = expr;   // declaration form
+var y = move x;      // expression form
 ```
 
 **Semantics:**
-1. Evaluate `expr` and bind to `x`.
-2. Mark the source of `expr` (if it's a variable) as `Moved`.
-3. Any subsequent use of the source is a compile-time error.
+1. Evaluate `expr` and bind to `x` (or transfer `x` to `y`).
+2. Mark the source as `Moved` — any subsequent use is a compile-time error.
+3. No runtime cost: the value is bitwise-copied; no destructor runs.
 
 **Example:**
 ```omscript
 var a = 42;
 move var b = a;
-println(b);  // 42
-// println(a);  // ERROR: use of moved variable
+println(b);     // OK: 42
+// println(a);  // [E015] use of moved variable 'a'
 ```
-
-**Move expression:** `var y = move x;`
-- Transfer ownership from `x` to `y`.
-- `x` becomes dead.
 
 ---
 
-### 17.2 Borrow — `borrow var x = expr;`
+### 17.3 Borrow — `borrow var x = expr;`
 
 **Syntax:**
 ```omscript
@@ -5331,26 +5942,26 @@ borrow var x = expr;
 ```
 
 **Semantics:**
-1. Create an immutable alias `x` to the source variable.
-2. Increment `immutBorrowCount` of the source.
+1. Create an immutable alias `x` for the source variable.
+2. Increment `immutBorrows` of the source.
 3. Source remains readable but NOT writable while the borrow is active.
-4. When `x` goes out of scope, decrement `immutBorrowCount`.
+4. When `x` goes out of scope, `immutBorrows` is decremented.
 
 **Example:**
 ```omscript
 var a = 42;
 {
     borrow var ref = a;
-    println(ref);  // 42
-    println(a);    // 42 (source still readable)
-    // a = 99;     // ERROR: cannot write to borrowed variable
+    println(ref);   // 42
+    println(a);     // 42 (source still readable)
+    // a = 99;      // [E016] cannot write to 'a' — active immutable borrow
 }
-a = 99;  // OK now (borrow ended)
+a = 99;  // OK — borrow ended
 ```
 
 ---
 
-### 17.3 Borrow mut — `borrow mut var x = expr;`
+### 17.4 Borrow Mut — `borrow mut var x = expr;`
 
 **Syntax:**
 ```omscript
@@ -5358,10 +5969,9 @@ borrow mut var x = expr;
 ```
 
 **Semantics:**
-1. Create a mutable alias `x` to the source variable.
-2. Set `mutBorrowed = true` for the source.
-3. Source is completely LOCKED (no reads or writes) while the mutable borrow is active.
-4. When `x` goes out of scope, clear `mutBorrowed`.
+1. Create a mutable alias `x` for the source variable.
+2. Set `mutBorrowed = true` — source is completely locked (no reads or writes).
+3. When `x` goes out of scope, `mutBorrowed` is cleared.
 
 **Example:**
 ```omscript
@@ -5369,40 +5979,52 @@ var a = 42;
 {
     borrow mut var ref = a;
     ref = 99;
-    // println(a);  // ERROR: cannot read mutably borrowed variable
+    // println(a);  // [E016] cannot read mutably-borrowed variable 'a'
 }
-println(a);  // 99 (borrow ended)
+println(a);  // 99 — borrow ended; source reflects the write
 ```
 
 ---
 
-### 17.4 `invalidate x;`
+### 17.5 Shared Ownership — `shared x;`
 
-**Semantics:** Immediately free the heap allocation associated with `x` and mark it as dead.
+**Syntax:**
+```omscript
+shared x;          // transition to shared ownership
+own x;             // restore unique ownership
+```
 
-**Which types get freed:**
-- **Strings:** Calls `free()` on the string pointer.
-- **Arrays (heap-allocated):** Calls `free()` on the array pointer.
-- **Dictionaries:** Calls destructor on the `std::unordered_map` and `free()` on the wrapper.
-- **Structs:** Calls `free()` on the struct pointer.
-- **Heap pointers (`ptr`):** Calls `free()` if the pointer was allocated via `malloc`/`calloc`/`realloc`.
-- **BigInts:** Calls destructor on the GMP `mpz_t` and `free()` on the wrapper.
+**Semantics of `shared x;`** (Ω spec §3.1):
+- Transitions `x` to the `Shared` state.
+- Multiple immutable reads are allowed.
+- Any write to `x` is a **compile-time error** (E020).
+- Mutable borrow of `x` is forbidden.
+- `shared x;` on a moved or invalidated variable is a compile-time error.
 
-**Tracking-set cleanup:** All compile-time tracking maps (`stringVars_`, `nonNegValues_`, etc.) are cleared of the variable.
-
-**Dead-var poisoning:** The variable's `VarBorrowState` is set to `invalidated = true`; any subsequent use is a compile-time error.
+**Semantics of `own x;`** (Ω spec §3.1):
+- Restores `x` to the `Owned` state (clears `shared = false`).
+- Requires that no active borrows exist (E018 if borrows remain).
+- `freeze` is stronger than `shared`: a frozen variable cannot be un-frozen by `own`.
 
 **Example:**
 ```omscript
-var s = "hello";
-println(s);  // "hello"
-invalidate s;
-// println(s);  // ERROR: use of invalidated variable
+fn main() -> int {
+    var x = 10;
+    shared x;         // x is now shared (read-only)
+
+    var r1 = x;       // OK: read
+    var r2 = x;       // OK: second read
+    // x = 99;        // [E020] cannot write to 'x' — shared ownership
+
+    own x;            // restore unique ownership
+    x = 35;           // OK: write
+    return r1 + r2 + x;  // 55
+}
 ```
 
 ---
 
-### 17.5 `freeze x;`
+### 17.6 `freeze x;` — Permanent Immutability
 
 **Syntax:**
 ```omscript
@@ -5410,29 +6032,121 @@ freeze x;
 ```
 
 **Semantics:**
-1. Mark variable `x` as permanently immutable.
-2. Set `frozen = true` in `VarBorrowState`.
-3. All subsequent loads from `x` are annotated with `!invariant` metadata (LLVM optimization hint).
-4. Any write to `x` is a compile-time error.
+1. Mark `x` permanently immutable (`frozen = true`).
+2. All subsequent loads from `x` are annotated with LLVM `!invariant` metadata.
+3. Any write to `x` is a compile-time error — even after scope re-entry.
+4. **No runtime cost** — purely a compile-time annotation.
+5. **`own x;` on a frozen variable is a compile-time error** (E021) — freeze is irreversible.
 
 **Example:**
 ```omscript
 var a = 42;
 freeze a;
-println(a);  // 42
-// a = 99;   // ERROR: cannot write to frozen variable
+println(a);   // 42
+// a = 99;    // [E005] cannot modify constant/frozen variable 'a'
+// own a;     // [E021] cannot assert unique ownership of 'a' — it is frozen
+```
+
+**Difference from `shared`:**
+
+| Property | `freeze` | `shared` |
+|----------|----------|----------|
+| Write blocked | ✓ permanent | ✓ until `own` |
+| LLVM `!invariant` | ✓ | ✗ |
+| Reversible | ✗ | ✓ via `own` |
+| `own` allowed | ✗ (E021) | ✓ |
+| `invalidate` allowed | ✓ | ✓ |
+
+If you need a mutable copy of a frozen variable, declare a new variable:
+```omscript
+var x = 42;
+freeze x;
+var y = x;   // copy — y is independently owned and writable
+y = 99;      // OK: y is a separate variable
 ```
 
 ---
 
-### 17.6 `reborrow` semantics
+### 17.7 `invalidate x;` — Explicit Deallocation
+
+**Syntax:**
+```omscript
+invalidate x;
+```
+
+**Semantics:**
+- Marks `x` as logically dead immediately (borrow checker removes it from the live set).
+- Schedules `free(x)` at the optimal CFG exit point (deferred-free queue).
+- Any subsequent use of `x` is a compile-time error (E015).
+- **Double-invalidate** is a compile-time error (E019).
+- **Invalidate while borrowed** is a compile-time error (E022) — freeing memory with active aliases would dangle the borrow.
+
+**Loop safety:** `invalidate` is safe to call inside a loop body. The compiler captures the variable's *alloca* (which dominates the entire function) in the deferred-free queue rather than a loaded IR value. The physical `load` + `free()` pair is emitted at the function-exit block, where the alloca is always in scope. This avoids the LLVM IR domination violation that would occur if a loaded pointer defined in a loop body were used outside that body.
+
+**Implementation note (deferred-free queue design):**
+The queue is a flat `vector<{AllocaInst*, Type*}>` — a contiguous array of 16-byte pairs. At function exit, each entry is drained with a single `load`/`inttoptr`/`free` sequence. This gives:
+- No per-invalidation heap allocations.
+- No pointer chasing.
+- Deterministic cleanup: all `free()` calls for a function are emitted together, giving the allocator a dense batch it can coalesce.
+- Performance ≈ immediate free, with the added benefit of batched allocator coalescing.
+
+**Which types are freed:**
+| Type | Action |
+|------|--------|
+| String | `free()` on string pointer |
+| Heap array | `free()` on array pointer |
+| Dict/map | Destructor + `free()` on wrapper |
+| Struct | `free()` on struct pointer |
+| Heap `ptr<T>` | `free()` if allocated via `malloc`/`alloc<T>` |
+| BigInt | GMP `mpz_clear()` + `free()` on wrapper |
+| Stack `ptr<T>` | `llvm.lifetime.end` intrinsic (no `free()`) |
+
+**Example:**
+```omscript
+fn main() -> int {
+    var p: ptr<i64> = alloc<i64>(1);
+    *p = 99;
+    var val = *p;
+    invalidate p;
+    // *p = 1;       // [E015] use of invalidated variable 'p'
+    // invalidate p; // [E019] double invalidation of 'p'
+    return val;      // 99
+}
+```
+
+**Borrow constraint (E022):**
+```omscript
+fn main() -> int {
+    var p: ptr<i64> = alloc<i64>(1);
+    borrow var r = p;   // active borrow
+    invalidate p;        // [E022] cannot invalidate 'p' — 1 immutable borrow(s) active
+    return 0;
+}
+```
+
+To correctly invalidate after borrowing, ensure all borrows end first (go out of scope):
+```omscript
+fn main() -> int {
+    var p: ptr<i64> = alloc<i64>(1);
+    {
+        borrow var r = p;    // borrow is active in this block
+        var val = *r;
+    }                        // r goes out of scope → borrow released
+    invalidate p;            // OK: no active borrows
+    return 0;
+}
+```
+
+---
+
+### 17.8 `reborrow` — Chained Borrows
 
 **Syntax:**
 ```omscript
 reborrow var ref = source;
 ```
 
-**Semantics:** Create a new immutable borrow from an existing borrow (chain borrows).
+**Semantics:** Create a new immutable borrow from an existing borrow, incrementing `reborrows` of the source variable.
 
 **Example:**
 ```omscript
@@ -5444,106 +6158,321 @@ println(r2);  // 42
 
 ---
 
-### 17.7 `prefetch` (variable-level vs use-site `@prefetch`)
+### 17.9 Pointer Types (`ptr`, `ptr<T>`)
 
-**Variable-level:** `prefetch x;`  
-**Semantics:** Emit `llvm.prefetch` intrinsic to load the address of `x` into cache (hint to hardware).
+#### 17.9.1 Core Pointer Operations
 
-**Use-site annotation:** `@prefetch` on a loop annotation (see section 8.12 in Part 1).
+| Operation | Syntax | Description |
+|-----------|--------|-------------|
+| Declare | `var p: ptr<T> = ...` | Typed pointer variable |
+| Address-of | `&x` | Take address of `x`; produces `ptr<T>` |
+| Allocate | `alloc<T>(n)` / `new T(n)` | Allocate `n` elements of type `T` |
+| Allocate 1 | `alloc<T>()` / `new T` | Allocate exactly 1 element (Ω spec §4.1) |
+| Allocate + init | `new T { field: val, ... }` | Allocate one `T` and initialise its fields |
+| Dereference read | `*p` | Load value through pointer |
+| Dereference write | `*p = v` | Store value through pointer (Ω spec §4.2) |
+| Arithmetic | `p + n`, `p - n` | Advance by `n * sizeof(T)` (Ω spec §4.4) |
+| Null | `null`, `nullptr` | Zero-address pointer (Ω spec §2.2) |
+| Free | `invalidate p` | Deferred `free()` at CFG exit |
+| In-place init | `construct p { field: val, ... };` | Initialise fields of already-allocated `ptr<T>` |
 
----
+#### 17.9.2 `alloc<T>` — Raw Compile-Time Smart Allocator
 
-### 17.8 No-aliasing guarantee
+`alloc<T>(n)` decides allocation strategy entirely at **compile time** — no runtime branching is emitted. Returns **raw (uninitialised)** memory. Three tiers:
 
-**Noalias metadata:** When ownership analysis proves that a pointer does NOT alias any other pointer, LLVM `noalias` metadata is attached to loads/stores and function arguments.
+| Tier | Condition | Strategy | Notes |
+|------|-----------|----------|-------|
+| **T1 Stack** | Constant `n` AND `n × sizeof(T) ≤ 8 KiB` | `alloca` in entry block | SROA/mem2reg eligible; `lifetime.start`/`end` scoped |
+| **T2 Arena** | Constant `n` AND fits in 64 KiB per-function slab | GEP into shared static slab | Zero heap involvement; all sub-allocations are compile-time GEPs |
+| **T3 Heap** | Dynamic `n` OR size exceeds slab | `malloc` / `aligned_alloc` | `nonnull` + `dereferenceable(N)` + alignment `llvm.assume` annotations emitted for LLVM AA |
 
-**Benefits:**
-- Enables aggressive load/store reordering.
-- Improves vectorization.
-- Allows the optimizer to assume no memory dependences.
+`alloc<T>()` (no argument) allocates exactly 1 element.
 
-**Emission rules:**
-- `Owned` variables: always noalias (no other aliases exist).
-- `Borrowed` variables: noalias with respect to other borrows (rust-style borrow rules).
-- `MutBorrowed` variables: exclusive access (noalias with all other pointers).
+**Safety improvements in T3 (heap)**:
+- Return pointer annotated `nonnull` — LLVM may assume malloc succeeds.
+- When `n` is a compile-time constant, `dereferenceable(n × sizeof(T))` is emitted — enables load-store forwarding and alias analysis.
+- `llvm.assume(ptr != null)` and `llvm.assume(ptr % alignof(T) == 0)` are emitted — vectorizer and IndVars can exploit alignment without runtime checks.
 
----
-
-### 17.9 Pointer types (`ptr`, `ptr<T>`)
-
-#### Element-type tracking
-
-**`ptrElemTypes_` map:** Tracks the element type of each pointer variable:
-```cpp
-std::unordered_map<std::string, llvm::Type*> ptrElemTypes_;
-```
-
-**Element-type inference:** From `&x` based on `varTypeAnnotations_`:
-- If `x: T`, then `&x` has element type `T`.
-- If `x` has no annotation, element type is `i64` (default).
-
-**Untyped `ptr` sentinel:** When no element type is known, the pointer is opaque (`ptr` in source, `i8*` in LLVM IR).
-
-#### Heap vs stack origin tracking
-
-**Heap pointers:** Allocated via `malloc`, `calloc`, `realloc`, or `alloc<T>(N)` (when N is dynamic or too large).
-
-**Stack pointers:** Allocated via `alloca` in the function entry block (when escape analysis proves safe).
-
-**Tracking:** `heapPtrs_` set stores names of heap-allocated pointers (enables automatic `free()` on `invalidate`).
-
-#### Stack-allocated `alloc<T>` with backing alloca
-
-**Smart allocator:** `alloc<T>(count)` decides at compile time:
-- If `count` is constant AND `count*sizeof(T) <= 4096`: emit `alloca` in entry block.
-- Otherwise: emit `malloc` call.
-
-**Lifetime.end emission:** Stack-allocated pointers have `llvm.lifetime.end` intrinsic emitted at scope exit (optimization hint).
-
-#### Allowed initializers for `ptr`
-
-**Validation rule** (from `parser.cpp` around line 1530):
-- `ptr` variables MUST be initialized with one of:
-  - `&variable` (address-of)
-  - `malloc(...)`, `calloc(...)`, `realloc(...)`, `alloc<T>(...)`
-  - Another `ptr` variable
-  - A function call that returns `ptr`
-
-**Disallowed:**
 ```omscript
-var p: ptr = 42;  // ERROR: invalid initializer for ptr
+var arr: ptr<i64> = alloc<i64>(4);   // T1: stack alloca, raw (uninitialised)
+var big: ptr<i64> = alloc<i64>(2048); // T2: arena GEP, raw
+var one: ptr<i64> = alloc<i64>();    // 1 element, raw
 ```
 
-**Allowed:**
+---
+
+#### 17.9.2a `new T(n)` — Zero-Initialised Allocation
+
+`new T(n)` is semantically distinct from `alloc<T>(n)`. It uses the same three-tier compile-time allocation strategy but **guarantees zero-initialised memory** — all bytes are set to zero before the pointer is returned.
+
+| Tier | Zero-init mechanism |
+|------|---------------------|
+| **T1 Stack** | `alloca` + `memset(ptr, 0, n×sizeof(T))` |
+| **T2 Arena** | arena GEP + `memset(ptr, 0, n×sizeof(T))` |
+| **T3 Heap** | `calloc(n, sizeof(T))` — OS-level zeroing, no extra call |
+
+`new T` (no parens) zero-initialises exactly 1 element.
+
 ```omscript
-var x = 42;
-var p: ptr = &x;  // OK
-var q: ptr = malloc(100);  // OK
+var arr: ptr<i64> = new i64(4);    // T1: zero-initialised (all 0)
+fn dyn(n: int) -> ptr<i64> {
+    return new i64(n);             // T3: calloc (n is dynamic)
+}
+var one: ptr<i64> = new i64;       // 1 element, zero-initialised
+```
+
+**When to use `alloc<T>` vs `new T`:**
+
+| Need | Use |
+|------|-----|
+| Raw speed, you will write every field before reading | `alloc<T>(n)` |
+| Safety by default — zero is a valid sentinel / default | `new T(n)` |
+| Allocate + initialise specific fields immediately | `new T { field: val, ... }` |
+| Allocate many + initialise one at a time | `alloc<T>(n)` + `construct p { ... };` |
+
+---
+
+#### 17.9.2b `construct` Statement — In-Place Field Initialisation
+
+`construct ptr { field: val, ... };` initialises the fields of an already-allocated struct pointer in place. It lowers with **zero abstraction cost** to a sequence of typed `GEP` + `store` pairs — exactly what writing `ptr->x = val; ptr->y = val;` by hand would produce, but with automatic per-field TBAA metadata and correct alignment from the struct definition.
+
+**Syntax:**
+```
+construct TARGET { FIELD: EXPR [, FIELD: EXPR]* [,] };
+```
+
+Where `TARGET` is any expression returning a `ptr<T>` and `FIELD: EXPR` pairs provide field initialisers.  Trailing commas are allowed.  Fields not listed are **left as-is** (uninitialised if from `alloc<T>`, zero if from `new T`).
+
+**Example:**
+```omscript
+struct Point { x: int; y: int; }
+
+fn make_point(x: int, y: int) -> ptr<Point> {
+    var p: ptr<Point> = alloc<Point>(1);  // raw memory
+    construct p {
+        x: x,
+        y: y,
+    };
+    return p;
+}
+```
+
+**Lowering** (no extra IR, identical to hand-written field stores):
+```
+%construct.field.ptr = getelementptr inbounds %Point, ptr %p, i32 0, i32 0
+store i64 %x, ptr %construct.field.ptr, align 8, !tbaa !...
+%construct.field.ptr1 = getelementptr inbounds %Point, ptr %p, i32 0, i32 1
+store i64 %y, ptr %construct.field.ptr1, align 8, !tbaa !...
+```
+
+**Any expression is valid as `TARGET`:**
+```omscript
+// Construct into the result of pointer arithmetic
+construct (arr + i) { x: 5, y: 10 };
 ```
 
 ---
 
-### 17.10 Scope-based drop (RAII-like)
+#### 17.9.2c `new T { ... }` Expression — Allocation + Field Construction
 
-**Not implemented.** OmScript does NOT automatically call `invalidate` at scope exit. Heap allocations persist until explicitly invalidated or the program terminates.
+`new T { field: val, ... }` is an **expression** that combines `alloc<T>(1)` (raw allocation) with an immediate `construct` statement.  It returns a `ptr<T>` with exactly the listed fields initialised and unlisted fields **uninitialised**.
 
-**Future feature:** Automatic drop at scope exit for owned variables.
+Use `new T { ... }` when you want to initialise exactly the fields you need and skip the rest for maximum performance. Use `new T(1)` + `construct` if you prefer separate alloc and init steps.
+
+**Allocation + field comparison:**
+
+| Form | Allocates | Zero-fills all | Initialises specific fields | Count |
+|---|---|---|---|---|
+| `alloc<T>(n)` | ✓ | ✗ | ✗ | `n` |
+| `new T(n)` | ✓ | ✓ | ✗ | `n` |
+| `new T { f:v, ... }` | ✓ | ✗ | ✓ listed only | 1 |
+| `construct p { f:v, ... };` | ✗ | ✗ | ✓ listed only | existing |
+
+**Example:**
+```omscript
+struct Point { x: int; y: int; }
+
+fn make_point(x: int, y: int) -> ptr<Point> {
+    return new Point { x: x, y: y };
+}
+
+fn main() -> int {
+    var p: ptr<Point> = new Point { x: 3, y: 4 };
+    println(p->x);   // 3
+    println(p->y);   // 4
+    invalidate p;
+    return 0;
+}
+```
+
+**Lowering** (identical to `alloc<Point>(1)` + `construct`):
+```
+%ptr = call nonnull ptr @malloc(i64 16)
+%construct.field.ptr = getelementptr inbounds %Point, ptr %ptr, i32 0, i32 0
+store i64 3, ptr %construct.field.ptr, align 8, !tbaa !...
+%construct.field.ptr1 = getelementptr inbounds %Point, ptr %ptr, i32 0, i32 1
+store i64 4, ptr %construct.field.ptr1, align 8, !tbaa !...
+; %ptr is the result — no extra overhead
+```
+
+#### 17.9.3 Pointer Arithmetic
+
+`ptr<T>` arithmetic is type-aware: `p + n` advances by `n * sizeof(T)` bytes.
+
+```omscript
+fn main() -> int {
+    var arr: ptr<i64> = alloc<i64>(3);
+    *arr       = 10;
+    *(arr + 1) = 20;
+    *(arr + 2) = 47;
+    var result = *arr + *(arr + 1) + *(arr + 2);  // 77
+    invalidate arr;
+    return result;
+}
+```
+
+#### 17.9.4 Null Pointers
+
+Both `null` and `nullptr` produce a zero-address `ptr<T>`:
+```omscript
+var p: ptr<i64> = null;     // zero pointer
+var q: ptr<i64> = nullptr;  // identical (Ω spec §2.2)
+if (p == q) { println("both null"); }
+```
+
+#### 17.9.5 Allowed Pointer Initializers
+
+| Initializer | Example | Valid |
+|-------------|---------|-------|
+| Address-of | `&x` | ✓ |
+| `alloc<T>()` | `alloc<i64>(4)` | ✓ |
+| `malloc`/`calloc`/`realloc` | `malloc(100)` | ✓ |
+| Another ptr variable | `q` | ✓ |
+| Function returning ptr | `get_buf()` | ✓ |
+| `null` / `nullptr` | `null` | ✓ |
+| Integer literal | `42` | ✗ (error) |
 
 ---
 
-### 17.11 Allowed/disallowed conversions
+### 17.10 `prefetch x;`
 
-**`ptr` → `int`:**
-- Allowed implicitly (pointer values are stored as i64).
-- Use case: Pass pointer across function boundaries.
+**Variable-level prefetch:** Emit `llvm.prefetch` intrinsic to load the address of `x` into cache.
 
-**`int` → `ptr`:**
-- Allowed via explicit cast: `IntToPtr`.
-- Use case: Reconstruct pointer from i64 value.
+**Use-site annotation:** `@prefetch` on a loop annotation (see §8.12).
 
-**`ptr<T>` → `ptr<U>`:**
-- Allowed (all pointers are i8* in LLVM IR).
-- No type safety enforcement at runtime.
+---
+
+### 17.11 No-Aliasing Guarantee
+
+When ownership analysis proves a pointer does not alias any other, LLVM `noalias` metadata is attached to loads/stores and function arguments:
+
+- `Owned` variables: always `noalias` (no aliases exist).
+- `MutBorrowed` variables: exclusive access (`noalias` with all other pointers).
+
+---
+
+### 17.12 Scope-Based Drop
+
+**Not automatically implemented.** OmScript does NOT automatically call `invalidate` at scope exit. Heap allocations persist until explicitly invalidated or the program terminates.
+
+The compiler does, however, emit `llvm.lifetime.end` for stack-allocated `alloc<T>` at scope exit as an LLVM optimization hint.
+
+---
+
+### 17.13 Pointer Conversions
+
+| Conversion | Legality | Notes |
+|------------|----------|-------|
+| `ptr` → `int` | Implicit | Pointer values stored as i64 |
+| `int` → `ptr` | Explicit (`IntToPtr`) | Reconstruct pointer from i64 |
+| `ptr<T>` → `ptr<U>` | Allowed | All ptrs are opaque at LLVM IR level |
+
+---
+
+### 17.14 Borrow Checker Error Codes
+
+| Code | Name | Trigger |
+|------|------|---------|
+| E015 | `USE_AFTER_MOVE` | Read/write of moved or invalidated variable |
+| E016 | `BORROW_WRITE_CONFLICT` | Write to variable with active immutable borrow(s) |
+| E017 | `DOUBLE_MUT_BORROW` | Mutable borrow of already mutably-borrowed variable |
+| E018 | `MOVE_WHILE_BORROWED` | Move/`own` of variable with active borrow(s) |
+| E019 | `DOUBLE_INVALIDATE` | `invalidate` on already-invalidated variable |
+| E020 | `WRITE_TO_SHARED` | Write to variable in `shared` ownership state |
+| E021 | `OWN_ON_FROZEN` | `own` on a `frozen` variable — freeze is irreversible |
+| E022 | `INVALIDATE_WHILE_BORROWED` | `invalidate` while active borrow(s) exist on the variable |
+
+**Design notes:**
+- E019 and E022 together make `invalidate` fully safe: no double-free (E019) and no dangling alias (E022).
+- E021 enforces that `freeze` is strictly stronger than `shared`: once frozen, ownership cannot be reclaimed via `own`.
+- All error codes are compile-time only — zero runtime overhead.
+
+---
+
+### 17.15 Ownership Constraint Summary
+
+The following matrix summarizes which operations are permitted in each ownership state:
+
+| Operation | `Owned` | `Borrowed` | `MutBorrowed` | `Shared` | `Frozen` | `Moved` | `Invalidated` |
+|-----------|:-------:|:----------:|:-------------:|:--------:|:--------:|:-------:|:-------------:|
+| Read | ✓ | ✓ | ✗ | ✓ | ✓ | ✗ | ✗ |
+| Write | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| `move` | ✓ | ✗ | ✗ | ✗ | ✓¹ | ✗ | ✗ |
+| `invalidate` | ✓ | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ |
+| `freeze` | ✓ | ✗ | ✗ | ✓ | —² | ✗ | ✗ |
+| `shared` | ✓ | ✓ | ✗ | —² | ✓ | ✗ | ✗ |
+| `own` | —² | ✗ | ✗ | ✓ | ✗³ | ✗ | ✗ |
+| `borrow` | ✓ | ✓ | ✗ | ✓ | ✓ | ✗ | ✗ |
+| `borrow mut` | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+
+¹ Frozen variables may be moved; the destination is a new frozen owner.  
+² No-op / already in that state.  
+³ E021 — freeze is irreversible; `own` cannot downgrade a frozen variable.
+
+**Error triggered on invalid operation:**
+- Write to `Borrowed` → E016; write to `Shared` → E020; write to `Frozen`/`Moved`/`Invalidated` → E005/E015
+- `invalidate` on `Moved` → E015; on `Invalidated` → E019; on `Borrowed`/`MutBorrowed` → E022
+- `own` on `Frozen` → E021; `own` on `Borrowed` → E018
+
+---
+
+### 17.16 Safety Mode Flags
+
+#### `--no-ownership-checks` (Ω spec §6.2)
+
+Disables the borrow checker entirely. The compiler treats memory as a raw C-like model — no borrow tracking, no invalidation checks, no safety diagnostics.
+
+```
+omsc myprogram.om --no-ownership-checks -o out
+```
+
+**Use case:** Interoperating with C-style code, performance benchmarking, or code that manages memory manually.
+
+#### `--mem-sanitize` (Ω spec §7)
+
+Enables the compile-time path-sensitive memory sanitizer. Detects and reports:
+- Use-after-invalidate
+- Invalid dereference paths
+- Potential out-of-bounds pointer arithmetic
+- Double free
+- Null dereference possibilities
+
+Output format:
+```
+MEM-SANITIZER ERROR
+file.om:42
+
+use-after-invalidate detected
+variable: p
+control path:
+  line 38 -> invalidate p
+  line 41 -> *p (invalid use)
+```
+
+**Properties:**
+- Compile-time only — zero runtime cost
+- Path-sensitive (CFG-based): reports *possible* UB, not just certain UB
+- Does not affect code generation; purely diagnostic
 
 ---
 
@@ -5681,7 +6610,7 @@ print("hello");  // "hello\n"
 
 #### `println(any) → i64`
 
-Alias for `print`.
+Print value followed by newline to stdout (same behavior as `print`). Returns 0. Both `print` and `println` add a trailing newline; use `write` to print without one.
 
 ---
 
@@ -6048,6 +6977,11 @@ Return the byte size of a type as a compile-time constant.
 ```omscript
 println(sizeof(int));    // 8
 println(sizeof(float));  // 8
+println(sizeof(f32));    // 4
+println(sizeof(i32));    // 4
+println(sizeof(i128));   // 16
+println(sizeof(bool));   // 1
+println(sizeof(byte));   // 1
 ```
 
 ---
@@ -6067,6 +7001,291 @@ var y = u8(x);  // 1 (257 % 256)
 ```
 
 **Deep-dive table:** Deferred to Part 3.
+
+---
+
+### 19.5.2 Value conversion functions
+
+#### `to_string(any) → string`
+
+Convert any value to its string representation.
+
+- Integer → decimal string via `snprintf("%lld", ...)`.
+- Float → string via `snprintf("%g", ...)`.
+- String → returned as-is.
+
+**Example:**
+```omscript
+var s: string = to_string(42);       // "42"
+var f: string = to_string(3.14);     // "3.14"
+```
+
+---
+
+#### `to_int(any) → i64`
+
+Convert a value to an integer.
+
+- Float → truncates via `fptosi`.
+- String → parse as decimal (same as `str_to_int`).
+- Integer → identity.
+
+**Example:**
+```omscript
+var n: int = to_int(3.7);     // 3 (truncated)
+var m: int = to_int("42");    // 42
+```
+
+---
+
+#### `to_float(any) → f64`
+
+Convert a value to a 64-bit float.
+
+- Integer → exact conversion via `sitofp`.
+- String → parse as float (same as `str_to_float`).
+- Float → identity.
+
+**Example:**
+```omscript
+var f: float = to_float(10);    // 10.0
+var g: float = to_float("3.14"); // 3.14
+```
+
+---
+
+#### `to_char(i64) → string`
+
+Convert an ASCII code to a single-character string.
+
+**Example:**
+```omscript
+var c: string = to_char(65);   // "A"
+var d: string = to_char(97);   // "a"
+```
+
+---
+
+#### `char_code(string) → i64`
+
+Return the ASCII integer code of the first character of the string.
+
+**Example:**
+```omscript
+var code: int = char_code("A");   // 65
+var code2: int = char_code("hello"); // 104 (code of 'h')
+```
+
+---
+
+#### `number_to_string(i64) → string`
+
+Format an integer as a decimal string. Equivalent to `to_string` for integer inputs.
+
+**Example:**
+```omscript
+var s: string = number_to_string(12345);   // "12345"
+```
+
+---
+
+#### `string_to_number(string) → i64`
+
+Parse a decimal string as an integer. Equivalent to `str_to_int` for decimal strings.
+
+**Example:**
+```omscript
+var n: int = string_to_number("12345");   // 12345
+```
+
+---
+
+#### `str_to_int(string) → i64`
+
+Parse a decimal (or hex with `0x` prefix) string as a signed 64-bit integer. Returns 0 if the string is not a valid number.
+
+**Example:**
+```omscript
+var n: int = str_to_int("42");     // 42
+var h: int = str_to_int("0xFF");   // 255
+var z: int = str_to_int("abc");    // 0
+```
+
+---
+
+#### `str_to_float(string) → f64`
+
+Parse a string as a 64-bit floating-point value. Returns 0.0 if not valid.
+
+**Example:**
+```omscript
+var f: float = str_to_float("3.14");   // 3.14
+var g: float = str_to_float("1e5");    // 100000.0
+```
+
+---
+
+### 19.5.3 Random number generation
+
+#### `random() → i64`
+
+Return a pseudo-random non-negative integer. Uses the C `rand()` function, seeded once per process with `srand(time(NULL))`. The seed is set on the first call.
+
+**Range:** `[0, RAND_MAX]` (typically `[0, 2147483647]` on POSIX).
+
+**Example:**
+```omscript
+var r: int = random();
+println(r);
+
+var die: int = random() % 6 + 1;   // simulated dice roll [1, 6]
+```
+
+---
+
+### 19.5.4 Character classification predicates
+
+These functions test a single character passed as an ASCII integer code (as returned by `char_code` or `char_at`). All return `1` (true) or `0` (false).
+
+#### `is_alpha(i64) → bool`
+
+Return 1 if the character is a letter (`a-z` or `A-Z`).
+
+---
+
+#### `is_digit(i64) → bool`
+
+Return 1 if the character is a decimal digit (`0-9`).
+
+---
+
+#### `is_upper(i64) → bool`
+
+Return 1 if the character is an uppercase letter (`A-Z`).
+
+---
+
+#### `is_lower(i64) → bool`
+
+Return 1 if the character is a lowercase letter (`a-z`).
+
+---
+
+#### `is_space(i64) → bool`
+
+Return 1 if the character is whitespace (space, tab, newline, carriage return, etc.).
+
+---
+
+#### `is_alnum(i64) → bool`
+
+Return 1 if the character is alphanumeric (`a-z`, `A-Z`, or `0-9`).
+
+**Example:**
+```omscript
+var c: int = char_code("A");
+println(is_alpha(c));    // 1
+println(is_upper(c));    // 1
+println(is_digit(c));    // 0
+println(is_alnum(c));    // 1
+
+var d: int = char_code("5");
+println(is_digit(d));    // 1
+println(is_alpha(d));    // 0
+```
+
+---
+
+### 19.5.5 Range array constructors
+
+#### `range(start: i64, end: i64) → array`
+
+Return a new array `[start, start+1, ..., end-1]` (exclusive upper bound). Length is `max(0, end - start)`.
+
+**Example:**
+```omscript
+var a: int[] = range(0, 5);    // [0, 1, 2, 3, 4]
+var b: int[] = range(3, 7);    // [3, 4, 5, 6]
+```
+
+---
+
+#### `range_step(start: i64, end: i64, step: i64) → array`
+
+Return a new array `[start, start+step, start+2*step, ...]` stopping before `end`. `step` must be positive.
+
+**Example:**
+```omscript
+var evens: int[] = range_step(0, 10, 2);   // [0, 2, 4, 6, 8]
+var tens: int[] = range_step(10, 50, 10);  // [10, 20, 30, 40]
+```
+
+---
+
+### 19.5.6 HTTP client builtins
+
+The HTTP builtins perform synchronous HTTP requests via libcurl (linked at compile time when the `http_*` builtins are used). All functions return a heap-allocated string.
+
+#### `http_get(url: string) → string`
+
+Perform an HTTP GET request and return the response body.
+
+**Example:**
+```omscript
+var body: string = http_get("https://example.com/api/data");
+println(body);
+```
+
+---
+
+#### `http_post(url: string, body: string) → string`
+
+Perform an HTTP POST request with `body` as the request body (Content-Type: `application/x-www-form-urlencoded`). Returns the response body.
+
+**Example:**
+```omscript
+var resp: string = http_post("https://example.com/submit", "key=value");
+println(resp);
+```
+
+---
+
+#### `http_post(url: string, body: string, content_type: string) → string`
+
+Overload with explicit Content-Type header.
+
+**Example:**
+```omscript
+var resp: string = http_post("https://api.example.com/json", "{\"key\":\"val\"}", "application/json");
+```
+
+---
+
+#### `http_request(method: string, url: string, body: string, headers: string) → string`
+
+Full-control HTTP request. `method` is the HTTP verb (`"GET"`, `"POST"`, `"PUT"`, `"DELETE"`, etc.). `headers` is a newline-separated list of `Header: Value` strings. Returns the response body.
+
+**Example:**
+```omscript
+var resp: string = http_request("PUT", "https://api.example.com/item/1",
+                                "{\"name\":\"test\"}", "Content-Type: application/json");
+```
+
+---
+
+#### `http_status(url: string) → i64`
+
+Perform an HTTP GET and return only the HTTP status code (e.g., `200`, `404`).
+
+**Example:**
+```omscript
+var code: int = http_status("https://example.com");
+if code == 200 {
+    println("OK");
+} else {
+    println("Error: " + to_string(code));
+}
+```
 
 ---
 
@@ -7091,7 +8310,7 @@ The OmScript compiler (`omsc`) supports three primary invocation patterns:
 | Subcommand           | Aliases                     | Description                                             |
 |----------------------|-----------------------------|---------------------------------------------------------|
 | `help`               | `-h`, `--help`              | Display usage information                               |
-| `version`            | `-v`, `--version`           | Print compiler version (`4.1.1`)                        |
+| `version`            | `-v`, `--version`           | Print compiler version (`4.4.0`)                        |
 | `build`, `compile`   | `--build`, `--compile`      | Compile source to executable (default subcommand)       |
 | `run`                | `-r`, `--run`               | Compile and execute, passing args after `--`            |
 | `check`              | `--check`                   | Validate syntax and types without code generation       |
@@ -7146,6 +8365,8 @@ Flags are organized by category. Most boolean flags support negation via `-fno-<
 | `-funroll-loops`       | —     | `true`          | Loop unrolling hints                                    |
 | `-floop-optimize`      | —     | `true`          | Polyhedral loop transformations (tiling, interchange)   |
 | `-fparallelize`        | —     | `true`          | Auto-parallelization of independent loops               |
+| `-fsdr`                | —     | `true` (O2+)    | Speculative Devectorization & Revectorization (SDR)     |
+| `-fipof`               | —     | `true` (O2+)    | Implicit Phase Ordering Fixer (IPOF)                    |
 
 #### Target
 
@@ -7175,6 +8396,33 @@ Flags are organized by category. Most boolean flags support negation via `-fno-<
 #### Diagnostics
 
 The compiler emits structured diagnostics to stderr. Errors use exit code 1; warnings do not halt compilation.
+
+#### Memory Safety and Ownership
+
+| Flag                      | Short | Default | Description                                                  |
+|---------------------------|-------|---------|--------------------------------------------------------------|
+| `--no-ownership-checks`   | —     | `false` | Disable borrow/ownership checks entirely (unsafe mode, Ω spec §6.2) |
+| `--mem-sanitize`          | —     | `false` | Compile-time path-sensitive memory-safety diagnostics (Ω spec §7) |
+
+**`--no-ownership-checks`**: Disables the borrow checker. The compiler treats memory as a raw C-like model — no E015–E020 errors emitted. Use for interop with C-style pointer code.
+
+**`--mem-sanitize`**: Enables compile-time CFG-based analysis that detects and reports:
+- Use-after-invalidate paths
+- Potential null dereferences
+- Double-free risks
+- Out-of-bounds pointer arithmetic possibilities
+
+Output uses the format:
+```
+MEM-SANITIZER ERROR
+file.om:42
+
+use-after-invalidate detected
+variable: p
+control path:
+  line 38 -> invalidate p
+  line 41 -> *p (invalid use)
+```
 
 #### PGO (Profile-Guided Optimization)
 
@@ -7247,25 +8495,24 @@ The `pkg` subcommand manages dependencies:
 omsc pkg <action> [args]
 ```
 
-| Action    | Description                                                        |
-|-----------|--------------------------------------------------------------------|
-| `init`    | Create `oms.toml` in current directory (same as `omsc init`)       |
-| `add <name>` | Add dependency to `[dependencies]` section of `oms.toml`        |
-| `install` | Fetch and install all dependencies listed in `oms.toml`            |
-| `remove <name>` | Remove dependency from `oms.toml`                            |
-| `list`    | List installed packages in `om_packages/`                          |
-| `build`   | Build the current project (same as `omsc build`)                   |
-| `run`     | Build and run (same as `omsc run`)                                 |
+| Action                           | Aliases               | Description                                                        |
+|----------------------------------|-----------------------|--------------------------------------------------------------------|
+| `install <name>`                 | `add <name>`          | Install a package from the registry into `om_packages/`            |
+| `remove <name>`                  | `uninstall`, `rm`     | Remove an installed package from `om_packages/` and `oms.toml`     |
+| `list`                           | `ls`                  | List all currently installed packages                              |
+| `search [query]`                 | `find [query]`        | Search the registry for packages matching the query                |
+| `info <name>`                    | `show <name>`         | Show metadata and description for a package                        |
 
 **Dependency resolution**:
 Dependencies are fetched from the default registry URL (GitHub `user-packages/` directory) or a custom registry set via `OMSC_REGISTRY_URL` environment variable.
 
 **Example workflow**:
 ```bash
-omsc pkg init                  # creates oms.toml
-omsc pkg add http              # adds http library
-omsc pkg install               # downloads to om_packages/http/
-omsc pkg build                 # compiles with dependency
+omsc pkg install http           # downloads http library to om_packages/http/
+omsc pkg list                   # shows installed packages
+omsc pkg info http              # shows metadata for http package
+omsc pkg remove http            # uninstalls and removes from oms.toml
+omsc pkg search json            # search registry for JSON-related packages
 ```
 
 ### 24.8 Project file format (oms.toml)
@@ -7662,7 +8909,7 @@ The supported operation set is fixed by the `Op` enum (`egraph.h:55-98`): consta
 
 **Example**:
 ```omscript
-let x = (a + 0) * 1;
+var x: int = (a + 0) * 1;
 ```
 The e-graph after saturation contains:
 ```
@@ -7806,7 +9053,7 @@ After saturation, the extractor builds the output AST by recursively choosing th
 
 **Example 1: Constant folding**
 ```omscript
-let x = (3 + 5) * 2;
+var x: int = (3 + 5) * 2;
 ```
 After saturation:
 ```
@@ -7820,7 +9067,7 @@ Extracted: `Const(16)`.
 
 **Example 2: Algebraic simplification**
 ```omscript
-let y = x * 1 + 0 - 0;
+var y: int = x * 1 + 0 - 0;
 ```
 After saturation:
 ```
@@ -8097,7 +9344,8 @@ RecMII = latency(`fadd`) = 4 cycles. Scheduler ensures loop II ≥ 4.
 
 **Example**:
 ```omscript
-let y = x * 10 + x * 5;
+var x: int = 3;
+var y: int = x * 10 + x * 5;
 ```
 OPTMAX combines to `x * 15` before e-graph sees it.
 
@@ -8162,8 +9410,8 @@ LLVM's **SROA** (Scalar Replacement of Aggregates) pass:
 **Example**:
 ```omscript
 struct Point { x: int, y: int }
-let p = Point { x: 3, y: 4 };
-let z = p.x + p.y;
+var p: Point = Point { x: 3, y: 4 };
+var z: int = p.x + p.y;
 ```
 After SROA:
 ```llvm
@@ -8184,7 +9432,7 @@ After `mem2reg`:
 
 **Loop vectorizer** recognizes reductions:
 ```omscript
-let sum = 0;
+var sum: int = 0;
 for i in 0..n {
     sum += arr[i];
 }
@@ -8217,8 +9465,8 @@ and (per-pass timings are recorded but printed only when verbose mode is on; see
 
 CF-CTRE evaluates array operations at compile time:
 ```omscript
-const arr = comptime {
-    let a = [1, 2, 3];
+const arr: int[] = comptime {
+    var a: int[] = [1, 2, 3];
     push(a, 4);
     a
 };
@@ -8245,13 +9493,13 @@ RLC merges disjoint region lifetimes to eliminate redundant allocations:
 
 ```omscript
 fn process() {
-    let r1 = newRegion();
-    let data1 = alloc(r1, 1024);
+    var r1: int = newRegion();
+    var data1: ptr = alloc(r1, 1024);
     // ... use data1 ...
     invalidate(r1);
 
-    let r2 = newRegion();          // RLC merges r2 into r1
-    let data2 = alloc(r2, 512);    // reuses r1's memory
+    var r2: int = newRegion();          // RLC merges r2 into r1
+    var data2: ptr = alloc(r2, 512);    // reuses r1's memory
     // ... use data2 ...
     invalidate(r2);
 }
@@ -8260,13 +9508,13 @@ fn process() {
 After RLC:
 ```omscript
 fn process() {
-    let r1 = newRegion();
-    let data1 = alloc(r1, 1024);
+    var r1: int = newRegion();
+    var data1: ptr = alloc(r1, 1024);
     // ... use data1 ...
     // invalidate(r1) removed
 
     // r2 eliminated
-    let data2 = alloc(r1, 512);    // reuses r1
+    var data2: ptr = alloc(r1, 512);    // reuses r1
     // ... use data2 ...
     invalidate(r1);
 }
@@ -8362,8 +9610,8 @@ OmScript provides explicit integer type casts as built-in functions. These are c
 
 **Example**:
 ```omscript
-let x: int = 42;
-let y = u64(x);   // y == 42, no IR generated
+var x: int = 42;
+var y: u64 = u64(x);   // y == 42, no IR generated
 ```
 
 ### 27.3 `u32(x)`, `i32(x)`
@@ -8386,8 +9634,8 @@ let y = u64(x);   // y == 42, no IR generated
 
 **Example**:
 ```omscript
-let a = u32(-1);         // a = 4294967295 (0xFFFFFFFF)
-let b = u32(0x1_0000_0000);  // b = 0 (wraps)
+var a: u32 = u32(-1);             // a = 4294967295 (0xFFFFFFFF)
+var b: u32 = u32(0x1_0000_0000);  // b = 0 (wraps)
 ```
 
 #### `i32(x)` — Signed 32-bit truncation + sign-extend
@@ -8412,9 +9660,9 @@ return (int64_t)tmp;       // sign-extend
 
 **Example**:
 ```omscript
-let c = i32(0x8000_0000);   // c = -2147483648 (sign bit set)
-let d = i32(0x7FFF_FFFF);   // d = 2147483647
-let e = i32(0x1_8000_0000); // e = -2147483648 (wraps, bit 31 set)
+var c: i32 = i32(0x8000_0000);   // c = -2147483648 (sign bit set)
+var d: i32 = i32(0x7FFF_FFFF);   // d = 2147483647
+var e: i32 = i32(0x1_8000_0000); // e = -2147483648 (wraps, bit 31 set)
 ```
 
 ### 27.4 `u16(x)`, `i16(x)`
@@ -8433,8 +9681,8 @@ let e = i32(0x1_8000_0000); // e = -2147483648 (wraps, bit 31 set)
 
 **Example**:
 ```omscript
-let f = u16(0x1_FFFF);   // f = 0xFFFF = 65535
-let g = u16(-1);         // g = 65535 (0xFFFF)
+var f: u16 = u16(0x1_FFFF);   // f = 0xFFFF = 65535
+var g: u16 = u16(-1);         // g = 65535 (0xFFFF)
 ```
 
 #### `i16(x)` — Signed 16-bit truncation + sign-extend
@@ -8451,8 +9699,8 @@ let g = u16(-1);         // g = 65535 (0xFFFF)
 
 **Example**:
 ```omscript
-let h = i16(0x8000);     // h = -32768 (0x8000 sign-extends to 0xFFFF_FFFF_FFFF_8000)
-let i = i16(0x7FFF);     // i = 32767
+var h: i16 = i16(0x8000);     // h = -32768 (0x8000 sign-extends to 0xFFFF_FFFF_FFFF_8000)
+var i2: i16 = i16(0x7FFF);    // i2 = 32767
 ```
 
 ### 27.5 `u8(x)`, `i8(x)`
@@ -8471,9 +9719,9 @@ let i = i16(0x7FFF);     // i = 32767
 
 **Example**:
 ```omscript
-let j = u8(255);    // j = 255
-let k = u8(256);    // k = 0 (wraps)
-let l = u8(-1);     // l = 255 (0xFF)
+var j: u8 = u8(255);    // j = 255
+var k: u8 = u8(256);    // k = 0 (wraps)
+var l: u8 = u8(-1);     // l = 255 (0xFF)
 ```
 
 #### `i8(x)` — Signed 8-bit truncation + sign-extend
@@ -8490,9 +9738,9 @@ let l = u8(-1);     // l = 255 (0xFF)
 
 **Example**:
 ```omscript
-let m = i8(127);    // m = 127
-let n = i8(128);    // n = -128 (0x80 sign-extends to 0xFFFF_FFFF_FFFF_FF80)
-let o = i8(-1);     // o = -1 (0xFF sign-extends to 0xFFFF_FFFF_FFFF_FFFF)
+var m: i8 = i8(127);    // m = 127
+var n: i8 = i8(128);    // n = -128 (0x80 sign-extends to 0xFFFF_FFFF_FFFF_FF80)
+var o: i8 = i8(-1);     // o = -1 (0xFF sign-extends to 0xFFFF_FFFF_FFFF_FFFF)
 ```
 
 ### 27.6 `bool(x)`
@@ -8511,9 +9759,9 @@ let o = i8(-1);     // o = -1 (0xFF sign-extends to 0xFFFF_FFFF_FFFF_FFFF)
 
 **Example**:
 ```omscript
-let p = bool(42);   // p = 1
-let q = bool(0);    // q = 0
-let r = bool(-5);   // r = 1
+var p: bool = bool(42);   // p = 1
+var q: bool = bool(0);    // q = 0
+var r: bool = bool(-5);   // r = 1
 ```
 
 ### 27.7 Compile-time folding rules table
@@ -8540,7 +9788,7 @@ Casts are **codegen-time operations**, not type annotations. OmScript has a sing
 
 **Contrast with C**:
 - In C: `uint32_t x = (uint32_t)y;` — type-level constraint enforced at compile time.
-- In OmScript: `let x: int = u32(y);` — codegen-time truncation + zero-extension; result is stored as `i64`.
+- In OmScript: `var x: int = u32(y);` — codegen-time truncation + zero-extension; result is stored as `i64`.
 
 ### 27.9 Worked examples
 
@@ -8548,13 +9796,13 @@ Casts are **codegen-time operations**, not type annotations. OmScript has a sing
 
 ```omscript
 fn pack_rgb(r: int, g: int, b: int) -> int {
-    let r8 = u8(r);
-    let g8 = u8(g);
-    let b8 = u8(b);
+    var r8: int = u8(r);
+    var g8: int = u8(g);
+    var b8: int = u8(b);
     return (r8 << 16) | (g8 << 8) | b8;
 }
 
-let color = pack_rgb(255, 128, 64);   // color = 0xFF8040
+var color: int = pack_rgb(255, 128, 64);   // color = 0xFF8040
 ```
 
 **LLVM IR** (simplified):
@@ -8574,10 +9822,10 @@ define i64 @pack_rgb(i64 %r, i64 %g, i64 %b) {
 #### Example 2: Signed vs. unsigned 32-bit
 
 ```omscript
-let val = 0xFFFF_FFFF;
+var val: int = 0xFFFF_FFFF;
 
-let unsigned = u32(val);   // unsigned = 4294967295 (0xFFFFFFFF, zero-extended)
-let signed   = i32(val);   // signed   = -1 (0xFFFFFFFF, sign-extended to 0xFFFF_FFFF_FFFF_FFFF)
+var unsigned: int = u32(val);   // unsigned = 4294967295 (0xFFFFFFFF, zero-extended)
+var signed: int   = i32(val);   // signed   = -1 (0xFFFFFFFF, sign-extended to 0xFFFF_FFFF_FFFF_FFFF)
 
 print(unsigned);  // 4294967295
 print(signed);    // -1
@@ -8586,11 +9834,11 @@ print(signed);    // -1
 #### Example 3: Overflow wrapping
 
 ```omscript
-let big = 0x1_0000_0000;   // 2^32
-let wrapped = u32(big);    // wrapped = 0 (wraps modulo 2^32)
+var big: int = 0x1_0000_0000;    // 2^32
+var wrapped: int = u32(big);     // wrapped = 0 (wraps modulo 2^32)
 
-let neg = -1;
-let byte = u8(neg);        // byte = 255 (wraps: -1 mod 256 = 255)
+var neg: int = -1;
+var byte: int = u8(neg);         // byte = 255 (wraps: -1 mod 256 = 255)
 ```
 
 #### Example 4: `bool` for conditionals
@@ -9416,9 +10664,9 @@ omsc pkg list            # shows installed packages
 
 ### Variables
 ```omscript
-let x = 42;               // mutable
-const y = 100;            // immutable
-let z: int = 0;           // explicit type (optional)
+var x: int = 42;          // mutable, type annotation required
+const y: int = 100;       // immutable
+var z: int = 0;           // explicit type annotation
 ```
 
 ### Functions
@@ -9436,13 +10684,13 @@ fn greet(name: string) {  // no return type
 ```omscript
 if x > 0 {
     print("positive");
-} else if x < 0 {
+} elif x < 0 {
     print("negative");
 } else {
     print("zero");
 }
 
-let result = x > 0 ? "pos" : "neg";   // ternary
+var result: string = x > 0 ? "pos" : "neg";   // ternary
 ```
 
 ### Loops
@@ -9462,47 +10710,74 @@ while x > 0 {
 
 ### Operators
 ```omscript
-let sum = a + b;         // arithmetic
-let prod = a * b;
-let rem = a % b;
-let pow = a ** b;        // exponentiation
+var s: int = a + b;      // arithmetic
+var prod: int = a * b;
+var rem: int = a % b;
+var pw: int = a ** b;    // exponentiation
 
-let eq = a == b;         // comparison
-let ne = a != b;
+var eq: bool = a == b;   // comparison
+var ne: bool = a != b;
 
-let and = a && b;        // logical
-let or = a || b;
+var a2: bool = a && b;   // logical
+var or2: bool = a || b;
 
-let band = a & b;        // bitwise
-let bor = a | b;
-let shl = a << 2;
+var band: int = a & b;   // bitwise
+var bor: int = a | b;
+var shl: int = a << 2;
 ```
 
 ### Arrays
 ```omscript
-let arr = [1, 2, 3];
-let first = arr[0];
+var arr: int[] = [1, 2, 3];
+var first: int = arr[0];
 arr[1] = 42;
-let length = len(arr);
+var length: int = len(arr);
 push(arr, 4);
-let last = pop(arr);
+var last: int = pop(arr);
 ```
 
 ### Strings
 ```omscript
-let s = "hello";
-let len = str_len(s);
-let upper = str_upper(s);
-let concat = s + " world";
-let sub = str_substr(s, 0, 3);   // "hel"
+var s: string = "hello";
+var slen: int = str_len(s);
+var upper: string = str_upper(s);
+var concat: string = s + " world";
+var sub: string = str_substr(s, 0, 3);   // "hel"
 ```
 
 ### Ownership
 ```omscript
-let r = newRegion();         // create region
-let data = alloc(r, 1024);   // allocate in region
+var r: int = newRegion();       // create region
+var data: ptr = alloc(r, 1024); // allocate in region
 // ... use data ...
-invalidate(r);               // free region
+invalidate(r);                  // free region
+```
+
+### Pointers and Construction
+```omscript
+struct Point { x: int; y: int; }
+
+// Raw allocation — uninitialised memory (fastest when you write every field)
+var p: ptr<Point> = alloc<Point>(1);
+
+// In-place field initialisation on already-allocated memory (zero-cost GEP+store)
+construct p {
+    x: 10,
+    y: 20,
+};
+
+// Zero-initialised allocation — all bytes zeroed before use
+var zp: ptr<Point> = new Point;       // calloc(1, sizeof(Point))
+var zi: ptr<i64>   = new i64(8);      // calloc(8, sizeof(i64))
+
+// Allocate + initialise specific fields in one expression (alloc + field stores)
+var q: ptr<Point> = new Point { x: 3, y: 4 };
+println(q->x);  // 3
+
+invalidate p;
+invalidate zp;
+invalidate zi;
+invalidate q;
 ```
 
 ### Comptime
@@ -9519,7 +10794,8 @@ const factorial_10 = comptime {
 ### OPTMAX
 ```omscript
 // Automatic: enabled at O1+
-let y = x * 10 + x * 5;   // optimized to x * 15 by OPTMAX
+var x: int = 3;
+var y: int = x * 10 + x * 5;   // optimized to x * 15 by OPTMAX
 ```
 
 ### CLI
@@ -9557,11 +10833,18 @@ fn multiply_add(a: int, b: int, c: int) -> int {
 | **Fuel**              | Instruction budget for CF-CTRE evaluation. Default: 10,000,000 instructions at O2. |
 | **Comptime**          | Compile-time evaluation. Code inside `comptime { ... }` blocks is executed by CF-CTRE. |
 | **Ptr-elem-type**     | Pointer element type. The type of data pointed to by a pointer (used internally by LLVM IR). |
-| **Ownership state**   | State of a region variable: `created`, `invalidated`. Tracked by RLC pass. |
-| **Freeze**            | Operation that converts a mutable reference to an immutable reference (future feature). |
-| **Invalidate**        | Keyword that marks the end of a region's lifetime. After `invalidate(r)`, `r` cannot be used. |
-| **Reborrow**          | Creating a new reference to the same data (future feature). |
-| **No-alias**          | Guarantee that two pointers do not refer to overlapping memory. Enables aggressive optimization. |
+| **Ownership state**   | Per-variable state tracked by the borrow checker. One of: `Owned`, `Borrowed`, `MutBorrowed`, `Shared`, `Frozen`, `Moved`, `Invalidated`. See §17.1. |
+| **Owned**             | Initial ownership state: variable has unique, exclusive read-write access. |
+| **Borrowed**          | Variable has ≥1 active immutable borrows (`borrow var r = x`). Source is readable but not writable or moveable until all borrows end. |
+| **MutBorrowed**       | Variable has exactly one active mutable borrow (`borrow mut var r = x`). Source is completely locked (no reads or writes) until the borrow ends. |
+| **Shared**            | Variable transitioned via `shared x;`. Multiple reads allowed; writes and mutable borrows are compile-time errors (E020). Reversible via `own x;`. |
+| **Frozen**            | Variable permanently immutable via `freeze x;`. LLVM `!invariant` metadata emitted on all loads. Irreversible — `own` is a compile-time error (E021). |
+| **Moved**             | Ownership transferred via `move var y = x`. Reading/writing `x` afterwards is a compile-time error (E015). |
+| **Invalidated**       | Variable killed via `invalidate x;`. Memory scheduled for deferred `free()`. Any subsequent use is E015. Double-invalidate is E019. |
+| **Freeze**            | `freeze x;` — mark variable permanently read-only. LLVM `!invariant.load` emitted. `own` on frozen variable → E021. |
+| **Invalidate**        | `invalidate x;` — deferred deallocation. Logical death is immediate; physical `free()` is batched at function exit. Cannot invalidate while borrowed (E022). |
+| **Reborrow**          | `reborrow var ref = src;` — create a new non-owning immutable alias from an existing borrow. Increments the source's `reborrows` count. |
+| **No-alias**          | Guarantee that two pointers do not refer to overlapping memory. Emitted as LLVM `noalias` on `Owned` and `MutBorrowed` variables. Enables aggressive optimization. |
 | **Saturation**        | Termination condition for e-graph: no new e-nodes added in an iteration. |
 | **Extraction**        | Phase of e-graph optimization where the minimum-cost term is selected from each e-class. |
 | **SCoP**              | Static Control Part. Loop nest with affine bounds and subscripts, eligible for polyhedral optimization. |

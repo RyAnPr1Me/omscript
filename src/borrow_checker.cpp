@@ -68,6 +68,8 @@ static BorrowMap joinMaps(const BorrowMap& a, const BorrowMap& b) {
             rs.mutBorrowed = rs.mutBorrowed || sb.mutBorrowed;
             // Frozen in either branch.
             rs.frozen = rs.frozen || sb.frozen;
+            // Shared in either branch.
+            rs.shared = rs.shared || sb.shared;
         }
     }
     return result;
@@ -192,6 +194,12 @@ private:
                 "cannot write to '" + name + "' — it has " +
                 std::to_string(s->immutBorrows) + " active immutable borrow(s)", site);
         }
+        if (s->shared) {
+            throw makeBorrowError(ErrorCode::E020_WRITE_TO_SHARED,
+                "cannot write to '" + name + "' — it is in shared ownership state "
+                "(Ω spec §3.1); use 'own " + name + ";' to restore unique ownership first",
+                site);
+        }
         if (s->frozen) {
             // Frozen variables are const — but E005 handles that.
         }
@@ -215,14 +223,14 @@ private:
                 "cannot move '" + name + "' — it has active borrow(s); "
                 "end the borrow before moving", site);
         }
-        // `reborrow` aliases block moves *unless* the variable is frozen.
-        // A frozen variable with only reborrow aliases is movable: `reborrow`
+        // `reborrow` aliases block moves *unless* the variable is frozen or shared.
+        // A frozen/shared variable with only reborrow aliases is movable: `reborrow`
         // is explicitly a short-lived, non-owning alias and the programmer
         // promises the alias won't be used after the move.
-        if (s->reborrows > 0 && !s->frozen) {
+        if (s->reborrows > 0 && !s->frozen && !s->shared) {
             throw makeBorrowError(ErrorCode::E018_MOVE_WHILE_BORROWED,
                 "cannot move '" + name + "' — it has active reborrow alias(es); "
-                "end the reborrow scope or freeze '" + name + "' before moving", site);
+                "end the reborrow scope or freeze/share '" + name + "' before moving", site);
         }
     }
 
@@ -571,9 +579,40 @@ private:
         }
         case ASTNodeType::INVALIDATE_STMT: {
             const auto* iv = static_cast<const InvalidateStmt*>(stmt);
-            auto& s = stateOf(iv->varName);
-            s.invalidated = true;
-            s.moved = false;
+            const auto* s = stateOfOpt(iv->varName);
+            if (s) {
+                if (s->invalidated) {
+                    // E019 — double-invalidate: variable already freed at compile time.
+                    throw makeBorrowError(ErrorCode::E019_DOUBLE_INVALIDATE,
+                        "double invalidation of '" + iv->varName +
+                        "' — variable was already invalidated", stmt);
+                }
+                if (s->moved) {
+                    throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
+                        "cannot invalidate '" + iv->varName +
+                        "' — variable was already moved", stmt);
+                }
+                // E022 — invalidate while borrowed: active borrows still reference
+                // this variable; freeing the memory now would dangle the alias.
+                if (s->mutBorrowed || s->immutBorrows > 0 || s->reborrows > 0) {
+                    std::string detail;
+                    if (s->mutBorrowed)          detail = "a mutable borrow";
+                    else if (s->immutBorrows > 0) detail = std::to_string(s->immutBorrows) +
+                                                           " immutable borrow(s)";
+                    else                          detail = std::to_string(s->reborrows) +
+                                                           " reborrow alias(es)";
+                    throw makeBorrowError(ErrorCode::E022_INVALIDATE_WHILE_BORROWED,
+                        "cannot invalidate '" + iv->varName + "' — it still has " + detail +
+                        " active; end all borrows before invalidating (Ω spec §6.2)", stmt);
+                }
+            }
+            // Use stateOf() to upsert the entry once — if s was non-null above
+            // the entry already exists; if s was null we create a fresh entry.
+            // Calling stateOf() twice would insert two default entries if the
+            // map reallocates between the two calls.
+            auto& ms = stateOf(iv->varName);
+            ms.invalidated = true;
+            ms.moved = false;
             break;
         }
         case ASTNodeType::FREEZE_STMT: {
@@ -592,6 +631,56 @@ private:
                 }
             }
             stateOf(fz->varName).frozen = true;
+            break;
+        }
+        case ASTNodeType::SHARED_STMT: {
+            // `shared x;` — transition x to shared ownership (Ω spec §3.1).
+            // Read-only aliasable: multiple immutable borrows allowed,
+            // mutable borrows and mutations are henceforth errors.
+            const auto* sh = static_cast<const SharedStmt*>(stmt);
+            const auto* s = stateOfOpt(sh->varName);
+            if (s) {
+                if (s->isDead()) {
+                    throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
+                        "cannot mark '" + sh->varName + "' as shared — variable is " +
+                        (s->moved ? "moved" : "invalidated"), stmt);
+                }
+                if (s->mutBorrowed) {
+                    throw makeBorrowError(ErrorCode::E016_BORROW_WRITE_CONFLICT,
+                        "cannot mark '" + sh->varName +
+                        "' as shared — it has an active mutable borrow", stmt);
+                }
+            }
+            stateOf(sh->varName).shared = true;
+            break;
+        }
+        case ASTNodeType::OWN_STMT: {
+            // `own x;` — explicitly assert unique ownership (Ω spec §3.1).
+            // Clears shared state; verifies no active borrows remain.
+            const auto* ow = static_cast<const OwnStmt*>(stmt);
+            const auto* s = stateOfOpt(ow->varName);
+            if (s) {
+                if (s->isDead()) {
+                    throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
+                        "cannot assert ownership of '" + ow->varName +
+                        "' — variable is " + (s->moved ? "moved" : "invalidated"), stmt);
+                }
+                // E021 — own on frozen: freeze is irreversible; 'own' cannot
+                // downgrade a frozen variable back to a writable owned state.
+                if (s->frozen) {
+                    throw makeBorrowError(ErrorCode::E021_OWN_ON_FROZEN,
+                        "cannot assert unique ownership of '" + ow->varName +
+                        "' — it is frozen (freeze is irreversible; use a new variable if "
+                        "you need a mutable copy)", stmt);
+                }
+                if (s->mutBorrowed || s->immutBorrows > 0 || s->reborrows > 0) {
+                    throw makeBorrowError(ErrorCode::E018_MOVE_WHILE_BORROWED,
+                        "cannot assert unique ownership of '" + ow->varName +
+                        "' — it has active borrow(s); end all borrows first", stmt);
+                }
+            }
+            // Clear shared state; frozen remains (freeze is stronger than shared).
+            stateOf(ow->varName).shared = false;
             break;
         }
         case ASTNodeType::THROW_STMT: {
@@ -667,16 +756,194 @@ void BorrowChecker::run() {
 // runBorrowCheck — public entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
-BorrowCheckResult runBorrowCheck(const Program& program, bool verbose) {
+// Forward declaration for the mem-sanitizer helper.
+static void runMemSanitizer(const Program& program,
+                             BorrowCheckResult& result);
+
+BorrowCheckResult runBorrowCheck(const Program& program,
+                                 bool verbose,
+                                 bool noOwnershipChecks,
+                                 bool memSanitize) {
     BorrowCheckResult result;
+
+    if (!noOwnershipChecks) {
+        for (const auto& fn : program.functions) {
+            if (!fn || !fn->body) continue;
+            if (verbose)
+                std::cerr << "[borrow-check] checking function '" << fn->name << "'\n";
+            BorrowChecker checker(*fn);
+            checker.run();  // throws DiagnosticError on first violation
+        }
+    } else if (verbose) {
+        std::cerr << "[borrow-check] ownership checks disabled (--no-ownership-checks)\n";
+    }
+
+    if (memSanitize) {
+        runMemSanitizer(program, result);
+    }
+
+    return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MemSanitizer — compile-time path-sensitive diagnostics (Ω spec §7)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Walk the AST to collect: (a) invalidation/move events with their location,
+// (b) uses of the same variable after its death point.
+// This is a simplified CFG-aware scan: we track death events sequentially,
+// and for each subsequent use of the same variable we report a diagnostic.
+
+struct MemEvent {
+    enum class Kind { Invalidate, Move, NullAssign };
+    std::string varName;
+    Kind        kind;
+    int         line;
+    std::string desc;  // human-readable description
+};
+
+/// Collect memory events from a statement list (simplified sequential scan).
+static void collectMemEvents(const Statement* stmt,
+                              std::vector<MemEvent>& events,
+                              std::unordered_map<std::string, MemEvent>& deathMap,
+                              BorrowCheckResult& result,
+                              const std::string& file) {
+    if (!stmt) return;
+
+    auto reportUse = [&](const std::string& varName, int useLine,
+                         const std::string& useDesc) {
+        auto it = deathMap.find(varName);
+        if (it == deathMap.end()) return;
+        const auto& ev = it->second;
+        MemSanitizerDiag diag;
+        diag.file      = file;
+        diag.varName   = varName;
+        diag.causeLine = ev.line;
+        diag.useLine   = useLine;
+        diag.useDesc   = useDesc;
+        if (ev.kind == MemEvent::Kind::Invalidate) {
+            diag.kind      = "use-after-invalidate";
+            diag.causeDesc = "invalidate " + varName;
+        } else if (ev.kind == MemEvent::Kind::Move) {
+            diag.kind      = "use-after-move";
+            diag.causeDesc = "move " + varName;
+        } else {
+            diag.kind      = "null-deref";
+            diag.causeDesc = varName + " = null";
+        }
+        result.memSanitizerDiags.push_back(std::move(diag));
+    };
+
+    // Scan for dereferences of dead pointers in an expression.
+    std::function<void(const Expression*, int)> scanExpr =
+        [&](const Expression* expr, int parentLine) {
+            if (!expr) return;
+            const int eline = expr->line ? expr->line : parentLine;
+
+            if (expr->type == ASTNodeType::UNARY_EXPR) {
+                const auto* ue = static_cast<const UnaryExpr*>(expr);
+                if (ue->op == "deref" && ue->operand &&
+                    ue->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
+                    const auto* id = static_cast<const IdentifierExpr*>(ue->operand.get());
+                    reportUse(id->name, eline, "*" + id->name + " (invalid use)");
+                }
+                scanExpr(ue->operand.get(), eline);
+            } else if (expr->type == ASTNodeType::BINARY_EXPR) {
+                const auto* be = static_cast<const BinaryExpr*>(expr);
+                scanExpr(be->left.get(), eline);
+                scanExpr(be->right.get(), eline);
+            } else if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
+                const auto* id = static_cast<const IdentifierExpr*>(expr);
+                reportUse(id->name, eline, id->name + " (use of dead variable)");
+            } else if (expr->type == ASTNodeType::CALL_EXPR) {
+                const auto* ce = static_cast<const CallExpr*>(expr);
+                for (const auto& arg : ce->arguments)
+                    scanExpr(arg.get(), eline);
+            } else if (expr->type == ASTNodeType::INDEX_EXPR) {
+                const auto* ie = static_cast<const IndexExpr*>(expr);
+                scanExpr(ie->array.get(), eline);
+                scanExpr(ie->index.get(), eline);
+            }
+        };
+
+    switch (stmt->type) {
+        case ASTNodeType::INVALIDATE_STMT: {
+            const auto* iv = static_cast<const InvalidateStmt*>(stmt);
+            deathMap[iv->varName] = {iv->varName, MemEvent::Kind::Invalidate,
+                                     stmt->line, "invalidate " + iv->varName};
+            break;
+        }
+        case ASTNodeType::MOVE_DECL:
+        case ASTNodeType::MOVE_EXPR: {
+            // No direct variable name here in all cases, skip for now.
+            break;
+        }
+        case ASTNodeType::VAR_DECL: {
+            const auto* vd = static_cast<const VarDecl*>(stmt);
+            // If a previously dead variable is re-declared, clear death record.
+            deathMap.erase(vd->name);
+            if (vd->initializer)
+                scanExpr(vd->initializer.get(), stmt->line);
+            break;
+        }
+        case ASTNodeType::EXPR_STMT: {
+            const auto* es = static_cast<const ExprStmt*>(stmt);
+            if (es->expression)
+                scanExpr(es->expression.get(), stmt->line);
+            break;
+        }
+        case ASTNodeType::RETURN_STMT: {
+            const auto* rs = static_cast<const ReturnStmt*>(stmt);
+            if (rs->value)
+                scanExpr(rs->value.get(), stmt->line);
+            break;
+        }
+        case ASTNodeType::BLOCK: {
+            const auto* bs = static_cast<const BlockStmt*>(stmt);
+            for (const auto& s : bs->statements)
+                collectMemEvents(s.get(), events, deathMap, result, file);
+            break;
+        }
+        case ASTNodeType::IF_STMT: {
+            const auto* is = static_cast<const IfStmt*>(stmt);
+            if (is->condition) scanExpr(is->condition.get(), stmt->line);
+            if (is->thenBranch)
+                collectMemEvents(is->thenBranch.get(), events, deathMap, result, file);
+            if (is->elseBranch)
+                collectMemEvents(is->elseBranch.get(), events, deathMap, result, file);
+            break;
+        }
+        case ASTNodeType::WHILE_STMT: {
+            const auto* ws = static_cast<const WhileStmt*>(stmt);
+            if (ws->condition) scanExpr(ws->condition.get(), stmt->line);
+            if (ws->body)
+                collectMemEvents(ws->body.get(), events, deathMap, result, file);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+static void runMemSanitizer(const Program& program,
+                             BorrowCheckResult& result) {
     for (const auto& fn : program.functions) {
         if (!fn || !fn->body) continue;
-        if (verbose)
-            std::cerr << "[borrow-check] checking function '" << fn->name << "'\n";
-        BorrowChecker checker(*fn);
-        checker.run();  // throws DiagnosticError on first violation
+        std::vector<MemEvent> events;
+        std::unordered_map<std::string, MemEvent> deathMap;
+        collectMemEvents(fn->body.get(), events, deathMap, result, fn->name);
     }
-    return result;
+
+    // Emit diagnostics to stderr in the spec format.
+    for (const auto& d : result.memSanitizerDiags) {
+        std::cerr << "MEM-SANITIZER ERROR\n"
+                  << d.file << ":" << d.useLine << "\n\n"
+                  << d.kind << " detected\n"
+                  << "variable: " << d.varName << "\n"
+                  << "control path:\n"
+                  << "  line " << d.causeLine << " -> " << d.causeDesc << "\n"
+                  << "  line " << d.useLine   << " -> " << d.useDesc   << "\n\n";
+    }
 }
 
 } // namespace omscript

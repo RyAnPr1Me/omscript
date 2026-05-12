@@ -256,9 +256,9 @@ static constexpr SimdTypeRow kSimdTypeRegistry[] = {
 };
 
 /// Returns true if a type-annotation string represents an unsigned integer
-/// (uint, or any uN for N in [1..256]).
+/// (uint, byte, or any uN for N in [1..256]).
 static bool isUnsignedAnnotation(const std::string& tn) {
-    if (tn == "uint") return true;
+    if (tn == "uint" || tn == "byte") return true;
     if (tn.size() >= 2 && tn[0] == 'u') {
         for (size_t j = 1; j < tn.size(); ++j)
             if (!std::isdigit(static_cast<unsigned char>(tn[j]))) return false;
@@ -451,7 +451,14 @@ static const std::unordered_set<std::string> stdlibFunctions = {"abs",
                                                                 "to_i16", "to_u16",
                                                                 "to_i32", "to_u32",
                                                                 "to_i64", "to_u64",
-                                                                "to_f32", "to_f64"};
+                                                                "to_f32", "to_f64",
+                                                                "store_ptr",
+                                                                "pslice_len",
+                                                                "pslice_ptr",
+                                                                "funcptr_from",
+                                                                "funcptr_new",
+                                                                "malloc",
+                                                                "free"};
 
 bool isStdlibFunction(const std::string& name) {
     return stdlibFunctions.find(name) != stdlibFunctions.end();
@@ -674,7 +681,9 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     if (!ann.empty() && ann[0] == '&') {
         ann = ann.substr(1);
     }
-    if (ann == "ptr" || (ann.rfind("ptr<", 0) == 0 && ann.back() == '>'))
+    if (ann == "ptr" || ann == "funcptr" ||
+        (ann.rfind("ptr<", 0) == 0 && ann.back() == '>') ||
+        (ann.rfind("pslice<", 0) == 0 && ann.back() == '>'))
         return llvm::PointerType::getUnqual(*context);
     if (ann == "float" || ann == "double" || ann == "f64" || ann == "float64")
         return getFloatType();                                  // f64 (double)
@@ -682,8 +691,8 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
         return llvm::Type::getFloatTy(*context);                // f32 (single)
     if (ann == "bool")
         return llvm::Type::getInt1Ty(*context);                 // i1
-    if (ann == "i8" || ann == "u8")
-        return llvm::Type::getInt8Ty(*context);                 // i8/u8
+    if (ann == "i8" || ann == "u8" || ann == "byte")
+        return llvm::Type::getInt8Ty(*context);                 // i8/u8/byte
     if (ann == "i16" || ann == "u16")
         return llvm::Type::getInt16Ty(*context);                // i16/u16
     if (ann == "i32" || ann == "u32")
@@ -879,15 +888,13 @@ llvm::Value* CodeGenerator::toDefaultType(llvm::Value* v) {
         // i1 is always 0/1 so ZExt is correct.  For wider signed integers use
         // SExt so that e.g. an i32 value of -1 becomes -1 in i64, not 2^32-1.
         if (srcBits == 1 || unsignedExprs_.count(v) || isUnsignedValue(v)) {
-            // The `nneg` flag (LLVM 18+) tells the optimizer the source value's
-            // sign bit is 0 (i.e., non-negative when interpreted as signed).
-            // This is safe for:
-            //   • i1 — only values 0/1, sign bit always 0.
-            //   • values in nonNegValues_ — proven to be in [0, 2^(n-1)-1].
-            // It is NOT safe to set nneg merely because the value is tagged as
-            // unsigned — an unsigned i32 may have its MSB set (values 2^31..2^32-1)
-            // even though we treat it as non-negative semantically.
-            const bool canNNeg = (srcBits == 1) || nonNegValues_.count(v);
+            // The `nneg` flag (LLVM 18+) is only valid when the source value's
+            // sign bit is 0 (i.e., the source is non-negative as a signed integer).
+            // CRITICAL: i1 is NOT eligible for nneg. In LLVM, i1 value 1 (true)
+            // is -1 as a signed 1-bit integer, so `zext nneg i1 1` is POISON.
+            // For unsigned sources (e.g. i32 with MSB set), nneg is also wrong.
+            // Only use nneg for multi-bit values proven non-negative via nonNegValues_.
+            const bool canNNeg = (srcBits > 1) && nonNegValues_.count(v);
             return builder->CreateZExt(v, getDefaultType(), "zext",
                                        /*IsNonNeg=*/canNNeg);
         }
@@ -1074,7 +1081,7 @@ void CodeGenerator::bindVariableAnnotated(const std::string& name, llvm::Value* 
 }
 
 bool CodeGenerator::isUnsignedAnnot(const std::string& annot) {
-    if (annot == "uint") return true;
+    if (annot == "uint" || annot == "byte") return true;
     if (annot.size() >= 2 && annot[0] == 'u') {
         for (size_t j = 1; j < annot.size(); ++j)
             if (!std::isdigit(static_cast<unsigned char>(annot[j]))) return false;
@@ -1110,6 +1117,9 @@ bool CodeGenerator::isUnsignedValue(llvm::Value* v) const {
 }
 
 void CodeGenerator::checkConstModification(const std::string& name, const std::string& action) {
+    // Ω spec §6.2: --no-ownership-checks disables all safety validation.
+    if (noOwnershipChecks_) return;
+
     auto constIt = constValues.find(name);
     if (constIt != constValues.end() && constIt->second) {
         // Give a more specific error message for frozen variables
@@ -1122,8 +1132,16 @@ void CodeGenerator::checkConstModification(const std::string& name, const std::s
         throw DiagnosticError(
             Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, "Cannot " + action + " const variable: " + name});
     }
-    // Block writes to the source variable of an active mutable borrow.
+    // Block writes to variables in shared ownership state (Ω spec §3.1).
     auto* bs = getBorrowStateOpt(name);
+    if (bs && bs->shared) {
+        throw DiagnosticError(
+            Diagnostic{DiagnosticSeverity::Error, {"", 0, 0},
+                       "Cannot " + action + " variable '" + name +
+                       "' — it is in shared ownership state (Ω spec §3.1); "
+                       "use 'own " + name + ";' to restore unique ownership first"});
+    }
+    // Block writes to the source variable of an active mutable borrow.
     if (bs && bs->mutBorrowed) {
         throw DiagnosticError(
             Diagnostic{DiagnosticSeverity::Error, {"", 0, 0},
@@ -1275,12 +1293,14 @@ CodeGenerator::CountingLoopInfo CodeGenerator::emitCountingLoop(
 // ── IR emit helpers ───────────────────────────────────────────────────────────
 
 llvm::Value* CodeGenerator::emitBoolZExt(llvm::Value* i1Val, const llvm::Twine& name) {
-    // IsNonNeg=true sets the `zext nneg` flag (LLVM 18+): the source i1 value
-    // is always 0 or 1, so the sign bit of the result is always 0.
-    // This lets LLVM's value-range analysis skip a separate analysis step.
-    auto* result = builder->CreateZExt(i1Val, getDefaultType(), name, /*IsNonNeg=*/true);
+    // ZExt from i1 to i64. The result is always 0 or 1 (non-negative).
+    // CRITICAL: Do NOT set IsNonNeg=true here. In LLVM, `nneg` on `zext` means
+    // the SOURCE value is non-negative as a signed integer. For i1, value 1
+    // (true) is -1 as a signed 1-bit integer, so `zext nneg i1 true` = POISON.
+    // This would cause LLVM to misoptimize any comparison that evaluates to true.
+    // nonNegValues_ correctly communicates result non-negativity via other means.
+    auto* result = builder->CreateZExt(i1Val, getDefaultType(), name, /*IsNonNeg=*/false);
     // Note: !range metadata is not valid on zext instructions (only load/call/invoke).
-    // The `zext nneg` flag already communicates to LLVM that the result is in [0,2).
     nonNegValues_.insert(result);
     return result;
 }
@@ -1546,6 +1566,12 @@ llvm::Function* CodeGenerator::getOrDeclarePutchar() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
+    // memory(inaccessiblemem: readwrite): putchar writes to stdout's internal
+    // buffer, which is not accessible through any argument pointer.  This lets
+    // the optimizer hoist pure loads past putchar calls without worrying about
+    // interference with user-visible memory.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleMemOnly()));
     return fn;
 }
 
@@ -1562,6 +1588,10 @@ llvm::Function* CodeGenerator::getOrDeclarePuts() {
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(argmem: read, inaccessiblemem: readwrite): puts reads the string
+    // via its pointer argument and writes to stdout's internal buffer.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -1581,6 +1611,10 @@ llvm::Function* CodeGenerator::getOrDeclareFputs() {
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     OMSC_ADD_NOCAPTURE(fn, 1);  // stream pointer is not captured
+    // memory(argmem: read, inaccessiblemem: readwrite): fputs reads the string
+    // via param 0 and writes to the stream's internal stdio buffer.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -1611,10 +1645,16 @@ llvm::Function* CodeGenerator::getOrDeclareScanf() {
         llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {llvm::PointerType::getUnqual(*context)}, true);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "scanf", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(argmem: readwrite, inaccessiblemem: readwrite): scanf reads the
+    // format string (arg 0) and variadic pointer args (argmem write), plus
+    // reads from stdin's internal buffer (inaccessible).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -1654,9 +1694,16 @@ llvm::Function* CodeGenerator::getOrDeclareSnprintf() {
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addFnAttr(llvm::Attribute::NoSync);
     // snprintf: dest is writeonly+nocapture, format string is readonly+nocapture.
+    // NOTE: do NOT add NonNull to param 0 — the probe call pattern passes null
+    // with n=0 (valid per POSIX) to measure the required buffer length.
+    fn->addParamAttr(0, llvm::Attribute::WriteOnly); // only written, never read back
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(2, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 2);
+    // memory(argmem: readwrite): snprintf only reads/writes through its
+    // argument pointers (dest buffer and format/variadic args).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::argMemOnly()));
     return fn;
 }
 
@@ -2068,6 +2115,10 @@ llvm::Function* CodeGenerator::getOrDeclareFwrite() {
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(3, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 3);
+    // memory(argmem: read, inaccessiblemem: readwrite): fwrite reads the data
+    // buffer via param 0 and writes to the FILE* stream's internal buffer.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -2081,6 +2132,10 @@ llvm::Function* CodeGenerator::getOrDeclareFflush() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(inaccessiblemem: readwrite): fflush only operates on the FILE*
+    // stream's internal buffer state, which is not visible to the caller.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -2097,6 +2152,11 @@ llvm::Function* CodeGenerator::getOrDeclareFgets() {
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(2, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 2);
+    // memory(argmem: write, inaccessiblemem: readwrite): fgets writes the read
+    // characters into the buffer (param 0, argmem write) and advances the FILE*
+    // stream's internal read position (inaccessible state).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -2117,6 +2177,11 @@ llvm::Function* CodeGenerator::getOrDeclareFopen() {
     fn->addParamAttr(1, llvm::Attribute::NonNull);
     fn->addParamAttr(1, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 1);
+    // memory(argmem: read, inaccessiblemem: readwrite): fopen reads the path
+    // and mode strings (argmem read) and allocates/initialises a FILE* through
+    // the runtime's internal allocator (inaccessible memory).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -2130,6 +2195,11 @@ llvm::Function* CodeGenerator::getOrDeclareFclose() {
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(inaccessiblemem: readwrite): fclose flushes and frees the FILE*'s
+    // internal buffer (all state is inside the opaque FILE struct — not directly
+    // accessible to the caller).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -2146,6 +2216,11 @@ llvm::Function* CodeGenerator::getOrDeclareFread() {
     OMSC_ADD_NOCAPTURE(fn, 0);
     fn->addParamAttr(3, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 3);
+    // memory(argmem: write, inaccessiblemem: readwrite): fread writes data into
+    // the caller-supplied buffer (param 0, argmem) and advances the FILE*
+    // stream's read position (inaccessible internal state).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -2161,6 +2236,10 @@ llvm::Function* CodeGenerator::getOrDeclareFseek() {
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(inaccessiblemem: readwrite): fseek modifies the FILE* stream's
+    // internal position — all state is inside the opaque FILE struct.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 
@@ -2175,6 +2254,10 @@ llvm::Function* CodeGenerator::getOrDeclareFtell() {
     fn->addFnAttr(llvm::Attribute::NoFree);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(inaccessiblemem: read): ftell reads the FILE* stream's current
+    // position from its internal state — a read-only query of opaque state.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly(llvm::ModRefInfo::Ref)));
     return fn;
 }
 
@@ -2192,6 +2275,11 @@ llvm::Function* CodeGenerator::getOrDeclareAccess() {
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(argmem: read, inaccessiblemem: read): access() reads the pathname
+    // string through param 0 (argmem) and performs a read-only filesystem
+    // query through the kernel (inaccessible to the LLVM optimizer).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly(llvm::ModRefInfo::Ref)));
     return fn;
 }
 
@@ -2293,6 +2381,11 @@ llvm::Function* CodeGenerator::getOrDeclareGetenv() {
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(argmem: read, inaccessiblemem: read): getenv reads the name string
+    // via param 0 (argmem) and searches the process environment table, which is
+    // inaccessible memory from the optimizer's perspective.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly(llvm::ModRefInfo::Ref)));
     return fn;
 }
 
@@ -2304,10 +2397,16 @@ llvm::Function* CodeGenerator::getOrDeclareSetenv() {
     auto* ty = llvm::FunctionType::get(i32Ty, {ptrTy, ptrTy, i32Ty}, false);
     llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "setenv", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(1, llvm::Attribute::NonNull);
     OMSC_ADD_NOCAPTURE(fn, 0);
     OMSC_ADD_NOCAPTURE(fn, 1);
+    // memory(argmem: read, inaccessiblemem: readwrite): setenv reads the name
+    // and value strings (argmem read) and writes to the process environment
+    // table (inaccessible allocator-managed memory).
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
     return fn;
 }
 // ── BigInt runtime helper declarations ──────────────────────────────────────
@@ -4179,6 +4278,8 @@ void CodeGenerator::generate(Program* program) {
 
     {
         OptimizationOrchestrator orch(optimizationLevel, verbose_, this, optMgr_.get());
+        orch.setNoOwnershipChecks(noOwnershipChecks_);
+        orch.setMemSanitize(memSanitize_);
         orch.runPrepasses(program, *optCtx_);
     }
 
@@ -5483,6 +5584,15 @@ void CodeGenerator::generateStatement(Statement* stmt) {
     case ASTNodeType::FREEZE_STMT:
         generateFreeze(static_cast<FreezeStmt*>(stmt));
         break;
+    case ASTNodeType::SHARED_STMT:
+        generateShared(static_cast<SharedStmt*>(stmt));
+        break;
+    case ASTNodeType::OWN_STMT:
+        generateOwn(static_cast<OwnStmt*>(stmt));
+        break;
+    case ASTNodeType::CONSTRUCT_STMT:
+        generateConstruct(static_cast<ConstructStmt*>(stmt));
+        break;
     case ASTNodeType::PREFETCH_STMT:
         generatePrefetch(static_cast<PrefetchStmt*>(stmt));
         break;
@@ -5529,6 +5639,8 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateIndex(static_cast<IndexExpr*>(expr));
     case ASTNodeType::INDEX_ASSIGN_EXPR:
         return generateIndexAssign(static_cast<IndexAssignExpr*>(expr));
+    case ASTNodeType::DEREF_ASSIGN_EXPR:
+        return generateDerefAssign(static_cast<DerefAssignExpr*>(expr));
     case ASTNodeType::STRUCT_LITERAL_EXPR:
         return generateStructLiteral(static_cast<StructLiteralExpr*>(expr));
     case ASTNodeType::FIELD_ACCESS_EXPR:
@@ -5565,6 +5677,8 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateScopeResolution(static_cast<ScopeResolutionExpr*>(expr));
     case ASTNodeType::RANGE_ANNOT_EXPR:
         return generateRangeAnnot(static_cast<RangeAnnotExpr*>(expr));
+    case ASTNodeType::NEW_CONSTRUCT_EXPR:
+        return generateNewConstruct(static_cast<NewConstructExpr*>(expr));
     case ASTNodeType::COMPTIME_EXPR: {
         // comptime { ... } — evaluate the block at compile time via CF-CTRE.
         auto* ct = static_cast<ComptimeExpr*>(expr);
@@ -6314,6 +6428,10 @@ void CodeGenerator::autoDetectConstEvalFunctions(Program* program) {
             return false;
         case ASTNodeType::BREAK_STMT:
         case ASTNodeType::CONTINUE_STMT:
+        case ASTNodeType::FREEZE_STMT:
+        case ASTNodeType::SHARED_STMT:
+        case ASTNodeType::OWN_STMT:
+            // These are compile-time ownership annotations with no side effects.
             return true;
         case ASTNodeType::SWITCH_STMT: {
             auto* sw = static_cast<const SwitchStmt*>(stmt);

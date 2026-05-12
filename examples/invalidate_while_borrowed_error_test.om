@@ -1,0 +1,11 @@
+// invalidate_while_borrowed_error_test.om — verify E022 invalidate-while-borrowed
+// This test is expected to FAIL at compile time with:
+//   [E022] cannot invalidate 'p' — it still has 1 immutable borrow(s) active
+// It is used as a negative test (the compiler must reject this program).
+
+fn main() -> int {
+    var p: ptr<i64> = alloc<i64>(1);
+    borrow var r = p;    // r is an active borrow of p
+    invalidate p;        // ERROR: E022 — cannot invalidate while borrowed
+    return 0;
+}

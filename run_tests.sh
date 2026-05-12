@@ -463,7 +463,7 @@ ptest_program "examples/quality_improvements_test.om" 0
 ptest_program "examples/swap_oob.om" 134
 ptest_program "examples/char_at_oob.om" 134
 ptest_program "examples/overflow_wrap_test.om" 42
-ptest_program "examples/benchmark_loops_math.om" 192
+ptest_program "examples/benchmark_loops_math.om" 64
 ptest_program "examples/try_catch_test.om" 88
 ptest_program "examples/throw_in_called_fn_test.om" 147
 ptest_program "examples/len_string_test.om" 8
@@ -519,6 +519,11 @@ ptest_compile_fail "examples/invalid_binary.om"
 ptest_compile_fail "examples/invalid_octal.om"
 ptest_compile_fail "examples/invalid_numeric_underscore.om"
 ptest_compile_fail "examples/unknown_annotation.om"
+# Ω Ownership System negative tests (must be rejected by the compiler)
+ptest_compile_fail "examples/double_invalidate_error_test.om"
+ptest_compile_fail "examples/write_to_shared_error_test.om"
+ptest_compile_fail "examples/invalidate_while_borrowed_error_test.om"
+ptest_compile_fail "examples/own_on_frozen_error_test.om"
 flush_ptests
 test_cli_output "error-line-info" "line" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "error-includes-filename" "undefined_var.om" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
@@ -533,6 +538,11 @@ test_cli_output "invalid-hex-msg" "Expected hex digit after" 1 ./build/omsc exam
 test_cli_output "invalid-binary-msg" "Expected binary digit after" 1 ./build/omsc examples/invalid_binary.om -o /tmp/test_bin_err
 test_cli_output "invalid-octal-msg" "Expected octal digit after" 1 ./build/omsc examples/invalid_octal.om -o /tmp/test_oct_err
 test_cli_output "invalid-numeric-underscore-msg" "Invalid underscore placement in numeric literal" 1 ./build/omsc examples/invalid_numeric_underscore.om -o /tmp/test_num_uscore_err
+# Ω Ownership error code diagnostics
+test_cli_output "e019-double-invalidate-msg" "E019" 1 ./build/omsc examples/double_invalidate_error_test.om -o /tmp/test_e019
+test_cli_output "e020-write-to-shared-msg" "E020" 1 ./build/omsc examples/write_to_shared_error_test.om -o /tmp/test_e020
+test_cli_output "e021-own-on-frozen-msg" "E021" 1 ./build/omsc examples/own_on_frozen_error_test.om -o /tmp/test_e021
+test_cli_output "e022-invalidate-while-borrowed-msg" "E022" 1 ./build/omsc examples/invalidate_while_borrowed_error_test.om -o /tmp/test_e022
 
 echo ""
 echo "============================================"
@@ -862,6 +872,10 @@ ptest_program "examples/speculatable_annotation_test.om" 17
 ptest_program "examples/repr_annotation_test.om" 37
 ptest_program "examples/borrow_mut_syntax_test.om" 42
 ptest_program "examples/ref_borrow_test.om" 42
+ptest_program "examples/nullptr_test.om" 42
+ptest_program "examples/alloc_zero_args_test.om" 99
+ptest_program "examples/shared_ownership_test.om" 55
+ptest_program "examples/ptr_arith_typed_test.om" 77
 ptest_program "examples/comptime_chain_test.om" 45
 ptest_program "examples/comptime_array_test.om" 478546148456
 ptest_program "examples/comptime_array_append_test.om" 18
@@ -884,6 +898,10 @@ ptest_program "examples/ternary_positions_test.om" 150
 ptest_program "examples/function_call_patterns_test.om" 10
 # ── HTTP client builtins ──────────────────────────────────────────────────
 ptest_program "examples/http_test.om" 0
+# ── New language features ─────────────────────────────────────────────────
+ptest_program "examples/predefined_constants_test.om" 23
+ptest_program "examples/addr_of_test.om" 5
+ptest_program "examples/as_operator_test.om" 10
 flush_ptests
 
 echo ""

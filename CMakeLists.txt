@@ -153,9 +153,18 @@ if(CURL_FOUND)
 endif()
 target_compile_options(omsc_http PRIVATE -O2 -fPIC)
 
+# ── funcptr runtime static library (linked into user programs) ───────────────
+# funcptr_runtime.c provides omsc_funcptr_new() which allocates executable
+# memory (mmap/VirtualAlloc) so that raw machine-code bytes stored in a
+# `funcptr` variable can be called at runtime.
+add_library(omsc_funcptr STATIC
+    src/funcptr_runtime.c
+)
+target_compile_options(omsc_funcptr PRIVATE -O2 -fPIC)
+
 add_executable(omsc ${SRC})
-# Ensure omsc_bigint and omsc_http are built before omsc so the .a paths are valid.
-add_dependencies(omsc omsc_bigint omsc_http)
+# Ensure omsc_bigint, omsc_http, and omsc_funcptr are built before omsc.
+add_dependencies(omsc omsc_bigint omsc_http omsc_funcptr)
 
 # Tell the compiler binary where the bigint runtime library lives at build time.
 # At install time the path is overridden via OMSC_BIGINT_LIB_PATH.
@@ -166,6 +175,11 @@ target_compile_definitions(omsc PRIVATE
 # Tell the compiler binary where the HTTP runtime library lives at build time.
 target_compile_definitions(omsc PRIVATE
     OMSC_HTTP_LIB_PATH=\"${CMAKE_CURRENT_BINARY_DIR}/libomsc_http.a\"
+)
+
+# Tell the compiler binary where the funcptr runtime library lives at build time.
+target_compile_definitions(omsc PRIVATE
+    OMSC_FUNCPTR_LIB_PATH=\"${CMAKE_CURRENT_BINARY_DIR}/libomsc_funcptr.a\"
 )
 
 # Tell the compiler binary the full path to the curl library so that user

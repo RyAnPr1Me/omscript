@@ -431,6 +431,154 @@ llvm::Value* CodeGenerator::generateScopeResolution(ScopeResolutionExpr* expr) {
     codegenError(msg, expr);
 }
 
+// ---------------------------------------------------------------------------
+// tryResolvePredefinedConstant — return an LLVM constant for built-in integer
+// range identifiers, or nullptr if the name isn't one of them.
+//
+// Supported naming conventions:
+//   I{N}_MAX, I{N}_MIN  — signed   N-bit extremes (N = 1..256)
+//   U{N}_MAX            — unsigned N-bit max      (U{N}_MIN is always 0)
+//   U{N}_MIN            — 0 (explicit for clarity)
+//   BOOL_MAX, BOOL_MIN  — aliases for I1_MAX / I1_MIN (1 / 0)
+//   INT_MAX,  INT_MIN   — aliases for I64_MAX / I64_MIN
+//   UINT_MAX            — alias  for U64_MAX
+//   INT{N}_MAX / INT{N}_MIN / UINT{N}_MAX  — C-style aliases (N in bits)
+// ---------------------------------------------------------------------------
+llvm::Value* CodeGenerator::tryResolvePredefinedConstant(const std::string& name,
+                                                          ASTNode* ctx) {
+    // Helper: build a constant with the right bit width, auto-widening to i64
+    // for narrow types so callers get a usable value in normal arithmetic.
+    // Wide types (>64 bits) keep their native width so the caller can use them
+    // in comparisons with i128/i256 variables.
+    auto makeConst = [&](unsigned bits, llvm::APInt value, bool unsign) -> llvm::Value* {
+        llvm::IntegerType* ty = llvm::IntegerType::get(*context, bits);
+        auto* c = llvm::ConstantInt::get(ty, value);
+        if (value.isNonNegative() || unsign) nonNegValues_.insert(c);
+        if (unsign) unsignedExprs_.insert(c);
+        return c;
+    };
+
+    // ── Resolve name to (bits, isSigned, isMax) ────────────────────────────
+    unsigned bits = 0;
+    bool isSigned = true;
+    bool isMax    = true; // false → MIN
+
+    const std::string n = name; // local alias
+
+    // BOOL_MAX / BOOL_MIN — booleans are unsigned i1 (0 or 1)
+    if (n == "BOOL_MAX") { bits = 1; isSigned = false; isMax = true;  goto build; }
+    if (n == "BOOL_MIN") { bits = 1; isSigned = false; isMax = false; goto build; }
+
+    // INT_MAX / INT_MIN / UINT_MAX / UINT_MIN — 64-bit aliases
+    if (n == "INT_MAX")  { bits = 64; isSigned = true;  isMax = true;  goto build; }
+    if (n == "INT_MIN")  { bits = 64; isSigned = true;  isMax = false; goto build; }
+    if (n == "UINT_MAX") { bits = 64; isSigned = false; isMax = true;  goto build; }
+    if (n == "UINT_MIN") { bits = 64; isSigned = false; isMax = false; goto build; }
+
+    // I{N}_MAX / I{N}_MIN  (signed)
+    if (n.size() >= 6 && n[0] == 'I') {
+        // find _MAX or _MIN suffix
+        auto suffixPos = n.rfind("_MAX");
+        bool isMaxSuffix = (suffixPos != std::string::npos);
+        if (!isMaxSuffix) suffixPos = n.rfind("_MIN");
+        if (suffixPos != std::string::npos && suffixPos > 1) {
+            const std::string numStr = n.substr(1, suffixPos - 1);
+            bool allDig = !numStr.empty();
+            int bitsI = 0;
+            for (char c : numStr) {
+                if (!std::isdigit((unsigned char)c)) { allDig = false; break; }
+                bitsI = bitsI * 10 + (c - '0');
+                if (bitsI > 256) { allDig = false; break; }
+            }
+            if (allDig && bitsI >= 1 && bitsI <= 256) {
+                bits = static_cast<unsigned>(bitsI);
+                isSigned = true;
+                isMax = isMaxSuffix;
+                goto build;
+            }
+        }
+    }
+
+    // U{N}_MAX / U{N}_MIN  (unsigned)
+    if (n.size() >= 6 && n[0] == 'U') {
+        auto suffixPos = n.rfind("_MAX");
+        bool isMaxSuffix = (suffixPos != std::string::npos);
+        if (!isMaxSuffix) suffixPos = n.rfind("_MIN");
+        if (suffixPos != std::string::npos && suffixPos > 1) {
+            const std::string numStr = n.substr(1, suffixPos - 1);
+            bool allDig = !numStr.empty();
+            int bitsI = 0;
+            for (char c : numStr) {
+                if (!std::isdigit((unsigned char)c)) { allDig = false; break; }
+                bitsI = bitsI * 10 + (c - '0');
+                if (bitsI > 256) { allDig = false; break; }
+            }
+            if (allDig && bitsI >= 1 && bitsI <= 256) {
+                bits = static_cast<unsigned>(bitsI);
+                isSigned = false;
+                isMax = isMaxSuffix;
+                goto build;
+            }
+        }
+    }
+
+    // C-style aliases: INT8_MAX, INT16_MIN, UINT32_MAX, etc.
+    // Pattern: "INT" digits "_MAX"/"_MIN" or "UINT" digits "_MAX"/"_MIN"
+    {
+        bool isU = (n.rfind("UINT", 0) == 0);
+        bool isI = !isU && (n.rfind("INT", 0) == 0);
+        if (isI || isU) {
+            const size_t pfxLen = isU ? 4 : 3; // "UINT" vs "INT"
+            auto suffixPos = n.rfind("_MAX");
+            bool isMaxSuffix = (suffixPos != std::string::npos);
+            if (!isMaxSuffix) suffixPos = n.rfind("_MIN");
+            if (suffixPos != std::string::npos && suffixPos > pfxLen) {
+                const std::string numStr = n.substr(pfxLen, suffixPos - pfxLen);
+                bool allDig = !numStr.empty();
+                int bitsI = 0;
+                for (char c : numStr) {
+                    if (!std::isdigit((unsigned char)c)) { allDig = false; break; }
+                    bitsI = bitsI * 10 + (c - '0');
+                    if (bitsI > 256) { allDig = false; break; }
+                }
+                if (allDig && bitsI >= 1 && bitsI <= 256) {
+                    bits = static_cast<unsigned>(bitsI);
+                    isSigned = !isU;
+                    isMax = isMaxSuffix;
+                    goto build;
+                }
+            }
+        }
+    }
+
+    return nullptr; // not a predefined constant
+
+build:
+    {
+        llvm::APInt val;
+        if (!isMax) {
+            // MIN value
+            if (!isSigned) {
+                // unsigned MIN is always 0
+                val = llvm::APInt(bits, 0);
+            } else {
+                // signed MIN = -2^(bits-1) = 10...0 in two's complement
+                val = llvm::APInt::getSignedMinValue(bits);
+            }
+        } else {
+            // MAX value
+            if (!isSigned) {
+                // unsigned MAX = 2^bits - 1 = 11...1
+                val = llvm::APInt::getMaxValue(bits);
+            } else {
+                // signed MAX = 2^(bits-1) - 1 = 011...1
+                val = llvm::APInt::getSignedMaxValue(bits);
+            }
+        }
+        return makeConst(bits, val, !isSigned);
+    }
+}
+
 llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
     // Check for use-after-move, use-after-invalidate, or read-while-mut-borrowed.
     checkVariableReadable(expr->name, expr);
@@ -458,6 +606,13 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
                 auto* gv = gvIt->second;
                 return builder->CreateLoad(gv->getValueType(), gv, expr->name);
             }
+        }
+        // Predefined integer range constants: INTTYPE_MAX, INTTYPE_MIN, UINTTYPE_MAX.
+        // Supported names: I{N}_MAX, I{N}_MIN, U{N}_MAX, INT_MAX, INT_MIN, UINT_MAX,
+        // BOOL_MAX, BOOL_MIN, and common aliases (INT8_MAX etc.).
+        {
+            llvm::Value* rangeConst = tryResolvePredefinedConstant(expr->name, expr);
+            if (rangeConst) return rangeConst;
         }
         // Build "did you mean?" suggestion from known variables.
         std::string msg = "Unknown variable: " + expr->name;
@@ -669,7 +824,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Type* dstTy = resolveAnnotatedType(targetType);
         if (!dstTy) dstTy = getDefaultType();
         llvm::Type* srcTy = val->getType();
-        if (srcTy == dstTy) return val;
+        // byte[] must be checked BEFORE the srcTy==dstTy early-return because
+        // both strings and arrays have pointer (ptr) LLVM type — if we returned
+        // early here, a string as byte[] would just hand back the string pointer.
+        if (targetType != "byte[]" && srcTy == dstTy) return val;
         // Integer widening / narrowing
         if (srcTy->isIntegerTy() && dstTy->isIntegerTy()) {
             unsigned srcBits = srcTy->getIntegerBitWidth();
@@ -697,8 +855,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     }
                 }
                 if (isUnsignedSrc) {
+                    // IsNonNeg=false: LLVM's `nneg` flag asserts the *source*
+                    // integer is non-negative in a signed sense, which is false
+                    // for unsigned types with MSB set (e.g. u8 value 200 = -56
+                    // signed).  We communicate non-negativity via nonNegValues_
+                    // for OmScript-level alias analysis instead.
                     auto* z = builder->CreateZExt(val, dstTy, "as.zext",
-                                                   /*IsNonNeg=*/true);
+                                                   /*IsNonNeg=*/false);
                     nonNegValues_.insert(z);
                     return z;
                 }
@@ -712,13 +875,219 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
         // Float → integer
         if (srcTy->isFloatingPointTy() && dstTy->isIntegerTy()) {
+            // Use fptoui for unsigned target types (u8/u16/u32/u64/uN).
+            const std::string& tgtName = typeExpr->name;
+            if (!tgtName.empty() && tgtName[0] == 'u')
+                return builder->CreateFPToUI(val, dstTy, "as.fptoui");
             return builder->CreateFPToSI(val, dstTy, "as.fptosi");
+        }
+        // Float → float (different widths): fpext (widening) or fptrunc (narrowing).
+        if (srcTy->isFloatingPointTy() && dstTy->isFloatingPointTy()) {
+            unsigned srcBits = srcTy->getPrimitiveSizeInBits();
+            unsigned dstBits = dstTy->getPrimitiveSizeInBits();
+            if (dstBits > srcBits)
+                return builder->CreateFPExt(val, dstTy, "as.fpext");
+            if (dstBits < srcBits)
+                return builder->CreateFPTrunc(val, dstTy, "as.fptrunc");
+            return val; // same width, identity
         }
         // Integer → float
         if (srcTy->isIntegerTy() && dstTy->isFloatingPointTy()) {
+            // Use uitofp when the source variable's declared type is unsigned.
+            bool isUnsignedSrc = false;
+            if (const auto* srcId = asIdentifier(expr->left.get())) {
+                auto annIt = varTypeAnnotations_.find(srcId->name);
+                if (annIt != varTypeAnnotations_.end())
+                    isUnsignedSrc = isUnsignedAnnot(annIt->second);
+            } else if (expr->left->type == ASTNodeType::BINARY_EXPR) {
+                const auto* inner = static_cast<const BinaryExpr*>(expr->left.get());
+                if (inner->op == "as" && inner->right) {
+                    if (const auto* typeId = asIdentifier(inner->right.get()))
+                        isUnsignedSrc = isUnsignedAnnot(typeId->name);
+                }
+            }
+            if (isUnsignedSrc)
+                return builder->CreateUIToFP(val, dstTy, "as.uitofp");
             return builder->CreateSIToFP(val, dstTy, "as.sitofp");
         }
-        // Pointer ↔ integer
+        // Integer / Float / Pointer → string  (produces a heap-allocated OmScript string)
+        if (targetType == "string") {
+            // Float → string
+            if (srcTy->isFloatingPointTy()) {
+                llvm::Value* fval = srcTy->isDoubleTy()
+                    ? val
+                    : builder->CreateFPExt(val, getFloatType(), "as.str.fpext");
+                llvm::Value* maxLen = llvm::ConstantInt::get(getDefaultType(), 31);
+                llvm::Value* hdr = emitAllocString(maxLen, maxLen, "as.tostr");
+                llvm::Value* bufData = emitStringData(hdr, "as.tostr.data");
+                llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 32);
+                llvm::GlobalVariable* fmtStr = module->getGlobalVariable("as_tostr_float_fmt", true);
+                if (!fmtStr)
+                    fmtStr = builder->CreateGlobalString("%g", "as_tostr_float_fmt");
+                llvm::Value* written = builder->CreateCall(getOrDeclareSnprintf(),
+                    {bufData, bufSize, fmtStr, fval}, "as.tostr.written");
+                llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "as.tostr.len", false);
+                nonNegValues_.insert(actualLen);
+                emitStoreStringLen(actualLen, hdr);
+                stringReturningFunctions_.insert("as");
+                return hdr;
+            }
+            // Pointer → string: format the address as an unsigned decimal integer
+            if (srcTy->isPointerTy()) {
+                llvm::Value* asInt = builder->CreatePtrToInt(val, getDefaultType(), "as.str.ptrtoint");
+                llvm::Value* maxLen = llvm::ConstantInt::get(getDefaultType(), 20);
+                llvm::Value* hdr = emitAllocString(maxLen, maxLen, "as.tostr");
+                llvm::Value* bufData = emitStringData(hdr, "as.tostr.data");
+                llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 21);
+                llvm::GlobalVariable* fmtStr = module->getGlobalVariable("as_tostr_ptr_fmt", true);
+                if (!fmtStr)
+                    fmtStr = builder->CreateGlobalString("%llu", "as_tostr_ptr_fmt");
+                llvm::Value* written = builder->CreateCall(getOrDeclareSnprintf(),
+                    {bufData, bufSize, fmtStr, asInt}, "as.tostr.written");
+                llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "as.tostr.len", false);
+                nonNegValues_.insert(actualLen);
+                emitStoreStringLen(actualLen, hdr);
+                stringReturningFunctions_.insert("as");
+                return hdr;
+            }
+            // Integer → string (including wide ints: truncate to i64 for %lld)
+            llvm::Value* ival = val;
+            if (srcTy->isIntegerTy()) {
+                unsigned bits = srcTy->getIntegerBitWidth();
+                if (bits > 64)
+                    ival = builder->CreateTrunc(val, getDefaultType(), "as.str.trunc");
+                else if (bits < 64)
+                    ival = builder->CreateSExt(val, getDefaultType(), "as.str.sext");
+            }
+            llvm::Value* maxLen = llvm::ConstantInt::get(getDefaultType(), 20);
+            llvm::Value* hdr = emitAllocString(maxLen, maxLen, "as.tostr");
+            llvm::Value* bufData = emitStringData(hdr, "as.tostr.data");
+            llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 21);
+            llvm::GlobalVariable* fmtStr = module->getGlobalVariable("as_tostr_int_fmt", true);
+            if (!fmtStr)
+                fmtStr = builder->CreateGlobalString("%lld", "as_tostr_int_fmt");
+            llvm::Value* written = builder->CreateCall(getOrDeclareSnprintf(),
+                {bufData, bufSize, fmtStr, ival}, "as.tostr.written");
+            llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "as.tostr.len", false);
+            nonNegValues_.insert(actualLen);
+            emitStoreStringLen(actualLen, hdr);
+            stringReturningFunctions_.insert("as");
+            return hdr;
+        }
+        // Any value → byte[]  (raw bytes of the value, little-endian)
+        // Produces an OmScript int[] array whose elements are the individual
+        // bytes (0..255) of the source value's binary representation.
+        if (targetType == "byte[]") {
+            // Determine the raw integer bit-pattern to slice into bytes.
+            llvm::Value* asInt = nullptr;
+            unsigned numBytes = 0;
+
+            if (srcTy->isIntegerTy()) {
+                unsigned bits = srcTy->getIntegerBitWidth();
+                numBytes = (bits + 7) / 8;
+                if (bits <= 64) {
+                    asInt = (bits < 64)
+                        ? builder->CreateZExt(val, getDefaultType(), "as.bytes.zext")
+                        : val;
+                } else {
+                    // Wide integers (i128, i256…): keep the full value so
+                    // all bytes are extracted.  The shift/mask loop below uses
+                    // the actual type of asInt, so numBytes=bits/8 is correct.
+                    asInt = val;
+                }
+            } else if (srcTy->isFloatingPointTy()) {
+                unsigned bits = srcTy->getPrimitiveSizeInBits();
+                numBytes = bits / 8;
+                llvm::Type* intTy = llvm::IntegerType::get(*context, bits);
+                llvm::Value* bitInt = builder->CreateBitCast(val, intTy, "as.bytes.bitcast");
+                asInt = (bits < 64)
+                    ? builder->CreateZExt(bitInt, getDefaultType(), "as.bytes.zext")
+                    : (llvm::Value*)bitInt;
+            } else if (srcTy->isPointerTy()) {
+                // Check source annotation: if it's a string, emit per-char copy.
+                // Use isStringExpr() which checks stringVars_ (populated from the
+                // initializer of the variable, handles both "str" and "string" and
+                // string-returning function calls).
+                const bool isStr = isStringExpr(expr->left.get());
+                if (isStr) {
+                    // String → byte[]: one element per UTF-8 byte of the string data.
+                    llvm::Value* strData = emitStringData(val, "as.bytes.data");
+                    llvm::Value* strLen  = builder->CreateCall(getOrDeclareStrlen(), {strData},
+                                                                "as.bytes.strlen");
+                    nonNegValues_.insert(llvm::cast<llvm::CallInst>(strLen));
+                    llvm::Value* buf = emitAllocArray(strLen, "as.bytes.str");
+                    llvm::Function* curFn = builder->GetInsertBlock()->getParent();
+                    llvm::BasicBlock* preheader = builder->GetInsertBlock();
+                    llvm::BasicBlock* loopHdr  = llvm::BasicBlock::Create(*context, "as.bytes.lhdr", curFn);
+                    llvm::BasicBlock* loopBody = llvm::BasicBlock::Create(*context, "as.bytes.lbody", curFn);
+                    llvm::BasicBlock* loopExit = llvm::BasicBlock::Create(*context, "as.bytes.lexit", curFn);
+                    builder->CreateBr(loopHdr);
+                    builder->SetInsertPoint(loopHdr);
+                    llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "as.bytes.i");
+                    phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), preheader);
+                    llvm::Value* cond = builder->CreateICmpSLT(phi, strLen, "as.bytes.cond");
+                    builder->CreateCondBr(cond, loopBody, loopExit);
+                    builder->SetInsertPoint(loopBody);
+                    llvm::Value* charPtr = builder->CreateInBoundsGEP(
+                        llvm::Type::getInt8Ty(*context), strData, phi, "as.bytes.cp");
+                    llvm::LoadInst* charByte = builder->CreateLoad(
+                        llvm::Type::getInt8Ty(*context), charPtr, "as.bytes.cb");
+                    charByte->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+                    llvm::Value* charExt = builder->CreateZExt(charByte, getDefaultType(),
+                                                                "as.bytes.cext", /*IsNonNeg=*/false);
+                    nonNegValues_.insert(charExt);
+                    llvm::Value* arrIdx = builder->CreateAdd(phi,
+                        llvm::ConstantInt::get(getDefaultType(), 1),
+                        "as.bytes.ai", /*nuw=*/true, /*nsw=*/true);
+                    llvm::Value* ep = builder->CreateInBoundsGEP(getDefaultType(), buf, arrIdx,
+                                                                   "as.bytes.ep");
+                    emitStoreArrayElem(charExt, ep);
+                    llvm::Value* next = builder->CreateAdd(phi,
+                        llvm::ConstantInt::get(getDefaultType(), 1),
+                        "as.bytes.next", /*nuw=*/true, /*nsw=*/true);
+                    phi->addIncoming(next, loopBody);
+                    builder->CreateBr(loopHdr);
+                    builder->SetInsertPoint(loopExit);
+                    arrayVars_.insert("as");
+                    return buf;
+                }
+                // Generic pointer → 8 raw bytes (pointer value, little-endian).
+                numBytes = 8;
+                asInt = builder->CreatePtrToInt(val, getDefaultType(), "as.bytes.ptrtoint");
+            }
+
+            if (asInt && numBytes > 0) {
+                llvm::Value* lenV = llvm::ConstantInt::get(getDefaultType(), numBytes);
+                llvm::Value* buf  = emitAllocArray(lenV, "as.bytes");
+                llvm::Value* mask = llvm::ConstantInt::get(asInt->getType(), 0xFF);
+                for (unsigned i = 0; i < numBytes; ++i) {
+                    llvm::Value* shifted = (i == 0)
+                        ? asInt
+                        : builder->CreateLShr(asInt,
+                              llvm::ConstantInt::get(asInt->getType(),
+                                                      static_cast<uint64_t>(i) * 8),
+                              "as.bytes.shr");
+                    llvm::Value* byteVal = builder->CreateAnd(shifted, mask, "as.bytes.mask");
+                    if (byteVal->getType() != getDefaultType()) {
+                        // After masking with 0xFF the value fits in 8 bits; the
+                        // containing type may be narrower than i64 (use ZExt) or
+                        // wider than i64 — e.g. i128/i256 — (use Trunc).
+                        const unsigned byteValBits =
+                            byteVal->getType()->getIntegerBitWidth();
+                        byteVal = (byteValBits > 64)
+                            ? builder->CreateTrunc(byteVal, getDefaultType(), "as.bytes.ext")
+                            : builder->CreateZExt(byteVal, getDefaultType(), "as.bytes.ext");
+                    }
+                    llvm::Value* idxV = llvm::ConstantInt::get(getDefaultType(),
+                                                                static_cast<uint64_t>(i) + 1);
+                    llvm::Value* ep = builder->CreateInBoundsGEP(getDefaultType(), buf, idxV,
+                                                                   "as.bytes.ep");
+                    emitStoreArrayElem(byteVal, ep);
+                }
+                arrayVars_.insert("as");
+                return buf;
+            }
+        }
         if (srcTy->isPointerTy() && dstTy->isIntegerTy())
             return builder->CreatePtrToInt(val, dstTy, "as.ptrtoint");
         if (srcTy->isIntegerTy() && dstTy->isPointerTy())
@@ -1485,6 +1854,53 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         left  = builder->CreatePtrToInt(left,  getDefaultType(), "ptoi");
         right = builder->CreatePtrToInt(right, getDefaultType(), "ptoi");
     } else {
+        // Mixed ptr/int: for comparison operators, convert the integer operand
+        // to a pointer (inttoptr) so the comparison stays in pointer space and
+        // preserves alias-analysis provenance.  For non-comparison ops, keep
+        // the legacy ptrtoint path (arithmetic needs integer operands).
+        const bool isCmpOp = (expr->op == "==" || expr->op == "!=" ||
+                               expr->op == "<"  || expr->op == "<=" ||
+                               expr->op == ">"  || expr->op == ">=");
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        if (isCmpOp) {
+            if (left->getType()->isPointerTy() && right->getType()->isIntegerTy()) {
+                // Integer 0 → null pointer (common null-check idiom); others inttoptr.
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
+                    right = ci->isZero()
+                        ? llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ptrTy))
+                        : builder->CreateIntToPtr(right, ptrTy, "pcmp.itop");
+                } else {
+                    right = builder->CreateIntToPtr(right, ptrTy, "pcmp.itop");
+                }
+                llvm::Value* cmpBool = nullptr;
+                if (expr->op == "==")       cmpBool = builder->CreateICmpEQ (left, right, "pcmp.eq");
+                else if (expr->op == "!=")  cmpBool = builder->CreateICmpNE (left, right, "pcmp.ne");
+                else if (expr->op == "<")   cmpBool = builder->CreateICmpULT(left, right, "pcmp.lt");
+                else if (expr->op == "<=")  cmpBool = builder->CreateICmpULE(left, right, "pcmp.le");
+                else if (expr->op == ">")   cmpBool = builder->CreateICmpUGT(left, right, "pcmp.gt");
+                else if (expr->op == ">=")  cmpBool = builder->CreateICmpUGE(left, right, "pcmp.ge");
+                if (cmpBool)
+                    return emitBoolZExt(cmpBool, "pcmp.result");
+            } else if (right->getType()->isPointerTy() && left->getType()->isIntegerTy()) {
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
+                    left = ci->isZero()
+                        ? llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ptrTy))
+                        : builder->CreateIntToPtr(left, ptrTy, "pcmp.itop");
+                } else {
+                    left = builder->CreateIntToPtr(left, ptrTy, "pcmp.itop");
+                }
+                llvm::Value* cmpBool = nullptr;
+                if (expr->op == "==")       cmpBool = builder->CreateICmpEQ (left, right, "pcmp.eq");
+                else if (expr->op == "!=")  cmpBool = builder->CreateICmpNE (left, right, "pcmp.ne");
+                else if (expr->op == "<")   cmpBool = builder->CreateICmpULT(left, right, "pcmp.lt");
+                else if (expr->op == "<=")  cmpBool = builder->CreateICmpULE(left, right, "pcmp.le");
+                else if (expr->op == ">")   cmpBool = builder->CreateICmpUGT(left, right, "pcmp.gt");
+                else if (expr->op == ">=")  cmpBool = builder->CreateICmpUGE(left, right, "pcmp.ge");
+                if (cmpBool)
+                    return emitBoolZExt(cmpBool, "pcmp.result");
+            }
+        }
+        // Non-comparison (or unmatched): ptrtoint fallback.
         if (left->getType()->isPointerTy())
             left = builder->CreatePtrToInt(left, getDefaultType(), "ptoi");
         if (right->getType()->isPointerTy())
@@ -1501,11 +1917,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         auto tryNarrowLiteral = [&](llvm::Value*& constVal, llvm::Value* otherVal) {
             auto* ci = llvm::dyn_cast<llvm::ConstantInt>(constVal);
             if (!ci) return;
+            auto* intTy = llvm::dyn_cast<llvm::IntegerType>(otherVal->getType());
+            if (!intTy) return; // otherVal is not an integer (e.g. pointer); skip
             const unsigned constBits = constVal->getType()->getIntegerBitWidth();
-            const unsigned otherBits = otherVal->getType()->getIntegerBitWidth();
+            const unsigned otherBits = intTy->getBitWidth();
             if (constBits <= otherBits) return; // already narrower/same
             // Narrow the constant only when the value round-trips exactly.
-            auto* intTy = llvm::cast<llvm::IntegerType>(otherVal->getType());
             auto* narrowed = llvm::ConstantInt::getSigned(intTy, ci->getSExtValue());
             if (narrowed->getSExtValue() == ci->getSExtValue())
                 constVal = narrowed;
@@ -1524,7 +1941,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (leftBits < rightBits) {
             if (leftUnsigned) {
                 left = builder->CreateZExt(left, right->getType(), "zext",
-                                           /*IsNonNeg=*/true);
+                                           /*IsNonNeg=*/false);
                 nonNegValues_.insert(left);
             } else {
                 left = builder->CreateSExt(left, right->getType(), "sext");
@@ -1532,7 +1949,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         } else {
             if (rightUnsigned) {
                 right = builder->CreateZExt(right, left->getType(), "zext",
-                                            /*IsNonNeg=*/true);
+                                            /*IsNonNeg=*/false);
                 nonNegValues_.insert(right);
             } else {
                 right = builder->CreateSExt(right, left->getType(), "sext");
@@ -4661,6 +5078,27 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
         // Fallback: evaluate operand and return it (handles other lvalue forms).
         return operand;
     } else if (expr->op == "deref") {
+        // Check for funcptr dereference: *f where f has type `funcptr`.
+        // Dereferencing a funcptr calls the machine code at the stored address
+        // as a zero-argument function returning i64.
+        if (expr->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const auto* id = static_cast<IdentifierExpr*>(expr->operand.get());
+            if (funcptrVarNames_.count(id->name)) {
+                // funcptr alloca is now ptr-typed, so `operand` is already a
+                // native LLVM pointer — no inttoptr needed.
+                llvm::Value* fnPtr = operand->getType()->isPointerTy()
+                    ? operand
+                    : builder->CreateIntToPtr(
+                          toDefaultType(operand),
+                          llvm::PointerType::getUnqual(*context), "funcptr.deref.itop");
+                // Build the function type: () -> i64
+                llvm::FunctionType* fnTy = llvm::FunctionType::get(
+                    getDefaultType(), /*Params=*/{}, /*isVarArg=*/false);
+                llvm::CallInst* ci = builder->CreateCall(fnTy, fnPtr, {}, "funcptr.call");
+                ci->addFnAttr(llvm::Attribute::NoUnwind);
+                return ci;
+            }
+        }
         // Pointer dereference (*p): load the value pointed to by p.
         llvm::Value* ptr = operand;
         if (!ptr->getType()->isPointerTy())
@@ -5831,7 +6269,108 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     idxVal = toDefaultType(idxVal);
 
-    // ── Fast path: range-to-pointer-arithmetic mode ──────────────────────────
+    // ── pslice indexed access: bounds-checked element load ───────────────────
+    // For a variable declared as `pslice<T>`, p[i] emits a compile-time check
+    // when both i and the slice length are constants; otherwise emits a runtime
+    // bounds check (printf + abort on OOB, matching the existing array style).
+    if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const std::string& sliceName =
+            static_cast<IdentifierExpr*>(expr->array.get())->name;
+        if (psliceVarNames_.count(sliceName)) {
+            // Load the stored pointer directly — alloca type is ptr (native LLVM
+            // pointer), so no ptrtoint/inttoptr cast is needed here.
+            auto ptrAllocaIt = namedValues.find(sliceName);
+            if (ptrAllocaIt == namedValues.end())
+                codegenError("pslice: undefined variable '" + sliceName + "'", expr);
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            auto* basePtr2 = builder->CreateAlignedLoad(
+                ptrTy, ptrAllocaIt->second, llvm::MaybeAlign(8), "pslice.ptr");
+            if (tbaaScalar_)
+                basePtr2->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+
+            // Resolve element type.
+            llvm::Type* elemTy = getDefaultType();
+            auto elemIt = psliceElemTypes_.find(sliceName);
+            if (elemIt != psliceElemTypes_.end())
+                elemTy = resolveAnnotatedType(elemIt->second);
+
+            // Bounds check.
+            auto ctLenIt = psliceCompTimeLens_.find(sliceName);
+            const bool hasCtLen = (ctLenIt != psliceCompTimeLens_.end() &&
+                                   ctLenIt->second >= 0);
+            if (hasCtLen) {
+                const int64_t ctLen = ctLenIt->second;
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(idxVal)) {
+                    // Compile-time index + compile-time length → check now.
+                    const int64_t idx = ci->getSExtValue();
+                    if (idx < 0 || idx >= ctLen)
+                        codegenError("pslice index " + std::to_string(idx) +
+                                     " is out of bounds (slice length=" +
+                                     std::to_string(ctLen) + ")", expr);
+                    // Proven in-bounds at compile time — skip runtime check.
+                } else {
+                    // Runtime index, compile-time length → constant upper bound check.
+                    auto* limitVal = llvm::ConstantInt::get(getDefaultType(), ctLen);
+                    llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                    llvm::BasicBlock* okBB  = llvm::BasicBlock::Create(*context, "pslice.ok",   fn);
+                    llvm::BasicBlock* failBB= llvm::BasicBlock::Create(*context, "pslice.fail", fn);
+                    auto* valid = builder->CreateICmpULT(idxVal, limitVal, "pslice.valid");
+                    llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
+                    builder->CreateCondBr(valid, okBB, failBB, brW);
+                    builder->SetInsertPoint(failBB);
+                    {
+                        std::string msg = expr->line > 0
+                            ? "Runtime error: pslice index out of bounds at line " +
+                              std::to_string(expr->line) + "\n"
+                            : "Runtime error: pslice index out of bounds\n";
+                        builder->CreateCall(getPrintfFunction(),
+                            {builder->CreateGlobalString(msg, "pslice_oob_msg")});
+                    }
+                    builder->CreateCall(getOrDeclareAbort());
+                    builder->CreateUnreachable();
+                    builder->SetInsertPoint(okBB);
+                }
+            } else {
+                // Runtime length: load from the len alloca and check.
+                auto lenAllocaIt = psliceLenAllocas_.find(sliceName);
+                if (lenAllocaIt != psliceLenAllocas_.end()) {
+                    auto* lenVal = builder->CreateAlignedLoad(
+                        getDefaultType(), lenAllocaIt->second, llvm::MaybeAlign(8), "pslice.dynlen");
+                    if (tbaaScalar_)
+                        lenVal->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+                    llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                    llvm::BasicBlock* okBB  = llvm::BasicBlock::Create(*context, "pslice.ok",   fn);
+                    llvm::BasicBlock* failBB= llvm::BasicBlock::Create(*context, "pslice.fail", fn);
+                    auto* valid = builder->CreateICmpULT(idxVal, lenVal, "pslice.valid");
+                    llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
+                    builder->CreateCondBr(valid, okBB, failBB, brW);
+                    builder->SetInsertPoint(failBB);
+                    {
+                        std::string msg = expr->line > 0
+                            ? "Runtime error: pslice index out of bounds at line " +
+                              std::to_string(expr->line) + "\n"
+                            : "Runtime error: pslice index out of bounds\n";
+                        builder->CreateCall(getPrintfFunction(),
+                            {builder->CreateGlobalString(msg, "pslice_oob_msg")});
+                    }
+                    builder->CreateCall(getOrDeclareAbort());
+                    builder->CreateUnreachable();
+                    builder->SetInsertPoint(okBB);
+                }
+            }
+
+            // GEP into the element and load — pointer is already a native ptr.
+            auto* elemPtr = builder->CreateInBoundsGEP(elemTy, basePtr2, idxVal, "pslice.elem.ptr");
+            auto* elemLoad = builder->CreateLoad(elemTy, elemPtr, "pslice.elem");
+            elemLoad->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
+            // Widen narrower integers to i64 for uniform type handling.
+            if (elemTy->isIntegerTy() && elemTy != getDefaultType())
+                return builder->CreateSExt(elemLoad, getDefaultType(), "pslice.elem.widen");
+            return elemLoad;
+        }
+    }
+
+
     if (!isStringExpr(expr->array.get())
             && !loopPtrModeDataPtrs_.empty()
             && expr->array->type == ASTNodeType::IDENTIFIER_EXPR
@@ -5921,7 +6460,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         // Zero-extend to i64; result is always in [0, 256).
         // Use zext nneg (LLVM 18+) — !range is not valid on zext instructions.
         auto* charExt = builder->CreateZExt(charLoad, getDefaultType(), "idx.charext",
-                                             /*IsNonNeg=*/true);
+                                             /*IsNonNeg=*/false);
         nonNegValues_.insert(charExt);
         return charExt;
     }
@@ -5983,7 +6522,101 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     newVal = toDefaultType(newVal);
     idxVal = toDefaultType(idxVal);
 
-    // ── Fast path: range-to-pointer-arithmetic mode (store) ─────────────────
+    // ── pslice indexed store: p[i] = val with bounds check ───────────────────
+    if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const std::string& sliceName =
+            static_cast<IdentifierExpr*>(expr->array.get())->name;
+        if (psliceVarNames_.count(sliceName)) {
+            // Load the stored pointer directly (native LLVM ptr, no i64 cast).
+            auto ptrAllocaIt = namedValues.find(sliceName);
+            if (ptrAllocaIt == namedValues.end())
+                codegenError("pslice: undefined variable '" + sliceName + "'", expr);
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            auto* basePtr2 = builder->CreateAlignedLoad(
+                ptrTy, ptrAllocaIt->second, llvm::MaybeAlign(8), "pslice.st.ptr");
+            if (tbaaScalar_)
+                basePtr2->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+
+            llvm::Type* elemTy = getDefaultType();
+            auto elemIt = psliceElemTypes_.find(sliceName);
+            if (elemIt != psliceElemTypes_.end())
+                elemTy = resolveAnnotatedType(elemIt->second);
+
+            // Bounds check (compile-time or runtime, mirroring the load path).
+            auto ctLenIt = psliceCompTimeLens_.find(sliceName);
+            const bool hasCtLen = (ctLenIt != psliceCompTimeLens_.end() &&
+                                   ctLenIt->second >= 0);
+            if (hasCtLen) {
+                const int64_t ctLen = ctLenIt->second;
+                if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(idxVal)) {
+                    const int64_t idx = ci->getSExtValue();
+                    if (idx < 0 || idx >= ctLen)
+                        codegenError("pslice index " + std::to_string(idx) +
+                                     " is out of bounds (slice length=" +
+                                     std::to_string(ctLen) + ")", expr);
+                } else {
+                    auto* limitVal = llvm::ConstantInt::get(getDefaultType(), ctLen);
+                    llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                    llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "pslice.st.ok",   fn);
+                    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "pslice.st.fail", fn);
+                    auto* valid = builder->CreateICmpULT(idxVal, limitVal, "pslice.st.valid");
+                    llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
+                    builder->CreateCondBr(valid, okBB, failBB, brW);
+                    builder->SetInsertPoint(failBB);
+                    {
+                        std::string msg = expr->line > 0
+                            ? "Runtime error: pslice index out of bounds at line " +
+                              std::to_string(expr->line) + "\n"
+                            : "Runtime error: pslice index out of bounds\n";
+                        builder->CreateCall(getPrintfFunction(),
+                            {builder->CreateGlobalString(msg, "pslice_st_oob_msg")});
+                    }
+                    builder->CreateCall(getOrDeclareAbort());
+                    builder->CreateUnreachable();
+                    builder->SetInsertPoint(okBB);
+                }
+            } else {
+                auto lenAllocaIt = psliceLenAllocas_.find(sliceName);
+                if (lenAllocaIt != psliceLenAllocas_.end()) {
+                    auto* lenVal = builder->CreateAlignedLoad(
+                        getDefaultType(), lenAllocaIt->second, llvm::MaybeAlign(8), "pslice.st.dynlen");
+                    if (tbaaScalar_)
+                        lenVal->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+                    llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                    llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "pslice.st.ok",   fn);
+                    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "pslice.st.fail", fn);
+                    auto* valid = builder->CreateICmpULT(idxVal, lenVal, "pslice.st.valid");
+                    llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
+                    builder->CreateCondBr(valid, okBB, failBB, brW);
+                    builder->SetInsertPoint(failBB);
+                    {
+                        std::string msg = expr->line > 0
+                            ? "Runtime error: pslice index out of bounds at line " +
+                              std::to_string(expr->line) + "\n"
+                            : "Runtime error: pslice index out of bounds\n";
+                        builder->CreateCall(getPrintfFunction(),
+                            {builder->CreateGlobalString(msg, "pslice_st_oob_msg")});
+                    }
+                    builder->CreateCall(getOrDeclareAbort());
+                    builder->CreateUnreachable();
+                    builder->SetInsertPoint(okBB);
+                }
+            }
+
+            // Truncate/extend value to match element type, then store.
+            if (newVal->getType() != elemTy) {
+                if (elemTy->isIntegerTy() && newVal->getType()->isIntegerTy())
+                    newVal = builder->CreateIntCast(newVal, elemTy, /*isSigned=*/true, "pslice.st.cast");
+                else if (elemTy->isFloatingPointTy() && newVal->getType()->isIntegerTy())
+                    newVal = builder->CreateSIToFP(newVal, elemTy, "pslice.st.itofp");
+            }
+            // basePtr2 is already a native pointer — GEP directly.
+            auto* elemPtr = builder->CreateInBoundsGEP(elemTy, basePtr2, idxVal, "pslice.st.elem.ptr");
+            builder->CreateStore(newVal, elemPtr);
+            return newVal;
+        }
+    }
+
     if (!isStringExpr(expr->array.get())
             && !loopPtrModeDataPtrs_.empty()
             && expr->array->type == ASTNodeType::IDENTIFIER_EXPR
@@ -6028,9 +6661,11 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     }
 
     if (isStr) {
-        // Truncate to i8 and store at byte offset index
+        // Truncate to i8 and store at byte offset index.
+        // Fat-pointer: char data starts at offset 16 (after len + cap i64 fields).
         llvm::Value* byteVal = builder->CreateTrunc(newVal, llvm::Type::getInt8Ty(*context), "idxa.byte");
-        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), basePtr, idxVal, "idxa.charptr");
+        llvm::Value* dataPtr = emitStringData(basePtr, "idxa.strdata");
+        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dataPtr, idxVal, "idxa.charptr");
         auto* charStore = builder->CreateStore(byteVal, charPtr);
         charStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
     } else {
@@ -6518,6 +7153,55 @@ llvm::Value* CodeGenerator::generateInplaceStringAppend(AssignExpr* assignExpr,
     // Return the new pointer (matches what generateAssign normally returns for
     // string assignments: the result is the pointer value as an i64 integer).
     return newPtr;
+}
+
+// ── generateDerefAssign ───────────────────────────────────────────────────────
+// `*ptr = value` — write-through-pointer (Ω spec §4.2).
+llvm::Value* CodeGenerator::generateDerefAssign(DerefAssignExpr* expr) {
+    // Evaluate pointer expression.
+    llvm::Value* ptrVal = generateExpression(expr->ptr.get());
+
+    // Ensure it is a pointer type.
+    if (!ptrVal->getType()->isPointerTy()) {
+        ptrVal = builder->CreateIntToPtr(
+            ptrVal, llvm::PointerType::getUnqual(*context), "derefassign.itop");
+    }
+
+    // Evaluate the RHS value.
+    llvm::Value* rhs = generateExpression(expr->value.get());
+
+    // Determine element type for the store:
+    // If the pointer expression is a named ptr<T> variable, use T.
+    // If it is a GEP over a named ptr<T>, still use T.
+    // Fallback: use the default i64 type.
+    llvm::Type* storeTy = getDefaultType();
+    {
+        const Expression* ptrExpr = expr->ptr.get();
+        // Strip arithmetic: (p + n) → p
+        if (ptrExpr->type == ASTNodeType::BINARY_EXPR) {
+            ptrExpr = static_cast<const BinaryExpr*>(ptrExpr)->left.get();
+        }
+        if (ptrExpr->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const auto* id = static_cast<const IdentifierExpr*>(ptrExpr);
+            auto it = ptrElemTypes_.find(id->name);
+            if (it != ptrElemTypes_.end()) {
+                storeTy = resolveAnnotatedType(it->second);
+            }
+        }
+    }
+
+    // Truncate / extend value to match storage type when types differ.
+    if (rhs->getType() != storeTy) {
+        if (storeTy->isIntegerTy() && rhs->getType()->isIntegerTy()) {
+            rhs = builder->CreateIntCast(rhs, storeTy, /*isSigned=*/true, "derefassign.cast");
+        } else if (storeTy->isFloatingPointTy() && rhs->getType()->isIntegerTy()) {
+            rhs = builder->CreateSIToFP(rhs, storeTy, "derefassign.itofp");
+        }
+    }
+
+    builder->CreateStore(rhs, ptrVal);
+    // Return the stored value (mirrors C assignment semantics).
+    return rhs;
 }
 
 } // namespace omscript

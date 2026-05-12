@@ -1,39 +1,49 @@
 # OmScript
 
-A low-level, C-like programming language with **static typing** and **explicit malloc/free memory management** (no garbage collector, no reference counting). Features a **heavily optimized AOT compiler** using LLVM and a **multi-layer optimization engine** (AST pre-passes, equality-saturation E-graph, superoptimizer, and hardware-graph-driven instruction scheduler) that produces near-optimal native machine code for each target CPU.
+A low-level, C-like systems programming language with **static typing**, **explicit memory management** (no garbage collector, no reference counting), and a **heavily optimized AOT compiler** built on LLVM. OmScript pairs a safe, ownership-aware surface syntax with a multi-layer optimization engine — AST pre-passes, equality-saturation E-graph, superoptimizer, and a hardware-graph-driven instruction scheduler — that produces near-optimal native machine code for each target CPU.
 
-**Current version: 4.4.0**
+**Current version: 4.4.0** | [Language Reference](LANGUAGE_REFERENCE.md) | [Changelog](CHANGELOG.md)
+
+---
 
 ## Key Features
 
-- **C-like Syntax**: Familiar syntax for C/JavaScript programmers
-- **Static Typing**: Mandatory type annotations on all variable and parameter declarations; type-annotated arrays, maps, structs, and scalars are each represented with their native LLVM types throughout the compiler — no runtime type tags
-- **Structs**: Lightweight named record types with field access and mutation
+- **C-like Syntax**: Familiar to C/C++ and JavaScript programmers
+- **Static Typing**: Mandatory type annotations on all declarations; all types map 1-to-1 to native LLVM types — no runtime type tags
+- **Structs**: Lightweight named record types with field access, `@repr` layout control, and field-level alignment attributes
 - **Modules / Import**: Split programs across files with `import "file.om";` — duplicate/circular imports are silently deduplicated
-- **Aggressive AOT Compilation**: Multi-level LLVM optimization (O0–O3) for maximum performance
-- **Explicit Memory Management**: Arrays, maps, and strings are heap-allocated via `malloc`/`free`; no GC pauses, no reference counting. Small, non-escaping arrays are automatically stack-allocated (alloca) by the escape-analysis pass. Read-only integer-literal arrays become zero-overhead private globals at O2+.
-- **Lambda Expressions**: Anonymous functions with `|x| x * 2` syntax for use with higher-order builtins
+- **Aggressive AOT Compilation**: Multi-level LLVM optimization (O0–O3) with five compiler-specific passes layered on top
+- **Explicit Memory Management**:
+  - `alloc<T>(n)` — compile-time smart allocator with three tiers (T1: stack alloca, T2: per-function arena, T3: heap). Returns **raw uninitialised** memory.
+  - `new T(n)` — same tier selection as `alloc<T>(n)`, but **zero-initialises** the result (T1/T2: `memset(0)`, T3: `calloc`).
+  - `new T { field: val, ... }` — allocate + initialise specific fields in one expression (zero abstraction cost: `alloc` + GEP/store pairs).
+  - `construct p { field: val, ... };` — in-place field initialisation on already-allocated memory; lowers to typed GEP + store pairs with TBAA metadata.
+  - `invalidate p;` — explicit `free()` / lifetime.end with borrow-checker enforcement.
+- **Lambda Expressions**: Anonymous functions with `|x| x * 2` syntax for higher-order builtins
 - **Pipe Operator**: Left-to-right function chaining with `expr |> fn`
 - **Spread Operator**: Array unpacking in literals with `[1, ...arr, 2]`
-- **Method-Call Syntax**: `obj.method(args)` desugars to `method(obj, args)` — enables OOP-style code with zero runtime overhead
-- **For Loops with Ranges**: Modern range-based iteration with `for (i in start...end)` and `for (i in start...end...step)`
-- **For-Each Loops**: Iterate over arrays with `for (x in array)`
-- **Switch/Case**: Multi-way branching with `switch`/`case`/`default`, multi-value `case 1, 2, 3:`
+- **Method-Call Syntax**: `obj.method(args)` desugars to `method(obj, args)` — OOP-style code with zero runtime overhead
+- **Range-Based For Loops**: `for (i in start...end)` and `for (i in start...end...step)`
+- **For-Each Loops**: `for (x in array)` over array elements
+- **Switch/Case**: Multi-way branching with multi-value `case 1, 2, 3:`
 - **Do-While Loops**: Execute body at least once with `do { ... } while (cond);`
-- **Error Handling**: `throw N;` and per-function `catch(N) { ... }` handler blocks (zero-cost integer-keyed dispatch — no stack unwinding)
-- **Ownership System**: `move`, `invalidate`, `borrow`, `borrow mut`, `freeze`, and `reborrow` keywords for compile-time lifetime tracking and LLVM optimization hints
-- **`atomic var`**: Variable qualifier that makes every load, store, and RMW (including `++`/`--` and `+=`/`-=`/`&=`/`|=`/`^=`) a sequentially-consistent LLVM atomic instruction — lock-free shared state with no mutex overhead
-- **`volatile var`**: Variable qualifier that marks every load and store as LLVM-volatile — prevents the optimizer from eliding, caching, or reordering accesses; essential for memory-mapped I/O and signal-handler variables
-- **`comptime {}` Blocks**: Expressions evaluated entirely at compile time — result folded into a constant at the call site
-- **Array-Returning `comptime` Blocks**: `comptime` can call user functions that return arrays; the result is emitted as a `private unnamed_addr constant` global — zero runtime allocation, zero function call
-- **CF-CTRE (Cross-Function Compile-Time Reasoning Engine)**: new compiler phase (v4.1.1+) that executes pure functions across function-call boundaries at compile time with memoisation, pipeline SIMD tile semantics (8-lane tiles), and fixed-point purity analysis — see §28 of the Language Reference
-- **Integer Type-Cast Syntax**: `u8(x)`, `u16(x)`, `u32(x)`, `u64(x)`, `i8(x)`, `i16(x)`, `i32(x)`, `i64(x)`, `bool(x)` — function-call-style type coercions that fold at compile time inside `comptime` blocks
-- **`parallel` Loops**: `parallel for`/`while`/`foreach` emits loop parallelization metadata for auto-vectorization and parallel execution
+- **Error Handling**: `throw N;` + per-function `catch(N) { ... }` — zero-cost integer-keyed dispatch, no stack unwinding
+- **Ownership System**: `move`, `invalidate`, `borrow`, `borrow mut`, `freeze`, `reborrow` — compile-time lifetime tracking that feeds LLVM alias analysis
+- **`atomic var`**: Every load, store, and RMW (`++`/`--`, `+=`, `&=`, etc.) becomes a sequentially-consistent LLVM atomic — lock-free shared state without mutex overhead
+- **`volatile var`**: Every load and store is LLVM-volatile — prevents optimizer elision; essential for memory-mapped I/O and signal-handler variables
+- **`comptime {}` Blocks** (preferred over preprocessor macros):
+  - *Top-level*: define compile-time constants, conditional compilation, preprocessor migration — full type system, IDE-friendly, scope-aware
+  - *Expression-context*: evaluated at compile time by CF-CTRE; result replaces the expression with a constant
+- **`#define` / `#if` / `#ifdef` Preprocessor**: Traditional text-based macros and conditional compilation; `comptime {}` is recommended for new code
+- **CF-CTRE (Cross-Function Compile-Time Reasoning Engine)**: Executes pure functions across call boundaries at compile time with memoisation, SIMD-tile semantics, and fixed-point purity analysis (§28)
+- **Integer Type-Cast Syntax**: `u8(x)`, `u16(x)`, `u32(x)`, `u64(x)`, `i8(x)`, `i16(x)`, `i32(x)`, `i64(x)`, `bool(x)` — fold at compile time inside `comptime` blocks
+- **`parallel` Loops**: `parallel for`/`while`/`foreach` emits parallelization metadata for auto-vectorization and parallel execution
 - **Enum Declarations**: Named integer constants with auto-increment
 - **Default Parameters**: Optional function parameters with default values
 - **Null Coalescing Operator**: `??` for concise null/zero fallback expressions
 - **String Interpolation**: `$"hello {name}, count = {n + 1}"` with auto type conversion
 - **Multi-line Strings**: Triple-quoted `"""..."""` strings with embedded newlines
+- **`byte` / `byte[]`**: `byte` is an alias for `u8`; `x as byte[]` emits the raw little-endian byte representation
 - **140+ Built-in Functions**: Math, array manipulation, strings, maps, file I/O, threading, character classification, type conversion, and system calls
 - **Optimization Feedback**: Run with `-v` to see what the compiler folded, inlined, stack-allocated, and fused
 
@@ -125,11 +135,74 @@ atomic volatile var hw_reg: i64 = 0;
 ```
 Type annotations are optional in general but **required** inside `OPTMAX` blocks.
 
+### comptime Blocks
+```omscript
+// Top-level comptime block — type-safe, IDE-friendly replacement for #define / #ifdef
+comptime {
+    const MAX_RETRIES: int = 3;
+    const APP_NAME: string = "my_server";
+
+    if (OS == "linux") {
+        const USE_EPOLL: int = 1;
+    } else {
+        const USE_EPOLL: int = 0;
+    }
+
+    if (!defined(NDEBUG)) {
+        warning("building with assertions enabled");
+    }
+}
+
+// Expression-context comptime — evaluated at compile time by CF-CTRE
+var lut: int[] = comptime {
+    var result: int[] = array_fill(256, 0);
+    for (i: int in 0...256) {
+        result[i] = popcount(i);  // popcount lookup table, built at compile time
+    }
+    return result;
+};
+```
+
+### Memory Management
+```omscript
+struct Vec2 { x: int; y: int; }
+
+fn main() -> int {
+    // alloc<T>(n) — raw (uninitialised) smart allocation
+    // T1: stack alloca (≤8 KiB constant), T2: arena, T3: heap malloc
+    var buf: ptr<i64> = alloc<i64>(16);   // T1: stack alloca, raw memory
+    buf[0] = 42;
+
+    // new T(n) — zero-initialised smart allocation
+    // Same tiers as alloc<T>(n) but all bytes are zeroed
+    var zbuf: ptr<i64> = new i64(16);     // T1: stack alloca + memset(0)
+
+    // new T { field: val } — allocate + initialise fields in one expression
+    var v: ptr<Vec2> = new Vec2 { x: 3, y: 4 };
+    println(v->x);   // 3
+    println(v->y);   // 4
+
+    // construct — in-place field init on already-allocated memory (zero-cost)
+    var w: ptr<Vec2> = alloc<Vec2>(1);
+    construct w {
+        x: 10,
+        y: 20,
+    };
+    println(w->x);   // 10
+
+    invalidate buf;   // free (ownership enforced at compile time)
+    invalidate v;
+    invalidate w;
+    // zbuf is stack-allocated — no invalidate needed
+    return 0;
+}
+```
+
 ### Structs
 ```omscript
-struct Point { x, y }
+struct Point { x: int; y: int; }
 
-fn main() {
+fn main() -> int {
     var p = Point { x: 10, y: 20 };
     println(p.x);     // 10
     p.x = 30;         // field assignment
@@ -137,7 +210,7 @@ fn main() {
     return 0;
 }
 ```
-Structs are lightweight named record types. All fields require type annotations. Structs can be passed to and returned from functions.
+Structs are lightweight named record types. All fields require type annotations. Structs can be passed to and returned from functions by value.
 
 ### Import
 ```omscript

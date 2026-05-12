@@ -67,7 +67,12 @@ enum class ASTNodeType {
     COMPTIME_EXPR,  // comptime { ... } — compile-time evaluated block expression
     REBORROW_EXPR,  // reborrow ref = &src; / reborrow ref = &src.field; / reborrow ref = &src[idx];
     PIPELINE_STMT,  // pipeline (i in start...end) { stage name { ... } ... }
-    RANGE_ANNOT_EXPR // @range[lo, hi] expr — compiler-level integer range hint
+    RANGE_ANNOT_EXPR, // @range[lo, hi] expr — compiler-level integer range hint
+    SHARED_STMT,    // shared x; — mark variable as shared ownership (Ω spec §3.1)
+    OWN_STMT,       // own x;   — explicitly assert unique ownership (Ω spec §3.1)
+    DEREF_ASSIGN_EXPR,  // *p = v — write through pointer (Ω spec §4.2)
+    CONSTRUCT_STMT,     // construct ptr { field: val, ... }; — in-place field init
+    NEW_CONSTRUCT_EXPR  // new T { field: val, ... } — alloc<T>(1) + field init
 };
 
 class ASTNode {
@@ -215,6 +220,17 @@ class IndexAssignExpr : public Expression {
     IndexAssignExpr(std::unique_ptr<Expression> arr, std::unique_ptr<Expression> idx, std::unique_ptr<Expression> val)
         : Expression(ASTNodeType::INDEX_ASSIGN_EXPR), array(std::move(arr)), index(std::move(idx)),
           value(std::move(val)) {}
+};
+
+/// `*ptr = value` — write-through-pointer (Ω spec §4.2).
+/// The pointer expression is evaluated and the RHS value is stored through it.
+class DerefAssignExpr : public Expression {
+  public:
+    std::unique_ptr<Expression> ptr;    ///< The pointer expression (e.g. p, p+1)
+    std::unique_ptr<Expression> value;  ///< The RHS value to store
+
+    DerefAssignExpr(std::unique_ptr<Expression> p, std::unique_ptr<Expression> val)
+        : Expression(ASTNodeType::DEREF_ASSIGN_EXPR), ptr(std::move(p)), value(std::move(val)) {}
 };
 
 class LambdaExpr : public Expression {
@@ -859,6 +875,33 @@ class FreezeStmt : public Statement {
         : Statement(ASTNodeType::FREEZE_STMT), varName(name) {}
 };
 
+/// `shared x;` — transitions variable `x` to read-only aliasable ownership (Ω spec §3.1).
+/// After shared:
+///   - Multiple immutable borrows are permitted.
+///   - Mutable borrows and direct mutation are compile-time errors.
+///   - The variable still owns the memory; invalidate will free it.
+///   - Unlike freeze, no LLVM invariant.start is emitted (value may not
+///     be constant, only access is restricted).
+class SharedStmt : public Statement {
+  public:
+    std::string varName;
+
+    explicit SharedStmt(const std::string& name)
+        : Statement(ASTNodeType::SHARED_STMT), varName(name) {}
+};
+
+/// `own x;` — explicitly asserts unique ownership of variable `x` (Ω spec §3.1).
+/// Clears any shared/borrowed state and re-establishes exclusive ownership.
+/// Useful after scope-limited borrows end and the programmer wants the
+/// compiler to verify that no aliases remain.
+class OwnStmt : public Statement {
+  public:
+    std::string varName;
+
+    explicit OwnStmt(const std::string& name)
+        : Statement(ASTNodeType::OWN_STMT), varName(name) {}
+};
+
 /// `comptime { statements... }` — compile-time evaluated block expression.
 /// The block is evaluated at compile time by the OmScript constant evaluator.
 /// The result (the value of the last return statement) is a compile-time
@@ -1033,6 +1076,85 @@ class PipelineStmt : public Statement {
     PipelineStmt(std::unique_ptr<Expression> cnt, std::vector<StageDecl> stgs)
         : Statement(ASTNodeType::PIPELINE_STMT),
           count(std::move(cnt)), stages(std::move(stgs)) {}
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// § construct  —  in-place field initialisation of already-allocated memory
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `construct ptr { field: val, ... };`
+///
+/// Initialises the fields of an already-allocated struct pointer in place.
+/// Lowers with zero abstraction cost to a sequence of typed GEP + store
+/// pairs — exactly what writing `ptr->x = val; ptr->y = val; …` by hand
+/// would produce, but expressed more compactly and with TBAA / alignment
+/// metadata matching the struct definition:
+///
+///   var p: ptr<MyStruct> = alloc<MyStruct>(1);
+///   construct p {
+///       x: 5,
+///       y: 10,
+///   };
+///
+/// Lowers to:
+///   p->x = 5;   // CreateStructGEP(MyStruct, p, 0) + AlignedStore
+///   p->y = 10;  // CreateStructGEP(MyStruct, p, 1) + AlignedStore
+///
+/// Any field not listed is left uninitialised (use alloc<T> semantics;
+/// zero-init via `new T { ... }` if that is required).
+class ConstructStmt : public Statement {
+  public:
+    /// The target pointer expression (usually an IdentifierExpr for a
+    /// `ptr<T>` variable, but any expression returning a pointer is legal).
+    std::unique_ptr<Expression> target;
+
+    /// Optional struct-type hint stored at parse time (the `typeName` of
+    /// the matching `var p: ptr<MyStruct>` declaration).  May be empty; the
+    /// code generator falls back to `resolveField` search when it is.
+    std::string typeName;
+
+    /// Field name → initialiser expression pairs, in source order.
+    std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fields;
+
+    ConstructStmt(std::unique_ptr<Expression> tgt,
+                  std::string                  tn,
+                  std::vector<std::pair<std::string, std::unique_ptr<Expression>>> flds)
+        : Statement(ASTNodeType::CONSTRUCT_STMT),
+          target(std::move(tgt)),
+          typeName(std::move(tn)),
+          fields(std::move(flds)) {}
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// § new T { ... }  —  allocation + in-place initialisation (expression form)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `new T { field: val, ... }` — expression that allocates one `T` via
+/// `alloc<T>(1)` (T2/T3 smart allocator tier) and immediately initialises its
+/// fields.  Returns a `ptr<T>` (like `alloc<T>(1)`).
+///
+/// This is distinct from the bare `new T(n)` form (which is a raw alias for
+/// `alloc<T>(n)` with no construction): the brace-initialiser form combines
+/// allocation and construction in a single zero-overhead expression.
+///
+///   var p: ptr<Point> = new Point { x: 3, y: 4 };
+///
+/// Lowers to:
+///   ptr = alloc<Point>(1);          // T2/T3 allocation
+///   ptr->x = 3;                     // GEP(Point, ptr, 0) + store
+///   ptr->y = 4;                     // GEP(Point, ptr, 1) + store
+///   // result = ptr
+class NewConstructExpr : public Expression {
+  public:
+    std::string typeName;  ///< Struct type to allocate and initialise
+    std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fields;
+
+    NewConstructExpr(std::string tn,
+                     std::vector<std::pair<std::string,
+                                           std::unique_ptr<Expression>>> flds)
+        : Expression(ASTNodeType::NEW_CONSTRUCT_EXPR),
+          typeName(std::move(tn)),
+          fields(std::move(flds)) {}
 };
 
 } // namespace omscript

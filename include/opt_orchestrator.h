@@ -130,6 +130,12 @@ public:
 
     const RunStats& lastRunStats() const noexcept { return stats_; }
 
+    /// Control whether ownership/borrow checks are skipped (Ω spec §6.2).
+    void setNoOwnershipChecks(bool v) noexcept { noOwnershipChecks_ = v; }
+
+    /// Enable compile-time path-sensitive memory-safety diagnostics (Ω spec §7).
+    void setMemSanitize(bool v) noexcept { memSanitize_ = v; }
+
 private:
     // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -180,6 +186,8 @@ private:
     // ── State ─────────────────────────────────────────────────────────────
     OptimizationLevel   optLevel_;
     bool                verbose_;
+    bool                noOwnershipChecks_ = false;  ///< --no-ownership-checks flag
+    bool                memSanitize_       = false;  ///< --mem-sanitize flag
     CodeGenerator*      codegen_;   // non-owning
     OptimizationManager* manager_;  // non-owning; may be nullptr
     RunStats            stats_;

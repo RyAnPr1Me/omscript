@@ -163,6 +163,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     codegen.setHardwareGraphOpt(hgoe_);
     codegen.setSDR(sdr_);
     codegen.setIPOF(ipof_);
+    codegen.setNoOwnershipChecks(noOwnershipChecks_);
+    codegen.setMemSanitize(memSanitize_);
     codegen.setSourceFilename(sourceFile);
     if (!pgoGenPath_.empty()) {
         codegen.setPGOGen(pgoGenPath_);
@@ -327,6 +329,16 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
                     // skip adding -lcurl rather than producing a link error.
                 }
 #endif
+            }
+        }
+#endif
+        // Link the funcptr runtime library (omsc_funcptr_new for executable memory).
+        // OMSC_FUNCPTR_LIB_PATH is set at build time to the location of libomsc_funcptr.a.
+#ifdef OMSC_FUNCPTR_LIB_PATH
+        {
+            const std::string funcptrLib = OMSC_FUNCPTR_LIB_PATH;
+            if (!funcptrLib.empty() && std::filesystem::exists(funcptrLib)) {
+                linkArgs.push_back(funcptrLib);
             }
         }
 #endif

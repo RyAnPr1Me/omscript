@@ -1,0 +1,11 @@
+// double_invalidate_error_test.om — verify E019 double-invalidate is a compile error
+// This test is expected to FAIL at compile time with:
+//   [E019] double invalidation of 'p'
+// It is used as a negative test (the compiler must reject this program).
+
+fn main() -> int {
+    var p: ptr<i64> = alloc<i64>(1);
+    invalidate p;
+    invalidate p;   // ERROR: E019 — double invalidation
+    return 0;
+}

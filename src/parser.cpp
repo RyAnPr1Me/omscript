@@ -336,47 +336,490 @@ std::unique_ptr<Program> Parser::parse() {
             }
             continue;
         }
-        // Top-level `comptime { const X: T = val; ... }` — extracts compile-time constants
-        // into comptimeConstants_ for use in type aliases and loop annotations.
-        // Also emits a global const VarDecl so the constant is accessible inside functions.
+        // Top-level `comptime { ... }` — compile-time constant block.
+        //
+        // Supported statements inside the block:
+        //   const NAME [: TYPE] = VALUE;        — define a comptime constant
+        //   if (COND) { ... } [else if (...) { ... }]* [else { ... }]
+        //                                        — conditional compilation
+        //   error("message");                   — abort compilation with a message
+        //   warning("message");                 — emit a diagnostic and continue
+        //
+        // VALUE may be an integer, float, string, boolean literal, or a reference
+        // to another comptime constant already defined in this or an earlier block.
+        //
+        // COND may use: integer/string literals, comptime const names, the built-in
+        // identifiers OS / ARCH / VERSION (matching __OS__ / __ARCH__ / __VERSION__
+        // from the preprocessor), defined(NAME) to test whether a comptime const
+        // exists, comparison operators (==, !=, <, <=, >, >=), and logical
+        // operators (&&, ||, !).
+        //
+        // Every const definition that survives an active branch is also injected as
+        // a global const VarDecl so the name is accessible inside function bodies.
         if (check(TokenType::COMPTIME)) {
             try {
                 advance(); // consume 'comptime'
                 consume(TokenType::LBRACE, "Expected '{' after 'comptime'");
-                while (!check(TokenType::RBRACE) && !isAtEnd()) {
-                    // Only handle `const NAME: TYPE = LITERAL;` declarations
-                    if (match(TokenType::CONST)) {
-                        const Token cname = consume(TokenType::IDENTIFIER, "Expected constant name");
-                        std::string typeName;
-                        if (match(TokenType::COLON)) {
-                            typeName = parseTypeAnnotation(); // consume type annotation
-                        }
-                        consume(TokenType::ASSIGN, "Expected '=' in comptime const");
-                        // Accept integer literal or a negative literal
-                        long long val = 0;
-                        bool neg = false;
-                        if (match(TokenType::MINUS)) neg = true;
-                        if (check(TokenType::INTEGER)) {
-                            val = static_cast<long long>(advance().intValue);
-                            if (neg) val = -val;
-                        }
-                        consume(TokenType::SEMICOLON, "Expected ';' after comptime const");
-                        comptimeConstants_[cname.lexeme] = val;
-                        // Inject as a global const so the constant is visible inside functions
-                        auto initExpr = std::make_unique<LiteralExpr>(val);
-                        auto gv = std::make_unique<VarDecl>(cname.lexeme, std::move(initExpr),
-                                                            /*isConst=*/true, typeName.empty() ? "int" : typeName);
-                        gv->isCompilerGenerated = true;
-                        gv->line = cname.line;
-                        gv->column = cname.column;
-                        globals.push_back(std::move(gv));
-                    } else {
-                        // Skip non-const statements inside comptime
-                        while (!check(TokenType::SEMICOLON) && !check(TokenType::RBRACE) && !isAtEnd())
-                            advance();
-                        if (check(TokenType::SEMICOLON)) advance();
+
+                // ── comptime condition-value helper ──────────────────────────
+                // A value in a condition expression — either a signed integer or
+                // a string.  Boolean results are represented as i64 0/1.
+                struct CVal {
+                    bool isStr = false;
+                    long long i = 0;
+                    std::string s;
+                    bool asBool() const {
+                        return isStr ? !s.empty() : (i != 0);
                     }
-                }
+                };
+
+                // Retrieve a comptime value by name.  Checks the built-in
+                // OS/ARCH/VERSION symbols first, then the int constant map,
+                // then the string constant map.  Returns an empty optional if
+                // the name is not defined.
+                auto getComptimeVar = [&](const std::string& name) -> std::optional<CVal> {
+#if defined(_WIN32) || defined(_WIN64)
+                    static constexpr const char* kOS   = "windows";
+#elif defined(__APPLE__)
+                    static constexpr const char* kOS   = "macos";
+#else
+                    static constexpr const char* kOS   = "linux";
+#endif
+#if defined(__x86_64__) || defined(_M_X64)
+                    static constexpr const char* kArch = "x86_64";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+                    static constexpr const char* kArch = "aarch64";
+#elif defined(__arm__) || defined(_M_ARM)
+                    static constexpr const char* kArch = "arm";
+#else
+                    static constexpr const char* kArch = "unknown";
+#endif
+                    if (name == "OS")      return CVal{true,  0, kOS};
+                    if (name == "ARCH")    return CVal{true,  0, kArch};
+                    if (name == "VERSION") return CVal{true,  0, OMSC_VERSION};
+                    {
+                        auto it = comptimeConstants_.find(name);
+                        if (it != comptimeConstants_.end())
+                            return CVal{false, it->second, ""};
+                    }
+                    {
+                        auto it = comptimeStrings_.find(name);
+                        if (it != comptimeStrings_.end())
+                            return CVal{true, 0, it->second};
+                    }
+                    return std::nullopt;
+                };
+
+                // ── condition evaluator ──────────────────────────────────────
+                // Precedence (low → high): || > && > comparison > primary
+                //
+                // primary: literal | identifier | defined(name) | (expr) | !primary
+                // comparison: primary  (== | != | < | <= | > | >=)  primary
+                // and-expr: comparison (&&  comparison)*
+                // or-expr:  and-expr   (||  and-expr)*
+                //
+                // evalOr is declared first so that evalPrimary can capture it
+                // by reference for parenthesised sub-expressions.
+                std::function<bool()>  evalOr;
+                std::function<bool()>  evalAnd;
+                std::function<CVal()>  evalCmp;
+                std::function<CVal()>  evalPrimary;
+
+                evalPrimary = [&]() -> CVal {
+                    // Logical NOT
+                    if (match(TokenType::NOT)) {
+                        CVal v = evalPrimary();
+                        return CVal{false, v.asBool() ? 0LL : 1LL, ""};
+                    }
+                    // Parenthesised sub-expression
+                    if (match(TokenType::LPAREN)) {
+                        bool r = evalOr();
+                        if (check(TokenType::RPAREN)) advance();
+                        return CVal{false, r ? 1LL : 0LL, ""};
+                    }
+                    // String literal
+                    if (check(TokenType::STRING)) {
+                        return CVal{true, 0, advance().lexeme};
+                    }
+                    // Integer literal (optionally negated)
+                    if (check(TokenType::MINUS)) {
+                        advance();
+                        if (check(TokenType::INTEGER)) {
+                            return CVal{false, -(long long)advance().intValue, ""};
+                        }
+                        return CVal{false, 0, ""};
+                    }
+                    if (check(TokenType::INTEGER)) {
+                        return CVal{false, (long long)advance().intValue, ""};
+                    }
+                    // Float literal — coerce to int for comptime comparisons
+                    if (check(TokenType::FLOAT)) {
+                        return CVal{false, (long long)advance().floatValue, ""};
+                    }
+                    // Boolean literals
+                    if (match(TokenType::TRUE))  return CVal{false, 1, ""};
+                    if (match(TokenType::FALSE)) return CVal{false, 0, ""};
+                    // Identifier — comptime var ref or defined(name) predicate
+                    if (check(TokenType::IDENTIFIER)) {
+                        const std::string name = advance().lexeme;
+                        // defined(NAME) — tests whether the name exists in
+                        // either the int or the string comptime constant maps.
+                        if (name == "defined" && check(TokenType::LPAREN)) {
+                            advance(); // consume '('
+                            std::string dname;
+                            if (check(TokenType::IDENTIFIER)) dname = advance().lexeme;
+                            if (check(TokenType::RPAREN)) advance(); // consume ')'
+                            const bool isDef = comptimeConstants_.count(dname) > 0 ||
+                                               comptimeStrings_.count(dname)    > 0;
+                            return CVal{false, isDef ? 1LL : 0LL, ""};
+                        }
+                        auto v = getComptimeVar(name);
+                        return v.value_or(CVal{false, 0, ""});
+                    }
+                    return CVal{false, 0, ""};
+                };
+
+                evalCmp = [&]() -> CVal {
+                    CVal lhs = evalPrimary();
+                    if (!check(TokenType::EQ) && !check(TokenType::NE) &&
+                        !check(TokenType::LT) && !check(TokenType::LE) &&
+                        !check(TokenType::GT) && !check(TokenType::GE)) {
+                        return lhs;
+                    }
+                    const TokenType op = advance().type; // consume comparison operator
+                    CVal rhs = evalPrimary();
+                    bool result = false;
+                    if (lhs.isStr && rhs.isStr) {
+                        if      (op == TokenType::EQ) result = lhs.s == rhs.s;
+                        else if (op == TokenType::NE) result = lhs.s != rhs.s;
+                        else if (op == TokenType::LT) result = lhs.s <  rhs.s;
+                        else if (op == TokenType::LE) result = lhs.s <= rhs.s;
+                        else if (op == TokenType::GT) result = lhs.s >  rhs.s;
+                        else if (op == TokenType::GE) result = lhs.s >= rhs.s;
+                    } else {
+                        const long long l = lhs.isStr ? 0LL : lhs.i;
+                        const long long r = rhs.isStr ? 0LL : rhs.i;
+                        if      (op == TokenType::EQ) result = l == r;
+                        else if (op == TokenType::NE) result = l != r;
+                        else if (op == TokenType::LT) result = l <  r;
+                        else if (op == TokenType::LE) result = l <= r;
+                        else if (op == TokenType::GT) result = l >  r;
+                        else if (op == TokenType::GE) result = l >= r;
+                    }
+                    return CVal{false, result ? 1LL : 0LL, ""};
+                };
+
+                evalAnd = [&]() -> bool {
+                    bool result = evalCmp().asBool();
+                    while (check(TokenType::AND)) {
+                        advance();
+                        // Always evaluate the RHS (no short-circuit; this is
+                        // a constant evaluator, so no side-effects).
+                        bool rhs = evalCmp().asBool();
+                        result = result && rhs;
+                    }
+                    return result;
+                };
+
+                evalOr = [&]() -> bool {
+                    bool result = evalAnd();
+                    while (check(TokenType::OR)) {
+                        advance();
+                        bool rhs = evalAnd();
+                        result = result || rhs;
+                    }
+                    return result;
+                };
+
+                // ── body parser ───────────────────────────────────────────────
+                // parseBody(active) processes comptime statements until '}'.
+                // When active==false the branch is inactive (dead): constants
+                // are NOT registered and VarDecls are NOT emitted, but the
+                // tokens are consumed so the parser stays in sync.
+                std::function<void(bool)> parseBody;
+                parseBody = [&](bool active) {
+                    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+                        // ── const declaration ──────────────────────────────
+                        if (match(TokenType::CONST)) {
+                            const Token cname = consume(TokenType::IDENTIFIER,
+                                "Expected constant name after 'const' in comptime block");
+                            std::string typeName;
+                            if (match(TokenType::COLON)) {
+                                typeName = parseTypeAnnotation();
+                            }
+                            consume(TokenType::ASSIGN,
+                                "Expected '=' in comptime const declaration");
+                            // Determine the value's kind.
+                            const bool neg = match(TokenType::MINUS);
+                            if (check(TokenType::INTEGER)) {
+                                const long long val = neg
+                                    ? -(long long)advance().intValue
+                                    :  (long long)advance().intValue;
+                                consume(TokenType::SEMICOLON,
+                                    "Expected ';' after comptime const");
+                                if (active) {
+                                    comptimeConstants_[cname.lexeme] = val;
+                                    const std::string tn =
+                                        typeName.empty() ? "int" : typeName;
+                                    auto initExpr = std::make_unique<LiteralExpr>(val);
+                                    auto gv = std::make_unique<VarDecl>(
+                                        cname.lexeme, std::move(initExpr),
+                                        /*isConst=*/true, tn);
+                                    gv->isCompilerGenerated = true;
+                                    gv->line   = cname.line;
+                                    gv->column = cname.column;
+                                    globals.push_back(std::move(gv));
+                                }
+                            } else if (check(TokenType::FLOAT)) {
+                                const double fval = neg
+                                    ? -advance().floatValue
+                                    :  advance().floatValue;
+                                consume(TokenType::SEMICOLON,
+                                    "Expected ';' after comptime const");
+                                if (active) {
+                                    // Store truncated integer for numeric
+                                    // comptime-if comparisons.
+                                    comptimeConstants_[cname.lexeme] =
+                                        (long long)fval;
+                                    const std::string tn =
+                                        typeName.empty() ? "float" : typeName;
+                                    auto initExpr =
+                                        std::make_unique<LiteralExpr>(fval);
+                                    auto gv = std::make_unique<VarDecl>(
+                                        cname.lexeme, std::move(initExpr),
+                                        /*isConst=*/true, tn);
+                                    gv->isCompilerGenerated = true;
+                                    gv->line   = cname.line;
+                                    gv->column = cname.column;
+                                    globals.push_back(std::move(gv));
+                                }
+                            } else if (!neg && check(TokenType::STRING)) {
+                                const std::string sval = advance().lexeme;
+                                consume(TokenType::SEMICOLON,
+                                    "Expected ';' after comptime const");
+                                if (active) {
+                                    comptimeStrings_[cname.lexeme] = sval;
+                                    const std::string tn =
+                                        typeName.empty() ? "string" : typeName;
+                                    auto initExpr =
+                                        std::make_unique<LiteralExpr>(sval);
+                                    auto gv = std::make_unique<VarDecl>(
+                                        cname.lexeme, std::move(initExpr),
+                                        /*isConst=*/true, tn);
+                                    gv->isCompilerGenerated = true;
+                                    gv->line   = cname.line;
+                                    gv->column = cname.column;
+                                    globals.push_back(std::move(gv));
+                                }
+                            } else if (!neg && match(TokenType::TRUE)) {
+                                consume(TokenType::SEMICOLON,
+                                    "Expected ';' after comptime const");
+                                if (active) {
+                                    comptimeConstants_[cname.lexeme] = 1;
+                                    const std::string tn =
+                                        typeName.empty() ? "bool" : typeName;
+                                    auto initExpr =
+                                        std::make_unique<LiteralExpr>(1LL);
+                                    auto gv = std::make_unique<VarDecl>(
+                                        cname.lexeme, std::move(initExpr),
+                                        /*isConst=*/true, tn);
+                                    gv->isCompilerGenerated = true;
+                                    gv->line   = cname.line;
+                                    gv->column = cname.column;
+                                    globals.push_back(std::move(gv));
+                                }
+                            } else if (!neg && match(TokenType::FALSE)) {
+                                consume(TokenType::SEMICOLON,
+                                    "Expected ';' after comptime const");
+                                if (active) {
+                                    comptimeConstants_[cname.lexeme] = 0;
+                                    const std::string tn =
+                                        typeName.empty() ? "bool" : typeName;
+                                    auto initExpr =
+                                        std::make_unique<LiteralExpr>(0LL);
+                                    auto gv = std::make_unique<VarDecl>(
+                                        cname.lexeme, std::move(initExpr),
+                                        /*isConst=*/true, tn);
+                                    gv->isCompilerGenerated = true;
+                                    gv->line   = cname.line;
+                                    gv->column = cname.column;
+                                    globals.push_back(std::move(gv));
+                                }
+                            } else if (!neg && check(TokenType::IDENTIFIER)) {
+                                // Reference to an already-defined comptime const.
+                                const std::string refName = advance().lexeme;
+                                consume(TokenType::SEMICOLON,
+                                    "Expected ';' after comptime const");
+                                if (active) {
+                                    const auto itI =
+                                        comptimeConstants_.find(refName);
+                                    const auto itS =
+                                        comptimeStrings_.find(refName);
+                                    auto bv = getComptimeVar(refName);
+                                    if (bv && !bv->isStr) {
+                                        // Integer or built-in numeric
+                                        comptimeConstants_[cname.lexeme] =
+                                            bv->i;
+                                        const std::string tn =
+                                            typeName.empty() ? "int" : typeName;
+                                        auto initExpr =
+                                            std::make_unique<LiteralExpr>(bv->i);
+                                        auto gv = std::make_unique<VarDecl>(
+                                            cname.lexeme, std::move(initExpr),
+                                            /*isConst=*/true, tn);
+                                        gv->isCompilerGenerated = true;
+                                        gv->line   = cname.line;
+                                        gv->column = cname.column;
+                                        globals.push_back(std::move(gv));
+                                    } else if (bv && bv->isStr) {
+                                        // String (user-defined or built-in
+                                        // OS/ARCH/VERSION)
+                                        comptimeStrings_[cname.lexeme] = bv->s;
+                                        const std::string tn =
+                                            typeName.empty() ? "string" : typeName;
+                                        auto initExpr =
+                                            std::make_unique<LiteralExpr>(bv->s);
+                                        auto gv = std::make_unique<VarDecl>(
+                                            cname.lexeme, std::move(initExpr),
+                                            /*isConst=*/true, tn);
+                                        gv->isCompilerGenerated = true;
+                                        gv->line   = cname.line;
+                                        gv->column = cname.column;
+                                        globals.push_back(std::move(gv));
+                                    } else if (itI != comptimeConstants_.end()) {
+                                        // Already checked via getComptimeVar but
+                                        // keep as fallback for non-builtin ints.
+                                        comptimeConstants_[cname.lexeme] =
+                                            itI->second;
+                                        const std::string tn =
+                                            typeName.empty() ? "int" : typeName;
+                                        auto initExpr =
+                                            std::make_unique<LiteralExpr>(
+                                                itI->second);
+                                        auto gv = std::make_unique<VarDecl>(
+                                            cname.lexeme, std::move(initExpr),
+                                            /*isConst=*/true, tn);
+                                        gv->isCompilerGenerated = true;
+                                        gv->line   = cname.line;
+                                        gv->column = cname.column;
+                                        globals.push_back(std::move(gv));
+                                    } else if (itS != comptimeStrings_.end()) {
+                                        comptimeStrings_[cname.lexeme] =
+                                            itS->second;
+                                        const std::string tn =
+                                            typeName.empty() ? "string" : typeName;
+                                        auto initExpr =
+                                            std::make_unique<LiteralExpr>(
+                                                itS->second);
+                                        auto gv = std::make_unique<VarDecl>(
+                                            cname.lexeme, std::move(initExpr),
+                                            /*isConst=*/true, tn);
+                                        gv->isCompilerGenerated = true;
+                                        gv->line   = cname.line;
+                                        gv->column = cname.column;
+                                        globals.push_back(std::move(gv));
+                                    } else {
+                                        errors_.push_back(
+                                            "comptime const '" + cname.lexeme +
+                                            "': undefined reference to comptime "
+                                            "constant '" + refName + "'");
+                                    }
+                                }
+                            } else {
+                                // Unrecognised value form — skip to semicolon.
+                                while (!check(TokenType::SEMICOLON) &&
+                                       !check(TokenType::RBRACE) && !isAtEnd())
+                                    advance();
+                                if (check(TokenType::SEMICOLON)) advance();
+                            }
+                        }
+                        // ── comptime if / else if / else ───────────────────
+                        else if (match(TokenType::IF)) {
+                            consume(TokenType::LPAREN,
+                                "Expected '(' after 'if' in comptime block");
+                            const bool cond = evalOr();
+                            consume(TokenType::RPAREN,
+                                "Expected ')' after condition in comptime if");
+                            consume(TokenType::LBRACE,
+                                "Expected '{' after comptime if condition");
+                            parseBody(active && cond);
+                            consume(TokenType::RBRACE,
+                                "Expected '}' to close comptime if block");
+                            bool handled = cond; // true branch was taken
+                            while (check(TokenType::ELSE)) {
+                                advance(); // consume 'else'
+                                if (match(TokenType::IF)) {
+                                    // else if (COND) { ... }
+                                    consume(TokenType::LPAREN,
+                                        "Expected '(' after 'else if' in "
+                                        "comptime block");
+                                    const bool elseIfCond = evalOr();
+                                    consume(TokenType::RPAREN,
+                                        "Expected ')' after comptime else if "
+                                        "condition");
+                                    consume(TokenType::LBRACE,
+                                        "Expected '{' after comptime else if "
+                                        "condition");
+                                    parseBody(active && !handled && elseIfCond);
+                                    consume(TokenType::RBRACE,
+                                        "Expected '}' to close comptime else if "
+                                        "block");
+                                    if (elseIfCond) handled = true;
+                                } else {
+                                    // plain else { ... }
+                                    consume(TokenType::LBRACE,
+                                        "Expected '{' after 'else' in comptime "
+                                        "block");
+                                    parseBody(active && !handled);
+                                    consume(TokenType::RBRACE,
+                                        "Expected '}' to close comptime else "
+                                        "block");
+                                    break; // no more branches after else
+                                }
+                            }
+                        }
+                        // ── error("msg") / warning("msg") ─────────────────
+                        else if (check(TokenType::IDENTIFIER) &&
+                                 (tokens[current].lexeme == "error" ||
+                                  tokens[current].lexeme == "warning")) {
+                            const std::string fname = advance().lexeme;
+                            if (match(TokenType::LPAREN)) {
+                                std::string msg;
+                                if (check(TokenType::STRING))
+                                    msg = advance().lexeme;
+                                if (check(TokenType::RPAREN)) advance();
+                                if (check(TokenType::SEMICOLON)) advance();
+                                if (active) {
+                                    if (fname == "error") {
+                                        errors_.push_back(
+                                            "comptime error: " + msg);
+                                    } else {
+                                        warnings_.push_back(
+                                            "comptime warning: " + msg);
+                                    }
+                                }
+                            } else {
+                                while (!check(TokenType::SEMICOLON) &&
+                                       !check(TokenType::RBRACE) && !isAtEnd())
+                                    advance();
+                                if (check(TokenType::SEMICOLON)) advance();
+                            }
+                        }
+                        // ── skip anything else (future-proofing) ──────────
+                        else {
+                            while (!check(TokenType::SEMICOLON) &&
+                                   !check(TokenType::RBRACE)    &&
+                                   !check(TokenType::IF)        &&
+                                   !check(TokenType::ELSE)      &&
+                                   !check(TokenType::CONST)     &&
+                                   !isAtEnd())
+                                advance();
+                            if (check(TokenType::SEMICOLON)) advance();
+                        }
+                    }
+                };
+
+                parseBody(/*active=*/true);
                 consume(TokenType::RBRACE, "Expected '}' to close comptime block");
             } catch (const std::exception& e) {
                 errors_.push_back(e.what());
@@ -1134,6 +1577,13 @@ std::string Parser::parseTypeAnnotation() {
         std::string inner = parseTypeAnnotation(); // recursively parse element type
         consume(TokenType::GT, "Expected '>' to close ptr<T> type parameter");
         typeName = "ptr<" + inner + ">";
+    }
+    // Support pslice<T> fat-pointer slice annotation: pslice<i64>, pslice<f64>, etc.
+    if (typeName == "pslice" && check(TokenType::LT)) {
+        advance(); // consume '<'
+        std::string inner = parseTypeAnnotation(); // recursively parse element type
+        consume(TokenType::GT, "Expected '>' to close pslice<T> type parameter");
+        typeName = "pslice<" + inner + ">";
     }
     // Support dict[KeyType, ValType] generic annotation (e.g., dict[str, int])
     // Only activates when the type name is exactly "dict" followed by '[' with
@@ -1920,6 +2370,58 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         return stmt;
     }
 
+    if (match(TokenType::SHARED)) {
+        // `shared x;` — transition x to read-only aliasable ownership (Ω spec §3.1).
+        const Token kw = tokens[current - 1];
+        const Token name = consume(TokenType::IDENTIFIER, "Expected variable name after 'shared'");
+        consume(TokenType::SEMICOLON, "Expected ';' after 'shared'");
+        auto stmt = std::make_unique<SharedStmt>(name.lexeme);
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+
+    if (match(TokenType::OWN)) {
+        // `own x;` — explicitly assert unique ownership of x (Ω spec §3.1).
+        const Token kw = tokens[current - 1];
+        const Token name = consume(TokenType::IDENTIFIER, "Expected variable name after 'own'");
+        consume(TokenType::SEMICOLON, "Expected ';' after 'own'");
+        auto stmt = std::make_unique<OwnStmt>(name.lexeme);
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+
+    // ── construct EXPR { field: val, ... }; ──────────────────────────────────
+    // In-place field initialisation of already-allocated memory.
+    // The target is any expression that yields a ptr<T>.
+    // Lowers to a sequence of GEP + store pairs — zero extra abstraction cost.
+    if (match(TokenType::CONSTRUCT)) {
+        const Token kw = tokens[current - 1];
+        // Parse the target expression.  Intentionally stop before `{` so
+        // that `construct arr + 1 { x: 5 }` is parsed as `(arr + 1)`.
+        // Use parseUnary as the precedence ceiling (no comma or assignment).
+        auto target = parseUnary();
+        consume(TokenType::LBRACE, "Expected '{' after construct target expression");
+        std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fields;
+        while (!check(TokenType::RBRACE) && !isAtEnd()) {
+            const Token fname = consume(TokenType::IDENTIFIER,
+                "Expected field name in construct block");
+            consume(TokenType::COLON, "Expected ':' after field name in construct block");
+            auto val = parseExpression();
+            fields.emplace_back(fname.lexeme, std::move(val));
+            // Allow trailing comma
+            if (check(TokenType::COMMA)) advance();
+        }
+        consume(TokenType::RBRACE, "Expected '}' to close construct block");
+        consume(TokenType::SEMICOLON, "Expected ';' after construct statement");
+        auto stmt = std::make_unique<ConstructStmt>(std::move(target), /*typeName=*/"",
+                                                    std::move(fields));
+        stmt->line   = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+
     return parseExprStmt();
 }
 
@@ -1968,6 +2470,13 @@ std::unique_ptr<BlockStmt> Parser::parseBlock() {
 }
 
 std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
+    // Allow `var mut name: &T = &expr;` as shorthand for `borrow mut name: &T = &expr;`.
+    // Consume an optional leading `mut` before the name.
+    bool isBorrowMut = false;
+    if (check(TokenType::MUT)) {
+        isBorrowMut = true;
+        advance(); // consume 'mut'
+    }
     const Token name = consume(TokenType::IDENTIFIER, "Expected variable name");
     std::string typeName;
     if (match(TokenType::COLON)) {
@@ -1998,49 +2507,39 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
               "silently defaults to 'i64'.");
     }
 
+    // Shorthand borrow: `var name: &T = &expr;` → equivalent to `borrow var name: &T = &expr;`
+    // If the type annotation is a reference type (&T) and an initializer is present,
+    // automatically wrap the initializer in a BorrowExpr so the reference codegen path fires.
+    if (!typeName.empty() && typeName[0] == '&' && initializer &&
+        initializer->type != ASTNodeType::BORROW_EXPR) {
+        auto borrowExpr = std::make_unique<BorrowExpr>(std::move(initializer), isBorrowMut);
+        borrowExpr->line = name.line;
+        borrowExpr->column = name.column;
+        initializer = std::move(borrowExpr);
+    }
+
     // Compile-time validation: `ptr` variables may only be initialized with
-    //   &var / &arr[...]  (UnaryExpr op == "&")
-    //   malloc/realloc/calloc(...) (CallExpr)
-    //   null              (LiteralExpr intValue == 0)
-    //   ptr-arithmetic    (BinaryExpr e.g. p + n, p - n)
-    //   another ptr var   (IdentifierExpr)
-    // Literal non-zero integers, floats, and strings are always rejected.
+    // expressions that could plausibly produce a pointer at runtime.
+    // We reject only the most obvious misuse: a non-zero integer literal
+    // (e.g. `var p: ptr = 42`) or a float/string literal, which can never
+    // be a valid pointer in OmScript.
+    // Everything else — function calls (builtins or user-defined), address-of,
+    // identifiers, binary expressions, if-expressions, casts, etc. — is
+    // accepted here and any type mismatch is caught by the code generator.
     if ((typeName == "ptr" || typeName.rfind("ptr<", 0) == 0) && initializer) {
-        bool valid = false;
+        bool valid = true;
         const Expression* init = initializer.get();
-        switch (init->type) {
-            case ASTNodeType::UNARY_EXPR:
-                valid = (static_cast<const UnaryExpr*>(init)->op == "&");
-                break;
-            case ASTNodeType::CALL_EXPR: {
-                const std::string& callee = static_cast<const CallExpr*>(init)->callee;
-                valid = (callee == "malloc" || callee == "realloc" || callee == "calloc" ||
-                         (callee.rfind("alloc<", 0) == 0 && callee.back() == '>'));
-                break;
-            }
-            case ASTNodeType::LITERAL_EXPR: {
-                const auto* lit = static_cast<const LiteralExpr*>(init);
-                // Only null (integer 0) is valid; any other literal is rejected.
-                valid = (lit->literalType == LiteralExpr::LiteralType::INTEGER &&
-                         lit->intValue == 0);
-                break;
-            }
-            case ASTNodeType::BINARY_EXPR:
-                // Pointer arithmetic (p + n, p - n) or other ptr-producing ops.
-                valid = true;
-                break;
-            case ASTNodeType::IDENTIFIER_EXPR:
-                // Pointer-to-pointer assignment (var q:ptr = p).
-                valid = true;
-                break;
-            default:
-                valid = false;
-                break;
+        if (init->type == ASTNodeType::LITERAL_EXPR) {
+            const auto* lit = static_cast<const LiteralExpr*>(init);
+            // Only null (integer 0) is valid; non-zero integers, floats, and
+            // string literals are rejected.
+            valid = (lit->literalType == LiteralExpr::LiteralType::INTEGER &&
+                     lit->intValue == 0);
         }
         if (!valid) {
-            error("Pointer variable '" + name.lexeme + "' must be initialized with "
-                  "&var, &arr, malloc(...), realloc(...), calloc(...), null, "
-                  "pointer arithmetic (p+n), or another pointer variable");
+            error("Pointer variable '" + name.lexeme + "' cannot be initialized "
+                  "with a non-pointer literal. Use &var, a function call, null/nullptr, "
+                  "or another pointer expression.");
         }
     }
 
@@ -3155,6 +3654,18 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             node->line = expr->line;
             node->column = expr->column;
             return node;
+        } else if (expr->type == ASTNodeType::UNARY_EXPR) {
+            // Handle `*ptr = value` — write-through-pointer (Ω spec §4.2).
+            auto* ue = static_cast<UnaryExpr*>(expr.get());
+            if (ue->op == "deref") {
+                auto rhs = parseAssignment();
+                auto ptrExpr = std::move(ue->operand);
+                auto node = std::make_unique<DerefAssignExpr>(std::move(ptrExpr), std::move(rhs));
+                node->line = expr->line;
+                node->column = expr->column;
+                return node;
+            }
+            error("Invalid assignment target");
         } else {
             error("Invalid assignment target");
         }
@@ -4096,6 +4607,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     // Decides stack vs heap at compile time based on whether x is a
     // compile-time constant and fits within the stack threshold.
     // Returns a ptr<T> pointing to x contiguous elements of type T.
+    // alloc<T>() with no argument allocates exactly one element (Ω spec §4.1).
     if (check(TokenType::IDENTIFIER) && peek().lexeme == "alloc" &&
         current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LT) {
         const Token kw = advance(); // consume 'alloc'
@@ -4103,19 +4615,100 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         std::string elemTypeName = parseTypeAnnotation();
         consume(TokenType::GT, "Expected '>' after type in alloc<T>(...)");
         consume(TokenType::LPAREN, "Expected '(' after alloc<T>");
-        auto countExpr = parseExpression();
-        consume(TokenType::RPAREN, "Expected ')' after count in alloc<T>(...)");
         // Encode the element type in the callee name so codegen can recover it
-        // without modifying the CallExpr AST.  Pattern: "alloc<T>" with one arg.
+        // without modifying the CallExpr AST.
         std::vector<std::unique_ptr<Expression>> args;
-        args.push_back(std::move(countExpr));
+        if (!check(TokenType::RPAREN)) {
+            // alloc<T>(n) — explicit count
+            args.push_back(parseExpression());
+        }
+        // alloc<T>() — zero args means allocate 1 element (handled in codegen)
+        consume(TokenType::RPAREN, "Expected ')' after alloc<T>(...) arguments");
         auto call = std::make_unique<CallExpr>("alloc<" + elemTypeName + ">", std::move(args));
         call->line   = kw.line;
         call->column = kw.column;
         return call;
     }
 
-    // sizeof(T) — compile-time byte size of a type.
+    // new T(count) — zero-initialised allocation (semantically distinct from alloc<T>).
+    // Syntax: new <TypeAnnotation>(n)  or  new <TypeAnnotation>  (no parens = 1 element)
+    // Examples: new i64(5)   new ptr<i32>   new byte(256)
+    //
+    // Unlike alloc<T>(n) which returns raw (uninitialised) memory, new T(n) always
+    // returns zero-filled memory:
+    //   T1/T2 (stack/arena): alloc + memset(0)
+    //   T3    (heap):        calloc(count, sizeof(T))
+    //
+    // new T { field: val, ... } — allocation + in-place construction.
+    // Allocates one T (via alloc<T>(1)) and immediately initialises its
+    // fields.  Distinguished from the zero-init form by the `{` lookahead.
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "new" &&
+        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::IDENTIFIER) {
+        const Token kw = advance(); // consume 'new'
+        std::string elemTypeName = parseTypeAnnotation(); // e.g. "MyStruct", "i64"
+
+        // ── new T { field: val, ... } ──────────────────────────────────────
+        // Detect brace-initialised form: new TypeName { ... }
+        if (check(TokenType::LBRACE)) {
+            advance(); // consume '{'
+            std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fields;
+            while (!check(TokenType::RBRACE) && !isAtEnd()) {
+                const Token fname = consume(TokenType::IDENTIFIER,
+                    "Expected field name in new T { ... } initialiser");
+                consume(TokenType::COLON,
+                    "Expected ':' after field name in new T { ... } initialiser");
+                auto val = parseExpression();
+                fields.emplace_back(fname.lexeme, std::move(val));
+                if (check(TokenType::COMMA)) advance(); // trailing comma OK
+            }
+            consume(TokenType::RBRACE, "Expected '}' to close new T { ... } initialiser");
+            auto expr = std::make_unique<NewConstructExpr>(elemTypeName, std::move(fields));
+            expr->line   = kw.line;
+            expr->column = kw.column;
+            return expr;
+        }
+
+        // ── new T(count) / new T  — zero-initialised allocation ──────────────
+        // Unlike alloc<T>(n) which returns raw (uninitialised) memory, new T(n)
+        // returns zero-initialised memory.  The callee prefix "new_zero<" routes
+        // through the same three-tier allocator but appends a zero-fill step:
+        //   T1/T2 (stack/arena): memset(ptr, 0, count*sizeof(T))
+        //   T3 (heap):           calloc(count, sizeof(T))   — OS-zeroed, no overhead
+        std::vector<std::unique_ptr<Expression>> args;
+        if (check(TokenType::LPAREN)) {
+            advance(); // consume '('
+            if (!check(TokenType::RPAREN)) {
+                args.push_back(parseExpression());
+            }
+            consume(TokenType::RPAREN, "Expected ')' after new T(...) argument");
+        }
+        // No parens → new_zero<T>() → 1 zero-initialised element
+        auto call = std::make_unique<CallExpr>("new_zero<" + elemTypeName + ">", std::move(args));
+        call->line   = kw.line;
+        call->column = kw.column;
+        return call;
+    }
+
+    // pslice_new<T>(ptr, len) — create a fat pointer slice over T elements.
+    // The <T> type parameter is encoded into the callee name for codegen recovery.
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "pslice_new" &&
+        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LT) {
+        const Token kw = advance(); // consume 'pslice_new'
+        advance();                  // consume '<'
+        std::string elemTypeName = parseTypeAnnotation();
+        consume(TokenType::GT, "Expected '>' after type in pslice_new<T>(...)");
+        consume(TokenType::LPAREN, "Expected '(' after pslice_new<T>");
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(parseExpression());   // ptr argument
+        consume(TokenType::COMMA, "Expected ',' between pslice_new<T> arguments");
+        args.push_back(parseExpression());   // len argument
+        consume(TokenType::RPAREN, "Expected ')' after pslice_new<T>(...) arguments");
+        auto call = std::make_unique<CallExpr>("pslice_new<" + elemTypeName + ">", std::move(args));
+        call->line   = kw.line;
+        call->column = kw.column;
+        return call;
+    }
+
     // The argument MUST be a type name (identifier), not an expression.
     // Produces an integer literal equal to the byte size of T.
     if (check(TokenType::IDENTIFIER) && peek().lexeme == "sizeof" &&
@@ -4127,14 +4720,15 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         consume(TokenType::RPAREN, "Expected ')' after type name in sizeof(...)");
         // Compute size at parse time using known bit widths.
         long long byteSize = 8; // default (pointer/int64)
-        if (typeName == "bool" || typeName == "i8" || typeName == "u8")
+        if (typeName == "bool" || typeName == "i8" || typeName == "u8" || typeName == "byte")
             byteSize = 1;
         else if (typeName == "i16" || typeName == "u16")
             byteSize = 2;
-        else if (typeName == "i32" || typeName == "u32")
+        else if (typeName == "i32" || typeName == "u32" || typeName == "f32" || typeName == "float32")
             byteSize = 4;
         else if (typeName == "i64" || typeName == "u64" || typeName == "int" ||
                  typeName == "uint" || typeName == "float" || typeName == "double" ||
+                 typeName == "f64" || typeName == "float64" ||
                  typeName == "ptr" || typeName.rfind("ptr<", 0) == 0 ||
                  typeName == "string" || typeName == "bigint")
             byteSize = 8;

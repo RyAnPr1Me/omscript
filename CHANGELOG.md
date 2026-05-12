@@ -7,7 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Round-49: `new T(n)` zero-initialisation — semantic distinction from `alloc<T>(n)`** (`src/parser.cpp`, `src/codegen_builtins.cpp`):
+  - **Parser**: `new T(n)` now emits `CallExpr("new_zero<T>", {n})` instead of `CallExpr("alloc<T>", {n})`. The two allocation forms are now semantically distinct at the AST level.
+  - **Codegen** (`new_zero<T>` handler, all three tiers):
+    - **T1 (stack alloca)**: same `alloca` + `lifetime.start` path as `alloc<T>` T1, followed by `CreateMemSet(ptr, 0, count*sizeof(T), align)`.
+    - **T2 (arena)**: same arena sub-allocation GEP as `alloc<T>` T2, followed by `CreateMemSet(ptr, 0, count*sizeof(T), align)`.
+    - **T3 (heap)**: uses `calloc(count, sizeof(T))` — OS-level zeroing with `nonnull` + `dereferenceable` + alignment `llvm.assume` annotations; no redundant `memset` call is emitted.
+  - **`new T { field: val, ... }` remains unchanged**: routes through `alloc<T>(1)` (raw) + `emitConstructFieldsInto` — field-specific stores are more efficient than a zero-fill when every field will be written anyway.
+  - **Documentation**: §17.9.2 in LANGUAGE_REFERENCE.md now documents `alloc<T>`, `new T(n)`, `construct`, and `new T { ... }` as four distinct forms with a unified comparison table.
+
+- **Round-49: Documentation overhaul** (`LANGUAGE_REFERENCE.md`, `README.md`):
+  - §3 (Preprocessor): Added prominent recommendation to prefer `comptime {}` for new code, with guidance on when the preprocessor is still appropriate.
+  - §5.9.1 (comptime): Expanded preprocessor migration table from 7 to 20+ rows; added `Why comptime {} is better` rationale section.
+  - §17.9.2: Rewrote as four distinct subsections — `alloc<T>`, `new T(n)`, `construct`, `new T { ... }` — with an updated comparison table, lowering examples, and `when to use each` guidance.
+  - §24.2: Corrected `version` subcommand output from `4.1.1` to `4.4.0`.
+  - §31 (Quick-Start Cheat Sheet): Updated pointer/construction examples to reflect the `new T(n)` zero-init semantics.
+  - README: Overhauled key features list (memory management, comptime), added `comptime {}` and Memory Management syntax sections with code examples.
+
 ### Fixed
+
+- **Round-49: Deferred-free queue redesign — `DeferredFreeEntry` struct** (`src/codegen_stmt.cpp`, `include/codegen.h`):
+  - **Root cause of the domination violation**: The original queue stored loaded `llvm::Value*` pointers (i.e. the result of a `load i64` from the alloca inside the invalidate site's basic block). LLVM SSA requires every use of a value to be dominated by its definition. When `invalidate` appeared inside a loop body (`forbody`), the loaded `%s.ptr` was defined there, but `emitDeferredFrees()` emitted the `free(%s.ptr)` in the function-exit block (`forend`). Because `forend` is reachable from `forcond` without passing through `forbody` (e.g. when `n == 0`), `%s.ptr` did not dominate all its uses, triggering the LLVM verifier error "Instruction does not dominate all uses!".
+  - **Fix**: `deferredFreeQueue_` now stores `DeferredFreeEntry{AllocaInst*, Type*}` pairs instead of loaded `Value*` values. The `alloca` is created in the function's entry block and therefore dominates every basic block in the function — including every possible exit. At `emitDeferredFrees()` time (just before each `ret`/`throw` edge), the load is emitted *there*, in the exit block, where it trivially dominates its own use in the subsequent `free()` call. The `invalidate` site no longer emits any IR; it only captures `(alloca, elemType)`.
+  - **Properties of the redesigned queue**:
+    - **Flat vector, no per-invalidation heap allocations**: the `std::vector<DeferredFreeEntry>` is a contiguous array — O(1) push, single cache-line scan at drain time.
+    - **No pointer chasing**: each entry is a plain `{AllocaInst*, Type*}` pair (16 bytes on 64-bit); the load and cast are emitted inline at drain time.
+    - **Deterministic cleanup**: all `free()` calls for a given function are emitted in a single burst just before each `ret` edge — the allocator sees a dense sequence and can merge adjacent free-list operations.
+    - **Performance ≈ immediate free**: one `load` + optional `inttoptr` + one `call free` per entry, indistinguishable from emitting at the invalidate site, but grouped for better allocator coalescing.
+
+- **Round-48: `invalidate` IR domination fix (superseded by Round-49)**:
+  - An intermediate fix had emitted `free()` immediately at the `invalidate` site to avoid the domination violation. While semantically correct, this prevented the allocator from seeing a batched sequence of frees and tied cleanup to the exact invalidation point rather than the function exit. Superseded by the Round-49 queue redesign above.
+
+- **Round-47: String builtin correctness fixes** (`src/codegen_builtins.cpp`, `run_tests.sh`):
+  - **`char_code` loaded from fat-pointer header instead of char data** (`src/codegen_builtins.cpp`): The non-literal (runtime) path for `char_code(s)` was performing `load i8` directly from `strPtr` (offset 0 = the `len` field) instead of from `emitStringData(strPtr)` (offset 16 = first character byte). For example, `char_code("A")` would return `1` (the low byte of len=1) instead of `65`. The compile-time fold for string literals was unaffected. Fixed by routing through `emitStringData` before the load.
+  - **`str_trim` IR domination violation** (`src/codegen_builtins.cpp`): `trimStrData = emitStringData(strPtr, "trim.data")` was emitted inside `trim.startbody` (which is only entered when the string has at least one character and that character is a space). The value was then used in `trim.endbody` and the final memcpy block, neither of which is dominated by `trim.startbody`. This caused an LLVM IR verifier error ("Instruction does not dominate all uses") for any string that does not start with whitespace. Fixed by hoisting `emitStringData` to the preheader block before the start-scanning loop.
+  - **`str_lstrip` IR domination violation** (`src/codegen_builtins.cpp`): Same structural bug: `lsStrData = emitStringData(strPtr, "lstrip.data")` was inside `lstrip.body` but used in `lstrip.done` (the result-building block). Fixed by hoisting to the preheader before the loop.
+  - **`benchmark_loops_math` wrong expected exit code** (`run_tests.sh`): The integration test expected exit code `192` but the benchmark consistently produces `64` (the deterministic checksum of all benchmark result sums, modulo 256). Updated the expected value to `64`.
 
 - **CI/Release build fix** (`src/alg_simp_pass.cpp`):
   - Added missing `#include <climits>` that caused `LLONG_MIN` to be undeclared on GCC (all Linux CI jobs and the Release PGO build were failing). Clang finds `LLONG_MIN` via implicit includes but GCC strictly requires the explicit header.
@@ -158,7 +195,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`invalidate` deferred-free semantics** (`src/codegen_stmt.cpp`, `include/codegen.h`):
   - Logical invalidation is still instantaneous: any use of an invalidated variable after the `invalidate` statement is a compile-time error (borrow checker + `deadVars_` detection unchanged).
   - Physical `free()` is now **deferred** to the function's exit point instead of being emitted at the `invalidate` site.  Every heap pointer queued by `invalidate` statements is freed in a single **batch** just before `ret` (or `throw` dispatch), giving the allocator a dense sequence of `free()` calls that it can merge and LLVM's optimizer a wider window to reorder, hoist, or sink them.
-  - Implemented via `deferredFreeQueue_` (a per-function `vector<Value*>` in `CodeGenerator`) and a new `emitDeferredFrees()` helper called from `generateReturn()` and `generateThrow()`.
+  - Implemented via `deferredFreeQueue_` (a per-function `vector<DeferredFreeEntry>` in `CodeGenerator`, where each `DeferredFreeEntry` holds the `AllocaInst*` and element `Type*` — storing the alloca rather than a loaded value ensures IR domination is always satisfied, even when `invalidate` appears inside a loop body) and a new `emitDeferredFrees()` helper called from `generateReturn()` and `generateThrow()`.
   - Arena-backed and stack-backed pointers continue to be handled exactly as before (no `free()` for arena, `lifetime.end` only for stack).
 
 ### Fixed

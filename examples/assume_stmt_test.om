@@ -1,5 +1,5 @@
 fn main() -> int {
-    var n = 5
+    var n = 5;
     assume(n > 0);
-    return n + 2
+    return n + 2;
 }

@@ -128,12 +128,13 @@ struct OptStats {
 };
 
 /// Ownership lattice states for compile-time memory safety.
-/// Owned→Borrowed/MutBorrowed/Frozen/Moved/Invalidated; see VarBorrowState for transitions.
+/// Owned→Borrowed/MutBorrowed/Frozen/Shared/Moved/Invalidated; see VarBorrowState.
 enum class OwnershipState {
     Owned,        ///< Variable owns its value — full read/write access
     Borrowed,     ///< Has ≥1 immutable borrows — readable but not writable
     MutBorrowed,  ///< Has one mutable alias — source is completely locked
     Frozen,       ///< Permanently immutable — all loads are invariant
+    Shared,       ///< Read-only aliasable ownership (Ω spec §3.1) — multiple immut borrows ok
     Moved,        ///< Ownership transferred out — use is a compile error
     Invalidated   ///< Explicitly killed — use is a compile error
 };
@@ -145,20 +146,22 @@ struct VarBorrowState {
     bool moved            = false;
     bool invalidated      = false;
     bool frozen           = false;
+    bool shared           = false;  ///< True after `shared x;` (Ω spec §3.1)
 
     bool isDead()     const { return moved || invalidated; }
     /// Source can be read when not mutably borrowed and not dead.
     bool isReadable() const { return !isDead() && !mutBorrowed; }
-    /// Source can be written only when no borrows exist, not frozen, not dead.
+    /// Source can be written only when no borrows exist, not frozen, not shared, not dead.
     bool isWritable() const {
-        return !isDead() && !mutBorrowed && immutBorrowCount == 0 && !frozen;
+        return !isDead() && !mutBorrowed && immutBorrowCount == 0 && !frozen && !shared;
     }
     /// Derive the canonical OwnershipState.
     OwnershipState state() const {
-        if (invalidated)         return OwnershipState::Invalidated;
-        if (moved)               return OwnershipState::Moved;
-        if (frozen)              return OwnershipState::Frozen;
-        if (mutBorrowed)         return OwnershipState::MutBorrowed;
+        if (invalidated)          return OwnershipState::Invalidated;
+        if (moved)                return OwnershipState::Moved;
+        if (frozen)               return OwnershipState::Frozen;
+        if (shared)               return OwnershipState::Shared;
+        if (mutBorrowed)          return OwnershipState::MutBorrowed;
         if (immutBorrowCount > 0) return OwnershipState::Borrowed;
         return OwnershipState::Owned;
     }
@@ -276,6 +279,18 @@ class CodeGenerator {
         runIRPasses_ = enable;
     }
 
+    /// Disable all ownership/borrow safety checks (Ω spec §6.2: --no-ownership-checks).
+    void setNoOwnershipChecks(bool enable) {
+        noOwnershipChecks_ = enable;
+    }
+    [[nodiscard]] bool isNoOwnershipChecks() const noexcept { return noOwnershipChecks_; }
+
+    /// Enable compile-time path-sensitive memory-safety diagnostics (Ω spec §7: --mem-sanitize).
+    void setMemSanitize(bool enable) {
+        memSanitize_ = enable;
+    }
+    [[nodiscard]] bool isMemSanitize() const noexcept { return memSanitize_; }
+
     /// Enable PGO instrumentation generation mode (writes .profraw to profilePath).
     void setPGOGen(const std::string& profilePath) {
         pgoGenPath_ = profilePath;
@@ -375,11 +390,22 @@ class CodeGenerator {
 
     /// Deferred-free queue: heap pointers queued by `invalidate` statements.
     /// The actual free() call is emitted in a batch at the function's exit point
-    /// (generateReturn / generateThrow), rather than at the invalidate site.
-    /// Variables are logically dead immediately at the invalidate call; any
-    /// subsequent use is a compile-time error.  The deferred physical free lets
-    /// LLVM move or coalesce the free() calls to an optimal CFG point.
-    std::vector<llvm::Value*> deferredFreeQueue_;
+    /// Each entry captures the data needed to emit free() at function-exit
+    /// time: the alloca that holds the heap pointer, and the LLVM type stored
+    /// in that alloca.  Storing the alloca (which is created at function entry
+    /// and therefore dominates every basic block) rather than a loaded IR value
+    /// is critical for correctness: a loaded value only dominates the basic
+    /// block where it was emitted, so deferring the load to emitDeferredFrees()
+    /// — which runs just before each return/throw edge — avoids IR domination
+    /// violations when invalidate() is called inside a loop body.
+    ///
+    /// The queue is a flat vector of (alloca, type) pairs: no per-invalidation
+    /// heap allocations, no pointer chasing, O(1) push, O(n) drain at exit.
+    struct DeferredFreeEntry {
+        llvm::AllocaInst* alloca;   ///< alloca that holds the heap pointer
+        llvm::Type*       elemType; ///< type stored in the alloca slot
+    };
+    std::vector<DeferredFreeEntry> deferredFreeQueue_;
 
     struct LoopContext {
         llvm::BasicBlock* breakTarget;
@@ -659,8 +685,28 @@ class CodeGenerator {
     /// Dict/map variable names (routes dict["key"] through map_get IR).
     llvm::StringSet<> dictVarNames_;
 
+    /// Variables with type `funcptr` — a pointer to executable machine code.
+    /// Dereferencing a funcptr (`*f`) calls the code at the stored address.
+    llvm::StringSet<> funcptrVarNames_;
+
     /// Variables with type `ptr`/`ptr<T>` (excluded from isStringExpr).
     llvm::StringSet<> ptrVarNames_;
+
+    /// Variables with type `pslice<T>` — a fat pointer bundling a raw pointer
+    /// and a length.  Indexing emits compile-time or runtime bounds checks.
+    llvm::StringSet<> psliceVarNames_;
+
+    /// Element type string for pslice variables (`pslice<T>` → `T`).
+    llvm::StringMap<std::string> psliceElemTypes_;
+
+    /// Per-variable alloca (i64) holding the length for pslice variables.
+    llvm::StringMap<llvm::AllocaInst*> psliceLenAllocas_;
+
+    /// Compile-time-constant length for pslice variables, or -1 if dynamic.
+    llvm::StringMap<int64_t> psliceCompTimeLens_;
+
+    /// Scratch: length value stashed by pslice_new<T> for VarDecl to store.
+    llvm::Value* lastPsliceNewLen_ = nullptr;
 
     /// Element type string for typed pointer variables (`ptr<T>`).
     /// Maps variable name → inner type annotation (e.g., "i64", "i32[]").
@@ -757,6 +803,9 @@ class CodeGenerator {
 
     [[gnu::hot]] llvm::Value* generateLiteral(LiteralExpr* expr);
     [[gnu::hot]] llvm::Value* generateIdentifier(IdentifierExpr* expr);
+    /// Resolve a built-in integer range constant (I8_MAX, U32_MIN, INT_MAX …).
+    /// Returns nullptr if the name is not a predefined constant.
+    llvm::Value* tryResolvePredefinedConstant(const std::string& name, ASTNode* ctx);
     [[gnu::hot]] llvm::Value* generateBinary(BinaryExpr* expr);
     /// Fold a chain of string literal concatenations to a compile-time constant.
     bool tryFoldStringConcat(Expression* expr, std::string& out) const;
@@ -819,6 +868,7 @@ class CodeGenerator {
     /// Emit inline map_get (equivalent to map_get(mapVal, keyVal, 0)).
     llvm::Value* emitMapGet(llvm::Value* mapVal, llvm::Value* keyVal);
     llvm::Value* generateIndexAssign(IndexAssignExpr* expr);
+    llvm::Value* generateDerefAssign(DerefAssignExpr* expr);  ///< *p = v (Ω spec §4.2)
     llvm::Value* generateStructLiteral(StructLiteralExpr* expr);
     llvm::Value* generateFieldAccess(FieldAccessExpr* expr);
     llvm::Value* generateFieldAssign(FieldAssignExpr* expr);
@@ -862,6 +912,18 @@ class CodeGenerator {
     void generateInvalidate(InvalidateStmt* stmt);
     void generateMoveDecl(MoveDecl* stmt);
     void generateFreeze(FreezeStmt* stmt);
+    void generateShared(SharedStmt* stmt);  ///< shared x; — Ω spec §3.1
+    void generateOwn(OwnStmt* stmt);        ///< own x;    — Ω spec §3.1
+    void generateConstruct(ConstructStmt* stmt);  ///< construct ptr { field: val, ... };
+    llvm::Value* generateNewConstruct(NewConstructExpr* expr); ///< new T { field: val, ... }
+    /// Shared back-end: emit one GEP+store per field into @p basePtr.
+    /// Reused by both generateConstruct (statement) and generateNewConstruct (expression).
+    void emitConstructFieldsInto(
+        llvm::Value* basePtr,
+        const std::string& structHint,
+        const std::vector<std::pair<std::string,
+                                    std::unique_ptr<Expression>>>& fields,
+        const ASTNode* errorNode);
     void generatePrefetch(PrefetchStmt* stmt);
     void generateAssume(AssumeStmt* stmt);
     void generatePipeline(PipelineStmt* stmt);
@@ -1046,6 +1108,8 @@ class CodeGenerator {
     bool enableIPOF_ = true;          // -fipof / -fno-ipof (implicit phase ordering fixer)
     unsigned ipofLevel_ = 0;          // 0 = auto (set from optimization level at call time)
     bool runIRPasses_ = true;         // Run runOptimizationPasses() after codegen (set false in IR unit tests).
+    bool noOwnershipChecks_ = false;  // --no-ownership-checks (Ω spec §6.2)
+    bool memSanitize_       = false;  // --mem-sanitize        (Ω spec §7)
     unsigned preferredVectorWidth_ = 4; // SIMD vector width for loop hints (target-aware)
     std::string pgoGenPath_;          // --pgo-gen=<path>: emit raw profile to this file
     std::string pgoUsePath_;          // --pgo-use=<path>: read profile data from this file
@@ -1264,6 +1328,11 @@ class CodeGenerator {
   public:
     // Per-function optimization for targeted optimization of individual functions
     void optimizeFunction(llvm::Function* func);
+
+    /// Returns the raw CTEngine pointer (may be null before runCFCTRE runs).
+    /// Used by OptimizationOrchestrator to re-sync OptimizationContext after
+    /// runCFCTRE recreates ctEngine_ (freeing the old instance).
+    CTEngine* getCTEngine() const noexcept { return ctEngine_.get(); }
 };
 
 } // namespace omscript

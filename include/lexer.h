@@ -81,6 +81,9 @@ enum class TokenType {
     ATOMIC,    // atomic   — all accesses to the variable are indivisible
     VOLATILE,  // volatile — suppress all optimizations on the annotated storage
     TYPE,      // type     — top-level type alias declaration
+    SHARED,    // shared   — read-only aliasable ownership state (Ω spec §3.1)
+    OWN,       // own      — explicit unique-ownership declaration (Ω spec §3.1)
+    CONSTRUCT, // construct — in-place field initialization of allocated memory
 
     // Operators
     PLUS,
