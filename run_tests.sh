@@ -874,6 +874,7 @@ ptest_program "examples/borrow_mut_syntax_test.om" 42
 ptest_program "examples/ref_borrow_test.om" 42
 ptest_program "examples/nullptr_test.om" 42
 ptest_program "examples/alloc_zero_args_test.om" 99
+ptest_program "examples/new_struct_construct_test.om" 0
 ptest_program "examples/shared_ownership_test.om" 55
 ptest_program "examples/ptr_arith_typed_test.om" 77
 ptest_program "examples/comptime_chain_test.om" 45

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Round-51: `alloc<T>` / `new T(n)` — correct struct element size + auto-construct** (`src/codegen_builtins.cpp`):
+  - **Root cause**: Both `alloc<T>` and `new_zero<T>` computed the element type for allocation sizing via `resolveAnnotatedType(T)`.  For struct types, `resolveAnnotatedType` returns an opaque `ptr` (8 bytes) — the in-memory representation used for *variables*.  This caused the T1/T2 stack/arena allocations to create `[n x ptr]` arrays (8·n bytes) instead of `[n x %omsc.struct.T]` (sizeof(T)·n bytes).  With e.g. `struct Point { x, y }` (16 bytes), `alloc<Point>(1)` allocated only 8 bytes; the `construct p { x: 11, y: 22 }` store for field `y` wrote 8 bytes past the end of the allocation.  LLVM's optimiser treated that out-of-bounds store as dead and returned `poison` for the subsequent load, yielding garbage at runtime.
+  - **Fix** (`alloc<T>` handler, line ~466; `new_zero<T>` handler, line ~669): after calling `resolveAnnotatedType`, call `getOrCreateStructLLVMType(T)`.  If the result is non-null (i.e. T is a known struct), replace `elemTy` with the struct type.  All downstream size/alignment calculations (`DL.getTypeAllocSize`, `DL.getABITypeAlign`) then operate on the full struct layout, producing correctly-sized T1/T2/T3 allocations.
+  - **Auto-construct for `new T` on struct types** (`new_zero<T>` T1/T2 paths): for struct element types, the flat `CreateMemSet(0)` is replaced with explicit per-field `CreateStructGEP` + `CreateAlignedStore(null, ...)` sequences carrying per-field TBAA metadata.  This makes every field write visible to the optimizer with correct alias information, enables SROA to promote struct slots to SSA registers, and removes the need for LLVM to reason about an opaque memset when propagating field values.  T3 (heap) continues to use `calloc`, which provides OS-level zero-init without extra memset overhead.
+  - **New test**: `examples/new_struct_construct_test.om` — covers `alloc<T>` + `construct`, `new T`, `new T(n)`, `new T { field: val }`, and multi-field structs (`Vec3`); expected exit code 0.
+
 ### Added
 
 - **Round-49: `new T(n)` zero-initialisation — semantic distinction from `alloc<T>(n)`** (`src/parser.cpp`, `src/codegen_builtins.cpp`):

@@ -6205,10 +6205,12 @@ var one: ptr<i64> = alloc<i64>();    // 1 element, raw
 
 `new T(n)` is semantically distinct from `alloc<T>(n)`. It uses the same three-tier compile-time allocation strategy but **guarantees zero-initialised memory** — all bytes are set to zero before the pointer is returned.
 
+For **struct element types**, `new T(n)` goes one step further than a flat `memset`: it emits explicit per-field typed stores (with per-field TBAA metadata) so the optimizer can see each field write individually and apply SROA, copy propagation, and alias analysis more aggressively.
+
 | Tier | Zero-init mechanism |
 |------|---------------------|
-| **T1 Stack** | `alloca` + `memset(ptr, 0, n×sizeof(T))` |
-| **T2 Arena** | arena GEP + `memset(ptr, 0, n×sizeof(T))` |
+| **T1 Stack** | `alloca` + typed per-field `store zero` for structs; `memset(ptr, 0, n×sizeof(T))` for scalars |
+| **T2 Arena** | arena GEP + same field-by-field zero stores for structs; `memset` for scalars |
 | **T3 Heap** | `calloc(n, sizeof(T))` — OS-level zeroing, no extra call |
 
 `new T` (no parens) zero-initialises exactly 1 element.
@@ -6219,7 +6221,13 @@ fn dyn(n: int) -> ptr<i64> {
     return new i64(n);             // T3: calloc (n is dynamic)
 }
 var one: ptr<i64> = new i64;       // 1 element, zero-initialised
+
+struct Point { x, y }
+var p: ptr<Point> = new Point;     // T1: both fields zero-initialised via typed stores
+var pts: ptr<Point> = new Point(3);// T1: all 3 elements, all fields zero
 ```
+
+**`sizeof(T)` for struct types** uses the full LLVM struct layout (all fields + padding), not pointer size. `new Point(1)` where `Point = {i64, i64}` allocates 16 bytes, not 8.
 
 **When to use `alloc<T>` vs `new T`:**
 
@@ -7733,7 +7741,7 @@ OmScript's concurrency model is a thin layer over the host's POSIX threading pri
 | Thread | `pthread_create` / `pthread_join` | `i64` (pthread_t) |
 | Mutex | `pthread_mutex_*` | `i64` (`pthread_mutex_t*` cast to int) |
 | Parallel loop | `@parallel for` → loop-parallelism metadata | n/a |
-| Atomics | — | not yet implemented |
+| Atomics | `atomic var` qualifier | `i64` (seq-cst loads/stores/RMW) |
 
 ### 20.1 Threads
 
@@ -9383,9 +9391,17 @@ llvm-profdata merge *.profraw -o merged.profdata
 
 ### 26.6 Escape Analysis & Stack Allocation
 
-**Not yet implemented**. Planned:
-- Detect heap allocations (`newRegion()`, `alloc()`) that do not escape function scope.
-- Lower to `alloca` (stack allocation) when safe.
+**Implemented** via the three-tier allocation strategy in `alloc<T>` and `new T(n)` (see §17.9.2):
+
+- **T1 (Stack)**: when the allocation count is a compile-time constant and `count × sizeof(T) ≤ 8 KiB`, the compiler unconditionally emits a stack `alloca` in the function entry block — no escape analysis required because the decision is made entirely at the allocation site.
+- **T2 (Arena)**: compile-time constant allocations that fit the 64 KiB per-function slab are GEP'd into a shared entry-block alloca. Zero heap involvement; the slab is lifetime-scoped.
+- **T3 (Heap)**: dynamic counts or oversized allocations fall through to `malloc` / `calloc`.
+
+Additionally, the LLVM mid-end's own escape analysis (`-O1`+) can promote surviving T3 heap allocations to stack once it proves the pointer does not escape the function (i.e. is not returned, stored into a global, or passed to an escaping callee). The `4096-byte threshold` mentioned below applies only to OmScript's compile-time promotion; LLVM's analysis has no hard threshold.
+
+**Compile-time array escape heuristic** (§11.5): arrays declared with literal-sized `array_fill` / `[...]` and proven not to escape are stack-promoted by the AST-level analysis in `codegen.cpp` (`optStats_.escapeStackAllocs` counter).
+
+**`kStackAllocThreshold` = 8 192 bytes** (`include/codegen.h`). Allocations larger than this threshold remain on the heap even when the count is constant, to prevent stack overflow.
 
 ### 26.7 Bounds-Check Hoisting
 
@@ -10932,7 +10948,11 @@ fn compute(x: int) -> int {
 - v5.0 will require explicit migration (automated tool planned).
 
 **LLVM compatibility**:
-- Current: LLVM 18 (primary). LLVM 17 and 19–21 are expected to work but are not CI-tested.
-- Future: LLVM 22+ will require updates to HGOE and superoptimizer (latency tables).
+- **Primary**: LLVM 18 — CI-tested on every push.
+- **LLVM 17**: expected to work; not CI-tested.
+- **LLVM 19**: supported — `llvm::Intrinsic::getOrInsertDeclaration` replaces `getDeclaration` (`#if LLVM_VERSION_MAJOR >= 19`).
+- **LLVM 20–21**: supported — `VirtualFileSystem.h` include path changed in 22 (`#if LLVM_VERSION_MAJOR < 22`); `Attribute::NoCapture` replaced by `captures(none)` in 21 (`#if LLVM_VERSION_MAJOR >= 21`).
+- **LLVM 22+**: `llvm/Passes/PassPlugin.h` moved to `llvm/Plugins/PassPlugin.h` — handled via `#if LLVM_VERSION_MAJOR >= 22`; `VirtualFileSystem.h` removed; Polly plugin path updated. All known breaking API changes are guarded.
+- **macOS ARM64 (Apple Silicon)**: fully supported. The data layout and target triple are initialised at the start of `generate()` (via `InitializeNativeTarget` + `createTargetMachine` + `setDataLayout`) before any IR is emitted, ensuring correct ABI alignment for all types including `i64` (align 8, not 4).
 
 **End of Part 3**

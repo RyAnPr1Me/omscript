@@ -466,6 +466,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         expr->callee.rfind("alloc<", 0) == 0 && expr->callee.back() == '>') {
         const std::string elemTypeName = expr->callee.substr(6, expr->callee.size() - 7);
         llvm::Type* elemTy = resolveAnnotatedType(elemTypeName);
+        // resolveAnnotatedType returns an opaque ptr for struct types (used for variable
+        // storage), but alloc<T> needs the real struct LLVM type so that sizeof(T) and the
+        // stack/arena/heap allocations are sized correctly.  Without this, alloc<Point>(1)
+        // allocates 8 bytes (ptr size) when Point = {i64, i64} requires 16 bytes, causing
+        // the second field store to write past the allocation → undefined behaviour.
+        if (llvm::StructType* sty = getOrCreateStructLLVMType(elemTypeName))
+            elemTy = sty;
         const llvm::DataLayout& DL = module->getDataLayout();
         const uint64_t elemSize  = DL.getTypeAllocSize(elemTy);
         const llvm::Align elemAlign = DL.getABITypeAlign(elemTy);
@@ -667,6 +674,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         expr->callee.rfind("new_zero<", 0) == 0 && expr->callee.back() == '>') {
         const std::string elemTypeName = expr->callee.substr(9, expr->callee.size() - 10);
         llvm::Type* elemTy = resolveAnnotatedType(elemTypeName);
+        // Same struct-size fix as alloc<T>: use the actual struct LLVM type so that
+        // sizeof(T) is computed correctly for struct element types.
+        llvm::StructType* isStructTy = getOrCreateStructLLVMType(elemTypeName);
+        if (isStructTy)
+            elemTy = isStructTy;
         const llvm::DataLayout& DL = module->getDataLayout();
         const uint64_t elemSize  = DL.getTypeAllocSize(elemTy);
         const llvm::Align elemAlign = DL.getABITypeAlign(elemTy);
@@ -699,7 +711,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             const uint64_t alignedBytes =
                 (totalBytes + alignVal - 1u) & ~(alignVal - 1u);
 
-            // T1: stack alloca + memset zero
+            // T1: stack alloca + zero-init
             if (totalBytes <= kStackAllocThreshold) {
                 llvm::Function* fn = builder->GetInsertBlock()->getParent();
                 llvm::IRBuilder<> entryB(&fn->getEntryBlock(),
@@ -718,12 +730,38 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 auto* zero32 = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0);
                 auto* ptr = builder->CreateInBoundsGEP(arrayTy, stackAlloc,
                                                        {zero32, zero32}, "newz.stkptr");
-                // Zero-initialise the stack region.
-                builder->CreateMemSet(ptr,
-                    llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0),
-                    llvm::ConstantInt::get(getDefaultType(),
-                                           static_cast<int64_t>(totalBytes)),
-                    elemAlign);
+                // For struct types: auto-construct each element with typed per-field
+                // zero stores (with TBAA metadata) instead of a flat memset.  This
+                // lets the optimizer see explicit field writes and respects field types.
+                if (isStructTy) {
+                    const unsigned numFields = isStructTy->getNumElements();
+                    for (uint64_t elem = 0; elem < count; ++elem) {
+                        llvm::Value* elemBase = (count == 1)
+                            ? ptr
+                            : builder->CreateInBoundsGEP(
+                                  isStructTy, ptr,
+                                  llvm::ConstantInt::get(getDefaultType(),
+                                                         static_cast<int64_t>(elem)),
+                                  "newz.elem." + std::to_string(elem));
+                        for (unsigned fi = 0; fi < numFields; ++fi) {
+                            llvm::Type* fty = isStructTy->getElementType(fi);
+                            llvm::Value* fptr = builder->CreateStructGEP(
+                                isStructTy, elemBase, fi, "newz.field." + std::to_string(fi));
+                            llvm::StoreInst* st = builder->CreateAlignedStore(
+                                llvm::Constant::getNullValue(fty), fptr,
+                                DL.getABITypeAlign(fty));
+                            st->setMetadata(llvm::LLVMContext::MD_tbaa,
+                                            getOrCreateFieldTBAA(elemTypeName, fi));
+                        }
+                    }
+                } else {
+                    // Scalar / non-struct type: flat memset is optimal.
+                    builder->CreateMemSet(ptr,
+                        llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0),
+                        llvm::ConstantInt::get(getDefaultType(),
+                                               static_cast<int64_t>(totalBytes)),
+                        elemAlign);
+                }
                 lastStackAllocBacking_ = stackAlloc;
                 return ptr;
             }
@@ -763,12 +801,37 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::Value* typedPtr = (elemTy != i8Ty)
                     ? builder->CreatePointerCast(slotPtr, ptrTy, "newz.arena.ptr")
                     : slotPtr;
-                // Zero-initialise the arena slot.
-                builder->CreateMemSet(typedPtr,
-                    llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0),
-                    llvm::ConstantInt::get(i64Ty,
-                                           static_cast<int64_t>(totalBytes)),
-                    elemAlign);
+                // For struct types: auto-construct each element with typed per-field
+                // zero stores (with TBAA metadata) instead of a flat memset.
+                if (isStructTy) {
+                    const unsigned numFields = isStructTy->getNumElements();
+                    for (uint64_t elem = 0; elem < count; ++elem) {
+                        llvm::Value* elemBase = (count == 1)
+                            ? typedPtr
+                            : builder->CreateInBoundsGEP(
+                                  isStructTy, typedPtr,
+                                  llvm::ConstantInt::get(getDefaultType(),
+                                                         static_cast<int64_t>(elem)),
+                                  "newz.arena.elem." + std::to_string(elem));
+                        for (unsigned fi = 0; fi < numFields; ++fi) {
+                            llvm::Type* fty = isStructTy->getElementType(fi);
+                            llvm::Value* fptr = builder->CreateStructGEP(
+                                isStructTy, elemBase, fi,
+                                "newz.arena.field." + std::to_string(fi));
+                            llvm::StoreInst* st = builder->CreateAlignedStore(
+                                llvm::Constant::getNullValue(fty), fptr,
+                                DL.getABITypeAlign(fty));
+                            st->setMetadata(llvm::LLVMContext::MD_tbaa,
+                                            getOrCreateFieldTBAA(elemTypeName, fi));
+                        }
+                    }
+                } else {
+                    builder->CreateMemSet(typedPtr,
+                        llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0),
+                        llvm::ConstantInt::get(i64Ty,
+                                               static_cast<int64_t>(totalBytes)),
+                        elemAlign);
+                }
                 lastAllocWasArena_ = true;
                 return typedPtr;
             }
