@@ -565,7 +565,14 @@ These do not appear in the keyword table in §2.4 and you may shadow them, but d
 
 ## 3. Preprocessor
 
-The **preprocessor** runs before lexical analysis, transforming source text by expanding macros, resolving conditional compilation directives, and performing file inclusion. Preprocessor directives begin with `#` at the start of a line (leading whitespace is allowed).
+The **preprocessor** runs before lexical analysis, transforming source text by expanding macros, resolving conditional compilation directives, and handling file inclusion. Preprocessor directives begin with `#` at the start of a line (leading whitespace is allowed).
+
+> **Recommendation for new code**: Prefer `comptime {}` blocks over preprocessor macros for constant definitions and conditional compilation. `comptime {}` is fully type-checked, IDE-friendly, scope-aware, and integrates with the language's constant folding and CF-CTRE engine. See §5.9 for the `comptime {}` reference and a preprocessor migration guide.
+>
+> Use the preprocessor for:
+> - Cross-language compatibility (bridging with C headers or build systems that emit `#define`)
+> - Textual macro expansion not expressible in the type system
+> - Legacy codebases
 
 ### 3.1 Directive List
 
@@ -1882,15 +1889,37 @@ fn main() -> int {
 
 **Preprocessor migration guide:**
 
-| C preprocessor | OmScript `comptime {}` equivalent |
-|---|---|
-| `#define MAX 1024` | `comptime { const MAX: int = 1024; }` |
-| `#define NAME "hello"` | `comptime { const NAME: string = "hello"; }` |
-| `#ifdef DEBUG` / `#endif` | `comptime { if (defined(DEBUG)) { ... } }` |
-| `#if defined(__linux__)` | `comptime { if (OS == "linux") { ... } }` |
-| `#if MAJOR >= 4` | `comptime { if (VERSION_MAJOR >= 4) { ... } }` |
-| `#error "message"` | `comptime { error("message"); }` |
-| `#warning "message"` | `comptime { warning("message"); }` |
+| C/C++ preprocessor | OmScript `comptime {}` equivalent | Notes |
+|---|---|---|
+| `#define MAX 1024` | `comptime { const MAX: int = 1024; }` | Fully typed |
+| `#define PI 3.14159` | `comptime { const PI: float = 3.14159; }` | |
+| `#define NAME "hello"` | `comptime { const NAME: string = "hello"; }` | |
+| `#define DEBUG` (flag) | `comptime { const DEBUG: bool = true; }` | |
+| `#undef DEBUG` | not needed — omit the const or use `false` | |
+| `#ifdef DEBUG` / `#endif` | `comptime { if (defined(DEBUG)) { ... } }` | |
+| `#ifndef NDEBUG` | `comptime { if (!defined(NDEBUG)) { ... } }` | |
+| `#if defined(__linux__)` | `comptime { if (OS == "linux") { ... } }` | |
+| `#if defined(_WIN32)` | `comptime { if (OS == "windows") { ... } }` | |
+| `#if MAJOR >= 4` | `comptime { if (VERSION_MAJOR >= 4) { ... } }` | |
+| `#if X == 0 && Y != 0` | `comptime { if (X == 0 && Y != 0) { ... } }` | Full boolean logic |
+| `#error "message"` | `comptime { error("message"); }` | |
+| `#warning "message"` | `comptime { warning("message"); }` | |
+| `#assert COND` | `comptime { if (!COND) { error("assertion failed"); } }` | |
+| `__LINE__` | not available (use `@line` diagnostic annotation) | |
+| `__FILE__` | not available (use `import` path instead) | |
+| `__VERSION__` | `comptime { const VER = VERSION; }` where `VERSION` is built-in | |
+| `__OS__` | built-in `OS` comptime string | `"linux"`, `"windows"`, `"macos"` |
+| `__ARCH__` | built-in `ARCH` comptime string | `"x86_64"`, `"aarch64"`, `"arm"` |
+| `#define MAX(a,b) ((a)>(b)?(a):(b))` | `fn max(a: int, b: int) -> int { ... }` | Use a typed function — no macros needed |
+| `#define SQUARE(x) ((x)*(x))` | `fn square(x: int) -> int { return x*x; }` | Inlined at O1+ automatically |
+
+**Why `comptime {}` is better:**
+1. **Type safety** — `const MAX: int = 1024` is an `int`, not an untyped text substitution.
+2. **Scope awareness** — comptime constants obey file scope, no global pollution.
+3. **IDE support** — comptime constants appear in hover, completion, and cross-references.
+4. **No order dependency** — preprocessor macros must be defined before use; comptime constants are visible to the entire file regardless of order.
+5. **Readable diagnostics** — error messages use the constant name, not the substituted text.
+6. **Integration with CF-CTRE** — comptime constants feed directly into the compile-time reasoning engine, enabling deeper constant folding across function call boundaries.
 
 ---
 
@@ -6147,9 +6176,9 @@ println(r2);  // 42
 | Free | `invalidate p` | Deferred `free()` at CFG exit |
 | In-place init | `construct p { field: val, ... };` | Initialise fields of already-allocated `ptr<T>` |
 
-#### 17.9.2 `alloc<T>` / `new T` — Compile-Time Smart Allocator
+#### 17.9.2 `alloc<T>` — Raw Compile-Time Smart Allocator
 
-`alloc<T>(n)` and its alias `new T(n)` (C++-style) decide allocation strategy entirely at **compile time** — no runtime branching is emitted. Three tiers:
+`alloc<T>(n)` decides allocation strategy entirely at **compile time** — no runtime branching is emitted. Returns **raw (uninitialised)** memory. Three tiers:
 
 | Tier | Condition | Strategy | Notes |
 |------|-----------|----------|-------|
@@ -6157,41 +6186,69 @@ println(r2);  // 42
 | **T2 Arena** | Constant `n` AND fits in 64 KiB per-function slab | GEP into shared static slab | Zero heap involvement; all sub-allocations are compile-time GEPs |
 | **T3 Heap** | Dynamic `n` OR size exceeds slab | `malloc` / `aligned_alloc` | `nonnull` + `dereferenceable(N)` + alignment `llvm.assume` annotations emitted for LLVM AA |
 
-`alloc<T>()` / `new T` (no parens) allocates exactly 1 element.
+`alloc<T>()` (no argument) allocates exactly 1 element.
 
 **Safety improvements in T3 (heap)**:
-- Return pointer annotated `nonnull` — LLVM may assume malloc succeeds (consistent with `-fno-rtti` environments).
+- Return pointer annotated `nonnull` — LLVM may assume malloc succeeds.
 - When `n` is a compile-time constant, `dereferenceable(n × sizeof(T))` is emitted — enables load-store forwarding and alias analysis.
 - `llvm.assume(ptr != null)` and `llvm.assume(ptr % alignof(T) == 0)` are emitted — vectorizer and IndVars can exploit alignment without runtime checks.
 
 ```omscript
-var arr: ptr<i64> = alloc<i64>(4);  // T1: stack alloca (32 bytes ≤ 8 KiB)
-var arr2: ptr<i64> = new i64(4);    // identical to alloc<i64>(4)
-var big: ptr<i64> = new i64(2048);  // T2: arena GEP (16 KiB ≤ 64 KiB slab)
-fn dyn(n: int) -> ptr<i64> {
-    return new i64(n);              // T3: malloc (n is dynamic)
-}
-var one: ptr<i64> = new i64;        // 1 element, no parens (Ω spec §4.1)
-var one2: ptr<i64> = alloc<i64>();  // identical to new i64
+var arr: ptr<i64> = alloc<i64>(4);   // T1: stack alloca, raw (uninitialised)
+var big: ptr<i64> = alloc<i64>(2048); // T2: arena GEP, raw
+var one: ptr<i64> = alloc<i64>();    // 1 element, raw
 ```
 
-#### 17.9.2a `construct` Statement — In-Place Field Initialisation
+---
 
-`construct ptr { field: val, ... };` initialises the fields of an already-allocated struct pointer in place. It lowers with **zero abstraction cost** to a sequence of typed `GEP` + `store` pairs — exactly what writing `ptr->x = val; ptr->y = val;` by hand would produce, but with automatic per-field TBAA metadata and alignment from the struct definition.
+#### 17.9.2a `new T(n)` — Zero-Initialised Allocation
+
+`new T(n)` is semantically distinct from `alloc<T>(n)`. It uses the same three-tier compile-time allocation strategy but **guarantees zero-initialised memory** — all bytes are set to zero before the pointer is returned.
+
+| Tier | Zero-init mechanism |
+|------|---------------------|
+| **T1 Stack** | `alloca` + `memset(ptr, 0, n×sizeof(T))` |
+| **T2 Arena** | arena GEP + `memset(ptr, 0, n×sizeof(T))` |
+| **T3 Heap** | `calloc(n, sizeof(T))` — OS-level zeroing, no extra call |
+
+`new T` (no parens) zero-initialises exactly 1 element.
+
+```omscript
+var arr: ptr<i64> = new i64(4);    // T1: zero-initialised (all 0)
+fn dyn(n: int) -> ptr<i64> {
+    return new i64(n);             // T3: calloc (n is dynamic)
+}
+var one: ptr<i64> = new i64;       // 1 element, zero-initialised
+```
+
+**When to use `alloc<T>` vs `new T`:**
+
+| Need | Use |
+|------|-----|
+| Raw speed, you will write every field before reading | `alloc<T>(n)` |
+| Safety by default — zero is a valid sentinel / default | `new T(n)` |
+| Allocate + initialise specific fields immediately | `new T { field: val, ... }` |
+| Allocate many + initialise one at a time | `alloc<T>(n)` + `construct p { ... };` |
+
+---
+
+#### 17.9.2b `construct` Statement — In-Place Field Initialisation
+
+`construct ptr { field: val, ... };` initialises the fields of an already-allocated struct pointer in place. It lowers with **zero abstraction cost** to a sequence of typed `GEP` + `store` pairs — exactly what writing `ptr->x = val; ptr->y = val;` by hand would produce, but with automatic per-field TBAA metadata and correct alignment from the struct definition.
 
 **Syntax:**
 ```
 construct TARGET { FIELD: EXPR [, FIELD: EXPR]* [,] };
 ```
 
-Where `TARGET` is any expression returning a `ptr<T>` and `FIELD: EXPR` pairs provide field initialisers.  Trailing commas are allowed.  Fields not listed are **left uninitialised**.
+Where `TARGET` is any expression returning a `ptr<T>` and `FIELD: EXPR` pairs provide field initialisers.  Trailing commas are allowed.  Fields not listed are **left as-is** (uninitialised if from `alloc<T>`, zero if from `new T`).
 
 **Example:**
 ```omscript
 struct Point { x: int; y: int; }
 
 fn make_point(x: int, y: int) -> ptr<Point> {
-    var p: ptr<Point> = alloc<Point>(1);
+    var p: ptr<Point> = alloc<Point>(1);  // raw memory
     construct p {
         x: x,
         y: y,
@@ -6200,7 +6257,7 @@ fn make_point(x: int, y: int) -> ptr<Point> {
 }
 ```
 
-**Lowering** (no extra IR):
+**Lowering** (no extra IR, identical to hand-written field stores):
 ```
 %construct.field.ptr = getelementptr inbounds %Point, ptr %p, i32 0, i32 0
 store i64 %x, ptr %construct.field.ptr, align 8, !tbaa !...
@@ -6208,17 +6265,28 @@ store i64 %x, ptr %construct.field.ptr, align 8, !tbaa !...
 store i64 %y, ptr %construct.field.ptr1, align 8, !tbaa !...
 ```
 
-#### 17.9.2b `new T { ... }` Expression — Allocation + Construction
+**Any expression is valid as `TARGET`:**
+```omscript
+// Construct into the result of pointer arithmetic
+construct (arr + i) { x: 5, y: 10 };
+```
 
-`new T { field: val, ... }` is an **expression** that combines `alloc<T>(1)` with a `construct` statement in a single zero-overhead form.  It returns a `ptr<T>` just like `alloc<T>(1)`.
+---
 
-**Distinction from bare `new T(n)`:**
+#### 17.9.2c `new T { ... }` Expression — Allocation + Field Construction
 
-| Form | Allocates | Initialises fields | Count |
-|---|---|---|---|
-| `alloc<T>(n)` / `new T(n)` | ✓ | ✗ (raw memory) | `n` elements |
-| `new T { ... }` | ✓ | ✓ (listed fields) | always 1 |
-| `construct p { ... };` | ✗ | ✓ (listed fields) | (already allocated) |
+`new T { field: val, ... }` is an **expression** that combines `alloc<T>(1)` (raw allocation) with an immediate `construct` statement.  It returns a `ptr<T>` with exactly the listed fields initialised and unlisted fields **uninitialised**.
+
+Use `new T { ... }` when you want to initialise exactly the fields you need and skip the rest for maximum performance. Use `new T(1)` + `construct` if you prefer separate alloc and init steps.
+
+**Allocation + field comparison:**
+
+| Form | Allocates | Zero-fills all | Initialises specific fields | Count |
+|---|---|---|---|---|
+| `alloc<T>(n)` | ✓ | ✗ | ✗ | `n` |
+| `new T(n)` | ✓ | ✓ | ✗ | `n` |
+| `new T { f:v, ... }` | ✓ | ✗ | ✓ listed only | 1 |
+| `construct p { f:v, ... };` | ✗ | ✗ | ✓ listed only | existing |
 
 **Example:**
 ```omscript
@@ -6244,7 +6312,7 @@ fn main() -> int {
 store i64 3, ptr %construct.field.ptr, align 8, !tbaa !...
 %construct.field.ptr1 = getelementptr inbounds %Point, ptr %ptr, i32 0, i32 1
 store i64 4, ptr %construct.field.ptr1, align 8, !tbaa !...
-; %ptr is the result
+; %ptr is the result — no extra overhead
 ```
 
 #### 17.9.3 Pointer Arithmetic
@@ -8242,7 +8310,7 @@ The OmScript compiler (`omsc`) supports three primary invocation patterns:
 | Subcommand           | Aliases                     | Description                                             |
 |----------------------|-----------------------------|---------------------------------------------------------|
 | `help`               | `-h`, `--help`              | Display usage information                               |
-| `version`            | `-v`, `--version`           | Print compiler version (`4.1.1`)                        |
+| `version`            | `-v`, `--version`           | Print compiler version (`4.4.0`)                        |
 | `build`, `compile`   | `--build`, `--compile`      | Compile source to executable (default subcommand)       |
 | `run`                | `-r`, `--run`               | Compile and execute, passing args after `--`            |
 | `check`              | `--check`                   | Validate syntax and types without code generation       |
@@ -10689,25 +10757,27 @@ invalidate(r);                  // free region
 ```omscript
 struct Point { x: int; y: int; }
 
-// Raw allocation (fields uninitialised)
+// Raw allocation — uninitialised memory (fastest when you write every field)
 var p: ptr<Point> = alloc<Point>(1);
 
-// In-place field initialisation on already-allocated memory
+// In-place field initialisation on already-allocated memory (zero-cost GEP+store)
 construct p {
     x: 10,
     y: 20,
 };
 
-// Allocate + initialise in one expression
+// Zero-initialised allocation — all bytes zeroed before use
+var zp: ptr<Point> = new Point;       // calloc(1, sizeof(Point))
+var zi: ptr<i64>   = new i64(8);      // calloc(8, sizeof(i64))
+
+// Allocate + initialise specific fields in one expression (alloc + field stores)
 var q: ptr<Point> = new Point { x: 3, y: 4 };
 println(q->x);  // 3
 
-// Raw allocation alias (no construction)
-var r2: ptr<i64> = new i64(8);   // alloc<i64>(8)
-
 invalidate p;
+invalidate zp;
+invalidate zi;
 invalidate q;
-invalidate r2;
 ```
 
 ### Comptime

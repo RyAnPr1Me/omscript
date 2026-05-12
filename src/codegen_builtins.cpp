@@ -658,6 +658,155 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return heapPtr;
     }
 
+    // ── new_zero<T>(n) — zero-initialised allocation (new T(n) lowers here) ──
+    // Identical to alloc<T>(n) except that the returned memory is guaranteed
+    // to be zero-filled:
+    //   T1 / T2 (stack / arena): same alloc path + CreateMemSet(ptr,0,size,align)
+    //   T3 (heap):                calloc(count, sizeof(T)) — OS-zeroed, no runtime overhead
+    if (expr->callee.size() > 9 &&
+        expr->callee.rfind("new_zero<", 0) == 0 && expr->callee.back() == '>') {
+        const std::string elemTypeName = expr->callee.substr(9, expr->callee.size() - 10);
+        llvm::Type* elemTy = resolveAnnotatedType(elemTypeName);
+        const llvm::DataLayout& DL = module->getDataLayout();
+        const uint64_t elemSize  = DL.getTypeAllocSize(elemTy);
+        const llvm::Align elemAlign = DL.getABITypeAlign(elemTy);
+
+        if (expr->arguments.size() > 1)
+            codegenError("new T expects zero or one argument (element count); "
+                         "new T allocates one zero-initialised element, new T(n) allocates n",
+                         expr);
+
+        lastStackAllocBacking_ = nullptr;
+        lastAllocWasArena_     = false;
+
+        llvm::Value* countVal;
+        if (expr->arguments.empty()) {
+            countVal = llvm::ConstantInt::get(getDefaultType(), 1);
+        } else {
+            countVal = generateExpression(expr->arguments[0].get());
+            countVal = builder->CreateIntCast(countVal, getDefaultType(),
+                                              /*isSigned=*/true, "newz.cnt");
+        }
+
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(countVal)) {
+            const uint64_t count = ci->getZExtValue();
+            if (count == 0)
+                return llvm::ConstantPointerNull::get(
+                    llvm::PointerType::getUnqual(*context));
+
+            const uint64_t totalBytes  = count * elemSize;
+            const uint64_t alignVal    = elemAlign.value();
+            const uint64_t alignedBytes =
+                (totalBytes + alignVal - 1u) & ~(alignVal - 1u);
+
+            // T1: stack alloca + memset zero
+            if (totalBytes <= kStackAllocThreshold) {
+                llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                llvm::IRBuilder<> entryB(&fn->getEntryBlock(),
+                                          fn->getEntryBlock().begin());
+                auto* arrayTy   = llvm::ArrayType::get(elemTy, count);
+                auto* stackAlloc = entryB.CreateAlloca(arrayTy, nullptr,
+                                                       "newz.stkalloc." + elemTypeName);
+                stackAlloc->setAlignment(elemAlign);
+                const uint64_t lifeSz = DL.getTypeAllocSize(arrayTy);
+                auto* lifeSzVal = llvm::ConstantInt::get(
+                    llvm::Type::getInt64Ty(*context), lifeSz);
+                auto* lifetimeStart = OMSC_GET_INTRINSIC(
+                    module.get(), llvm::Intrinsic::lifetime_start,
+                    {llvm::PointerType::getUnqual(*context)});
+                builder->CreateCall(lifetimeStart, {lifeSzVal, stackAlloc});
+                auto* zero32 = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0);
+                auto* ptr = builder->CreateInBoundsGEP(arrayTy, stackAlloc,
+                                                       {zero32, zero32}, "newz.stkptr");
+                // Zero-initialise the stack region.
+                builder->CreateMemSet(ptr,
+                    llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0),
+                    llvm::ConstantInt::get(getDefaultType(),
+                                           static_cast<int64_t>(totalBytes)),
+                    elemAlign);
+                lastStackAllocBacking_ = stackAlloc;
+                return ptr;
+            }
+
+            // T2: arena sub-allocation + memset zero
+            if (alignedBytes <= kFuncArenaSlabSize &&
+                funcArenaUsedBytes_ + alignedBytes <= kFuncArenaSlabSize) {
+                llvm::Function* fn = builder->GetInsertBlock()->getParent();
+                llvm::IRBuilder<> entryB(&fn->getEntryBlock(),
+                                          fn->getEntryBlock().begin());
+                auto* ptrTy  = llvm::PointerType::getUnqual(*context);
+                auto* i8Ty   = llvm::Type::getInt8Ty(*context);
+                auto* i64Ty  = llvm::Type::getInt64Ty(*context);
+                if (!funcArenaBaseAlloca_) {
+                    auto* slabArrayTy = llvm::ArrayType::get(i8Ty, kFuncArenaSlabSize);
+                    funcArenaBaseAlloca_ = entryB.CreateAlloca(
+                        slabArrayTy, nullptr, "arena.slab");
+                    funcArenaBaseAlloca_->setAlignment(llvm::Align(16));
+                    auto* lifeSzVal = llvm::ConstantInt::get(
+                        i64Ty, static_cast<int64_t>(kFuncArenaSlabSize));
+                    auto* lifetimeStart = OMSC_GET_INTRINSIC(
+                        module.get(), llvm::Intrinsic::lifetime_start, {ptrTy});
+                    entryB.CreateCall(lifetimeStart, {lifeSzVal, funcArenaBaseAlloca_});
+                }
+                const uint64_t offset = funcArenaUsedBytes_;
+                funcArenaUsedBytes_ += alignedBytes;
+                auto* slabArrayTy = llvm::ArrayType::get(i8Ty, kFuncArenaSlabSize);
+                auto* zero32 = llvm::ConstantInt::get(
+                    llvm::Type::getInt32Ty(*context), 0);
+                llvm::Value* arenaBase = builder->CreateInBoundsGEP(
+                    slabArrayTy, funcArenaBaseAlloca_,
+                    {zero32, zero32}, "arena.base");
+                llvm::Value* slotPtr = builder->CreateInBoundsGEP(
+                    i8Ty, arenaBase,
+                    llvm::ConstantInt::get(i64Ty, static_cast<int64_t>(offset)),
+                    "newz.arena.slot." + elemTypeName);
+                llvm::Value* typedPtr = (elemTy != i8Ty)
+                    ? builder->CreatePointerCast(slotPtr, ptrTy, "newz.arena.ptr")
+                    : slotPtr;
+                // Zero-initialise the arena slot.
+                builder->CreateMemSet(typedPtr,
+                    llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0),
+                    llvm::ConstantInt::get(i64Ty,
+                                           static_cast<int64_t>(totalBytes)),
+                    elemAlign);
+                lastAllocWasArena_ = true;
+                return typedPtr;
+            }
+        }
+
+        // T3: heap — use calloc(count, sizeof(T)) for OS-level zero-init (no extra memset).
+        auto* callocFn = getOrDeclareCalloc();
+        auto* elemSzVal = llvm::ConstantInt::get(getDefaultType(),
+                                                  static_cast<int64_t>(elemSize));
+        llvm::Value* heapPtr = builder->CreateCall(callocFn,
+                                                    {countVal, elemSzVal},
+                                                    "newz.halloc.ptr");
+        if (auto* ci = llvm::dyn_cast<llvm::CallInst>(heapPtr)) {
+            ci->addRetAttr(llvm::Attribute::NonNull);
+            if (auto* cntCi = llvm::dyn_cast<llvm::ConstantInt>(countVal)) {
+                const uint64_t derefBytes = cntCi->getZExtValue() * elemSize;
+                if (derefBytes > 0)
+                    ci->addRetAttr(llvm::Attribute::getWithDereferenceableBytes(
+                        *context, derefBytes));
+            }
+            auto* notNull = builder->CreateIsNotNull(heapPtr, "newz.halloc.nonnull");
+            auto* assumeFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::assume, {});
+            builder->CreateCall(assumeFn, {notNull});
+            const uint64_t alignBytes = elemAlign.value();
+            if (alignBytes >= 2) {
+                auto* ptrAsInt = builder->CreatePtrToInt(heapPtr, getDefaultType(),
+                                                          "newz.halloc.ptrint");
+                auto* alignMask = llvm::ConstantInt::get(getDefaultType(),
+                                                          static_cast<int64_t>(alignBytes - 1));
+                auto* andVal = builder->CreateAnd(ptrAsInt, alignMask, "newz.halloc.alignchk");
+                auto* zero64 = llvm::ConstantInt::get(getDefaultType(), 0);
+                auto* alignOk = builder->CreateICmpEQ(andVal, zero64, "newz.halloc.aligned");
+                builder->CreateCall(assumeFn, {alignOk});
+            }
+        }
+        return heapPtr;
+    }
+
     // ── Width-typed integer intrinsics (__tw_<op>_<N>) ───────────────────────
     if (expr->callee.size() > 5 && expr->callee.substr(0,5) == "__tw_") {
         // Parse: __tw_<opname>_<width>

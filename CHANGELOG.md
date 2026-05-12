@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Round-49: `new T(n)` zero-initialisation — semantic distinction from `alloc<T>(n)`** (`src/parser.cpp`, `src/codegen_builtins.cpp`):
+  - **Parser**: `new T(n)` now emits `CallExpr("new_zero<T>", {n})` instead of `CallExpr("alloc<T>", {n})`. The two allocation forms are now semantically distinct at the AST level.
+  - **Codegen** (`new_zero<T>` handler, all three tiers):
+    - **T1 (stack alloca)**: same `alloca` + `lifetime.start` path as `alloc<T>` T1, followed by `CreateMemSet(ptr, 0, count*sizeof(T), align)`.
+    - **T2 (arena)**: same arena sub-allocation GEP as `alloc<T>` T2, followed by `CreateMemSet(ptr, 0, count*sizeof(T), align)`.
+    - **T3 (heap)**: uses `calloc(count, sizeof(T))` — OS-level zeroing with `nonnull` + `dereferenceable` + alignment `llvm.assume` annotations; no redundant `memset` call is emitted.
+  - **`new T { field: val, ... }` remains unchanged**: routes through `alloc<T>(1)` (raw) + `emitConstructFieldsInto` — field-specific stores are more efficient than a zero-fill when every field will be written anyway.
+  - **Documentation**: §17.9.2 in LANGUAGE_REFERENCE.md now documents `alloc<T>`, `new T(n)`, `construct`, and `new T { ... }` as four distinct forms with a unified comparison table.
+
+- **Round-49: Documentation overhaul** (`LANGUAGE_REFERENCE.md`, `README.md`):
+  - §3 (Preprocessor): Added prominent recommendation to prefer `comptime {}` for new code, with guidance on when the preprocessor is still appropriate.
+  - §5.9.1 (comptime): Expanded preprocessor migration table from 7 to 20+ rows; added `Why comptime {} is better` rationale section.
+  - §17.9.2: Rewrote as four distinct subsections — `alloc<T>`, `new T(n)`, `construct`, `new T { ... }` — with an updated comparison table, lowering examples, and `when to use each` guidance.
+  - §24.2: Corrected `version` subcommand output from `4.1.1` to `4.4.0`.
+  - §31 (Quick-Start Cheat Sheet): Updated pointer/construction examples to reflect the `new T(n)` zero-init semantics.
+  - README: Overhauled key features list (memory management, comptime), added `comptime {}` and Memory Management syntax sections with code examples.
+
 ### Fixed
 
 - **Round-49: Deferred-free queue redesign — `DeferredFreeEntry` struct** (`src/codegen_stmt.cpp`, `include/codegen.h`):

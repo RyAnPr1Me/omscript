@@ -4630,13 +4630,18 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         return call;
     }
 
-    // new T(count) — C++-style alias for alloc<T>(count).
+    // new T(count) — zero-initialised allocation (semantically distinct from alloc<T>).
     // Syntax: new <TypeAnnotation>(n)  or  new <TypeAnnotation>  (no parens = 1 element)
     // Examples: new i64(5)   new ptr<i32>   new byte(256)
     //
+    // Unlike alloc<T>(n) which returns raw (uninitialised) memory, new T(n) always
+    // returns zero-filled memory:
+    //   T1/T2 (stack/arena): alloc + memset(0)
+    //   T3    (heap):        calloc(count, sizeof(T))
+    //
     // new T { field: val, ... } — allocation + in-place construction.
     // Allocates one T (via alloc<T>(1)) and immediately initialises its
-    // fields.  Distinguished from the plain alloc form by the `{` lookahead.
+    // fields.  Distinguished from the zero-init form by the `{` lookahead.
     if (check(TokenType::IDENTIFIER) && peek().lexeme == "new" &&
         current + 1 < tokens.size() && tokens[current + 1].type == TokenType::IDENTIFIER) {
         const Token kw = advance(); // consume 'new'
@@ -4663,7 +4668,12 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             return expr;
         }
 
-        // ── new T(count) / new T  — raw allocation alias for alloc<T>(count) ──
+        // ── new T(count) / new T  — zero-initialised allocation ──────────────
+        // Unlike alloc<T>(n) which returns raw (uninitialised) memory, new T(n)
+        // returns zero-initialised memory.  The callee prefix "new_zero<" routes
+        // through the same three-tier allocator but appends a zero-fill step:
+        //   T1/T2 (stack/arena): memset(ptr, 0, count*sizeof(T))
+        //   T3 (heap):           calloc(count, sizeof(T))   — OS-zeroed, no overhead
         std::vector<std::unique_ptr<Expression>> args;
         if (check(TokenType::LPAREN)) {
             advance(); // consume '('
@@ -4672,8 +4682,8 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             }
             consume(TokenType::RPAREN, "Expected ')' after new T(...) argument");
         }
-        // No parens → alloc<T>() → 1 element
-        auto call = std::make_unique<CallExpr>("alloc<" + elemTypeName + ">", std::move(args));
+        // No parens → new_zero<T>() → 1 zero-initialised element
+        auto call = std::make_unique<CallExpr>("new_zero<" + elemTypeName + ">", std::move(args));
         call->line   = kw.line;
         call->column = kw.column;
         return call;
