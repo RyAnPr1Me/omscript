@@ -1728,7 +1728,10 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
     std::string qualifiedName = name.lexeme;
     while (check(TokenType::SCOPE)) {
         advance(); // consume '::'
-        const Token seg = consume(TokenType::IDENTIFIER, "Expected method name after '::'");
+        // Accept IDENTIFIER or keyword tokens (e.g. 'swap') as method names.
+        Token seg = (check(TokenType::IDENTIFIER) || check(TokenType::SWAP))
+            ? advance()
+            : consume(TokenType::IDENTIFIER, "Expected method name after '::'");
         qualifiedName += "::" + seg.lexeme;
         name = seg; // keep line/column at the method segment for error reporting
     }
