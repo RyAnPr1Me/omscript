@@ -31,8 +31,7 @@ namespace {
 /// Width 0 (unknown)→ full i64 range (unknown).
 WidthOptPass::Range rangeFromWidth(SemanticWidth sw) noexcept {
     if (!sw.isKnown())
-        return {std::numeric_limits<int64_t>::min(),
-                std::numeric_limits<int64_t>::max(), false};
+        return {std::numeric_limits<int64_t>::min(), std::numeric_limits<int64_t>::max(), false};
 
     const uint32_t bits = sw.bits;
     if (!sw.isSigned) {
@@ -43,12 +42,12 @@ WidthOptPass::Range rangeFromWidth(SemanticWidth sw) noexcept {
         return {0, hi, true};
     }
     // Signed.
-    if (bits > 64) return {std::numeric_limits<int64_t>::min(),
-                           std::numeric_limits<int64_t>::max(), false};
-    if (bits == 64) return {std::numeric_limits<int64_t>::min(),
-                            std::numeric_limits<int64_t>::max(), true};
+    if (bits > 64)
+        return {std::numeric_limits<int64_t>::min(), std::numeric_limits<int64_t>::max(), false};
+    if (bits == 64)
+        return {std::numeric_limits<int64_t>::min(), std::numeric_limits<int64_t>::max(), true};
     const int64_t lo = -(int64_t(1) << (bits - 1));
-    const int64_t hi =  (int64_t(1) << (bits - 1)) - 1;
+    const int64_t hi = (int64_t(1) << (bits - 1)) - 1;
     return {lo, hi, true};
 }
 
@@ -59,7 +58,8 @@ WidthOptPass::Range rangeFromWidth(SemanticWidth sw) noexcept {
 // ─────────────────────────────────────────────────────────────────────────────
 
 SemanticWidth WidthOptPass::widthOf(const Expression* expr) const noexcept {
-    if (!analyzer_) return SemanticWidth::unknown();
+    if (!analyzer_)
+        return SemanticWidth::unknown();
     return analyzer_->widthOf(expr);
 }
 
@@ -73,7 +73,8 @@ WidthOptPass::Range WidthOptPass::rangeOf(const Expression* expr) const noexcept
 /* static */
 bool WidthOptPass::isLiteralInt(const Expression* e, int64_t& out) noexcept {
     long long v = 0;
-    if (!isIntLiteral(e, &v)) return false;
+    if (!isIntLiteral(e, &v))
+        return false;
     out = static_cast<int64_t>(v);
     return true;
 }
@@ -81,7 +82,8 @@ bool WidthOptPass::isLiteralInt(const Expression* e, int64_t& out) noexcept {
 /* static */
 bool WidthOptPass::isMaskCovering(int64_t mask, uint32_t bits) noexcept {
     // The mask covers bits iff every bit in [0, bits-1] is set in mask.
-    if (bits == 0) return false;
+    if (bits == 0)
+        return false;
     if (bits >= 63) {
         // For 63+ bits, a signed 64-bit mask can't cover all positions
         // without being -1 (all-ones).
@@ -104,17 +106,19 @@ bool WidthOptPass::isMaskCovering(int64_t mask, uint32_t bits) noexcept {
 //   • LHS has known semantic width W
 //   • M covers all W bits of the LHS value space
 
-std::unique_ptr<Expression>
-WidthOptPass::tryEliminateMask(BinaryExpr* bin) {
+std::unique_ptr<Expression> WidthOptPass::tryEliminateMask(BinaryExpr* bin) {
     assert(bin->op == "&");
 
     int64_t mask = 0;
-    if (!isLiteralInt(bin->right.get(), mask)) return nullptr;
+    if (!isLiteralInt(bin->right.get(), mask))
+        return nullptr;
 
     const SemanticWidth lhsW = widthOf(bin->left.get());
-    if (!lhsW.isKnown()) return nullptr;
+    if (!lhsW.isKnown())
+        return nullptr;
 
-    if (!isMaskCovering(mask, lhsW.bits)) return nullptr;
+    if (!isMaskCovering(mask, lhsW.bits))
+        return nullptr;
 
     // The mask is a no-op: x & M == x because x already fits in `bits` bits.
     ++stats_.masksEliminated;
@@ -130,16 +134,18 @@ WidthOptPass::tryEliminateMask(BinaryExpr* bin) {
 //   If N >= W:  result is provably 0  → replace with literal 0
 //   If N > 0:   result has W-N bits   → annotated (width known, no AST change)
 
-std::unique_ptr<Expression>
-WidthOptPass::tryNarrowShift(BinaryExpr* bin) {
+std::unique_ptr<Expression> WidthOptPass::tryNarrowShift(BinaryExpr* bin) {
     assert(bin->op == ">>" || bin->op == ">>>");
 
     int64_t shiftAmount = 0;
-    if (!isLiteralInt(bin->right.get(), shiftAmount)) return nullptr;
-    if (shiftAmount <= 0) return nullptr; // negative or zero shifts: skip
+    if (!isLiteralInt(bin->right.get(), shiftAmount))
+        return nullptr;
+    if (shiftAmount <= 0)
+        return nullptr; // negative or zero shifts: skip
 
     const SemanticWidth lhsW = widthOf(bin->left.get());
-    if (!lhsW.isKnown()) return nullptr;
+    if (!lhsW.isKnown())
+        return nullptr;
 
     const uint32_t N = static_cast<uint32_t>(shiftAmount);
     const uint32_t W = lhsW.bits;
@@ -174,16 +180,15 @@ WidthOptPass::tryNarrowShift(BinaryExpr* bin) {
 //   if ((x & 0xFF) == 300)  →  if (0)  →  DCE eliminates the branch
 //   if ((x & 0xFF) != 300)  →  if (1)  →  DCE eliminates the else branch
 
-std::unique_ptr<Expression>
-WidthOptPass::tryPruneBranch(BinaryExpr* bin) {
+std::unique_ptr<Expression> WidthOptPass::tryPruneBranch(BinaryExpr* bin) {
     const std::string& op = bin->op;
-    if (op != "==" && op != "!=" && op != "<" &&
-        op != "<=" && op != ">" && op != ">=")
+    if (op != "==" && op != "!=" && op != "<" && op != "<=" && op != ">" && op != ">=")
         return nullptr;
 
     const Range lhsR = rangeOf(bin->left.get());
     const Range rhsR = rangeOf(bin->right.get());
-    if (!lhsR.known || !rhsR.known) return nullptr;
+    if (!lhsR.known || !rhsR.known)
+        return nullptr;
 
     // For singleton RHS (a literal), also try querying directly.
     int64_t rhsLit = 0;
@@ -200,31 +205,42 @@ WidthOptPass::tryPruneBranch(BinaryExpr* bin) {
 
     if (op == "==") {
         // Always false when the ranges don't intersect.
-        if (lhsR.hi < rhsR.lo || rhsR.hi < lhsR.lo) result = 0;
+        if (lhsR.hi < rhsR.lo || rhsR.hi < lhsR.lo)
+            result = 0;
         // Always true when both ranges are singleton and equal.
         else if (lhsR.lo == lhsR.hi && rhsR.lo == rhsR.hi && lhsR.lo == rhsR.lo)
             result = 1;
     } else if (op == "!=") {
         // Always true when the ranges don't intersect.
-        if (lhsR.hi < rhsR.lo || rhsR.hi < lhsR.lo) result = 1;
+        if (lhsR.hi < rhsR.lo || rhsR.hi < lhsR.lo)
+            result = 1;
         // Always false when both ranges are singleton and equal.
         else if (lhsR.lo == lhsR.hi && rhsR.lo == rhsR.hi && lhsR.lo == rhsR.lo)
             result = 0;
     } else if (op == "<") {
-        if (lhsR.hi < rhsR.lo) result = 1;  // max(LHS) < min(RHS) → always true
-        if (lhsR.lo >= rhsR.hi) result = 0; // min(LHS) >= max(RHS) → always false
+        if (lhsR.hi < rhsR.lo)
+            result = 1; // max(LHS) < min(RHS) → always true
+        if (lhsR.lo >= rhsR.hi)
+            result = 0; // min(LHS) >= max(RHS) → always false
     } else if (op == "<=") {
-        if (lhsR.hi <= rhsR.lo) result = 1;
-        if (lhsR.lo > rhsR.hi)  result = 0;
+        if (lhsR.hi <= rhsR.lo)
+            result = 1;
+        if (lhsR.lo > rhsR.hi)
+            result = 0;
     } else if (op == ">") {
-        if (lhsR.lo > rhsR.hi) result = 1;
-        if (lhsR.hi <= rhsR.lo) result = 0;
+        if (lhsR.lo > rhsR.hi)
+            result = 1;
+        if (lhsR.hi <= rhsR.lo)
+            result = 0;
     } else if (op == ">=") {
-        if (lhsR.lo >= rhsR.hi) result = 1;
-        if (lhsR.hi < rhsR.lo)  result = 0;
+        if (lhsR.lo >= rhsR.hi)
+            result = 1;
+        if (lhsR.hi < rhsR.lo)
+            result = 0;
     }
 
-    if (result == -1) return nullptr; // Could not prove
+    if (result == -1)
+        return nullptr; // Could not prove
 
     ++stats_.branchesPruned;
     return makeIntLiteral(static_cast<long long>(result));
@@ -234,25 +250,24 @@ WidthOptPass::tryPruneBranch(BinaryExpr* bin) {
 // Expression and statement walkers
 // ─────────────────────────────────────────────────────────────────────────────
 
-std::unique_ptr<Expression>
-WidthOptPass::trySimplifyExpr(Expression* expr) {
-    if (!expr || expr->type != ASTNodeType::BINARY_EXPR) return nullptr;
+std::unique_ptr<Expression> WidthOptPass::trySimplifyExpr(Expression* expr) {
+    if (!expr || expr->type != ASTNodeType::BINARY_EXPR)
+        return nullptr;
     auto* bin = static_cast<BinaryExpr*>(expr);
 
     if (bin->op == "&")
         return tryEliminateMask(bin);
     if (bin->op == ">>" || bin->op == ">>>")
         return tryNarrowShift(bin);
-    if (bin->op == "==" || bin->op == "!=" ||
-        bin->op == "<"  || bin->op == "<=" ||
-        bin->op == ">"  || bin->op == ">=")
+    if (bin->op == "==" || bin->op == "!=" || bin->op == "<" || bin->op == "<=" || bin->op == ">" || bin->op == ">=")
         return tryPruneBranch(bin);
 
     return nullptr;
 }
 
 void WidthOptPass::transformExprInPlace(std::unique_ptr<Expression>& expr) {
-    if (!expr) return;
+    if (!expr)
+        return;
 
     // First recurse into sub-expressions (bottom-up).
     switch (expr->type) {
@@ -291,7 +306,8 @@ void WidthOptPass::transformExprInPlace(std::unique_ptr<Expression>& expr) {
     case ASTNodeType::ASSIGN_EXPR:
         transformExprInPlace(static_cast<AssignExpr*>(expr.get())->value);
         break;
-    default: break;
+    default:
+        break;
     }
 
     // Then try to simplify this node.
@@ -300,11 +316,13 @@ void WidthOptPass::transformExprInPlace(std::unique_ptr<Expression>& expr) {
 }
 
 void WidthOptPass::transformStmtInPlace(std::unique_ptr<Statement>& stmt) {
-    if (!stmt) return;
+    if (!stmt)
+        return;
     switch (stmt->type) {
     case ASTNodeType::BLOCK: {
         auto* blk = static_cast<BlockStmt*>(stmt.get());
-        for (auto& s : blk->statements) transformStmtInPlace(s);
+        for (auto& s : blk->statements)
+            transformStmtInPlace(s);
         break;
     }
     case ASTNodeType::VAR_DECL:
@@ -356,9 +374,12 @@ void WidthOptPass::transformStmtInPlace(std::unique_ptr<Statement>& stmt) {
         auto* sw = static_cast<SwitchStmt*>(stmt.get());
         transformExprInPlace(sw->condition);
         for (auto& c : sw->cases) {
-            if (c.value) transformExprInPlace(c.value);
-            for (auto& v : c.values) transformExprInPlace(v);
-            for (auto& s : c.body)  transformStmtInPlace(s);
+            if (c.value)
+                transformExprInPlace(c.value);
+            for (auto& v : c.values)
+                transformExprInPlace(v);
+            for (auto& s : c.body)
+                transformStmtInPlace(s);
         }
         break;
     }
@@ -371,7 +392,8 @@ void WidthOptPass::transformStmtInPlace(std::unique_ptr<Statement>& stmt) {
     case ASTNodeType::CATCH_STMT: {
         auto* cs = static_cast<CatchStmt*>(stmt.get());
         if (cs->body)
-            for (auto& s : cs->body->statements) transformStmtInPlace(s);
+            for (auto& s : cs->body->statements)
+                transformStmtInPlace(s);
         break;
     }
     case ASTNodeType::ASSUME_STMT: {
@@ -390,13 +412,16 @@ void WidthOptPass::transformStmtInPlace(std::unique_ptr<Statement>& stmt) {
     }
     case ASTNodeType::PIPELINE_STMT: {
         auto* pl = static_cast<PipelineStmt*>(stmt.get());
-        if (pl->count) transformExprInPlace(pl->count);
+        if (pl->count)
+            transformExprInPlace(pl->count);
         for (auto& stage : pl->stages)
             if (stage.body)
-                for (auto& s : stage.body->statements) transformStmtInPlace(s);
+                for (auto& s : stage.body->statements)
+                    transformStmtInPlace(s);
         break;
     }
-    default: break;
+    default:
+        break;
     }
 }
 
@@ -405,7 +430,8 @@ void WidthOptPass::transformStmtInPlace(std::unique_ptr<Statement>& stmt) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 uint32_t WidthOptPass::run(Program* program) {
-    if (!program) return 0;
+    if (!program)
+        return 0;
 
     // Borrow the analyzer from the context's cached width pass result.
     // We construct a fresh one pointing at the (already-populated) context.
@@ -425,16 +451,12 @@ uint32_t WidthOptPass::run(Program* program) {
 
     analyzer_ = nullptr;
 
-    const uint32_t total = stats_.masksEliminated
-                         + stats_.shiftsZeroed
-                         + stats_.branchesPruned;
+    const uint32_t total = stats_.masksEliminated + stats_.shiftsZeroed + stats_.branchesPruned;
 
     if (verbose_ && total > 0) {
-        std::cout << "  [width-opt] "
-                  << stats_.masksEliminated << " masks eliminated, "
-                  << stats_.shiftsNarrowed  << " shifts narrowed, "
-                  << stats_.shiftsZeroed    << " shifts zeroed, "
-                  << stats_.branchesPruned  << " branches pruned\n";
+        std::cout << "  [width-opt] " << stats_.masksEliminated << " masks eliminated, " << stats_.shiftsNarrowed
+                  << " shifts narrowed, " << stats_.shiftsZeroed << " shifts zeroed, " << stats_.branchesPruned
+                  << " branches pruned\n";
     }
     return total;
 }

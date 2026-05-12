@@ -37,10 +37,10 @@ class Value;
 } // namespace llvm
 
 #include <cstdint>
-#include <string>
-#include <vector>
 #include <functional>
 #include <optional>
+#include <string>
+#include <vector>
 
 namespace omscript {
 // Forward declaration — avoids including optimization_manager.h from this header
@@ -73,8 +73,7 @@ struct TestVector {
 
 /// Evaluate a simple expression tree on a set of concrete inputs.
 /// Returns std::nullopt if the expression cannot be evaluated (e.g., memory ops).
-std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
-                                      const std::vector<uint64_t>& argValues);
+std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst, const std::vector<uint64_t>& argValues);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Idiom patterns — recognized instruction sequences
@@ -83,36 +82,36 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst,
 /// Recognized idiom types.
 enum class Idiom {
     None,
-    PopCount,       ///< Population count (number of 1-bits)
-    ByteSwap,       ///< Byte reversal (endian swap)
-    RotateLeft,     ///< Bit rotation left
-    RotateRight,    ///< Bit rotation right
-    CountLeadingZeros,  ///< CLZ
-    CountTrailingZeros, ///< CTZ
-    AbsoluteValue,  ///< abs(x) = x < 0 ? -x : x
-    IntMin,         ///< min(a,b) via select or branch
-    IntMax,         ///< max(a,b) via select or branch
-    IsPowerOf2,     ///< (x & (x-1)) == 0
-    SignExtend,     ///< Manual sign extension
-    BitFieldExtract,///< Shift-and-mask pattern
-    MultiplyByConst,///< Multi-instruction multiply sequence
-    DivideByConst,  ///< Multi-instruction divide sequence
-    ConditionalNeg, ///< Conditional negation pattern
-    SaturatingAdd,  ///< Addition with overflow clamp
-    SaturatingSub,  ///< Subtraction with underflow clamp
-    ConditionalIncrement,  ///< select(cond, x+1, x) → x + zext(cond)
-    ConditionalDecrement,  ///< select(cond, x-1, x) → x - zext(cond)
+    PopCount,               ///< Population count (number of 1-bits)
+    ByteSwap,               ///< Byte reversal (endian swap)
+    RotateLeft,             ///< Bit rotation left
+    RotateRight,            ///< Bit rotation right
+    CountLeadingZeros,      ///< CLZ
+    CountTrailingZeros,     ///< CTZ
+    AbsoluteValue,          ///< abs(x) = x < 0 ? -x : x
+    IntMin,                 ///< min(a,b) via select or branch
+    IntMax,                 ///< max(a,b) via select or branch
+    IsPowerOf2,             ///< (x & (x-1)) == 0
+    SignExtend,             ///< Manual sign extension
+    BitFieldExtract,        ///< Shift-and-mask pattern
+    MultiplyByConst,        ///< Multi-instruction multiply sequence
+    DivideByConst,          ///< Multi-instruction divide sequence
+    ConditionalNeg,         ///< Conditional negation pattern
+    SaturatingAdd,          ///< Addition with overflow clamp
+    SaturatingSub,          ///< Subtraction with underflow clamp
+    ConditionalIncrement,   ///< select(cond, x+1, x) → x + zext(cond)
+    ConditionalDecrement,   ///< select(cond, x-1, x) → x - zext(cond)
     AverageWithoutOverflow, ///< (a & b) + ((a ^ b) >> 1) → floor((a+b)/2) — Hacker's Delight §5-2
-    SignFunction,          ///< select(x>0,1,select(x<0,-1,0)) → sign(x) — Hacker's Delight §2-7
-    NextPowerOf2,          ///< bit-smear + 1 → 1 << (bw - ctlz(x-1)) — Hacker's Delight §3-1
+    SignFunction,           ///< select(x>0,1,select(x<0,-1,0)) → sign(x) — Hacker's Delight §2-7
+    NextPowerOf2,           ///< bit-smear + 1 → 1 << (bw - ctlz(x-1)) — Hacker's Delight §3-1
 };
 
 /// Result of idiom detection on an instruction or sequence.
 struct IdiomMatch {
     Idiom idiom = Idiom::None;
-    llvm::Instruction* rootInst = nullptr;  ///< The instruction that produces the final result
-    std::vector<llvm::Value*> operands;     ///< Extracted operands for the idiom
-    unsigned bitWidth = 64;                 ///< Bit width of the operation
+    llvm::Instruction* rootInst = nullptr; ///< The instruction that produces the final result
+    std::vector<llvm::Value*> operands;    ///< Extracted operands for the idiom
+    unsigned bitWidth = 64;                ///< Bit width of the operation
 };
 
 /// Scan a basic block for recognized idioms.
@@ -124,9 +123,9 @@ std::vector<IdiomMatch> detectIdioms(llvm::BasicBlock& bb);
 
 /// Configuration for the synthesis search.
 struct SynthesisConfig {
-    unsigned maxInstructions = 3;   ///< Maximum instructions in synthesized sequence
-    unsigned numTestVectors = 16;   ///< Number of test vectors for verification
-    double costThreshold = 0.8;     ///< Only replace if new cost < threshold * old cost
+    unsigned maxInstructions = 3; ///< Maximum instructions in synthesized sequence
+    unsigned numTestVectors = 16; ///< Number of test vectors for verification
+    double costThreshold = 0.8;   ///< Only replace if new cost < threshold * old cost
 };
 
 /// Attempt to synthesize a cheaper replacement for the given instruction.
@@ -139,11 +138,11 @@ bool synthesizeReplacement(llvm::Instruction* inst, const SynthesisConfig& confi
 
 /// Configuration for the superoptimizer.
 struct SuperoptimizerConfig {
-    bool enableIdiomRecognition = true;  ///< Detect and replace known idioms
-    bool enableSynthesis = true;         ///< Enumerative synthesis for small sequences
-    bool enableBranchOpt = true;         ///< Branch-to-select conversion
-    bool enableAlgebraic = true;         ///< Algebraic identity simplification
-    bool enableDeadCodeElim = true;      ///< Remove dead instructions after optimization
+    bool enableIdiomRecognition = true; ///< Detect and replace known idioms
+    bool enableSynthesis = true;        ///< Enumerative synthesis for small sequences
+    bool enableBranchOpt = true;        ///< Branch-to-select conversion
+    bool enableAlgebraic = true;        ///< Algebraic identity simplification
+    bool enableDeadCodeElim = true;     ///< Remove dead instructions after optimization
     SynthesisConfig synthesis;
 
     /// Optional hardware-accurate cost model.
@@ -168,17 +167,15 @@ struct SuperoptimizerStats {
     unsigned branchesSimplified = 0;
     unsigned algebraicSimplified = 0;
     unsigned deadCodeEliminated = 0;
-    double estimatedSpeedup = 0.0;     ///< Estimated percentage improvement
+    double estimatedSpeedup = 0.0; ///< Estimated percentage improvement
 };
 
 /// Run the superoptimizer on a single LLVM function.
 /// Returns statistics about optimizations applied.
-[[nodiscard]] SuperoptimizerStats superoptimizeFunction(llvm::Function& func,
-                                           const SuperoptimizerConfig& config = {});
+[[nodiscard]] SuperoptimizerStats superoptimizeFunction(llvm::Function& func, const SuperoptimizerConfig& config = {});
 
 /// Run the superoptimizer on all functions in a module.
-[[nodiscard]] SuperoptimizerStats superoptimizeModule(llvm::Module& module,
-                                         const SuperoptimizerConfig& config = {});
+[[nodiscard]] SuperoptimizerStats superoptimizeModule(llvm::Module& module, const SuperoptimizerConfig& config = {});
 
 /// Convert srem-by-positive-constant → urem when the dividend is provably
 /// non-negative.  This is factored out as a standalone pass so it can run

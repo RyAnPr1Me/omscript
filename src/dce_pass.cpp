@@ -56,7 +56,8 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt);
 // those are transparent to break/continue flow.
 
 static bool hasTopLevelBreakContinue(const Statement* s) {
-    if (!s) return false;
+    if (!s)
+        return false;
     switch (s->type) {
     case ASTNodeType::BREAK_STMT:
     case ASTNodeType::CONTINUE_STMT:
@@ -64,13 +65,13 @@ static bool hasTopLevelBreakContinue(const Statement* s) {
     case ASTNodeType::BLOCK: {
         const auto* blk = static_cast<const BlockStmt*>(s);
         for (const auto& st : blk->statements)
-            if (hasTopLevelBreakContinue(st.get())) return true;
+            if (hasTopLevelBreakContinue(st.get()))
+                return true;
         return false;
     }
     case ASTNodeType::IF_STMT: {
         const auto* ifs = static_cast<const IfStmt*>(s);
-        return hasTopLevelBreakContinue(ifs->thenBranch.get()) ||
-               hasTopLevelBreakContinue(ifs->elseBranch.get());
+        return hasTopLevelBreakContinue(ifs->thenBranch.get()) || hasTopLevelBreakContinue(ifs->elseBranch.get());
     }
     // Nested loops and switch absorb break/continue — do not recurse.
     case ASTNodeType::FOR_STMT:
@@ -102,7 +103,8 @@ static bool hasTopLevelBreakContinue(const Statement* s) {
 // throw may be followed by catch() handlers that must NOT be removed.
 
 static bool stmtAlwaysExits(const Statement* s) {
-    if (!s) return false;
+    if (!s)
+        return false;
     switch (s->type) {
     case ASTNodeType::RETURN_STMT:
     case ASTNodeType::BREAK_STMT:
@@ -110,12 +112,14 @@ static bool stmtAlwaysExits(const Statement* s) {
         return true;
     case ASTNodeType::BLOCK: {
         const auto* blk = static_cast<const BlockStmt*>(s);
-        if (blk->statements.empty()) return false;
+        if (blk->statements.empty())
+            return false;
         // Walk backwards past any null slots to find the last real statement.
         // By the time Pass B runs, Pass A has already pruned inner-block dead
         // code, so the last statement is the last *reachable* statement.
         for (auto it = blk->statements.rbegin(); it != blk->statements.rend(); ++it) {
-            if (*it) return stmtAlwaysExits(it->get());
+            if (*it)
+                return stmtAlwaysExits(it->get());
         }
         return false;
     }
@@ -123,9 +127,7 @@ static bool stmtAlwaysExits(const Statement* s) {
         const auto* ifs = static_cast<const IfStmt*>(s);
         // Only an if WITH an else can guarantee both paths exit.
         // An if without else may fall through when the condition is false.
-        return ifs->elseBranch &&
-               stmtAlwaysExits(ifs->thenBranch.get()) &&
-               stmtAlwaysExits(ifs->elseBranch.get());
+        return ifs->elseBranch && stmtAlwaysExits(ifs->thenBranch.get()) && stmtAlwaysExits(ifs->elseBranch.get());
     }
     default:
         return false;
@@ -141,7 +143,8 @@ static bool stmtAlwaysExits(const Statement* s) {
 
 static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
     DCEStats stats;
-    if (!stmt) return stats;
+    if (!stmt)
+        return stats;
 
     switch (stmt->type) {
 
@@ -152,14 +155,14 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
         // Recursively clean up both branches first (bottom-up).
         if (ifStmt->thenBranch) {
             auto sub = transformStmt(ifStmt->thenBranch);
-            stats.deadIfBranches   += sub.deadIfBranches;
-            stats.deadLoops        += sub.deadLoops;
+            stats.deadIfBranches += sub.deadIfBranches;
+            stats.deadLoops += sub.deadLoops;
             stats.unreachableStmts += sub.unreachableStmts;
         }
         if (ifStmt->elseBranch) {
             auto sub = transformStmt(ifStmt->elseBranch);
-            stats.deadIfBranches   += sub.deadIfBranches;
-            stats.deadLoops        += sub.deadLoops;
+            stats.deadIfBranches += sub.deadIfBranches;
+            stats.deadLoops += sub.deadLoops;
             stats.unreachableStmts += sub.unreachableStmts;
         }
 
@@ -176,8 +179,7 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
                     stmt = std::move(ifStmt->elseBranch);
                 } else {
                     // No else-branch → replace with empty block.
-                    stmt = std::make_unique<BlockStmt>(
-                        std::vector<std::unique_ptr<Statement>>{});
+                    stmt = std::make_unique<BlockStmt>(std::vector<std::unique_ptr<Statement>>{});
                 }
             }
         }
@@ -191,8 +193,8 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
         // Recursively clean the body first.
         if (whileStmt->body) {
             auto sub = transformStmt(whileStmt->body);
-            stats.deadIfBranches   += sub.deadIfBranches;
-            stats.deadLoops        += sub.deadLoops;
+            stats.deadIfBranches += sub.deadIfBranches;
+            stats.deadLoops += sub.deadLoops;
             stats.unreachableStmts += sub.unreachableStmts;
         }
 
@@ -200,8 +202,7 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
         if (isIntLiteral(whileStmt->condition.get(), &condVal) && condVal == 0) {
             // while (0) — body is unreachable; remove the loop entirely.
             ++stats.deadLoops;
-            stmt = std::make_unique<BlockStmt>(
-                std::vector<std::unique_ptr<Statement>>{});
+            stmt = std::make_unique<BlockStmt>(std::vector<std::unique_ptr<Statement>>{});
         }
         break;
     }
@@ -213,8 +214,8 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
         // Recursively clean the body first.
         if (doWhile->body) {
             auto sub = transformStmt(doWhile->body);
-            stats.deadIfBranches   += sub.deadIfBranches;
-            stats.deadLoops        += sub.deadLoops;
+            stats.deadIfBranches += sub.deadIfBranches;
+            stats.deadLoops += sub.deadLoops;
             stats.unreachableStmts += sub.unreachableStmts;
         }
 
@@ -239,8 +240,8 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
     case ASTNodeType::BLOCK: {
         auto* block = static_cast<BlockStmt*>(stmt.get());
         auto sub = transformBlock(block);
-        stats.deadIfBranches   += sub.deadIfBranches;
-        stats.deadLoops        += sub.deadLoops;
+        stats.deadIfBranches += sub.deadIfBranches;
+        stats.deadLoops += sub.deadLoops;
         stats.unreachableStmts += sub.unreachableStmts;
         break;
     }
@@ -252,18 +253,16 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
         // the loop body is unreachable — replace the entire for statement with
         // an empty block.
         long long startVal = 0, endVal = 0;
-        if (isIntLiteral(forStmt->start.get(), &startVal) &&
-            isIntLiteral(forStmt->end.get(),   &endVal)   &&
+        if (isIntLiteral(forStmt->start.get(), &startVal) && isIntLiteral(forStmt->end.get(), &endVal) &&
             startVal >= endVal) {
             ++stats.deadLoops;
-            stmt = std::make_unique<BlockStmt>(
-                std::vector<std::unique_ptr<Statement>>{});
+            stmt = std::make_unique<BlockStmt>(std::vector<std::unique_ptr<Statement>>{});
             break;
         }
         if (forStmt->body) {
             auto sub = transformStmt(forStmt->body);
-            stats.deadIfBranches   += sub.deadIfBranches;
-            stats.deadLoops        += sub.deadLoops;
+            stats.deadIfBranches += sub.deadIfBranches;
+            stats.deadLoops += sub.deadLoops;
             stats.unreachableStmts += sub.unreachableStmts;
         }
         break;
@@ -279,8 +278,8 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
         auto* feStmt = static_cast<ForEachStmt*>(stmt.get());
         if (feStmt->body) {
             auto sub = transformStmt(feStmt->body);
-            stats.deadIfBranches   += sub.deadIfBranches;
-            stats.deadLoops        += sub.deadLoops;
+            stats.deadIfBranches += sub.deadIfBranches;
+            stats.deadLoops += sub.deadLoops;
             stats.unreachableStmts += sub.unreachableStmts;
         }
         break;
@@ -296,8 +295,8 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
             auto tmpBlock = std::make_unique<BlockStmt>(std::move(sc.body));
             auto sub = transformBlock(tmpBlock.get());
             sc.body = std::move(tmpBlock->statements);
-            stats.deadIfBranches   += sub.deadIfBranches;
-            stats.deadLoops        += sub.deadLoops;
+            stats.deadIfBranches += sub.deadIfBranches;
+            stats.deadLoops += sub.deadLoops;
             stats.unreachableStmts += sub.unreachableStmts;
         }
         break;
@@ -308,8 +307,8 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
         auto* catchStmt = static_cast<CatchStmt*>(stmt.get());
         if (catchStmt->body) {
             auto sub = transformBlock(catchStmt->body.get());
-            stats.deadIfBranches   += sub.deadIfBranches;
-            stats.deadLoops        += sub.deadLoops;
+            stats.deadIfBranches += sub.deadIfBranches;
+            stats.deadLoops += sub.deadLoops;
             stats.unreachableStmts += sub.unreachableStmts;
         }
         break;
@@ -320,8 +319,8 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
         auto* deferStmt = static_cast<DeferStmt*>(stmt.get());
         if (deferStmt->body) {
             auto sub = transformStmt(deferStmt->body);
-            stats.deadIfBranches   += sub.deadIfBranches;
-            stats.deadLoops        += sub.deadLoops;
+            stats.deadIfBranches += sub.deadIfBranches;
+            stats.deadLoops += sub.deadLoops;
             stats.unreachableStmts += sub.unreachableStmts;
         }
         break;
@@ -332,8 +331,8 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
         auto* asStmt = static_cast<AssumeStmt*>(stmt.get());
         if (asStmt->deoptBody) {
             auto sub = transformStmt(asStmt->deoptBody);
-            stats.deadIfBranches   += sub.deadIfBranches;
-            stats.deadLoops        += sub.deadLoops;
+            stats.deadIfBranches += sub.deadIfBranches;
+            stats.deadLoops += sub.deadLoops;
             stats.unreachableStmts += sub.unreachableStmts;
         }
         break;
@@ -351,8 +350,8 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
         for (auto& stage : plStmt->stages) {
             if (stage.body) {
                 auto sub = transformBlock(stage.body.get());
-                stats.deadIfBranches   += sub.deadIfBranches;
-                stats.deadLoops        += sub.deadLoops;
+                stats.deadIfBranches += sub.deadIfBranches;
+                stats.deadLoops += sub.deadLoops;
                 stats.unreachableStmts += sub.unreachableStmts;
             }
         }
@@ -374,13 +373,14 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
 
 static DCEStats transformBlock(BlockStmt* block) {
     DCEStats stats;
-    if (!block) return stats;
+    if (!block)
+        return stats;
 
     // Pass 1 — recursively simplify each statement.
     for (auto& s : block->statements) {
         auto sub = transformStmt(s);
-        stats.deadIfBranches   += sub.deadIfBranches;
-        stats.deadLoops        += sub.deadLoops;
+        stats.deadIfBranches += sub.deadIfBranches;
+        stats.deadLoops += sub.deadLoops;
         stats.unreachableStmts += sub.unreachableStmts;
     }
 
@@ -392,14 +392,14 @@ static DCEStats transformBlock(BlockStmt* block) {
     size_t cutoff = block->statements.size();
     for (size_t i = 0; i < block->statements.size(); ++i) {
         const Statement* s = block->statements[i].get();
-        if (!s) continue;
+        if (!s)
+            continue;
         if (s->type == ASTNodeType::THROW_STMT) {
             // A throw is only a pruning boundary if NO catch block follows it
             // anywhere in the same block — i.e. it is truly unhandled.
             bool hasCatchAfter = false;
             for (size_t j = i + 1; j < block->statements.size(); ++j) {
-                if (block->statements[j] &&
-                    block->statements[j]->type == ASTNodeType::CATCH_STMT) {
+                if (block->statements[j] && block->statements[j]->type == ASTNodeType::CATCH_STMT) {
                     hasCatchAfter = true;
                     break;
                 }
@@ -440,15 +440,14 @@ DCEStats runDCEPass(Program* program, bool verbose) {
     forEachFunction(program, [&](FunctionDecl* fn) {
         DCEStats fnStats = transformBlock(fn->body.get());
 
-        total.deadIfBranches   += fnStats.deadIfBranches;
-        total.deadLoops        += fnStats.deadLoops;
+        total.deadIfBranches += fnStats.deadIfBranches;
+        total.deadLoops += fnStats.deadLoops;
         total.unreachableStmts += fnStats.unreachableStmts;
 
         if (verbose && (fnStats.deadIfBranches || fnStats.deadLoops || fnStats.unreachableStmts)) {
-            std::cerr << "[DCE] " << fn->name
-                      << ": " << fnStats.deadIfBranches   << " dead if-branch(es), "
-                      << fnStats.deadLoops        << " dead loop(s), "
-                      << fnStats.unreachableStmts << " unreachable stmt(s) removed\n";
+            std::cerr << "[DCE] " << fn->name << ": " << fnStats.deadIfBranches << " dead if-branch(es), "
+                      << fnStats.deadLoops << " dead loop(s), " << fnStats.unreachableStmts
+                      << " unreachable stmt(s) removed\n";
         }
     });
 

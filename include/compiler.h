@@ -134,19 +134,31 @@ class Compiler {
     }
 
     /// Enable or disable Speculative Devectorization & Revectorization (default: true).
-    void setSDR(bool enable) { sdr_ = enable; }
+    void setSDR(bool enable) {
+        sdr_ = enable;
+    }
 
     /// Enable or disable the Implicit Phase Ordering Fixer (default: true).
-    void setIPOF(bool enable) { ipof_ = enable; }
+    void setIPOF(bool enable) {
+        ipof_ = enable;
+    }
 
     /// Disable all ownership/borrow safety checks (Ω spec §6.2: --no-ownership-checks).
     /// When true: borrow checker is skipped and codegen ownership validation is bypassed.
-    void setNoOwnershipChecks(bool enable) { noOwnershipChecks_ = enable; }
-    [[nodiscard]] bool isNoOwnershipChecks() const noexcept { return noOwnershipChecks_; }
+    void setNoOwnershipChecks(bool enable) {
+        noOwnershipChecks_ = enable;
+    }
+    [[nodiscard]] bool isNoOwnershipChecks() const noexcept {
+        return noOwnershipChecks_;
+    }
 
     /// Enable compile-time path-sensitive memory-safety diagnostics (Ω spec §7: --mem-sanitize).
-    void setMemSanitize(bool enable) { memSanitize_ = enable; }
-    [[nodiscard]] bool isMemSanitize() const noexcept { return memSanitize_; }
+    void setMemSanitize(bool enable) {
+        memSanitize_ = enable;
+    }
+    [[nodiscard]] bool isMemSanitize() const noexcept {
+        return memSanitize_;
+    }
 
   private:
     std::string readFile(const std::string& filename);
@@ -171,10 +183,10 @@ class Compiler {
     bool superopt_ = true;
     unsigned superoptLevel_ = 2;
     bool hgoe_ = true;
-    bool sdr_  = true;
+    bool sdr_ = true;
     bool ipof_ = true;
-    bool noOwnershipChecks_ = false;  ///< --no-ownership-checks (Ω spec §6.2)
-    bool memSanitize_       = false;  ///< --mem-sanitize        (Ω spec §7)
+    bool noOwnershipChecks_ = false; ///< --no-ownership-checks (Ω spec §6.2)
+    bool memSanitize_ = false;       ///< --mem-sanitize        (Ω spec §7)
     std::string pgoGenPath_;
     std::string pgoUsePath_;
 };

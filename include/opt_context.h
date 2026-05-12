@@ -3,12 +3,12 @@
 #define OPT_CONTEXT_H
 
 
-#include "ast.h"      // FunctionEffects, OptMaxConfig, etc.
-#include "ast_arena.h" // StringHash, StringEqual
-#include "cfctre.h"   // CTValue, CTEngine
-#include "egraph.h"   // EGraph, SaturationConfig, egraph::optimizeProgram, etc.
-#include "ersl.h"     // EffectSummary, Region, Stability, EscapeClass
-#include "opt_pass.h" // AnalysisKey, PassMetadata, IRInvariant
+#include "ast.h"        // FunctionEffects, OptMaxConfig, etc.
+#include "ast_arena.h"  // StringHash, StringEqual
+#include "cfctre.h"     // CTValue, CTEngine
+#include "egraph.h"     // EGraph, SaturationConfig, egraph::optimizeProgram, etc.
+#include "ersl.h"       // EffectSummary, Region, Stability, EscapeClass
+#include "opt_pass.h"   // AnalysisKey, PassMetadata, IRInvariant
 #include "pass_utils.h" // isIntWidthTypeName (used by isWidthCastName)
 #include <any>
 #include <limits>
@@ -23,18 +23,18 @@ namespace omscript {
 // BuiltinEffects — per-builtin effect descriptor
 struct BuiltinEffects {
     bool constFoldable = false; ///< Can be evaluated at compile time
-    bool readsMemory   = false; ///< Accesses heap/array/string memory
-    bool writesMemory  = false; ///< Mutates heap/array/string memory
-    bool hasIO         = false; ///< Performs observable I/O
-    bool mayThrow      = false; ///< May raise / panic / abort / exit
-    bool noReturn      = false; ///< Provably never returns to the caller
-    bool allocates     = false; ///< Performs heap allocation
-    bool deallocates   = false; ///< Releases heap memory
+    bool readsMemory = false;   ///< Accesses heap/array/string memory
+    bool writesMemory = false;  ///< Mutates heap/array/string memory
+    bool hasIO = false;         ///< Performs observable I/O
+    bool mayThrow = false;      ///< May raise / panic / abort / exit
+    bool noReturn = false;      ///< Provably never returns to the caller
+    bool allocates = false;     ///< Performs heap allocation
+    bool deallocates = false;   ///< Releases heap memory
 };
 
 // BuiltinEffectTable — static singleton lookup table; O(1) by name, unknown → all false
 class BuiltinEffectTable {
-public:
+  public:
     /// Return the effect descriptor for built-in @p name.
     /// For unknown names all fields are false (conservatively impure).
     static const BuiltinEffects& get(std::string_view name) noexcept;
@@ -106,14 +106,13 @@ public:
     static bool isWidthCastName(std::string_view nm) noexcept {
         // __tw_* and __tf_* generated width/type-specific builtins.
         // Use compare() to avoid the temporary std::string that substr() allocates.
-        if (nm.size() > 5 &&
-            (nm.compare(0, 5, "__tw_") == 0 || nm.compare(0, 5, "__tf_") == 0))
+        if (nm.size() > 5 && (nm.compare(0, 5, "__tw_") == 0 || nm.compare(0, 5, "__tf_") == 0))
             return true;
         // iN / uN width casts — delegate to the shared helper in pass_utils.h.
         return isIntWidthTypeName(nm);
     }
 
-private:
+  private:
     BuiltinEffectTable() = delete;
     /// Internal table: keyed by std::string_view into string literals (static storage).
     /// All keys are string literals so their storage is always valid.
@@ -128,8 +127,7 @@ struct ValueRange {
 
     /// True when the range has been narrowed below the full i64 range.
     bool isNarrowed() const noexcept {
-        return lo > std::numeric_limits<int64_t>::min() ||
-               hi < std::numeric_limits<int64_t>::max();
+        return lo > std::numeric_limits<int64_t>::min() || hi < std::numeric_limits<int64_t>::max();
     }
 
     /// Intersect two ranges: the tightest bound satisfying both constraints.
@@ -143,22 +141,30 @@ struct ValueRange {
     }
 
     /// True when the range is empty (no value satisfies it).
-    bool isEmpty() const noexcept { return lo > hi; }
+    bool isEmpty() const noexcept {
+        return lo > hi;
+    }
 
     /// True when the value is always non-negative.
-    bool isNonNeg() const noexcept { return lo >= 0; }
+    bool isNonNeg() const noexcept {
+        return lo >= 0;
+    }
 
     /// True when the value is a single known constant.
-    bool isConst() const noexcept { return lo == hi; }
+    bool isConst() const noexcept {
+        return lo == hi;
+    }
 
     /// Return the constant value when isConst() is true.
-    int64_t constVal() const noexcept { return lo; }
+    int64_t constVal() const noexcept {
+        return lo;
+    }
 };
 
 // FunctionFacts — per-function analysis results (populated by Orchestrator, read by CodeGenerator)
 struct FunctionFacts {
     // ── Purity / effect ───────────────────────────────────────────────────
-    bool isPure          = false; ///< No side effects; safe for LLVM readnone
+    bool isPure = false;          ///< No side effects; safe for LLVM readnone
     bool isConstFoldable = false; ///< Can be const-evaluated when args known
     FunctionEffects effects;      ///< Detailed effect summary from inferFunctionEffects
 
@@ -169,9 +175,9 @@ struct FunctionFacts {
     EffectSummary ersl;
 
     // ── Constant return values ────────────────────────────────────────────
-    std::optional<int64_t>     constIntReturn;    ///< Always-constant int return
+    std::optional<int64_t> constIntReturn;        ///< Always-constant int return
     std::optional<std::string> constStringReturn; ///< Always-constant string return
-    std::optional<CTValue>     uniformCTReturn;   ///< CF-CTRE uniform return value
+    std::optional<CTValue> uniformCTReturn;       ///< CF-CTRE uniform return value
 
     // ── Reachability ──────────────────────────────────────────────────────
     bool isDead = false; ///< Unreachable from any entry point (CF-CTRE Phase 7)
@@ -185,53 +191,56 @@ struct FunctionFacts {
 
 // AnalysisValidity — validity flags for each analysis pass; cleared when the AST changes
 struct AnalysisValidity {
-    bool preflightCheck  = false; ///< runPreflightCheck() has run
-    bool stringTypes     = false; ///< preAnalyzeStringTypes() has run
-    bool arrayTypes      = false; ///< preAnalyzeArrayTypes() has run
-    bool constantReturns = false; ///< analyzeConstantReturnValues() has run
-    bool purity          = false; ///< autoDetectConstEvalFunctions() has run
-    bool effects         = false; ///< inferFunctionEffects() has run
-    bool ersl            = false; ///< ERSL deriveEffectSummary() has run
-    bool synthesis       = false; ///< runSynthesisPass() has run
-    bool cfctre          = false; ///< runCFCTRE() has run
-    bool egraph          = false; ///< egraph::optimizeProgram() has run
-    bool rangeAnalysis   = false; ///< Value range analysis has run
-    bool rlc             = false; ///< Region Lifetime Coalescing pass has run
-    bool dce             = false; ///< Dead Code Elimination pass has run
-    bool cse             = false; ///< Common Subexpression Elimination pass has run
-    bool algSimp         = false; ///< Algebraic Simplification pass has run
-    bool copyProp        = false; ///< Copy Propagation pass has run
+    bool preflightCheck = false;    ///< runPreflightCheck() has run
+    bool stringTypes = false;       ///< preAnalyzeStringTypes() has run
+    bool arrayTypes = false;        ///< preAnalyzeArrayTypes() has run
+    bool constantReturns = false;   ///< analyzeConstantReturnValues() has run
+    bool purity = false;            ///< autoDetectConstEvalFunctions() has run
+    bool effects = false;           ///< inferFunctionEffects() has run
+    bool ersl = false;              ///< ERSL deriveEffectSummary() has run
+    bool synthesis = false;         ///< runSynthesisPass() has run
+    bool cfctre = false;            ///< runCFCTRE() has run
+    bool egraph = false;            ///< egraph::optimizeProgram() has run
+    bool rangeAnalysis = false;     ///< Value range analysis has run
+    bool rlc = false;               ///< Region Lifetime Coalescing pass has run
+    bool dce = false;               ///< Dead Code Elimination pass has run
+    bool cse = false;               ///< Common Subexpression Elimination pass has run
+    bool algSimp = false;           ///< Algebraic Simplification pass has run
+    bool copyProp = false;          ///< Copy Propagation pass has run
     bool widthLegalization = false; ///< WidthLegalizationPass has run
-    bool widthOpt          = false; ///< WidthOptPass has run
-    bool uniqueness        = false; ///< Uniqueness analysis has run (codegen uses results)
-    bool borrowCheck       = false; ///< Standalone borrow checker has run
-    bool hgoeEGraph        = false; ///< HGOE-Guided E-Graph Superoptimizer has run
+    bool widthOpt = false;          ///< WidthOptPass has run
+    bool uniqueness = false;        ///< Uniqueness analysis has run (codegen uses results)
+    bool borrowCheck = false;       ///< Standalone borrow checker has run
+    bool hgoeEGraph = false;        ///< HGOE-Guided E-Graph Superoptimizer has run
 
     // ── Dispatch table ────────────────────────────────────────────────────
     bool* fieldFor(std::string_view fact) noexcept {
-        struct Row { std::string_view name; bool AnalysisValidity::* field; };
+        struct Row {
+            std::string_view name;
+            bool AnalysisValidity::*field;
+        };
         static constexpr Row kTable[] = {
-            {"preflight_check",    &AnalysisValidity::preflightCheck   },
-            {"string_types",       &AnalysisValidity::stringTypes      },
-            {"array_types",        &AnalysisValidity::arrayTypes       },
-            {"constant_returns",   &AnalysisValidity::constantReturns  },
-            {"purity",             &AnalysisValidity::purity           },
-            {"effects",            &AnalysisValidity::effects          },
-            {"ersl",               &AnalysisValidity::ersl             },
-            {"synthesis",          &AnalysisValidity::synthesis        },
-            {"cfctre",             &AnalysisValidity::cfctre           },
-            {"egraph",             &AnalysisValidity::egraph           },
-            {"range_analysis",     &AnalysisValidity::rangeAnalysis    },
-            {"rlc",                &AnalysisValidity::rlc              },
-            {"dce",                &AnalysisValidity::dce              },
-            {"cse",                &AnalysisValidity::cse              },
-            {"alg_simp",           &AnalysisValidity::algSimp          },
-            {"copy_prop",          &AnalysisValidity::copyProp         },
+            {"preflight_check", &AnalysisValidity::preflightCheck},
+            {"string_types", &AnalysisValidity::stringTypes},
+            {"array_types", &AnalysisValidity::arrayTypes},
+            {"constant_returns", &AnalysisValidity::constantReturns},
+            {"purity", &AnalysisValidity::purity},
+            {"effects", &AnalysisValidity::effects},
+            {"ersl", &AnalysisValidity::ersl},
+            {"synthesis", &AnalysisValidity::synthesis},
+            {"cfctre", &AnalysisValidity::cfctre},
+            {"egraph", &AnalysisValidity::egraph},
+            {"range_analysis", &AnalysisValidity::rangeAnalysis},
+            {"rlc", &AnalysisValidity::rlc},
+            {"dce", &AnalysisValidity::dce},
+            {"cse", &AnalysisValidity::cse},
+            {"alg_simp", &AnalysisValidity::algSimp},
+            {"copy_prop", &AnalysisValidity::copyProp},
             {"width_legalization", &AnalysisValidity::widthLegalization},
-            {"width_opt",          &AnalysisValidity::widthOpt         },
-            {"uniqueness",         &AnalysisValidity::uniqueness       },
-            {"borrow_check",       &AnalysisValidity::borrowCheck      },
-            {"hgoe_egraph",        &AnalysisValidity::hgoeEGraph       },
+            {"width_opt", &AnalysisValidity::widthOpt},
+            {"uniqueness", &AnalysisValidity::uniqueness},
+            {"borrow_check", &AnalysisValidity::borrowCheck},
+            {"hgoe_egraph", &AnalysisValidity::hgoeEGraph},
         };
         for (const auto& row : kTable) {
             if (row.name == fact)
@@ -246,16 +255,18 @@ struct AnalysisValidity {
     // ── Public interface ──────────────────────────────────────────────────
 
     /// Mark all facts invalid (call when the AST is modified).
-    void invalidateAll() noexcept { *this = {}; }
+    void invalidateAll() noexcept {
+        *this = {};
+    }
 
     /// Mark only function-body-derived facts invalid (for single-function edits).
     void invalidateFunctionFacts() noexcept {
         // Excludes string_types, array_types, and rlc (structural facts that survive single-function edits).
-        static constexpr std::string_view kBodyFacts[] = {
-            "constant_returns", "purity", "effects", "cfctre", "range_analysis"
-        };
+        static constexpr std::string_view kBodyFacts[] = {"constant_returns", "purity", "effects", "cfctre",
+                                                          "range_analysis"};
         for (std::string_view f : kBodyFacts)
-            if (bool* fp = fieldFor(f)) *fp = false;
+            if (bool* fp = fieldFor(f))
+                *fp = false;
     }
 
     /// Return true if @p fact is currently valid. Unknown fact names return false.
@@ -267,7 +278,8 @@ struct AnalysisValidity {
     /// Mark @p fact invalid; cascades through the dependency graph if attached. Unknown names ignored.
     void invalidate(std::string_view fact) noexcept {
         auto markInvalid = [this](std::string_view f) noexcept {
-            if (bool* fp = fieldFor(f)) *fp = false;
+            if (bool* fp = fieldFor(f))
+                *fp = false;
         };
         if (depGraph_) {
             for (const auto& d : depGraph_->getAllDependents(std::string(fact)))
@@ -279,7 +291,8 @@ struct AnalysisValidity {
 
     /// Mark @p fact valid. Unknown fact names are silently ignored.
     void markValid(std::string_view fact) noexcept {
-        if (bool* fp = fieldFor(fact)) *fp = true;
+        if (bool* fp = fieldFor(fact))
+            *fp = true;
     }
 
     /// Attach a dependency graph so that invalidating a fact also invalidates
@@ -291,43 +304,42 @@ struct AnalysisValidity {
         return depGraph_;
     }
 
-private:
+  private:
     const AnalysisDependencyGraph* depGraph_ = nullptr;
 };
 
 // AnalysisCache — typed key-value store (std::any values) for analysis results with invalidation
 class AnalysisCache {
-public:
-    AnalysisCache()  = default;
+  public:
+    AnalysisCache() = default;
     ~AnalysisCache() = default;
 
     // Non-copyable (large state).
-    AnalysisCache(const AnalysisCache&)            = delete;
+    AnalysisCache(const AnalysisCache&) = delete;
     AnalysisCache& operator=(const AnalysisCache&) = delete;
 
     // Movable.
-    AnalysisCache(AnalysisCache&&)            = default;
+    AnalysisCache(AnalysisCache&&) = default;
     AnalysisCache& operator=(AnalysisCache&&) = default;
 
     /// Store a value of type T under key @p k, replacing any existing entry.
-    template<class T>
-    void put(const AnalysisKey& k, T value) {
+    template <class T> void put(const AnalysisKey& k, T value) {
         store_[k] = std::move(value);
     }
 
     /// Retrieve a const pointer to T for key @p k; nullptr if not found or wrong type.
-    template<class T>
-    const T* get(const AnalysisKey& k) const noexcept {
+    template <class T> const T* get(const AnalysisKey& k) const noexcept {
         auto it = store_.find(k);
-        if (it == store_.end()) return nullptr;
+        if (it == store_.end())
+            return nullptr;
         return std::any_cast<T>(&it->second);
     }
 
     /// Retrieve a mutable pointer to T for key @p k; nullptr if not found or wrong type.
-    template<class T>
-    T* get(const AnalysisKey& k) noexcept {
+    template <class T> T* get(const AnalysisKey& k) noexcept {
         auto it = store_.find(k);
-        if (it == store_.end()) return nullptr;
+        if (it == store_.end())
+            return nullptr;
         return std::any_cast<T>(&it->second);
     }
 
@@ -362,51 +374,61 @@ public:
     }
 
     /// Remove all cached values.
-    void clear() noexcept { store_.clear(); }
+    void clear() noexcept {
+        store_.clear();
+    }
 
     /// Return the number of entries currently in the cache.
-    size_t size() const noexcept { return store_.size(); }
+    size_t size() const noexcept {
+        return store_.size();
+    }
 
-private:
+  private:
     std::unordered_map<AnalysisKey, std::any> store_;
-    const AnalysisDependencyGraph*            depGraph_ = nullptr;
+    const AnalysisDependencyGraph* depGraph_ = nullptr;
 };
 
 // EGraphConfig — public mirror of egraph::SaturationConfig; defaults match egraph::optimizeExpression
 struct EGraphConfig {
-    size_t maxNodes            = 10000; ///< Node limit per expression graph
-    size_t maxIterations       = 15;    ///< Saturation iteration cap
-    bool   enableConstFolding  = true;  ///< Enable constant-folding during saturation
+    size_t maxNodes = 10000;        ///< Node limit per expression graph
+    size_t maxIterations = 15;      ///< Saturation iteration cap
+    bool enableConstFolding = true; ///< Enable constant-folding during saturation
 };
 
 // EGraphStats — per-run statistics; reset at start of optimizeProgram/optimizeFunction
 struct EGraphStats {
-    unsigned expressionsAttempted  = 0; ///< Expressions submitted to the e-graph
+    unsigned expressionsAttempted = 0;  ///< Expressions submitted to the e-graph
     unsigned expressionsSimplified = 0; ///< Expressions that changed after extraction
-    unsigned expressionsSkipped    = 0; ///< Expressions not representable in the e-graph
-    unsigned functionsChanged      = 0; ///< Functions with ≥1 simplified expression
-    size_t   rulesApplied          = 0; ///< Total rewrites across all saturations
+    unsigned expressionsSkipped = 0;    ///< Expressions not representable in the e-graph
+    unsigned functionsChanged = 0;      ///< Functions with ≥1 simplified expression
+    size_t rulesApplied = 0;            ///< Total rewrites across all saturations
 
-    void reset() noexcept { *this = {}; }
+    void reset() noexcept {
+        *this = {};
+    }
 };
 
 // EGraphSubsystem — e-graph equality-saturation optimizer owned by OptimizationContext
 class EGraphSubsystem {
-public:
-    EGraphSubsystem()  = default;
+  public:
+    EGraphSubsystem() = default;
     ~EGraphSubsystem() = default;
 
     // ── Configuration ─────────────────────────────────────────────────────
 
     /// Replace the current configuration before any optimize* call.
-    void setConfig(EGraphConfig cfg) noexcept { config_ = cfg; }
-    const EGraphConfig& config() const noexcept { return config_; }
+    void setConfig(EGraphConfig cfg) noexcept {
+        config_ = cfg;
+    }
+    const EGraphConfig& config() const noexcept {
+        return config_;
+    }
 
     /// Build egraph::SaturationConfig from our config for internal use.
     egraph::SaturationConfig toSaturationConfig() const noexcept {
         egraph::SaturationConfig sc;
-        sc.maxNodes            = config_.maxNodes;
-        sc.maxIterations       = config_.maxIterations;
+        sc.maxNodes = config_.maxNodes;
+        sc.maxIterations = config_.maxIterations;
         sc.enableConstantFolding = config_.enableConstFolding;
         return sc;
     }
@@ -414,7 +436,7 @@ public:
     /// Build egraph::EGraphOptContext from our config and pure-user-funcs.
     egraph::EGraphOptContext toOptContext() const noexcept {
         egraph::EGraphOptContext ctx;
-        ctx.config        = toSaturationConfig();
+        ctx.config = toSaturationConfig();
         ctx.pureUserFuncs = pureUserFuncs_.empty() ? nullptr : &pureUserFuncs_;
         return ctx;
     }
@@ -446,25 +468,29 @@ public:
 
     // ── Statistics ────────────────────────────────────────────────────────
 
-    const EGraphStats& stats() const noexcept { return stats_; }
+    const EGraphStats& stats() const noexcept {
+        return stats_;
+    }
 
     /// Reset statistics (called automatically at the start of optimizeProgram).
-    void resetStats() noexcept { stats_.reset(); }
+    void resetStats() noexcept {
+        stats_.reset();
+    }
 
-private:
-    EGraphConfig                    config_;
-    EGraphStats                     stats_;
+  private:
+    EGraphConfig config_;
+    EGraphStats stats_;
     std::unordered_set<std::string> pureUserFuncs_;
 };
 
 // OptimizationContext — owns FunctionFacts, AnalysisValidity, EGraphSubsystem, and CTEngine ref
 class OptimizationContext {
-public:
+  public:
     explicit OptimizationContext() = default;
-    ~OptimizationContext()         = default;
+    ~OptimizationContext() = default;
 
     // Non-copyable (large state, always passed by pointer or reference).
-    OptimizationContext(const OptimizationContext&)            = delete;
+    OptimizationContext(const OptimizationContext&) = delete;
     OptimizationContext& operator=(const OptimizationContext&) = delete;
 
     // ── Fact registration (called by analysis passes) ─────────────────────
@@ -503,28 +529,32 @@ public:
     /// Return the always-constant integer return value, if known.
     std::optional<int64_t> constIntReturn(const std::string& funcName) const noexcept {
         auto it = facts_.find(funcName);
-        if (it == facts_.end()) return std::nullopt;
+        if (it == facts_.end())
+            return std::nullopt;
         return it->second.constIntReturn;
     }
 
     /// Return the always-constant string return value, if known.
     std::optional<std::string> constStringReturn(const std::string& funcName) const noexcept {
         auto it = facts_.find(funcName);
-        if (it == facts_.end()) return std::nullopt;
+        if (it == facts_.end())
+            return std::nullopt;
         return it->second.constStringReturn;
     }
 
     /// Return the CF-CTRE uniform return value (may be any CTValue), if known.
     std::optional<CTValue> uniformCTReturn(const std::string& funcName) const noexcept {
         auto it = facts_.find(funcName);
-        if (it == facts_.end()) return std::nullopt;
+        if (it == facts_.end())
+            return std::nullopt;
         return it->second.uniformCTReturn;
     }
 
     /// Return the known integer return range for @p funcName, if available.
     std::optional<ValueRange> returnRange(const std::string& funcName) const noexcept {
         auto it = facts_.find(funcName);
-        if (it == facts_.end()) return std::nullopt;
+        if (it == facts_.end())
+            return std::nullopt;
         return it->second.returnRange;
     }
 
@@ -552,13 +582,21 @@ public:
 
     // ── Validity tracking ─────────────────────────────────────────────────
 
-    AnalysisValidity&       validity()       noexcept { return validity_; }
-    const AnalysisValidity& validity() const noexcept { return validity_; }
+    AnalysisValidity& validity() noexcept {
+        return validity_;
+    }
+    const AnalysisValidity& validity() const noexcept {
+        return validity_;
+    }
 
     // ── CTEngine reference ────────────────────────────────────────────────
     /// Non-owning pointer to the CTEngine; set once before the Orchestrator runs.
-    void setCTEngine(CTEngine* engine) noexcept { ctEngine_ = engine; }
-    CTEngine* ctEngine() const noexcept { return ctEngine_; }
+    void setCTEngine(CTEngine* engine) noexcept {
+        ctEngine_ = engine;
+    }
+    CTEngine* ctEngine() const noexcept {
+        return ctEngine_;
+    }
 
     // ── CTEngine query proxies — all return safe defaults when ctEngine_ is null ──
 
@@ -570,7 +608,8 @@ public:
     /// Strength-reduced operator token for @p binExpr, or empty if none found.
     const std::string& cheaperRewrite(const Expression* binExpr) const noexcept {
         static const std::string kEmpty;
-        if (!ctEngine_) return kEmpty;
+        if (!ctEngine_)
+            return kEmpty;
         return ctEngine_->cheaperRewrite(binExpr);
     }
 
@@ -585,23 +624,24 @@ public:
     }
 
     /// Abstract integer exit-range of @p varName in @p fnName; CTInterval::top() if unknown.
-    CTInterval getExitRange(const std::string& fnName,
-                            const std::string& varName) const noexcept {
-        if (!ctEngine_) return CTInterval::top();
+    CTInterval getExitRange(const std::string& fnName, const std::string& varName) const noexcept {
+        if (!ctEngine_)
+            return CTInterval::top();
         return ctEngine_->getExitRange(fnName, varName);
     }
 
     /// Execute @p fnName with CT-known @p args; nullopt if ctEngine_ is null or failed.
-    std::optional<CTValue> executeFunction(const std::string&          fnName,
-                                           const std::vector<CTValue>& args) const {
-        if (!ctEngine_) return std::nullopt;
+    std::optional<CTValue> executeFunction(const std::string& fnName, const std::vector<CTValue>& args) const {
+        if (!ctEngine_)
+            return std::nullopt;
         return ctEngine_->executeFunction(fnName, args);
     }
 
     /// Uniform-return-value map from CFCTRE; empty map when ctEngine_ is null.
     const std::unordered_map<std::string, CTValue>& uniformReturnValues() const noexcept {
         static const std::unordered_map<std::string, CTValue> kEmpty;
-        if (!ctEngine_) return kEmpty;
+        if (!ctEngine_)
+            return kEmpty;
         return ctEngine_->uniformReturnValues();
     }
 
@@ -611,12 +651,20 @@ public:
     }
 
     // ── E-Graph subsystem ─────────────────────────────────────────────────
-    EGraphSubsystem&       egraph()       noexcept { return egraph_; }
-    const EGraphSubsystem& egraph() const noexcept { return egraph_; }
+    EGraphSubsystem& egraph() noexcept {
+        return egraph_;
+    }
+    const EGraphSubsystem& egraph() const noexcept {
+        return egraph_;
+    }
 
     // ── Analysis cache ────────────────────────────────────────────────────
-    AnalysisCache&       cache()       noexcept { return cache_; }
-    const AnalysisCache& cache() const noexcept { return cache_; }
+    AnalysisCache& cache() noexcept {
+        return cache_;
+    }
+    const AnalysisCache& cache() const noexcept {
+        return cache_;
+    }
 
     // ── Analysis dependency graph — non-owning; shared by validity_ and cache_ ──
     void setDependencyGraph(const AnalysisDependencyGraph* graph) noexcept {
@@ -627,12 +675,12 @@ public:
         return cache_.dependencyGraph();
     }
 
-private:
+  private:
     std::unordered_map<std::string, FunctionFacts> facts_;
     AnalysisValidity validity_;
-    CTEngine*        ctEngine_ = nullptr;
-    EGraphSubsystem  egraph_;
-    AnalysisCache    cache_;
+    CTEngine* ctEngine_ = nullptr;
+    EGraphSubsystem egraph_;
+    AnalysisCache cache_;
 };
 
 } // namespace omscript

@@ -2,16 +2,16 @@
 /// @brief Implementation of OptimizationManager, PassScheduler, LegalityService.
 
 #include "optimization_manager.h"
-#include "ersl.h"              // deriveEffectSummary, EffectSummary
-#include "opt_orchestrator.h"  // PassRegistry, PassMetadata
-#include "superoptimizer.h"    // superopt::instructionCost — used by DefaultCostModel
+#include "ersl.h"             // deriveEffectSummary, EffectSummary
+#include "opt_orchestrator.h" // PassRegistry, PassMetadata
+#include "superoptimizer.h"   // superopt::instructionCost — used by DefaultCostModel
 #include <cassert>
 #include <iostream>
 #include <unordered_set>
 
 // LLVM headers needed for LegalityService::canTransformFunction.
-#include <llvm/IR/Function.h>
 #include <llvm/IR/Attributes.h>
+#include <llvm/IR/Function.h>
 
 namespace omscript {
 
@@ -44,19 +44,20 @@ std::unique_ptr<CostModel> createDefaultCostModel() {
 // LegalityService
 // ─────────────────────────────────────────────────────────────────────────────
 
-LegalityVerdict LegalityService::canTransformLoops(
-    const LoopLegalityContext& ctx) const noexcept
-{
-    if (!ctx.effects) return LegalityVerdict::Unknown;
+LegalityVerdict LegalityService::canTransformLoops(const LoopLegalityContext& ctx) const noexcept {
+    if (!ctx.effects)
+        return LegalityVerdict::Unknown;
 
     // I/O operations (print, file I/O, sleep, …) must not be reordered — a
     // loop that prints every iteration cannot have its iterations interchanged.
-    if (ctx.effects->hasIO) return LegalityVerdict::Illegal;
+    if (ctx.effects->hasIO)
+        return LegalityVerdict::Illegal;
 
     // hasMutation indicates that the function mutates program state in ways
     // beyond simple array reads/writes (e.g. modifies global variables, calls
     // impure user functions).  Conservative: block all transforms.
-    if (ctx.effects->hasMutation) return LegalityVerdict::Illegal;
+    if (ctx.effects->hasMutation)
+        return LegalityVerdict::Illegal;
 
     // ── ERSL refinement ──────────────────────────────────────────────────────
     // Use the pre-computed EffectSummary from ctx.ersl when available
@@ -85,10 +86,7 @@ LegalityVerdict LegalityService::canTransformLoops(
     return LegalityVerdict::Legal;
 }
 
-LegalityVerdict LegalityService::checkLegality(
-    LoopTransform transform,
-    const LoopLegalityContext& ctx) const noexcept
-{
+LegalityVerdict LegalityService::checkLegality(LoopTransform transform, const LoopLegalityContext& ctx) const noexcept {
     switch (transform) {
     case LoopTransform::Interchange:
     case LoopTransform::Tiling:
@@ -106,9 +104,7 @@ LegalityVerdict LegalityService::checkLegality(
     return LegalityVerdict::Unknown;
 }
 
-LegalityVerdict LegalityService::canTransformFunction(
-    const llvm::Function& F) const noexcept
-{
+LegalityVerdict LegalityService::canTransformFunction(const llvm::Function& F) const noexcept {
     // Use LLVM function attributes as an IR-level proxy for the effect summary.
     // These are set by codegen when inferMemoryEffects() runs after IR emission.
     //
@@ -122,8 +118,8 @@ LegalityVerdict LegalityService::canTransformFunction(
     // Absence of willreturn means the function may not terminate; transforms
     // that change loop trip counts or introduce new loops could change termination
     // behaviour — conservatively Unknown.
-    const bool noFree  = F.hasFnAttribute(llvm::Attribute::NoFree);
-    const bool noSync  = F.hasFnAttribute(llvm::Attribute::NoSync);
+    const bool noFree = F.hasFnAttribute(llvm::Attribute::NoFree);
+    const bool noSync = F.hasFnAttribute(llvm::Attribute::NoSync);
     const bool willRet = F.hasFnAttribute(llvm::Attribute::WillReturn);
 
     if (!willRet) {
@@ -144,12 +140,9 @@ LegalityVerdict LegalityService::canTransformFunction(
 bool PassScheduler::checkPreconditions(const PassMetadata& meta) const noexcept {
     for (const char* req : meta.requires_) {
         if (!ctx_.validity().isValid(req)) {
-            std::cerr << "[omscript][opt] "
-                      << (strict_ ? "FATAL: " : "WARNING: ")
-                      << "pass '" << meta.name << "' requires fact '" << req
-                      << "' which is not valid -- "
-                      << (strict_ ? "pass ordering is incorrect" : "skipping pass")
-                      << "\n";
+            std::cerr << "[omscript][opt] " << (strict_ ? "FATAL: " : "WARNING: ") << "pass '" << meta.name
+                      << "' requires fact '" << req << "' which is not valid -- "
+                      << (strict_ ? "pass ordering is incorrect" : "skipping pass") << "\n";
             assert(!strict_ && "Pass precondition violated -- see error above");
             return false;
         }
@@ -170,7 +163,8 @@ void PassScheduler::applyInvalidation(const PassMetadata& meta) noexcept {
 
 bool PassScheduler::allProvidedValid(const PassMetadata& meta) const noexcept {
     for (const char* fact : meta.provides_) {
-        if (!ctx_.validity().isValid(fact)) return false;
+        if (!ctx_.validity().isValid(fact))
+            return false;
     }
     return true;
 }
@@ -179,30 +173,26 @@ bool PassScheduler::allProvidedValid(const PassMetadata& meta) const noexcept {
 // PassScheduler::runToProvide — demand-driven fact computation
 // ─────────────────────────────────────────────────────────────────────────────
 
-bool PassScheduler::runToProvide(
-    const std::string& targetFact,
-    Program* program,
-    const std::unordered_map<uint32_t, Runner>& dispatch)
-{
+bool PassScheduler::runToProvide(const std::string& targetFact, Program* program,
+                                 const std::unordered_map<uint32_t, Runner>& dispatch) {
     std::unordered_set<std::string> inProgress;
     return runToProvideImpl(targetFact, program, dispatch, inProgress);
 }
 
-bool PassScheduler::runToProvideImpl(
-    const std::string& targetFact,
-    Program* program,
-    const std::unordered_map<uint32_t, Runner>& dispatch,
-    std::unordered_set<std::string>& inProgress)
-{
+bool PassScheduler::runToProvideImpl(const std::string& targetFact, Program* program,
+                                     const std::unordered_map<uint32_t, Runner>& dispatch,
+                                     std::unordered_set<std::string>& inProgress) {
     // Already valid — nothing to do.
-    if (ctx_.validity().isValid(targetFact)) return true;
+    if (ctx_.validity().isValid(targetFact))
+        return true;
 
     // Cycle detection: if we are already in the process of computing this
     // fact (from a recursive call), there is a dependency cycle in the pass
     // registry.  Return false rather than infinite recursion.
     if (!inProgress.insert(targetFact).second) {
         std::cerr << "[omscript][opt] CYCLE: circular dependency detected "
-                     "while computing fact '" << targetFact << "'\n";
+                     "while computing fact '"
+                  << targetFact << "'\n";
         return false;
     }
 
@@ -212,9 +202,13 @@ bool PassScheduler::runToProvideImpl(
     const PassMetadata* producer = nullptr;
     for (const auto& meta : reg.all()) {
         for (const char* fact : meta.provides_) {
-            if (fact == targetFact) { producer = &meta; break; }
+            if (fact == targetFact) {
+                producer = &meta;
+                break;
+            }
         }
-        if (producer) break;
+        if (producer)
+            break;
     }
 
     if (!producer) {
@@ -239,7 +233,8 @@ bool PassScheduler::runToProvideImpl(
                 }
             }
         }
-        if (allValid) break;
+        if (allValid)
+            break;
     }
 
     // Check the dispatch map before running.

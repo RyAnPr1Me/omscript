@@ -2,9 +2,9 @@
 // Wraps the OmBigInt arbitrary-precision library (include/bigint.h).
 #include "bigint_runtime.h"
 #include "bigint.h"
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <cstdio>
 
 using namespace omscript;
 
@@ -21,7 +21,8 @@ extern "C" omsc_bigint_t* omsc_bigint_new_i64(long long v) {
 }
 
 extern "C" omsc_bigint_t* omsc_bigint_new_str(const char* s) {
-    if (!s) return nullptr;
+    if (!s)
+        return nullptr;
     try {
         return new OmscBigInt(OmBigInt::from_string(s));
     } catch (...) {
@@ -30,7 +31,8 @@ extern "C" omsc_bigint_t* omsc_bigint_new_str(const char* s) {
 }
 
 extern "C" omsc_bigint_t* omsc_bigint_copy(const omsc_bigint_t* a) {
-    if (!a) return nullptr;
+    if (!a)
+        return nullptr;
     return new OmscBigInt(a->val);
 }
 
@@ -101,12 +103,14 @@ extern "C" omsc_bigint_t* omsc_bigint_xor(const omsc_bigint_t* a, const omsc_big
 }
 
 extern "C" omsc_bigint_t* omsc_bigint_shl(const omsc_bigint_t* a, long long n) {
-    if (n <= 0) return omsc_bigint_copy(a);
+    if (n <= 0)
+        return omsc_bigint_copy(a);
     return new OmscBigInt(OmBigInt(a->val.mag << static_cast<size_t>(n), a->val.neg));
 }
 
 extern "C" omsc_bigint_t* omsc_bigint_shr(const omsc_bigint_t* a, long long n) {
-    if (n <= 0) return omsc_bigint_copy(a);
+    if (n <= 0)
+        return omsc_bigint_copy(a);
     return new OmscBigInt(OmBigInt(a->val.mag >> static_cast<size_t>(n), a->val.neg));
 }
 
@@ -141,7 +145,8 @@ extern "C" int omsc_bigint_ge(const omsc_bigint_t* a, const omsc_bigint_t* b) {
 extern "C" char* omsc_bigint_tostring(const omsc_bigint_t* a) {
     std::string s = a->val.to_string();
     char* buf = static_cast<char*>(std::malloc(s.size() + 1));
-    if (buf) std::memcpy(buf, s.data(), s.size() + 1);
+    if (buf)
+        std::memcpy(buf, s.data(), s.size() + 1);
     return buf;
 }
 
@@ -150,7 +155,8 @@ extern "C" char* omsc_bigint_tohexstring(const omsc_bigint_t* a) {
     // Prepend "0x"
     std::string result = (a->val.is_negative() ? "-0x" : "0x") + s;
     char* buf = static_cast<char*>(std::malloc(result.size() + 1));
-    if (buf) std::memcpy(buf, result.data(), result.size() + 1);
+    if (buf)
+        std::memcpy(buf, result.data(), result.size() + 1);
     return buf;
 }
 

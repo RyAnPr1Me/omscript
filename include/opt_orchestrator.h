@@ -49,7 +49,7 @@ enum class OptimizationLevel;
 // OptimizationOrchestrator
 // ─────────────────────────────────────────────────────────────────────────────
 class OptimizationOrchestrator {
-public:
+  public:
     /// @param optLevel  Optimization level (drives which passes are active).
     /// @param verbose   When true, print per-pass timing and statistics.
     /// @param codegen   Non-owning pointer to the CodeGenerator that owns the
@@ -62,15 +62,13 @@ public:
     ///                  setting and shares the manager's dependency graph.
     ///                  When nullptr (the default), a standalone PassScheduler
     ///                  is created from ctx directly.
-    explicit OptimizationOrchestrator(OptimizationLevel optLevel,
-                                      bool verbose,
-                                      CodeGenerator* codegen,
+    explicit OptimizationOrchestrator(OptimizationLevel optLevel, bool verbose, CodeGenerator* codegen,
                                       OptimizationManager* manager = nullptr) noexcept;
 
     ~OptimizationOrchestrator() = default;
 
     // Non-copyable.
-    OptimizationOrchestrator(const OptimizationOrchestrator&)            = delete;
+    OptimizationOrchestrator(const OptimizationOrchestrator&) = delete;
     OptimizationOrchestrator& operator=(const OptimizationOrchestrator&) = delete;
 
     // ── Primary entry point ───────────────────────────────────────────────
@@ -106,61 +104,65 @@ public:
     /// @returns true  if @p factKey is valid on return.
     /// @returns false if the fact cannot be computed (no registered producer,
     ///                circular dependency, or a prerequisite could not be met).
-    bool runToProvide(const std::string& factKey,
-                      Program* program,
-                      OptimizationContext& ctx);
+    bool runToProvide(const std::string& factKey, Program* program, OptimizationContext& ctx);
 
     // ── Statistics ────────────────────────────────────────────────────────
 
     /// Wall-clock timing for a single pass.
     struct PassTiming {
-        std::string name;      ///< Pass name (mirrors PassMetadata::name)
-        double      elapsedMs; ///< Wall-clock time in milliseconds
+        std::string name; ///< Pass name (mirrors PassMetadata::name)
+        double elapsedMs; ///< Wall-clock time in milliseconds
     };
 
     struct RunStats {
-        unsigned passesRun      = 0; ///< Number of passes that executed
-        unsigned passesSkipped  = 0; ///< Number of passes skipped (already valid)
-        double   totalElapsedMs = 0; ///< Wall-clock time for all passes (ms)
+        unsigned passesRun = 0;     ///< Number of passes that executed
+        unsigned passesSkipped = 0; ///< Number of passes skipped (already valid)
+        double totalElapsedMs = 0;  ///< Wall-clock time for all passes (ms)
 
         /// Per-pass wall-clock times in execution order.
         /// Empty until after the first runPrepasses / runInvalidated call.
         std::vector<PassTiming> passTimings;
     };
 
-    const RunStats& lastRunStats() const noexcept { return stats_; }
+    const RunStats& lastRunStats() const noexcept {
+        return stats_;
+    }
 
     /// Control whether ownership/borrow checks are skipped (Ω spec §6.2).
-    void setNoOwnershipChecks(bool v) noexcept { noOwnershipChecks_ = v; }
+    void setNoOwnershipChecks(bool v) noexcept {
+        noOwnershipChecks_ = v;
+    }
 
     /// Enable compile-time path-sensitive memory-safety diagnostics (Ω spec §7).
-    void setMemSanitize(bool v) noexcept { memSanitize_ = v; }
+    void setMemSanitize(bool v) noexcept {
+        memSanitize_ = v;
+    }
 
-private:
+  private:
     // ── Helpers ───────────────────────────────────────────────────────────
 
     // Run one named pass and record timing / validity.
-    void runPreflightCheck    (Program* program, OptimizationContext& ctx);
-    void runStringTypes       (Program* program, OptimizationContext& ctx);
-    void runArrayTypes        (Program* program, OptimizationContext& ctx);
-    void runConstantReturns   (Program* program, OptimizationContext& ctx);
-    void runPurity            (Program* program, OptimizationContext& ctx);
-    void runEffects           (Program* program, OptimizationContext& ctx);
-    void runERSL              (Program* program, OptimizationContext& ctx);
-    void runSynthesis         (Program* program, OptimizationContext& ctx);
-    void runCFCTRE            (Program* program, OptimizationContext& ctx);
-    void runEGraph            (Program* program, OptimizationContext& ctx);
-    void runRangeAnalysis     (Program* program, OptimizationContext& ctx);
-    void runRLC               (Program* program, OptimizationContext& ctx);
-    void runDCE               (Program* program, OptimizationContext& ctx);
-    void runCSE               (Program* program, OptimizationContext& ctx);
-    void runAlgSimp           (Program* program, OptimizationContext& ctx);
-    void runCopyProp          (Program* program, OptimizationContext& ctx);
-    void runWidthLegalization (Program* program, OptimizationContext& ctx);
-    void runWidthOpt          (Program* program, OptimizationContext& ctx);
-    void runUniqueness        (Program* program, OptimizationContext& ctx);
-    void runBorrowCheck       (Program* program, OptimizationContext& ctx);
-    void runHGOEEGraph        (Program* program, OptimizationContext& ctx);
+    void runPreflightCheck(Program* program, OptimizationContext& ctx);
+    void runStringTypes(Program* program, OptimizationContext& ctx);
+    void runArrayTypes(Program* program, OptimizationContext& ctx);
+    void runConstantReturns(Program* program, OptimizationContext& ctx);
+    void runPurity(Program* program, OptimizationContext& ctx);
+    void runEffects(Program* program, OptimizationContext& ctx);
+    void runERSL(Program* program, OptimizationContext& ctx);
+    void runSynthesis(Program* program, OptimizationContext& ctx);
+    void runCFCTRE(Program* program, OptimizationContext& ctx);
+    void runEGraph(Program* program, OptimizationContext& ctx);
+    void runRangeAnalysis(Program* program, OptimizationContext& ctx);
+    void runRLC(Program* program, OptimizationContext& ctx);
+    void runDCE(Program* program, OptimizationContext& ctx);
+    void runCSE(Program* program, OptimizationContext& ctx);
+    void runAlgSimp(Program* program, OptimizationContext& ctx);
+    void runCopyProp(Program* program, OptimizationContext& ctx);
+    void runWidthLegalization(Program* program, OptimizationContext& ctx);
+    void runWidthOpt(Program* program, OptimizationContext& ctx);
+    void runUniqueness(Program* program, OptimizationContext& ctx);
+    void runBorrowCheck(Program* program, OptimizationContext& ctx);
+    void runHGOEEGraph(Program* program, OptimizationContext& ctx);
 
     /// Build the PassId → runner dispatch map used by runPassPipeline and
     /// runToProvide.  Defined once here so the 10-entry table never needs to
@@ -184,13 +186,13 @@ private:
     void runPassPipeline(Program* program, OptimizationContext& ctx, bool skipValid);
 
     // ── State ─────────────────────────────────────────────────────────────
-    OptimizationLevel   optLevel_;
-    bool                verbose_;
-    bool                noOwnershipChecks_ = false;  ///< --no-ownership-checks flag
-    bool                memSanitize_       = false;  ///< --mem-sanitize flag
-    CodeGenerator*      codegen_;   // non-owning
-    OptimizationManager* manager_;  // non-owning; may be nullptr
-    RunStats            stats_;
+    OptimizationLevel optLevel_;
+    bool verbose_;
+    bool noOwnershipChecks_ = false; ///< --no-ownership-checks flag
+    bool memSanitize_ = false;       ///< --mem-sanitize flag
+    CodeGenerator* codegen_;         // non-owning
+    OptimizationManager* manager_;   // non-owning; may be nullptr
+    RunStats stats_;
 };
 
 } // namespace omscript

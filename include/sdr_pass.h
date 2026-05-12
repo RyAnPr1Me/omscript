@@ -50,10 +50,10 @@
 // Thread safety: runSDR() is stateless and safe to call from multiple threads
 //   provided each call receives its own Module reference.
 
-#include <llvm/IR/Module.h>
-#include <llvm/Analysis/TargetTransformInfo.h>
 #include <cstdint>
 #include <functional>
+#include <llvm/Analysis/TargetTransformInfo.h>
+#include <llvm/IR/Module.h>
 
 namespace omscript::sdr {
 
@@ -111,27 +111,27 @@ enum class RegionKind : uint8_t {
 // SdrRegion — one candidate region found during phase 1
 // ─────────────────────────────────────────────────────────────────────────────
 struct SdrRegion {
-    llvm::Instruction* root     = nullptr; ///< Root vector instruction
-    RegionKind         kind     = RegionKind::PartialUse;
-    unsigned           origLanes = 0;      ///< Original vector width (lanes)
-    unsigned           usedLanes = 0;      ///< Lanes actually consumed
-    uint64_t           usedMask  = 0;      ///< Bitmask of consumed lane indices
-    bool               isReduction = false;///< True when a horizontal reduction
-    double             origCost    = 0.0;  ///< TTI cost of original sequence
+    llvm::Instruction* root = nullptr; ///< Root vector instruction
+    RegionKind kind = RegionKind::PartialUse;
+    unsigned origLanes = 0;   ///< Original vector width (lanes)
+    unsigned usedLanes = 0;   ///< Lanes actually consumed
+    uint64_t usedMask = 0;    ///< Bitmask of consumed lane indices
+    bool isReduction = false; ///< True when a horizontal reduction
+    double origCost = 0.0;    ///< TTI cost of original sequence
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SdrStats — per-module statistics from a single runSDR() call
 // ─────────────────────────────────────────────────────────────────────────────
 struct SdrStats {
-    unsigned regionsDetected   = 0; ///< Phase-1: candidate regions found
-    unsigned regionsAnalyzed   = 0; ///< Phase-2/3: regions fully analyzed
-    unsigned narrowed          = 0; ///< Phase-4: vector narrowings applied
-    unsigned widened           = 0; ///< Phase-4: vector widenings applied
-    unsigned reductionsReplaced = 0;///< Phase-4: reduction intrinsics inserted
-    unsigned passthrough        = 0;///< Phase-4: left as scalar (no gain)
-    unsigned skippedCostly      = 0;///< Skipped because rebuild was not cheaper
-    unsigned skippedLarge       = 0;///< Skipped because region too large
+    unsigned regionsDetected = 0;    ///< Phase-1: candidate regions found
+    unsigned regionsAnalyzed = 0;    ///< Phase-2/3: regions fully analyzed
+    unsigned narrowed = 0;           ///< Phase-4: vector narrowings applied
+    unsigned widened = 0;            ///< Phase-4: vector widenings applied
+    unsigned reductionsReplaced = 0; ///< Phase-4: reduction intrinsics inserted
+    unsigned passthrough = 0;        ///< Phase-4: left as scalar (no gain)
+    unsigned skippedCostly = 0;      ///< Skipped because rebuild was not cheaper
+    unsigned skippedLarge = 0;       ///< Skipped because region too large
 
     /// Total transformations applied (sum of narrowed + widened + reductionsReplaced).
     unsigned totalTransformed() const noexcept {
@@ -152,8 +152,7 @@ struct SdrStats {
 //
 // @p config   Tuning configuration.  A default-constructed SdrConfig gives
 //             sensible defaults for O2-level compilation.
-SdrStats runSDR(llvm::Module& module,
-                const std::function<llvm::TargetTransformInfo(llvm::Function&)>& getTTI,
+SdrStats runSDR(llvm::Module& module, const std::function<llvm::TargetTransformInfo(llvm::Function&)>& getTTI,
                 const SdrConfig& config = {});
 
 } // namespace omscript::sdr

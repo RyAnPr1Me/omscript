@@ -28,7 +28,9 @@ class Parser {
     [[nodiscard]] std::unique_ptr<Program> parse();
 
     /// Set the base directory for resolving import paths.
-    void setBaseDir(const std::string& dir) { baseDir_ = dir; }
+    void setBaseDir(const std::string& dir) {
+        baseDir_ = dir;
+    }
 
     /// Returns collected parse errors (populated when multi-error mode is active).
     [[nodiscard]] const std::vector<std::string>& errors() const noexcept {
@@ -89,8 +91,7 @@ class Parser {
 
     /// Parse an import statement and return the imported program.
     void parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
-                     std::vector<std::unique_ptr<EnumDecl>>& enums,
-                     std::vector<std::unique_ptr<StructDecl>>& structs,
+                     std::vector<std::unique_ptr<EnumDecl>>& enums, std::vector<std::unique_ptr<StructDecl>>& structs,
                      std::vector<std::unique_ptr<VarDecl>>& globals);
 
     /// Parse a user-defined namespace block: namespace Name { fn/struct/enum ... }
@@ -234,7 +235,7 @@ class Parser {
     std::unique_ptr<Expression> parseAssignment();
     std::unique_ptr<Expression> parseTernary();
     std::unique_ptr<Expression> parseNullCoalesce();
-    std::unique_ptr<Expression> parseCustomOp();  // user-defined arbitrary-symbol operators
+    std::unique_ptr<Expression> parseCustomOp(); // user-defined arbitrary-symbol operators
     std::unique_ptr<Expression> parseLogicalOr();
     std::unique_ptr<Expression> parseLogicalAnd();
     std::unique_ptr<Expression> parseBitwiseOr();

@@ -80,15 +80,11 @@ Value Value::operator+(const Value& other) const {
             // a stack buffer, then concat() builds the result in one allocation.
             char buf[32];
             auto [ptr, len] = other.toCStrBuf(buf, sizeof(buf));
-            result = RefCountedString::concat(
-                stringValue.c_str(), stringValue.length(),
-                ptr, len);
+            result = RefCountedString::concat(stringValue.c_str(), stringValue.length(), ptr, len);
         } else {
             char buf[32];
             auto [ptr, len] = toCStrBuf(buf, sizeof(buf));
-            result = RefCountedString::concat(
-                ptr, len,
-                other.stringValue.c_str(), other.stringValue.length());
+            result = RefCountedString::concat(ptr, len, other.stringValue.c_str(), other.stringValue.length());
         }
         Value v;
         v.type = Type::STRING;

@@ -55,8 +55,10 @@
 namespace omscript {
 // Forward declarations to avoid pulling in heavy headers.
 struct Program;
-class  OptimizationContext;
-namespace egraph { class EGraph; }
+class OptimizationContext;
+namespace egraph {
+class EGraph;
+}
 
 namespace hgoe_egraph {
 
@@ -68,24 +70,20 @@ namespace hgoe_egraph {
 /// Values are derived from the target MicroarchProfile (latency-heavy targets
 /// weight `latency` more; bandwidth-heavy targets weight `memoryPressure`).
 struct CostWeights {
-    double cycles             = 1.0;
-    double uops               = 0.5;
-    double latency            = 2.0;
+    double cycles = 1.0;
+    double uops = 0.5;
+    double latency = 2.0;
     double throughputPressure = 0.5;
-    double registerPressure   = 0.3;
-    double memoryPressure     = 0.8;
-    double branchPenalty      = 1.5;
+    double registerPressure = 0.3;
+    double memoryPressure = 0.8;
+    double branchPenalty = 1.5;
 };
 
 /// Compute a single scalar cost from a MultiCost and a CostWeights.
 inline double scalarize(const egraph::MultiCost& mc, const CostWeights& w) noexcept {
-    return mc.cycles             * w.cycles
-         + mc.uops               * w.uops
-         + mc.latency            * w.latency
-         + mc.throughputPressure * w.throughputPressure
-         + mc.registerPressure   * w.registerPressure
-         + mc.memoryPressure     * w.memoryPressure
-         + mc.branchPenalty      * w.branchPenalty;
+    return mc.cycles * w.cycles + mc.uops * w.uops + mc.latency * w.latency +
+           mc.throughputPressure * w.throughputPressure + mc.registerPressure * w.registerPressure +
+           mc.memoryPressure * w.memoryPressure + mc.branchPenalty * w.branchPenalty;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -141,14 +139,14 @@ struct HGOEGuidedConfig {
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct HGOEGuidedStats {
-    size_t iterations       = 0;  ///< Full expand-score-prune rounds executed
-    size_t nodesAdded       = 0;  ///< Total new e-nodes created
-    size_t classesPruned    = 0;  ///< Classes pruned by HGOE lower-bound check
-    size_t merges           = 0;  ///< Successful e-class merges
-    size_t rewrites         = 0;  ///< Rewrite rules applied (inc. duplicate LHS)
+    size_t iterations = 0;         ///< Full expand-score-prune rounds executed
+    size_t nodesAdded = 0;         ///< Total new e-nodes created
+    size_t classesPruned = 0;      ///< Classes pruned by HGOE lower-bound check
+    size_t merges = 0;             ///< Successful e-class merges
+    size_t rewrites = 0;           ///< Rewrite rules applied (inc. duplicate LHS)
     double estimatedSpeedup = 0.0; ///< Scalar-cost ratio: original / best found
-    bool   hitNodeLimit     = false; ///< True if nodeLimit was reached
-    bool   hitIterLimit     = false; ///< True if iterLimit was reached
+    bool hitNodeLimit = false;     ///< True if nodeLimit was reached
+    bool hitIterLimit = false;     ///< True if iterLimit was reached
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -172,7 +170,7 @@ struct HGOEGuidedStats {
 ///   ENode best = opt.extractBest(root);           // retrieve winner
 /// @endcode
 class HGOEGuidedOptimizer {
-public:
+  public:
     explicit HGOEGuidedOptimizer(HGOEGuidedConfig config = {});
 
     // ── Graph construction ───────────────────────────────────────────────
@@ -187,9 +185,7 @@ public:
     [[nodiscard]] egraph::ClassId seedVar(const std::string& name);
 
     /// Convenience: seed a binary operation.
-    [[nodiscard]] egraph::ClassId seedBinOp(egraph::Op op,
-                                            egraph::ClassId lhs,
-                                            egraph::ClassId rhs);
+    [[nodiscard]] egraph::ClassId seedBinOp(egraph::Op op, egraph::ClassId lhs, egraph::ClassId rhs);
 
     // ── Guided optimization loop ─────────────────────────────────────────
 
@@ -204,9 +200,8 @@ public:
     ///               pruning threshold below the root's actual minimum).
     ///               Pass ClassId(-1) to disable root-anchored pruning.
     /// Returns statistics from the run.
-    [[nodiscard]] HGOEGuidedStats
-    optimize(const std::vector<egraph::RewriteRule>& rules,
-             egraph::ClassId root = static_cast<egraph::ClassId>(-1));
+    [[nodiscard]] HGOEGuidedStats optimize(const std::vector<egraph::RewriteRule>& rules,
+                                           egraph::ClassId root = static_cast<egraph::ClassId>(-1));
 
     // ── Extraction ───────────────────────────────────────────────────────
 
@@ -219,15 +214,21 @@ public:
 
     // ── Accessors ────────────────────────────────────────────────────────
 
-    [[nodiscard]] const egraph::EGraph& graph() const noexcept { return graph_; }
-    [[nodiscard]]       egraph::EGraph& graph()       noexcept { return graph_; }
-    [[nodiscard]] const HGOEGuidedConfig& config() const noexcept { return cfg_; }
+    [[nodiscard]] const egraph::EGraph& graph() const noexcept {
+        return graph_;
+    }
+    [[nodiscard]] egraph::EGraph& graph() noexcept {
+        return graph_;
+    }
+    [[nodiscard]] const HGOEGuidedConfig& config() const noexcept {
+        return cfg_;
+    }
     [[nodiscard]] size_t numClasses() const;
-    [[nodiscard]] size_t numNodes()   const;
+    [[nodiscard]] size_t numNodes() const;
 
-private:
-    egraph::EGraph      graph_;
-    HGOEGuidedConfig    cfg_;
+  private:
+    egraph::EGraph graph_;
+    HGOEGuidedConfig cfg_;
 
     // ── Internal helpers ─────────────────────────────────────────────────
 
@@ -236,8 +237,7 @@ private:
     bool scoreClass(egraph::ClassId id);
 
     /// Compute the MultiCost of an e-node given its children's bestCost.
-    egraph::MultiCost computeNodeCost(const egraph::ENode& node,
-                                      egraph::ClassId      cls);
+    egraph::MultiCost computeNodeCost(const egraph::ENode& node, egraph::ClassId cls);
 
     /// Propagate updated costs bottom-up through the use-list.
     /// Starts from `dirtyClasses` and walks the parent_ links in the EGraph.
@@ -278,9 +278,7 @@ private:
 ///   5. Replaces the original expression in-place if a cheaper form was found.
 ///
 /// Returns aggregate statistics summed across all expressions optimized.
-HGOEGuidedStats runHGOEGuidedPass(Program& program,
-                                   const HGOEGuidedConfig& config,
-                                   bool verbose = false);
+HGOEGuidedStats runHGOEGuidedPass(Program& program, const HGOEGuidedConfig& config, bool verbose = false);
 
 } // namespace hgoe_egraph
 } // namespace omscript

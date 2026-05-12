@@ -76,9 +76,9 @@
 ///   - The profitability model estimates a net positive performance gain.
 
 #include <cstdint>
-#include <vector>
 #include <optional>
 #include <string>
+#include <vector>
 
 // LLVM pass infrastructure (needed for OmPolyOptFunctionPass definition)
 #include <llvm/IR/PassManager.h>
@@ -204,12 +204,10 @@ struct PolyOptStats {
 /// Run the polyhedral optimizer on a single LLVM function.
 /// Requires that the function has been normalized (LoopSimplify + LCSSA).
 /// Returns statistics about transformations applied.
-PolyOptStats optimizeFunction(llvm::Function& F,
-                               const PolyOptConfig& config = PolyOptConfig{});
+PolyOptStats optimizeFunction(llvm::Function& F, const PolyOptConfig& config = PolyOptConfig{});
 
 /// Run the polyhedral optimizer on all functions in a module.
-PolyOptStats optimizeModule(llvm::Module& M,
-                             const PolyOptConfig& config = PolyOptConfig{});
+PolyOptStats optimizeModule(llvm::Module& M, const PolyOptConfig& config = PolyOptConfig{});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LLVM New Pass Manager integration
@@ -219,15 +217,12 @@ PolyOptStats optimizeModule(llvm::Module& M,
 /// FunctionPass.  Registered at VectorizerStartEP (after LoopSimplify + LCSSA,
 /// before the vectorizer) so the inner point-loops produced by tiling are
 /// exposed to LLVM's auto-vectorizer.
-struct OmPolyOptFunctionPass
-    : public llvm::PassInfoMixin<OmPolyOptFunctionPass> {
+struct OmPolyOptFunctionPass : public llvm::PassInfoMixin<OmPolyOptFunctionPass> {
 
     PolyOptConfig config;
-    explicit OmPolyOptFunctionPass(const PolyOptConfig& cfg = PolyOptConfig{})
-        : config(cfg) {}
+    explicit OmPolyOptFunctionPass(const PolyOptConfig& cfg = PolyOptConfig{}) : config(cfg) {}
 
-    llvm::PreservedAnalyses run(llvm::Function& F,
-                                llvm::FunctionAnalysisManager& FAM);
+    llvm::PreservedAnalyses run(llvm::Function& F, llvm::FunctionAnalysisManager& FAM);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -243,9 +238,9 @@ struct LoopLegalityResult {
     bool scopDetected = false;
 
     bool interchange = false; ///< Loop interchange is legal for this nest
-    bool tiling      = false; ///< Loop tiling is legal for this nest
-    bool reversal    = false; ///< Inner-loop reversal is legal
-    bool skewing     = false; ///< Skewing with factor 1 is legal
+    bool tiling = false;      ///< Loop tiling is legal for this nest
+    bool reversal = false;    ///< Inner-loop reversal is legal
+    bool skewing = false;     ///< Skewing with factor 1 is legal
 };
 
 /// Check the legality of all loop transformations for a given outermost loop.
@@ -259,11 +254,8 @@ struct LoopLegalityResult {
 ///
 /// This function is exposed so that OptimizationManager::legality() can
 /// pre-screen loops before committing to the full polyopt pass.
-LoopLegalityResult checkLoopLegality(llvm::Loop* outerLoop,
-                                      llvm::ScalarEvolution& SE,
-                                      llvm::DominatorTree& DT,
-                                      llvm::LoopInfo& LI,
-                                      const PolyOptConfig& config = PolyOptConfig{});
+LoopLegalityResult checkLoopLegality(llvm::Loop* outerLoop, llvm::ScalarEvolution& SE, llvm::DominatorTree& DT,
+                                     llvm::LoopInfo& LI, const PolyOptConfig& config = PolyOptConfig{});
 
 } // namespace polyopt
 } // namespace omscript

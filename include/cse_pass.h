@@ -57,8 +57,7 @@ struct CSEStats {
 ///                        expressions.  Pass nullptr to use the default
 ///                        binary-only behaviour.
 /// @returns               Aggregate statistics across all functions.
-CSEStats runCSEPass(Program* program,
-                    bool verbose = false,
+CSEStats runCSEPass(Program* program, bool verbose = false,
                     const std::unordered_map<std::string, EffectSummary>* idempotentFuncs = nullptr);
 
 } // namespace omscript

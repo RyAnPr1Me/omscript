@@ -21,8 +21,8 @@
 ///   - No OS interaction: no I/O, no randomness, no filesystem access.
 
 #include <cstdint>
-#include <map>
 #include <limits>
+#include <map>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -70,36 +70,64 @@ static constexpr CTArrayHandle CT_NULL_HANDLE = 0;
 // ═══════════════════════════════════════════════════════════════════════════════
 struct CTInterval {
     enum class Kind : uint8_t { BOTTOM, RANGE, TOP };
-    Kind    kind{Kind::TOP};
+    Kind kind{Kind::TOP};
     int64_t lo{std::numeric_limits<int64_t>::min()};
     int64_t hi{std::numeric_limits<int64_t>::max()};
 
     // ── Factory helpers ───────────────────────────────────────────────────────
-    static CTInterval top()    noexcept { return {}; }
-    static CTInterval bottom() noexcept { CTInterval a; a.kind = Kind::BOTTOM; return a; }
+    static CTInterval top() noexcept {
+        return {};
+    }
+    static CTInterval bottom() noexcept {
+        CTInterval a;
+        a.kind = Kind::BOTTOM;
+        return a;
+    }
     static CTInterval exact(int64_t v) noexcept {
-        CTInterval a; a.kind = Kind::RANGE; a.lo = a.hi = v; return a;
+        CTInterval a;
+        a.kind = Kind::RANGE;
+        a.lo = a.hi = v;
+        return a;
     }
     static CTInterval range(int64_t lo, int64_t hi) noexcept {
-        if (lo > hi) return bottom();
-        CTInterval a; a.kind = Kind::RANGE; a.lo = lo; a.hi = hi; return a;
+        if (lo > hi)
+            return bottom();
+        CTInterval a;
+        a.kind = Kind::RANGE;
+        a.lo = lo;
+        a.hi = hi;
+        return a;
     }
 
     // ── Kind predicates ───────────────────────────────────────────────────────
-    bool isBottom()   const noexcept { return kind == Kind::BOTTOM; }
-    bool isRange()    const noexcept { return kind == Kind::RANGE; }
-    bool isTop()      const noexcept { return kind == Kind::TOP; }
-    bool isConcrete() const noexcept { return kind == Kind::RANGE && lo == hi; }
+    bool isBottom() const noexcept {
+        return kind == Kind::BOTTOM;
+    }
+    bool isRange() const noexcept {
+        return kind == Kind::RANGE;
+    }
+    bool isTop() const noexcept {
+        return kind == Kind::TOP;
+    }
+    bool isConcrete() const noexcept {
+        return kind == Kind::RANGE && lo == hi;
+    }
 
     bool includes(int64_t v) const noexcept {
-        if (isBottom()) return false;
-        if (isTop())    return true;
+        if (isBottom())
+            return false;
+        if (isTop())
+            return true;
         return lo <= v && v <= hi;
     }
-    bool includesZero() const noexcept { return includes(0); }
+    bool includesZero() const noexcept {
+        return includes(0);
+    }
     bool isNonNegative() const noexcept {
-        if (isBottom()) return true;   // vacuously true
-        if (isTop())    return false;
+        if (isBottom())
+            return true; // vacuously true
+        if (isTop())
+            return false;
         return lo >= 0;
     }
 
@@ -107,9 +135,12 @@ struct CTInterval {
 
     /// Join (least upper bound): result contains all values from both.
     CTInterval join(const CTInterval& o) const noexcept {
-        if (isBottom()) return o;
-        if (o.isBottom()) return *this;
-        if (isTop() || o.isTop()) return top();
+        if (isBottom())
+            return o;
+        if (o.isBottom())
+            return *this;
+        if (isTop() || o.isTop())
+            return top();
         return range(std::min(lo, o.lo), std::max(hi, o.hi));
     }
 
@@ -118,26 +149,34 @@ struct CTInterval {
     /// overlap.  Used to combine constraints from compound conditions like
     /// `A && B` where both narrowings apply on the then-branch.
     CTInterval intersect(const CTInterval& o) const noexcept {
-        if (isBottom() || o.isBottom()) return bottom();
-        if (isTop()) return o;
-        if (o.isTop()) return *this;
+        if (isBottom() || o.isBottom())
+            return bottom();
+        if (isTop())
+            return o;
+        if (o.isTop())
+            return *this;
         const int64_t newLo = std::max(lo, o.lo);
         const int64_t newHi = std::min(hi, o.hi);
-        if (newLo > newHi) return bottom();
+        if (newLo > newHi)
+            return bottom();
         return range(newLo, newHi);
     }
 
     /// Widening: called on loop back-edges to ensure convergence.
     /// If the new bound extends the old bound, widen it to ±∞.
     CTInterval widen(const CTInterval& prev) const noexcept {
-        if (isBottom()) return prev;
-        if (prev.isBottom()) return *this;
-        if (isTop()) return top();
-        if (prev.isTop()) return top();
+        if (isBottom())
+            return prev;
+        if (prev.isBottom())
+            return *this;
+        if (isTop())
+            return top();
+        if (prev.isTop())
+            return top();
         const int64_t newLo = (lo < prev.lo) ? std::numeric_limits<int64_t>::min() : prev.lo;
         const int64_t newHi = (hi > prev.hi) ? std::numeric_limits<int64_t>::max() : prev.hi;
-        if (newLo == std::numeric_limits<int64_t>::min() &&
-            newHi == std::numeric_limits<int64_t>::max()) return top();
+        if (newLo == std::numeric_limits<int64_t>::min() && newHi == std::numeric_limits<int64_t>::max())
+            return top();
         return range(newLo, newHi);
     }
 
@@ -149,42 +188,61 @@ struct CTInterval {
     // constraint imposed by the condition — semantically derived from the
     // definition of the comparison operator.
 
-    CTInterval narrowLT(int64_t bound) const noexcept {   // x < bound
-        if (isBottom()) return *this;
-        if (bound == std::numeric_limits<int64_t>::min()) return bottom();
-        if (isTop()) return range(std::numeric_limits<int64_t>::min(), bound - 1);
-        if (lo >= bound) return bottom();
+    CTInterval narrowLT(int64_t bound) const noexcept { // x < bound
+        if (isBottom())
+            return *this;
+        if (bound == std::numeric_limits<int64_t>::min())
+            return bottom();
+        if (isTop())
+            return range(std::numeric_limits<int64_t>::min(), bound - 1);
+        if (lo >= bound)
+            return bottom();
         return range(lo, std::min(hi, bound - 1));
     }
-    CTInterval narrowLE(int64_t bound) const noexcept {   // x <= bound
-        if (isBottom()) return *this;
-        if (isTop()) return range(std::numeric_limits<int64_t>::min(), bound);
-        if (lo > bound) return bottom();
+    CTInterval narrowLE(int64_t bound) const noexcept { // x <= bound
+        if (isBottom())
+            return *this;
+        if (isTop())
+            return range(std::numeric_limits<int64_t>::min(), bound);
+        if (lo > bound)
+            return bottom();
         return range(lo, std::min(hi, bound));
     }
-    CTInterval narrowGT(int64_t bound) const noexcept {   // x > bound
-        if (isBottom()) return *this;
-        if (bound == std::numeric_limits<int64_t>::max()) return bottom();
-        if (isTop()) return range(bound + 1, std::numeric_limits<int64_t>::max());
-        if (hi <= bound) return bottom();
+    CTInterval narrowGT(int64_t bound) const noexcept { // x > bound
+        if (isBottom())
+            return *this;
+        if (bound == std::numeric_limits<int64_t>::max())
+            return bottom();
+        if (isTop())
+            return range(bound + 1, std::numeric_limits<int64_t>::max());
+        if (hi <= bound)
+            return bottom();
         return range(std::max(lo, bound + 1), hi);
     }
-    CTInterval narrowGE(int64_t bound) const noexcept {   // x >= bound
-        if (isBottom()) return *this;
-        if (isTop()) return range(bound, std::numeric_limits<int64_t>::max());
-        if (hi < bound) return bottom();
+    CTInterval narrowGE(int64_t bound) const noexcept { // x >= bound
+        if (isBottom())
+            return *this;
+        if (isTop())
+            return range(bound, std::numeric_limits<int64_t>::max());
+        if (hi < bound)
+            return bottom();
         return range(std::max(lo, bound), hi);
     }
-    CTInterval narrowEQ(int64_t val) const noexcept {   // x == val
-        if (!includes(val)) return bottom();
+    CTInterval narrowEQ(int64_t val) const noexcept { // x == val
+        if (!includes(val))
+            return bottom();
         return exact(val);
     }
-    CTInterval narrowNE(int64_t val) const noexcept {   // x != val
-        if (!includes(val)) return *this;
-        if (isConcrete()) return bottom();        // only value, now excluded
-        if (isRange() && lo == val) return range(lo + 1, hi);
-        if (isRange() && hi == val) return range(lo, hi - 1);
-        return *this;  // conservative — can't express non-contiguous sets
+    CTInterval narrowNE(int64_t val) const noexcept { // x != val
+        if (!includes(val))
+            return *this;
+        if (isConcrete())
+            return bottom(); // only value, now excluded
+        if (isRange() && lo == val)
+            return range(lo + 1, hi);
+        if (isRange() && hi == val)
+            return range(lo, hi - 1);
+        return *this; // conservative — can't express non-contiguous sets
     }
 
     // ── Comparison results ────────────────────────────────────────────────────
@@ -197,12 +255,12 @@ struct CTInterval {
 
     enum class CmpResult { ALWAYS_TRUE, ALWAYS_FALSE, UNKNOWN };
 
-    CmpResult cmpLT(const CTInterval& o) const noexcept;   // this < o
-    CmpResult cmpLE(const CTInterval& o) const noexcept;   // this <= o
-    CmpResult cmpGT(const CTInterval& o) const noexcept;   // this > o
-    CmpResult cmpGE(const CTInterval& o) const noexcept;   // this >= o
-    CmpResult cmpEQ(const CTInterval& o) const noexcept;   // this == o
-    CmpResult cmpNE(const CTInterval& o) const noexcept;   // this != o
+    CmpResult cmpLT(const CTInterval& o) const noexcept; // this < o
+    CmpResult cmpLE(const CTInterval& o) const noexcept; // this <= o
+    CmpResult cmpGT(const CTInterval& o) const noexcept; // this > o
+    CmpResult cmpGE(const CTInterval& o) const noexcept; // this >= o
+    CmpResult cmpEQ(const CTInterval& o) const noexcept; // this == o
+    CmpResult cmpNE(const CTInterval& o) const noexcept; // this != o
 
     // ── Arithmetic transfer functions ─────────────────────────────────────────
     //
@@ -214,7 +272,7 @@ struct CTInterval {
     CTInterval opAdd(const CTInterval& o) const noexcept;
     CTInterval opSub(const CTInterval& o) const noexcept;
     CTInterval opMul(const CTInterval& o) const noexcept;
-    CTInterval opDiv(const CTInterval& o) const noexcept;  // returns TOP if divisor ∋ 0
+    CTInterval opDiv(const CTInterval& o) const noexcept; // returns TOP if divisor ∋ 0
     CTInterval opMod(const CTInterval& o) const noexcept;
     CTInterval opShl(const CTInterval& o) const noexcept;
     CTInterval opShr(const CTInterval& o) const noexcept;
@@ -268,14 +326,14 @@ struct CTAnalysisResult {
 
 // ─── CTValueKind ─────────────────────────────────────────────────────────────
 enum class CTValueKind : uint8_t {
-    CONCRETE_U64,     ///< Unsigned 64-bit integer (same storage as i64)
-    CONCRETE_I64,     ///< Signed 64-bit integer
-    CONCRETE_F64,     ///< 64-bit floating point
-    CONCRETE_BOOL,    ///< Boolean 0/1 (stored as uint8)
-    CONCRETE_STRING,  ///< Heap-owned UTF-8 string
-    CONCRETE_ARRAY,   ///< Array stored in CTHeap; value holds handle
-    UNINITIALIZED,    ///< Placeholder / missing value
-    SYMBOLIC,         ///< Unknown value for partial evaluation (path-sensitive folding)
+    CONCRETE_U64,    ///< Unsigned 64-bit integer (same storage as i64)
+    CONCRETE_I64,    ///< Signed 64-bit integer
+    CONCRETE_F64,    ///< 64-bit floating point
+    CONCRETE_BOOL,   ///< Boolean 0/1 (stored as uint8)
+    CONCRETE_STRING, ///< Heap-owned UTF-8 string
+    CONCRETE_ARRAY,  ///< Array stored in CTHeap; value holds handle
+    UNINITIALIZED,   ///< Placeholder / missing value
+    SYMBOLIC,        ///< Unknown value for partial evaluation (path-sensitive folding)
 };
 
 // ─── CTValue ─────────────────────────────────────────────────────────────────
@@ -289,44 +347,60 @@ struct CTValue {
     // Scalar payload (only one member is valid at a time, selected by `kind`).
     union {
         uint64_t u64;
-        int64_t  i64;
-        double   f64;
-        bool     b;
+        int64_t i64;
+        double f64;
+        bool b;
     } scalar{};
 
-    std::string   str;                      ///< Valid when kind == CONCRETE_STRING
-    CTArrayHandle arr{CT_NULL_HANDLE};      ///< Valid when kind == CONCRETE_ARRAY
-    uint32_t      symId{0};                 ///< Non-zero for SYMBOLIC values; unique per created symbolic
+    std::string str;                   ///< Valid when kind == CONCRETE_STRING
+    CTArrayHandle arr{CT_NULL_HANDLE}; ///< Valid when kind == CONCRETE_ARRAY
+    uint32_t symId{0};                 ///< Non-zero for SYMBOLIC values; unique per created symbolic
 
     // ── Factory helpers ───────────────────────────────────────────────────
-    static CTValue fromU64(uint64_t v)    noexcept;
-    static CTValue fromI64(int64_t  v)    noexcept;
-    static CTValue fromF64(double   v)    noexcept;
-    static CTValue fromBool(bool    v)    noexcept;
+    static CTValue fromU64(uint64_t v) noexcept;
+    static CTValue fromI64(int64_t v) noexcept;
+    static CTValue fromF64(double v) noexcept;
+    static CTValue fromBool(bool v) noexcept;
     static CTValue fromString(std::string s);
     static CTValue fromArray(CTArrayHandle h) noexcept;
-    static CTValue uninit()    noexcept { return CTValue{}; }
-    static CTValue symbolic()  noexcept; ///< Returns a fresh symbolic value with unique symId
+    static CTValue uninit() noexcept {
+        return CTValue{};
+    }
+    static CTValue symbolic() noexcept; ///< Returns a fresh symbolic value with unique symId
 
     // ── Kind predicates ───────────────────────────────────────────────────
-    bool isKnown()     const noexcept { return kind != CTValueKind::UNINITIALIZED; }
-    bool isSymbolic()  const noexcept { return kind == CTValueKind::SYMBOLIC; }
-    bool isConcrete()  const noexcept { return isKnown() && !isSymbolic(); }
-    bool isInt()    const noexcept {
+    bool isKnown() const noexcept {
+        return kind != CTValueKind::UNINITIALIZED;
+    }
+    bool isSymbolic() const noexcept {
+        return kind == CTValueKind::SYMBOLIC;
+    }
+    bool isConcrete() const noexcept {
+        return isKnown() && !isSymbolic();
+    }
+    bool isInt() const noexcept {
         return kind == CTValueKind::CONCRETE_I64 || kind == CTValueKind::CONCRETE_U64;
     }
-    bool isFloat()  const noexcept { return kind == CTValueKind::CONCRETE_F64;    }
-    bool isString() const noexcept { return kind == CTValueKind::CONCRETE_STRING; }
-    bool isArray()  const noexcept { return kind == CTValueKind::CONCRETE_ARRAY;  }
-    bool isBool()   const noexcept { return kind == CTValueKind::CONCRETE_BOOL;   }
+    bool isFloat() const noexcept {
+        return kind == CTValueKind::CONCRETE_F64;
+    }
+    bool isString() const noexcept {
+        return kind == CTValueKind::CONCRETE_STRING;
+    }
+    bool isArray() const noexcept {
+        return kind == CTValueKind::CONCRETE_ARRAY;
+    }
+    bool isBool() const noexcept {
+        return kind == CTValueKind::CONCRETE_BOOL;
+    }
 
     // ── Accessors (assert-checked) ────────────────────────────────────────
-    int64_t       asI64()  const noexcept;
-    uint64_t      asU64()  const noexcept;
-    double        asF64()  const noexcept;
-    bool          asBool() const noexcept;
-    const std::string& asStr()  const;
-    CTArrayHandle asArr()  const noexcept;
+    int64_t asI64() const noexcept;
+    uint64_t asU64() const noexcept;
+    double asF64() const noexcept;
+    bool asBool() const noexcept;
+    const std::string& asStr() const;
+    CTArrayHandle asArr() const noexcept;
 
     /// Truthy: non-zero int/float, non-empty string, valid array handle.
     bool isTruthy() const noexcept;
@@ -339,14 +413,16 @@ struct CTValue {
     void appendMemoHash(std::string& out) const;
 
     bool operator==(const CTValue& o) const noexcept;
-    bool operator!=(const CTValue& o) const noexcept { return !(*this == o); }
+    bool operator!=(const CTValue& o) const noexcept {
+        return !(*this == o);
+    }
 };
 
 // ─── CTArray / CTHeap ────────────────────────────────────────────────────────
 
 /// A fixed-length array stored on the compile-time heap.
 struct CTArray {
-    uint64_t             len{0};
+    uint64_t len{0};
     std::vector<CTValue> data;
 
     explicit CTArray(uint64_t n, const CTValue& fill = CTValue{});
@@ -358,8 +434,8 @@ struct CTArray {
 /// Provides mutation semantics required for array element assignment during
 /// compile-time function evaluation.
 class CTHeap {
-public:
-    CTHeap()  = default;
+  public:
+    CTHeap() = default;
     ~CTHeap() = default;
 
     /// Allocate a new array of `n` elements, each initialised to `fill`.
@@ -388,13 +464,15 @@ public:
     void freeArray(CTArrayHandle h);
 
     /// Read-only access to the underlying CTArray (nullptr if not found).
-    const CTArray* get(CTArrayHandle h)  const;
-    CTArray*       getMut(CTArrayHandle h);
+    const CTArray* get(CTArrayHandle h) const;
+    CTArray* getMut(CTArrayHandle h);
 
     /// Current handle counter (useful for stats / debugging).
-    uint64_t nextHandle() const noexcept { return nextHandle_; }
+    uint64_t nextHandle() const noexcept {
+        return nextHandle_;
+    }
 
-private:
+  private:
     /// `std::map` (not unordered_map) guarantees deterministic iteration order
     /// over handles, which matters for snapshot/serialisation of heap state.
     std::map<CTArrayHandle, CTArray> arrays_;
@@ -408,25 +486,25 @@ private:
 /// Holds local variable bindings, a pointer to the shared heap,
 /// and control-flow signals (return, break, continue).
 struct CTFrame {
-    const FunctionDecl* fn{nullptr};     ///< Executing function (non-owning)
+    const FunctionDecl* fn{nullptr}; ///< Executing function (non-owning)
 
     /// Local variable map: name → CTValue.
     /// Array variables are stored as CTValues with kind==CONCRETE_ARRAY.
     std::unordered_map<std::string, CTValue> locals;
 
-    CTHeap* heap{nullptr};               ///< Shared heap (non-owning)
-    int     ip{0};                       ///< Logical instruction pointer
+    CTHeap* heap{nullptr}; ///< Shared heap (non-owning)
+    int ip{0};             ///< Logical instruction pointer
 
     // ── Control-flow signals ──────────────────────────────────────────────
     CTValue returnValue;
-    bool    hasReturned{false};
-    bool    didBreak{false};
-    bool    didContinue{false};
+    bool hasReturned{false};
+    bool didBreak{false};
+    bool didContinue{false};
 
     /// Last expression value in a statement context.
     /// Used as implicit return for `comptime { expr; }` blocks.
     CTValue lastBareExpr;
-    bool    hasLastBare{false};
+    bool hasLastBare{false};
 
     /// Constraint set: varName → narrow interval from the branch condition that
     /// led into this frame path.  Applied in IDENTIFIER_EXPR to concretise symbolic
@@ -437,7 +515,7 @@ struct CTFrame {
 // ─── Memoisation key ─────────────────────────────────────────────────────────
 struct CTMemoKey {
     std::string fnName;
-    std::string argsHash;   ///< Concatenation of CTValue::memoHash() per arg
+    std::string argsHash; ///< Concatenation of CTValue::memoHash() per arg
     bool operator==(const CTMemoKey& o) const noexcept {
         return fnName == o.fnName && argsHash == o.argsHash;
     }
@@ -459,8 +537,8 @@ struct CTCallEdge {
 
 /// Interprocedural call graph of functions that participated in CT evaluation.
 struct CTGraph {
-    std::vector<std::string> nodes;   ///< Function names that were CT-evaluated
-    std::vector<CTCallEdge>  edges;   ///< Discovered call-graph edges
+    std::vector<std::string> nodes; ///< Function names that were CT-evaluated
+    std::vector<CTCallEdge> edges;  ///< Discovered call-graph edges
 };
 
 // ─── CTEngine ─────────────────────────────────────────────────────────────────
@@ -478,17 +556,17 @@ struct CTGraph {
 ///   (potentially partial) tile.  This matches the spec's VECTOR MODEL
 ///   requirement without introducing real parallelism.
 class CTEngine {
-public:
+  public:
     // ── Compile-time limits ───────────────────────────────────────────────
-    static constexpr int     kMaxDepth        = 128;
+    static constexpr int kMaxDepth = 128;
     static constexpr int64_t kMaxInstructions = 10'000'000LL;
-    static constexpr int     kSIMDLaneWidth   = 8;   ///< Pipeline tile width
+    static constexpr int kSIMDLaneWidth = 8; ///< Pipeline tile width
 
     explicit CTEngine();
     ~CTEngine() = default;
 
     // Non-copyable, non-movable (holds heap state).
-    CTEngine(const CTEngine&)            = delete;
+    CTEngine(const CTEngine&) = delete;
     CTEngine& operator=(const CTEngine&) = delete;
 
     // ── Function / constant registry ─────────────────────────────────────
@@ -501,27 +579,20 @@ public:
     // ── Primary execution entry points ───────────────────────────────────
 
     /// Execute a named function with CT-known arguments.
-    std::optional<CTValue> executeFunction(
-        const std::string&          fnName,
-        const std::vector<CTValue>& args);
+    std::optional<CTValue> executeFunction(const std::string& fnName, const std::vector<CTValue>& args);
 
     /// Execute a FunctionDecl* directly.
-    std::optional<CTValue> executeFunction(
-        const FunctionDecl*         fn,
-        const std::vector<CTValue>& args);
+    std::optional<CTValue> executeFunction(const FunctionDecl* fn, const std::vector<CTValue>& args);
 
     /// Evaluate a comptime block (BlockStmt).
-    std::optional<CTValue> evalComptimeBlock(
-        const BlockStmt*            body,
-        const std::unordered_map<std::string, CTValue>& env = {});
+    std::optional<CTValue> evalComptimeBlock(const BlockStmt* body,
+                                             const std::unordered_map<std::string, CTValue>& env = {});
 
     /// Evaluate a single expression in the given environment.
     /// Side effects (array mutations, local variable changes) stay inside a
     /// temporary frame and are not propagated back.  Use this as a drop-in
     /// replacement for per-expression constant folding (replaces tryFoldExprToConst).
-    CTValue evalSingleExpr(
-        const std::unordered_map<std::string, CTValue>& env,
-        const Expression* expr);
+    CTValue evalSingleExpr(const std::unordered_map<std::string, CTValue>& env, const Expression* expr);
 
     // ── Builtin evaluator (exposed for bridge with existing ConstValue) ───
     /// Evaluate a named built-in function with fully-resolved arguments.
@@ -549,9 +620,7 @@ public:
     ///                  hypot, fma, copysign, min_float, max_float
     ///   • Fast/precise arithmetic: fast_add/sub/mul/div, precise_add/sub/mul/div
     ///   • Type casts: u64, i64, int, uint, u32, i32, u16, i16, u8, i8, bool
-    std::optional<CTValue> evalBuiltin(
-        const std::string&          name,
-        const std::vector<CTValue>& args);
+    std::optional<CTValue> evalBuiltin(const std::string& name, const std::vector<CTValue>& args);
 
     // ── Heap access for result extraction ────────────────────────────────
     /// Extract all elements of an array into a std::vector.
@@ -559,14 +628,16 @@ public:
     /// Return the length of a heap array.
     uint64_t arrayLength(CTArrayHandle h) const;
     /// Direct heap access (read-only).
-    const CTHeap& heap() const noexcept { return heap_; }
+    const CTHeap& heap() const noexcept {
+        return heap_;
+    }
     /// Direct heap access (mutable).
-    CTHeap& heap() noexcept { return heap_; }
+    CTHeap& heap() noexcept {
+        return heap_;
+    }
 
     // ── Specialisation key ────────────────────────────────────────────────
-    std::string specializationKey(
-        const std::string&          fnName,
-        const std::vector<CTValue>& args) const;
+    std::string specializationKey(const std::string& fnName, const std::vector<CTValue>& args) const;
 
     // ── Whole-program CF-CTRE pass ─────────────────────────────────────────
     /// Run the CF-CTRE analysis pass over an entire parsed Program.
@@ -583,25 +654,29 @@ public:
         int64_t pipelineTilesExecuted{0};
         int64_t functionsRegistered{0};
         int64_t pureFunctionsDetected{0};
-        int64_t loopsReasoned{0};    ///< For-loops handled by closed-form symbolic analysis
-        int64_t branchMerges{0};     ///< Symbolic-IF diamond eliminations (path-sensitive folding)
-        int64_t ternaryMerges{0};    ///< Symbolic-ternary both-arm agreement folds
+        int64_t loopsReasoned{0};               ///< For-loops handled by closed-form symbolic analysis
+        int64_t branchMerges{0};                ///< Symbolic-IF diamond eliminations (path-sensitive folding)
+        int64_t ternaryMerges{0};               ///< Symbolic-ternary both-arm agreement folds
         int64_t uniformReturnFunctionsFound{0}; ///< Pure functions whose return is always the same constant
         int64_t deadFunctionsDetected{0};       ///< Functions unreachable from any entry point
         // Phase 9 (abstract interpretation) counters
-        int64_t deadBranchesEliminated{0};      ///< Q2: branches proven always-dead
-        int64_t safeArrayAccesses{0};           ///< Q5: array accesses proven in-bounds
-        int64_t safeDivisions{0};               ///< Q5: divisions proven non-zero divisor
-        int64_t safeArithmetic{0};              ///< Q5: add/sub/mul proven no-overflow
-        int64_t cheaperRewritesFound{0};        ///< Q4: range-conditioned strength reductions
+        int64_t deadBranchesEliminated{0}; ///< Q2: branches proven always-dead
+        int64_t safeArrayAccesses{0};      ///< Q5: array accesses proven in-bounds
+        int64_t safeDivisions{0};          ///< Q5: divisions proven non-zero divisor
+        int64_t safeArithmetic{0};         ///< Q5: add/sub/mul proven no-overflow
+        int64_t cheaperRewritesFound{0};   ///< Q4: range-conditioned strength reductions
         // Phase A/B/C/D/F additional stats
-        int64_t algebraicFolds{0};              ///< Algebraic identity simplifications (x+0, x-x, etc.)
-        int64_t constraintFolds{0};             ///< Branch-constraint folds (symbolic → concrete from narrowing)
-        int64_t partialEvalFolds{0};            ///< Partial specialisation cache hits
-        int64_t callSitesFolded{0};             ///< Phase 10: literal call sites pre-evaluated
+        int64_t algebraicFolds{0};   ///< Algebraic identity simplifications (x+0, x-x, etc.)
+        int64_t constraintFolds{0};  ///< Branch-constraint folds (symbolic → concrete from narrowing)
+        int64_t partialEvalFolds{0}; ///< Partial specialisation cache hits
+        int64_t callSitesFolded{0};  ///< Phase 10: literal call sites pre-evaluated
     };
-    const Stats& stats()      const noexcept { return stats_; }
-    void         resetStats()       noexcept { stats_ = {}; }
+    const Stats& stats() const noexcept {
+        return stats_;
+    }
+    void resetStats() noexcept {
+        stats_ = {};
+    }
 
     /// Set of user functions that produced ≥1 concrete fold result (i.e., they
     /// were successfully CT-evaluated with concrete arguments).  The codegen
@@ -629,7 +704,9 @@ public:
     }
 
     /// Interprocedural call graph built during runPass.
-    const CTGraph& graph() const noexcept { return graph_; }
+    const CTGraph& graph() const noexcept {
+        return graph_;
+    }
 
     // ── Abstract interpretation results (Phase 9) ─────────────────────────
     //
@@ -670,32 +747,26 @@ public:
     }
     /// Return the abstract interval for variable `varName` in function `fnName`
     /// at function exit.  Returns CTInterval::top() if unknown.
-    CTInterval getExitRange(const std::string& fnName,
-                            const std::string& varName) const noexcept;
+    CTInterval getExitRange(const std::string& fnName, const std::string& varName) const noexcept;
 
-private:
+  private:
     // ── Internal evaluation ───────────────────────────────────────────────
     CTValue evalExpr(CTFrame& frame, const Expression* expr);
-    bool    evalStmt(CTFrame& frame, const Statement*  stmt);
-    bool    evalPipelineStmt(CTFrame& frame, const Statement* stmt);
-    void    executeTile(CTFrame& frame,
-                        const std::vector<const Statement*>& stageStmts,
-                        int64_t baseIdx, int64_t n);
-    bool    executeBody(CTFrame& frame, const BlockStmt* body);
+    bool evalStmt(CTFrame& frame, const Statement* stmt);
+    bool evalPipelineStmt(CTFrame& frame, const Statement* stmt);
+    void executeTile(CTFrame& frame, const std::vector<const Statement*>& stageStmts, int64_t baseIdx, int64_t n);
+    bool executeBody(CTFrame& frame, const BlockStmt* body);
 
     CTValue evalBinaryOp(const std::string& op, const CTValue& lhs, const CTValue& rhs);
     CTValue evalUnaryOp(const std::string& op, const CTValue& val);
     CTValue evalTypeCast(const std::string& name, const CTValue& val);
-    CTValue evalCall(CTFrame& callerFrame,
-                     const std::string& fnName,
-                     const std::vector<CTValue>& args);
+    CTValue evalCall(CTFrame& callerFrame, const std::string& fnName, const std::vector<CTValue>& args);
 
     /// Attempt to symbolically reduce a for-range loop body using closed-form
     /// arithmetic instead of iteration.  Returns true (and updates frame) if
     /// the body was fully handled; returns false to let the caller fall back
     /// to direct iteration.
-    bool tryReasonForLoop(CTFrame& frame, const ForStmt* fs,
-                          int64_t start, int64_t end, int64_t step, int64_t N);
+    bool tryReasonForLoop(CTFrame& frame, const ForStmt* fs, int64_t start, int64_t end, int64_t step, int64_t N);
 
     /// Snapshot an array from the heap into a new handle (for memoisation).
     CTArrayHandle snapshotArray(CTArrayHandle src);
@@ -703,14 +774,11 @@ private:
     /// Narrow variable ranges along the then/else branches of an `if`
     /// based on simple comparison constraints in the condition expression.
     /// Updates `thenF.constraints` / `elseF.constraints` in place.
-    void narrowBranchConstraints(const Expression* cond,
-                                 CTFrame& thenF,
-                                 CTFrame& elseF) const;
+    void narrowBranchConstraints(const Expression* cond, CTFrame& thenF, CTFrame& elseF) const;
 
     /// Build a partial-specialisation cache key for (fnName, args), supporting
     /// mixed concrete/symbolic argument vectors.
-    std::string partialSpecKey(const std::string& fnName,
-                               const std::vector<CTValue>& args) const;
+    std::string partialSpecKey(const std::string& fnName, const std::vector<CTValue>& args) const;
 
     // ── Phase 9: Abstract interpretation (CTAbstractInterpreter) ─────────
     // Called from runPass; populates the analysis* maps below.
@@ -720,26 +788,26 @@ private:
     CTHeap heap_;
 
     std::unordered_map<std::string, const FunctionDecl*> functions_;
-    std::unordered_map<std::string, CTValue>             globalConsts_;
-    std::unordered_map<std::string, int64_t>             enumConsts_;
-    std::unordered_set<std::string>                      pureFunctions_;
+    std::unordered_map<std::string, CTValue> globalConsts_;
+    std::unordered_map<std::string, int64_t> enumConsts_;
+    std::unordered_set<std::string> pureFunctions_;
 
     /// Functions that produced ≥1 concrete fold (memoised with concrete args).
     /// Populated in executeFunction; read by codegen to apply InlineHint.
-    std::unordered_set<std::string>                      foldableCallees_;
+    std::unordered_set<std::string> foldableCallees_;
 
     /// Phase 6: pure functions whose return value is always the same constant
     /// (proven by evaluating with symbolic arguments).
-    std::unordered_map<std::string, CTValue>             uniformReturnValues_;
+    std::unordered_map<std::string, CTValue> uniformReturnValues_;
 
     /// Phase 7: functions unreachable from any entry point via BFS on the call graph.
-    std::unordered_set<std::string>                      deadFunctions_;
+    std::unordered_set<std::string> deadFunctions_;
 
     // ── Phase 9 analysis results ──────────────────────────────────────────
     /// Q2: if-statements where the then-branch is always-dead.
-    std::unordered_set<const Statement*>  analysisDeadThen_;
+    std::unordered_set<const Statement*> analysisDeadThen_;
     /// Q2: if-statements where the else-branch is always-dead.
-    std::unordered_set<const Statement*>  analysisDeadElse_;
+    std::unordered_set<const Statement*> analysisDeadElse_;
     /// Q5: array index expressions proven always in-bounds.
     std::unordered_set<const Expression*> analysisSafeArrayAccess_;
     /// Q5: div/mod expressions proven non-zero divisor.
@@ -749,7 +817,7 @@ private:
     /// Q4: range-conditioned cheaper rewrites.
     std::unordered_map<const Expression*, std::string> analysisCheaperRewrites_;
     /// Q1: per-function exit ranges  fnName → (varName → CTInterval).
-    std::unordered_map<std::string, CTAbstractEnv>     analysisExitEnvs_;
+    std::unordered_map<std::string, CTAbstractEnv> analysisExitEnvs_;
 
     /// Memoisation cache: CTMemoKey → snapshot CTValue.
     std::unordered_map<CTMemoKey, CTValue, CTMemoKeyHash> memoCache_;
@@ -765,7 +833,7 @@ private:
     /// Per-evaluation instruction budget (reset at each top-level entry).
     int64_t fuel_{0};
 
-    Stats   stats_;
+    Stats stats_;
     CTGraph graph_;
 };
 
@@ -793,9 +861,8 @@ private:
 //   - Proven-safe operation sets (Q5)
 // ═══════════════════════════════════════════════════════════════════════════════
 class CTAbstractInterpreter {
-public:
-    explicit CTAbstractInterpreter(CTEngine& eng,
-                                   const std::unordered_map<std::string, CTValue>& globals,
+  public:
+    explicit CTAbstractInterpreter(CTEngine& eng, const std::unordered_map<std::string, CTValue>& globals,
                                    const std::unordered_map<std::string, int64_t>& enums)
         : engine_(eng), globals_(globals), enums_(enums) {}
 
@@ -803,7 +870,7 @@ public:
     /// If the function body is nullptr, returns a default (all-top) result.
     CTAnalysisResult analyzeFunction(const FunctionDecl* fn);
 
-private:
+  private:
     CTEngine& engine_;
     const std::unordered_map<std::string, CTValue>& globals_;
     const std::unordered_map<std::string, int64_t>& enums_;
@@ -811,24 +878,20 @@ private:
     // ── Expression analysis ───────────────────────────────────────────────
     /// Compute the abstract interval for expression `e` in environment `env`.
     /// Returns CTInterval::top() when the value cannot be determined.
-    CTInterval analyzeExpr(const Expression* e, const CTAbstractEnv& env,
-                           CTAnalysisResult& result);
+    CTInterval analyzeExpr(const Expression* e, const CTAbstractEnv& env, CTAnalysisResult& result);
 
     // ── Statement analysis ────────────────────────────────────────────────
     /// Analyse `s` and update `env` to the post-state.
     /// Returns false if the rest of the block is unreachable (return/break).
-    bool analyzeStmt(const Statement* s, CTAbstractEnv& env,
-                     CTAnalysisResult& result);
+    bool analyzeStmt(const Statement* s, CTAbstractEnv& env, CTAnalysisResult& result);
 
-    void analyzeBlock(const BlockStmt* b, CTAbstractEnv& env,
-                      CTAnalysisResult& result);
+    void analyzeBlock(const BlockStmt* b, CTAbstractEnv& env, CTAnalysisResult& result);
 
     // ── Condition narrowing ───────────────────────────────────────────────
     /// Given a branch condition, narrow the two environments (then/else) to
     /// reflect the constraint implied by the condition being true / false.
     /// Both environments start as copies of the pre-condition environment.
-    void narrowCondition(const Expression* cond,
-                         CTAbstractEnv& thenEnv, CTAbstractEnv& elseEnv);
+    void narrowCondition(const Expression* cond, CTAbstractEnv& thenEnv, CTAbstractEnv& elseEnv);
 
     // ── Environment join ──────────────────────────────────────────────────
     /// Join two environments at a control-flow merge point.

@@ -1,6 +1,6 @@
+#include "build_system.h"
 #include "codegen.h"
 #include "compiler.h"
-#include "build_system.h"
 #include "diagnostic.h"
 #include "lexer.h"
 #include "parser.h"
@@ -328,17 +328,17 @@ std::string fetchLatestReleaseTag() {
 
     const std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
     const std::vector<std::string> args = {curlBin,
-                                     "-s",
-                                     "-L",
-                                     "--max-time",
-                                     timeoutStr,
-                                     "-H",
-                                     "Accept: application/vnd.github.v3+json",
-                                     "-H",
-                                     "User-Agent: omsc-updater",
-                                     "-o",
-                                     tmpFile,
-                                     kGitHubReleasesApiUrl};
+                                           "-s",
+                                           "-L",
+                                           "--max-time",
+                                           timeoutStr,
+                                           "-H",
+                                           "Accept: application/vnd.github.v3+json",
+                                           "-H",
+                                           "User-Agent: omsc-updater",
+                                           "-o",
+                                           tmpFile,
+                                           kGitHubReleasesApiUrl};
     llvm::SmallVector<llvm::StringRef, 14> argRefs;
     for (const auto& a : args) {
         argRefs.push_back(a);
@@ -1071,7 +1071,7 @@ bool downloadFile(const std::string& url, const std::string& destPath) {
     const std::string curlBin = *curlPathOrErr;
     const std::string timeoutStr = std::to_string(kDownloadTimeoutSeconds);
     const std::vector<std::string> args = {curlBin,    "-s", "-f",     "-L", "--max-redirs", "5", "--max-time",
-                                     timeoutStr, "-o", destPath, url};
+                                           timeoutStr, "-o", destPath, url};
     llvm::SmallVector<llvm::StringRef, 12> argRefs;
     for (const auto& a : args) {
         argRefs.push_back(a);
@@ -1102,7 +1102,7 @@ std::string downloadString(const std::string& url) {
 
     const std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
     const std::vector<std::string> args = {curlBin,    "-s", "-f",    "-L", "--max-redirs", "5", "--max-time",
-                                     timeoutStr, "-o", tmpFile, url};
+                                           timeoutStr, "-o", tmpFile, url};
     llvm::SmallVector<llvm::StringRef, 12> argRefs;
     for (const auto& a : args) {
         argRefs.push_back(a);
@@ -2152,10 +2152,16 @@ void dumpAST(const omscript::Program* program) {
             std::cout << " [OPTMAX]";
         if (fn->optMaxConfig.enabled) {
             std::cout << " [OPTMAX_V2 safety=";
-            switch(fn->optMaxConfig.safety) {
-                case omscript::SafetyLevel::Off: std::cout << "off"; break;
-                case omscript::SafetyLevel::Relaxed: std::cout << "relaxed"; break;
-                default: std::cout << "on"; break;
+            switch (fn->optMaxConfig.safety) {
+            case omscript::SafetyLevel::Off:
+                std::cout << "off";
+                break;
+            case omscript::SafetyLevel::Relaxed:
+                std::cout << "relaxed";
+                break;
+            default:
+                std::cout << "on";
+                break;
             }
             std::cout << "]";
         }
@@ -2220,14 +2226,14 @@ int main(int argc, char* argv[]) {
     bool flagSuperopt = true;
     unsigned flagSuperoptLevel = 2;
     bool flagHGOE = true;
-    bool flagSDR  = true;
+    bool flagSDR = true;
     bool flagIPOF = true;
     bool flagDebug = false;
-    bool flagNoOwnershipChecks = false;  // --no-ownership-checks (Ω spec §6.2)
-    bool flagMemSanitize       = false;  // --mem-sanitize        (Ω spec §7)
+    bool flagNoOwnershipChecks = false; // --no-ownership-checks (Ω spec §6.2)
+    bool flagMemSanitize = false;       // --mem-sanitize        (Ω spec §7)
 
     // Profile selection for project-mode commands.
-    std::string profileName;  // empty = use default ("debug")
+    std::string profileName;     // empty = use default ("debug")
     bool releaseProfile = false; // shortcut for --profile release
 
     // Tracks which flags the user set *explicitly* on the command line.
@@ -2235,27 +2241,27 @@ int main(int argc, char* argv[]) {
     // flags override the profile so that e.g. `omsc build --release -fno-egraph`
     // uses release settings except with e-graph disabled.
     struct ExplicitFlags {
-        bool optLevel      = false;
-        bool marchCpu      = false;
-        bool mtuneCpu      = false;
-        bool lto           = false;
-        bool pic           = false;
-        bool fastMath      = false;
-        bool optMax        = false;
-        bool vectorize     = false;
-        bool unrollLoops   = false;
-        bool loopOptimize  = false;
-        bool parallelize   = false;
-        bool egraph        = false;
-        bool superopt      = false;
+        bool optLevel = false;
+        bool marchCpu = false;
+        bool mtuneCpu = false;
+        bool lto = false;
+        bool pic = false;
+        bool fastMath = false;
+        bool optMax = false;
+        bool vectorize = false;
+        bool unrollLoops = false;
+        bool loopOptimize = false;
+        bool parallelize = false;
+        bool egraph = false;
+        bool superopt = false;
         bool superoptLevel = false;
-        bool hgoe          = false;
-        bool sdr           = false;
-        bool ipof          = false;
-        bool debug         = false;
-        bool strip         = false;
-        bool staticLink    = false;
-        bool stackProtector= false;
+        bool hgoe = false;
+        bool sdr = false;
+        bool ipof = false;
+        bool debug = false;
+        bool strip = false;
+        bool staticLink = false;
+        bool stackProtector = false;
     } explicitFlags;
     const auto tryParseOptimizationFlag = [](const std::string& arg) -> std::optional<omscript::OptimizationLevel> {
         if (arg == "-Ofast") {
@@ -2288,34 +2294,35 @@ int main(int argc, char* argv[]) {
         struct BoolFlagEntry {
             const char* onFlag;
             const char* offFlag;
-            bool*       value;
-            bool*       explicit_;
+            bool* value;
+            bool* explicit_;
         };
         static const BoolFlagEntry kBoolFlags[] = {
-            {"-flto",              "-fno-lto",              &flagLTO,           &explicitFlags.lto},
-            {"-fpic",              "-fno-pic",              &flagPIC,           &explicitFlags.pic},
-            {"-ffast-math",        "-fno-fast-math",        &flagFastMath,      &explicitFlags.fastMath},
-            {"-foptmax",           "-fno-optmax",           &flagOptMax,        &explicitFlags.optMax},
-            {"-fstack-protector",  "-fno-stack-protector",  &flagStackProtector,&explicitFlags.stackProtector},
-            {"-fvectorize",        "-fno-vectorize",        &flagVectorize,     &explicitFlags.vectorize},
-            {"-funroll-loops",     "-fno-unroll-loops",     &flagUnrollLoops,   &explicitFlags.unrollLoops},
-            {"-floop-optimize",    "-fno-loop-optimize",    &flagLoopOptimize,  &explicitFlags.loopOptimize},
-            {"-fparallelize",      "-fno-parallelize",      &flagParallelize,   &explicitFlags.parallelize},
-            {"-fegraph",           "-fno-egraph",           &flagEGraph,        &explicitFlags.egraph},
-            {"-fsuperopt",         "-fno-superopt",         &flagSuperopt,      &explicitFlags.superopt},
-            {"-fhgoe",             "-fno-hgoe",             &flagHGOE,          &explicitFlags.hgoe},
-            {"-fsdr",              "-fno-sdr",              &flagSDR,           &explicitFlags.sdr},
-            {"-fipof",             "-fno-ipof",             &flagIPOF,          &explicitFlags.ipof},
-            {"-static",            nullptr,                 &flagStatic,        &explicitFlags.staticLink}, // no -fno-static: static linking is always explicitly opted into
+            {"-flto", "-fno-lto", &flagLTO, &explicitFlags.lto},
+            {"-fpic", "-fno-pic", &flagPIC, &explicitFlags.pic},
+            {"-ffast-math", "-fno-fast-math", &flagFastMath, &explicitFlags.fastMath},
+            {"-foptmax", "-fno-optmax", &flagOptMax, &explicitFlags.optMax},
+            {"-fstack-protector", "-fno-stack-protector", &flagStackProtector, &explicitFlags.stackProtector},
+            {"-fvectorize", "-fno-vectorize", &flagVectorize, &explicitFlags.vectorize},
+            {"-funroll-loops", "-fno-unroll-loops", &flagUnrollLoops, &explicitFlags.unrollLoops},
+            {"-floop-optimize", "-fno-loop-optimize", &flagLoopOptimize, &explicitFlags.loopOptimize},
+            {"-fparallelize", "-fno-parallelize", &flagParallelize, &explicitFlags.parallelize},
+            {"-fegraph", "-fno-egraph", &flagEGraph, &explicitFlags.egraph},
+            {"-fsuperopt", "-fno-superopt", &flagSuperopt, &explicitFlags.superopt},
+            {"-fhgoe", "-fno-hgoe", &flagHGOE, &explicitFlags.hgoe},
+            {"-fsdr", "-fno-sdr", &flagSDR, &explicitFlags.sdr},
+            {"-fipof", "-fno-ipof", &flagIPOF, &explicitFlags.ipof},
+            {"-static", nullptr, &flagStatic,
+             &explicitFlags.staticLink}, // no -fno-static: static linking is always explicitly opted into
         };
         for (const auto& e : kBoolFlags) {
             if (e.onFlag && arg == e.onFlag) {
-                *e.value     = true;
+                *e.value = true;
                 *e.explicit_ = true;
                 return true;
             }
             if (e.offFlag && arg == e.offFlag) {
-                *e.value     = false;
+                *e.value = false;
                 *e.explicit_ = true;
                 // -fno-superopt also resets the level to 0.
                 if (e.value == &flagSuperopt) {
@@ -2327,13 +2334,20 @@ int main(int argc, char* argv[]) {
         }
         if (arg.substr(0, 17) == "-fsuperopt-level=") {
             const auto levelStr = arg.substr(17);
-            if (levelStr == "0") { flagSuperoptLevel = 0; flagSuperopt = false; }
-            else if (levelStr == "1") { flagSuperoptLevel = 1; flagSuperopt = true; }
-            else if (levelStr == "2") { flagSuperoptLevel = 2; flagSuperopt = true; }
-            else if (levelStr == "3") { flagSuperoptLevel = 3; flagSuperopt = true; }
-            else {
-                std::cerr << "Error: invalid superopt level '" << levelStr
-                          << "' (expected 0-3)\n";
+            if (levelStr == "0") {
+                flagSuperoptLevel = 0;
+                flagSuperopt = false;
+            } else if (levelStr == "1") {
+                flagSuperoptLevel = 1;
+                flagSuperopt = true;
+            } else if (levelStr == "2") {
+                flagSuperoptLevel = 2;
+                flagSuperopt = true;
+            } else if (levelStr == "3") {
+                flagSuperoptLevel = 3;
+                flagSuperopt = true;
+            } else {
+                std::cerr << "Error: invalid superopt level '" << levelStr << "' (expected 0-3)\n";
                 return false;
             }
             explicitFlags.superopt = true;
@@ -2426,8 +2440,7 @@ int main(int argc, char* argv[]) {
     if (firstArg.empty()) {
         // No command or file given — check for a project before showing usage.
         std::error_code _ec;
-        const auto ctx = omscript::loadProjectContext(
-            std::filesystem::current_path(_ec).string());
+        const auto ctx = omscript::loadProjectContext(std::filesystem::current_path(_ec).string());
         if (!ctx.has_value()) {
             std::cerr << "Error: no input file specified (run '" << argv[0] << " --help' for usage)\n";
             return 1;
@@ -2543,14 +2556,17 @@ int main(int argc, char* argv[]) {
         for (int i = argIndex; i < argc; ++i) {
             const std::string a = argv[i];
             if (!a.empty() && a[0] != '-') {
-                if (initName.empty())       initName = a;
-                else if (initDir == ".")    initDir  = a;
+                if (initName.empty())
+                    initName = a;
+                else if (initDir == ".")
+                    initDir = a;
             }
         }
         if (initName.empty()) {
             std::error_code ec;
             initName = std::filesystem::current_path(ec).filename().string();
-            if (initName.empty() || ec) initName = "hello";
+            if (initName.empty() || ec)
+                initName = "hello";
         }
         return omscript::initProject(initDir, initName) ? 0 : 1;
     }
@@ -2558,8 +2574,8 @@ int main(int argc, char* argv[]) {
     std::string sourceFile;
     std::string outputFile = command == Command::EmitIR ? "" : "a.out";
     bool outputSpecified = false;
-    const bool supportsOutputOption = command == Command::Compile || command == Command::Run || command == Command::EmitIR ||
-                                command == Command::Clean;
+    const bool supportsOutputOption = command == Command::Compile || command == Command::Run ||
+                                      command == Command::EmitIR || command == Command::Clean;
     bool parsingRunArgs = false;
     bool keepTemps = false;
     std::vector<std::string> runArgs;
@@ -2681,12 +2697,9 @@ int main(int argc, char* argv[]) {
         // BuildSystem which removes the entire target/<profile>/ tree.
         if (!outputSpecified) {
             std::error_code _ec;
-            const auto ctx = omscript::loadProjectContext(
-                std::filesystem::current_path(_ec).string());
+            const auto ctx = omscript::loadProjectContext(std::filesystem::current_path(_ec).string());
             if (ctx.has_value()) {
-                const std::string pname =
-                    releaseProfile ? "release"
-                    : (profileName.empty() ? "debug" : profileName);
+                const std::string pname = releaseProfile ? "release" : (profileName.empty() ? "debug" : profileName);
                 omscript::BuildSystem bs(ctx->rootDir, pname);
                 const omscript::BuildIO io{verbose, quiet, showTiming};
                 return bs.clean(io) ? 0 : 1;
@@ -2724,8 +2737,7 @@ int main(int argc, char* argv[]) {
         // oms.toml project manifest starting from the current directory.
         if (command == Command::Compile || command == Command::Run) {
             std::error_code _ec;
-            const auto ctx = omscript::loadProjectContext(
-                std::filesystem::current_path(_ec).string());
+            const auto ctx = omscript::loadProjectContext(std::filesystem::current_path(_ec).string());
             if (!ctx.has_value()) {
                 std::cerr << "Error: no input file specified and no oms.toml found.\n"
                           << "Run 'omsc init' to create a new project, "
@@ -2734,52 +2746,70 @@ int main(int argc, char* argv[]) {
             }
 
             // Resolve the active profile name.
-            const std::string pname =
-                releaseProfile ? "release"
-                : (profileName.empty() ? "debug" : profileName);
+            const std::string pname = releaseProfile ? "release" : (profileName.empty() ? "debug" : profileName);
 
             omscript::BuildSystem bs(ctx->rootDir, pname);
             const omscript::BuildIO io{verbose, quiet, showTiming};
-            if (!bs.prepare(io)) return 1;
+            if (!bs.prepare(io))
+                return 1;
 
             // Apply explicit CLI flag overrides on top of the profile loaded
             // from oms.toml.  Only flags the user actually passed are applied.
             {
                 omscript::BuildProfile eff = bs.profile();
-                if (explicitFlags.optLevel)       eff.optLevel       = optLevel;
-                if (explicitFlags.lto)             eff.lto            = flagLTO;
-                if (explicitFlags.fastMath)        eff.fastMath       = flagFastMath;
-                if (explicitFlags.optMax)          eff.optMax         = flagOptMax;
-                if (explicitFlags.vectorize)       eff.vectorize      = flagVectorize;
-                if (explicitFlags.unrollLoops)     eff.unrollLoops    = flagUnrollLoops;
-                if (explicitFlags.loopOptimize)    eff.loopOptimize   = flagLoopOptimize;
-                if (explicitFlags.parallelize)     eff.parallelize    = flagParallelize;
-                if (explicitFlags.egraph)          eff.egraph         = flagEGraph;
-                if (explicitFlags.superopt)        eff.superopt       = flagSuperopt;
-                if (explicitFlags.superoptLevel)   eff.superoptLevel  = flagSuperoptLevel;
-                if (explicitFlags.hgoe)            eff.hgoe           = flagHGOE;
-                if (explicitFlags.debug)           eff.debugInfo      = flagDebug;
-                if (explicitFlags.strip)           eff.strip          = flagStrip;
-                if (explicitFlags.staticLink)      eff.staticLink     = flagStatic;
-                if (explicitFlags.stackProtector)  eff.stackProtector = flagStackProtector;
+                if (explicitFlags.optLevel)
+                    eff.optLevel = optLevel;
+                if (explicitFlags.lto)
+                    eff.lto = flagLTO;
+                if (explicitFlags.fastMath)
+                    eff.fastMath = flagFastMath;
+                if (explicitFlags.optMax)
+                    eff.optMax = flagOptMax;
+                if (explicitFlags.vectorize)
+                    eff.vectorize = flagVectorize;
+                if (explicitFlags.unrollLoops)
+                    eff.unrollLoops = flagUnrollLoops;
+                if (explicitFlags.loopOptimize)
+                    eff.loopOptimize = flagLoopOptimize;
+                if (explicitFlags.parallelize)
+                    eff.parallelize = flagParallelize;
+                if (explicitFlags.egraph)
+                    eff.egraph = flagEGraph;
+                if (explicitFlags.superopt)
+                    eff.superopt = flagSuperopt;
+                if (explicitFlags.superoptLevel)
+                    eff.superoptLevel = flagSuperoptLevel;
+                if (explicitFlags.hgoe)
+                    eff.hgoe = flagHGOE;
+                if (explicitFlags.debug)
+                    eff.debugInfo = flagDebug;
+                if (explicitFlags.strip)
+                    eff.strip = flagStrip;
+                if (explicitFlags.staticLink)
+                    eff.staticLink = flagStatic;
+                if (explicitFlags.stackProtector)
+                    eff.stackProtector = flagStackProtector;
                 bs.setProfile(eff);
             }
-            if (!marchCpu.empty()) bs.setMarch(marchCpu);
-            if (!mtuneCpu.empty()) bs.setMtune(mtuneCpu);
-            if (outputSpecified)   bs.setOutputPath(outputFile);
+            if (!marchCpu.empty())
+                bs.setMarch(marchCpu);
+            if (!mtuneCpu.empty())
+                bs.setMtune(mtuneCpu);
+            if (outputSpecified)
+                bs.setOutputPath(outputFile);
 
             const auto result = bs.build(io);
-            if (!result.success) return 1;
+            if (!result.success)
+                return 1;
 
             if (command == Command::Run) {
                 llvm::SmallVector<llvm::StringRef, 8> argRefs;
                 argRefs.push_back(result.outputPath);
-                for (const auto& a : runArgs) argRefs.push_back(a);
-                const int rc =
-                    llvm::sys::ExecuteAndWait(result.outputPath, argRefs);
+                for (const auto& a : runArgs)
+                    argRefs.push_back(a);
+                const int rc = llvm::sys::ExecuteAndWait(result.outputPath, argRefs);
                 if (rc < 0) {
-                    std::cerr << "Error: program terminated by signal "
-                              << (-rc) << "\n";
+                    std::cerr << "Error: program terminated by signal " << (-rc) << "\n";
                     return 128 + (-rc);
                 }
                 if (rc != 0 && !quiet) {
@@ -2823,7 +2853,9 @@ int main(int argc, char* argv[]) {
             std::string source = readSourceFile(sourceFile);
             omscript::Preprocessor pp(sourceFile);
             source = pp.process(source);
-            for (const auto& w : pp.warnings()) { std::cerr << w << "\n"; }
+            for (const auto& w : pp.warnings()) {
+                std::cerr << w << "\n";
+            }
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
             auto lexEnd = std::chrono::steady_clock::now();
@@ -2841,7 +2873,9 @@ int main(int argc, char* argv[]) {
             auto parseStart = std::chrono::steady_clock::now();
             omscript::Parser parser(tokens);
             auto program = parser.parse();
-            for (const auto& w : parser.warnings()) { std::cerr << w << "\n"; }
+            for (const auto& w : parser.warnings()) {
+                std::cerr << w << "\n";
+            }
             auto parseEnd = std::chrono::steady_clock::now();
 
             if (command == Command::Check) {
@@ -2923,7 +2957,9 @@ int main(int argc, char* argv[]) {
             std::string source = readSourceFile(sourceFile);
             omscript::Preprocessor pp(sourceFile);
             source = pp.process(source);
-            for (const auto& w : pp.warnings()) { std::cerr << w << "\n"; }
+            for (const auto& w : pp.warnings()) {
+                std::cerr << w << "\n";
+            }
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
             auto lexEnd = std::chrono::steady_clock::now();
@@ -2931,7 +2967,9 @@ int main(int argc, char* argv[]) {
             auto parseStart = std::chrono::steady_clock::now();
             omscript::Parser parser(tokens);
             auto program = parser.parse();
-            for (const auto& w : parser.warnings()) { std::cerr << w << "\n"; }
+            for (const auto& w : parser.warnings()) {
+                std::cerr << w << "\n";
+            }
             auto parseEnd = std::chrono::steady_clock::now();
 
             auto codegenStart = std::chrono::steady_clock::now();
@@ -2968,12 +3006,16 @@ int main(int argc, char* argv[]) {
             std::string source = readSourceFile(sourceFile);
             omscript::Preprocessor pp(sourceFile);
             source = pp.process(source);
-            for (const auto& w : pp.warnings()) { std::cerr << w << "\n"; }
+            for (const auto& w : pp.warnings()) {
+                std::cerr << w << "\n";
+            }
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
             omscript::Parser parser(tokens);
             auto program = parser.parse();
-            for (const auto& w : parser.warnings()) { std::cerr << w << "\n"; }
+            for (const auto& w : parser.warnings()) {
+                std::cerr << w << "\n";
+            }
 
             omscript::CodeGenerator codegen(optLevel);
             codegen.setVerbose(verbose);

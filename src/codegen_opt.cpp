@@ -3,12 +3,11 @@
 #include "hardware_graph.h"
 #include "ipof_pass.h"
 #include "optimization_manager.h" // OptimizationManager, CostModel
-#include "program_analysis.h"     // ProgramFactsSnapshot, computeProgramFacts
+#include "polyopt.h"
+#include "program_analysis.h" // ProgramFactsSnapshot, computeProgramFacts
 #include "sdr_pass.h"
 #include "superoptimizer.h"
-#include "polyopt.h"
 #include <iostream>
-#include <unordered_set>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
@@ -18,6 +17,7 @@
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Passes/OptimizationLevel.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <unordered_set>
 #ifdef POLLY_LIB_PATH
 #if LLVM_VERSION_MAJOR >= 22
 #include <llvm/Plugins/PassPlugin.h>
@@ -42,34 +42,46 @@
 #include <llvm/Transforms/AggressiveInstCombine/AggressiveInstCombine.h>
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Transforms/IPO/AlwaysInliner.h>
-#include <llvm/Transforms/IPO/Inliner.h>
-#include <llvm/Transforms/IPO/GlobalDCE.h>
-#include <llvm/Transforms/IPO/GlobalOpt.h>
-#include <llvm/Transforms/IPO/HotColdSplitting.h>
 #include <llvm/Transforms/IPO/ArgumentPromotion.h>
+#include <llvm/Transforms/IPO/Attributor.h>
+#include <llvm/Transforms/IPO/CalledValuePropagation.h>
 #include <llvm/Transforms/IPO/ConstantMerge.h>
 #include <llvm/Transforms/IPO/DeadArgumentElimination.h>
 #include <llvm/Transforms/IPO/FunctionAttrs.h>
-#include <llvm/Transforms/IPO/InferFunctionAttrs.h>
-#include <llvm/Transforms/IPO/PartialInlining.h>
+#include <llvm/Transforms/IPO/GlobalDCE.h>
+#include <llvm/Transforms/IPO/GlobalOpt.h>
 #include <llvm/Transforms/IPO/GlobalSplit.h>
+#include <llvm/Transforms/IPO/HotColdSplitting.h>
+#include <llvm/Transforms/IPO/InferFunctionAttrs.h>
+#include <llvm/Transforms/IPO/Inliner.h>
+#include <llvm/Transforms/IPO/PartialInlining.h>
+#include <llvm/Transforms/IPO/SCCP.h>
 #include <llvm/Transforms/IPO/StripDeadPrototypes.h>
 #include <llvm/Transforms/InstCombine/InstCombine.h>
 #include <llvm/Transforms/Scalar.h>
 #include <llvm/Transforms/Scalar/ADCE.h>
-#include <llvm/Transforms/Scalar/CorrelatedValuePropagation.h>
+#include <llvm/Transforms/Scalar/AlignmentFromAssumptions.h>
+#include <llvm/Transforms/Scalar/BDCE.h>
+#include <llvm/Transforms/Scalar/CallSiteSplitting.h>
+#include <llvm/Transforms/Scalar/ConstantHoisting.h>
 #include <llvm/Transforms/Scalar/ConstraintElimination.h>
+#include <llvm/Transforms/Scalar/CorrelatedValuePropagation.h>
+#include <llvm/Transforms/Scalar/DFAJumpThreading.h>
 #include <llvm/Transforms/Scalar/DeadStoreElimination.h>
+#include <llvm/Transforms/Scalar/DivRemPairs.h>
+#include <llvm/Transforms/Scalar/EarlyCSE.h>
 #include <llvm/Transforms/Scalar/FlattenCFG.h>
 #include <llvm/Transforms/Scalar/Float2Int.h>
 #include <llvm/Transforms/Scalar/GVN.h>
 #include <llvm/Transforms/Scalar/IndVarSimplify.h>
-#include <llvm/Transforms/Scalar/LoopDeletion.h>
-#include <llvm/Transforms/Scalar/DFAJumpThreading.h>
 #include <llvm/Transforms/Scalar/InductiveRangeCheckElimination.h>
 #include <llvm/Transforms/Scalar/InferAlignment.h>
-#include <llvm/Transforms/Scalar/AlignmentFromAssumptions.h>
+#include <llvm/Transforms/Scalar/InstSimplifyPass.h>
+#include <llvm/Transforms/Scalar/JumpThreading.h>
+#include <llvm/Transforms/Scalar/LICM.h>
 #include <llvm/Transforms/Scalar/LoopBoundSplit.h>
+#include <llvm/Transforms/Scalar/LoopDataPrefetch.h>
+#include <llvm/Transforms/Scalar/LoopDeletion.h>
 #include <llvm/Transforms/Scalar/LoopDistribute.h>
 #include <llvm/Transforms/Scalar/LoopFlatten.h>
 #include <llvm/Transforms/Scalar/LoopFuse.h>
@@ -77,36 +89,31 @@
 #include <llvm/Transforms/Scalar/LoopInstSimplify.h>
 #include <llvm/Transforms/Scalar/LoopInterchange.h>
 #include <llvm/Transforms/Scalar/LoopLoadElimination.h>
-#include <llvm/Transforms/Scalar/LoopDataPrefetch.h>
+#include <llvm/Transforms/Scalar/LoopPassManager.h>
+#include <llvm/Transforms/Scalar/LoopPredication.h>
 #include <llvm/Transforms/Scalar/LoopRotation.h>
+#include <llvm/Transforms/Scalar/LoopSimplifyCFG.h>
 #include <llvm/Transforms/Scalar/LoopSink.h>
 #include <llvm/Transforms/Scalar/LoopUnrollAndJamPass.h>
+#include <llvm/Transforms/Scalar/LoopUnrollPass.h>
 #include <llvm/Transforms/Scalar/LoopVersioningLICM.h>
-#include <llvm/Transforms/Scalar/LoopPredication.h>
-#include <llvm/Transforms/Scalar/LoopSimplifyCFG.h>
-#include <llvm/Transforms/Scalar/CallSiteSplitting.h>
-#include <llvm/Transforms/Scalar/Sink.h>
-#include <llvm/Transforms/Scalar/ConstantHoisting.h>
-#include <llvm/Transforms/Scalar/SeparateConstOffsetFromGEP.h>
-#include <llvm/Transforms/Scalar/PartiallyInlineLibCalls.h>
-#include <llvm/Transforms/Scalar/SimplifyCFG.h>
+#include <llvm/Transforms/Scalar/MemCpyOptimizer.h>
 #include <llvm/Transforms/Scalar/MergeICmps.h>
 #include <llvm/Transforms/Scalar/MergedLoadStoreMotion.h>
-#include <llvm/Transforms/Scalar/MemCpyOptimizer.h>
 #include <llvm/Transforms/Scalar/NaryReassociate.h>
-#include <llvm/Transforms/Scalar/BDCE.h>
-#include <llvm/Transforms/Scalar/JumpThreading.h>
-#include <llvm/Transforms/Scalar/StraightLineStrengthReduce.h>
-#include <llvm/Transforms/Scalar/TailRecursionElimination.h>
-#include <llvm/Transforms/Scalar/LoopUnrollPass.h>
-#include <llvm/Transforms/Scalar/SimpleLoopUnswitch.h>
-#include <llvm/Transforms/Scalar/SpeculativeExecution.h>
-#include <llvm/Transforms/Scalar/DivRemPairs.h>
+#include <llvm/Transforms/Scalar/NewGVN.h>
+#include <llvm/Transforms/Scalar/PartiallyInlineLibCalls.h>
 #include <llvm/Transforms/Scalar/Reassociate.h>
-#include <llvm/Transforms/Scalar/EarlyCSE.h>
 #include <llvm/Transforms/Scalar/SCCP.h>
 #include <llvm/Transforms/Scalar/SROA.h>
-#include <llvm/Transforms/Scalar/LoopPassManager.h>
+#include <llvm/Transforms/Scalar/Scalarizer.h>
+#include <llvm/Transforms/Scalar/SeparateConstOffsetFromGEP.h>
+#include <llvm/Transforms/Scalar/SimpleLoopUnswitch.h>
+#include <llvm/Transforms/Scalar/SimplifyCFG.h>
+#include <llvm/Transforms/Scalar/Sink.h>
+#include <llvm/Transforms/Scalar/SpeculativeExecution.h>
+#include <llvm/Transforms/Scalar/StraightLineStrengthReduce.h>
+#include <llvm/Transforms/Scalar/TailRecursionElimination.h>
 #include <llvm/Transforms/Utils.h>
 #include <llvm/Transforms/Utils/CanonicalizeFreezeInLoops.h>
 #include <llvm/Transforms/Utils/Cloning.h>
@@ -114,17 +121,10 @@
 #include <llvm/Transforms/Utils/LibCallsShrinkWrap.h>
 #include <llvm/Transforms/Utils/LoopSimplify.h>
 #include <llvm/Transforms/Utils/Mem2Reg.h>
-#include <llvm/Transforms/Scalar/InstSimplifyPass.h>
-#include <llvm/Transforms/Scalar/LICM.h>
-#include <llvm/Transforms/Vectorize/VectorCombine.h>
 #include <llvm/Transforms/Vectorize/LoadStoreVectorizer.h>
 #include <llvm/Transforms/Vectorize/LoopVectorize.h>
 #include <llvm/Transforms/Vectorize/SLPVectorizer.h>
-#include <llvm/Transforms/Scalar/NewGVN.h>
-#include <llvm/Transforms/Scalar/Scalarizer.h>
-#include <llvm/Transforms/IPO/CalledValuePropagation.h>
-#include <llvm/Transforms/IPO/Attributor.h>
-#include <llvm/Transforms/IPO/SCCP.h>
+#include <llvm/Transforms/Vectorize/VectorCombine.h>
 #if LLVM_VERSION_MAJOR < 20
 #include <llvm/Transforms/IPO/SyntheticCountsPropagation.h>
 #endif
@@ -133,11 +133,7 @@
 #if LLVM_VERSION_MAJOR < 20
 #include <llvm/Transforms/Scalar/LoopReroll.h>
 #endif
-#include <llvm/Transforms/Scalar/GuardWidening.h>
-#include <llvm/Transforms/IPO/MergeFunctions.h>
-#include <llvm/Transforms/Scalar/LowerExpectIntrinsic.h>
-#include <llvm/Transforms/Scalar/WarnMissedTransforms.h>
-#include <llvm/Transforms/Scalar/LowerConstantIntrinsics.h>
+#include <algorithm>
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/BlockFrequencyInfo.h>
 #include <llvm/Analysis/BranchProbabilityInfo.h>
@@ -148,9 +144,13 @@
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/MDBuilder.h>
+#include <llvm/Transforms/IPO/MergeFunctions.h>
+#include <llvm/Transforms/Scalar/GuardWidening.h>
+#include <llvm/Transforms/Scalar/LowerConstantIntrinsics.h>
+#include <llvm/Transforms/Scalar/LowerExpectIntrinsic.h>
+#include <llvm/Transforms/Scalar/WarnMissedTransforms.h>
 #include <llvm/Transforms/Utils/ScalarEvolutionExpander.h>
 #include <llvm/Transforms/Utils/ValueMapper.h>
-#include <algorithm>
 #include <optional>
 #include <stdexcept>
 
@@ -185,20 +185,17 @@ struct UnifiedExecutionModel {
     unsigned branchSpeculationUopBudget = 6;
 };
 
-static UnifiedExecutionModel buildExecutionModel(const llvm::Function& F,
-                                                 const llvm::TargetTransformInfo& TTI) {
+static UnifiedExecutionModel buildExecutionModel(const llvm::Function& F, const llvm::TargetTransformInfo& TTI) {
     UnifiedExecutionModel model;
     const bool hasProfile = F.getParent() && F.getParent()->getProfileSummary(/*IsCS=*/false);
 
     // Cache-line size: 0 means the target doesn't know; default to 64 bytes.
-    const unsigned cacheLineBytes =
-        TTI.getCacheLineSize() > 0 ? static_cast<unsigned>(TTI.getCacheLineSize()) : 64u;
+    const unsigned cacheLineBytes = TTI.getCacheLineSize() > 0 ? static_cast<unsigned>(TTI.getCacheLineSize()) : 64u;
 
     // ── Streaming-store threshold ─────────────────────────────────────────
     {
         unsigned l1Bytes = 32768u; // 32 KB default
-        if (auto l1 = TTI.getCacheSize(llvm::TargetTransformInfo::CacheLevel::L1D);
-                l1 && *l1 > 0)
+        if (auto l1 = TTI.getCacheSize(llvm::TargetTransformInfo::CacheLevel::L1D); l1 && *l1 > 0)
             l1Bytes = static_cast<unsigned>(*l1);
         // Minimum: two cache lines worth of elements to avoid spurious promotion
         // of loops with only a handful of iterations (e.g. loop count = 3).
@@ -218,8 +215,7 @@ static UnifiedExecutionModel buildExecutionModel(const llvm::Function& F,
 
         // MAPR hoist distance: scaled from register count (more regs → wider OoO window).
         // x86-64 (16 GPRs): 16 + 8 = 24.  AArch64 / RISC-V (32 GPRs): 32 + 16 = 48.
-        model.maprMaxHoistDistance =
-            std::clamp<unsigned>(scalarRegs + (scalarRegs >> 1u), 16u, 48u);
+        model.maprMaxHoistDistance = std::clamp<unsigned>(scalarRegs + (scalarRegs >> 1u), 16u, 48u);
     }
 
     // Without profile data, branch probabilities are synthetic 50/50 guesses; be conservative.
@@ -230,12 +226,12 @@ static UnifiedExecutionModel buildExecutionModel(const llvm::Function& F,
     return model;
 }
 
-static unsigned instructionUopCost(const llvm::Instruction& I,
-                                   const llvm::TargetTransformInfo& TTI) {
-    if (I.isTerminator() || llvm::isa<llvm::DbgInfoIntrinsic>(I)) return 0;
-    const llvm::InstructionCost c =
-        TTI.getInstructionCost(&I, llvm::TargetTransformInfo::TCK_RecipThroughput);
-    if (!c.isValid()) return 1u;
+static unsigned instructionUopCost(const llvm::Instruction& I, const llvm::TargetTransformInfo& TTI) {
+    if (I.isTerminator() || llvm::isa<llvm::DbgInfoIntrinsic>(I))
+        return 0;
+    const llvm::InstructionCost c = TTI.getInstructionCost(&I, llvm::TargetTransformInfo::TCK_RecipThroughput);
+    if (!c.isValid())
+        return 1u;
 #if LLVM_VERSION_MAJOR >= 20
     const int64_t v = c.getValue();
 #else
@@ -259,7 +255,8 @@ static const llvm::Value* getBasePointer(const llvm::Value* V) {
 static bool hasNoAliasProvenance(const llvm::LoadInst* LI, const llvm::StoreInst* SI) {
     const llvm::Value* loadBase = getBasePointer(LI->getPointerOperand());
     const llvm::Value* storeBase = getBasePointer(SI->getPointerOperand());
-    if (loadBase == storeBase) return false;
+    if (loadBase == storeBase)
+        return false;
 
     if (llvm::isa<llvm::AllocaInst>(loadBase) && llvm::isa<llvm::AllocaInst>(storeBase))
         return true;
@@ -290,7 +287,8 @@ static unsigned runSignedToUnsignedConverge(llvm::Module& M, int maxIter) {
             round += superopt::convertSDivToUDiv(F);
         }
         total += round;
-        if (round == 0) break; // fixed point
+        if (round == 0)
+            break; // fixed point
     }
     return total;
 }
@@ -325,15 +323,16 @@ static llvm::SimplifyCFGOptions hyperblockCFGOpts() {
 }
 
 // ── Rule 4: OpCache-Friendly Loop Partitioning Pass ──────────────────────────
-struct OpcacheLoopPartitionPass
-    : public llvm::PassInfoMixin<OpcacheLoopPartitionPass> {
+struct OpcacheLoopPartitionPass : public llvm::PassInfoMixin<OpcacheLoopPartitionPass> {
 
     // Attach loop metadata to the back-edge branch of `L`.
     static void annotateLoop(llvm::Loop* L, llvm::LLVMContext& Ctx) {
         llvm::BasicBlock* latch = L->getLoopLatch();
-        if (!latch) return;
+        if (!latch)
+            return;
         llvm::BranchInst* back = llvm::dyn_cast<llvm::BranchInst>(latch->getTerminator());
-        if (!back) return;
+        if (!back)
+            return;
 
         // Collect existing loop metadata operands (skip the self-ref at [0]).
         llvm::SmallVector<llvm::Metadata*, 8> mds;
@@ -346,8 +345,7 @@ struct OpcacheLoopPartitionPass
                     if (op->getNumOperands() > 0) {
                         if (auto* s = llvm::dyn_cast<llvm::MDString>(op->getOperand(0))) {
                             llvm::StringRef name = s->getString();
-                            if (name.starts_with("llvm.loop.unroll") ||
-                                name.starts_with("llvm.loop.distribute"))
+                            if (name.starts_with("llvm.loop.unroll") || name.starts_with("llvm.loop.distribute"))
                                 continue;
                         }
                     }
@@ -358,17 +356,13 @@ struct OpcacheLoopPartitionPass
 
         // llvm.loop.unroll.disable = true  → prevent over-unrolling that
         // would expand the body beyond the µop cache capacity.
-        mds.push_back(llvm::MDNode::get(Ctx, {
-            llvm::MDString::get(Ctx, "llvm.loop.unroll.disable"),
-            llvm::ConstantAsMetadata::get(
-                llvm::ConstantInt::get(llvm::Type::getInt1Ty(Ctx), 1))
-        }));
+        mds.push_back(llvm::MDNode::get(
+            Ctx, {llvm::MDString::get(Ctx, "llvm.loop.unroll.disable"),
+                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(Ctx), 1))}));
         // llvm.loop.distribute.enable = true  → if LoopDistributePass sees
-        mds.push_back(llvm::MDNode::get(Ctx, {
-            llvm::MDString::get(Ctx, "llvm.loop.distribute.enable"),
-            llvm::ConstantAsMetadata::get(
-                llvm::ConstantInt::get(llvm::Type::getInt1Ty(Ctx), 1))
-        }));
+        mds.push_back(llvm::MDNode::get(
+            Ctx, {llvm::MDString::get(Ctx, "llvm.loop.distribute.enable"),
+                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(Ctx), 1))}));
 
         llvm::MDNode* md = llvm::MDNode::get(Ctx, mds);
         md->replaceOperandWith(0, md); // make self-referential
@@ -377,8 +371,7 @@ struct OpcacheLoopPartitionPass
 
     // Estimate loop body frontend pressure as target-aware "uop-like" cost
     // (TTI user cost), excluding subloop blocks.
-    static unsigned estimateLoopUops(llvm::Loop* L, llvm::LoopInfo& LI,
-                                     const llvm::TargetTransformInfo& TTI) {
+    static unsigned estimateLoopUops(llvm::Loop* L, llvm::LoopInfo& LI, const llvm::TargetTransformInfo& TTI) {
         unsigned count = 0;
         for (llvm::BasicBlock* BB : L->blocks()) {
             // Only count blocks whose innermost containing loop is exactly L
@@ -391,8 +384,7 @@ struct OpcacheLoopPartitionPass
         return count;
     }
 
-    llvm::PreservedAnalyses run(llvm::Function& F,
-                                llvm::FunctionAnalysisManager& FAM) {
+    llvm::PreservedAnalyses run(llvm::Function& F, llvm::FunctionAnalysisManager& FAM) {
         auto& LI = FAM.getResult<llvm::LoopAnalysis>(F);
         auto& TTI = FAM.getResult<llvm::TargetIRAnalysis>(F);
         llvm::LLVMContext& Ctx = F.getContext();
@@ -412,19 +404,19 @@ struct OpcacheLoopPartitionPass
                 changed = true;
             }
         }
-        return changed ? llvm::PreservedAnalyses::none()
-                       : llvm::PreservedAnalyses::all();
+        return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
     }
 };
 
 // ── Rule 5: Large-Array Streaming Store Pass ─────────────────────────────────
-struct LargeArrayStreamingStorePass
-    : public llvm::PassInfoMixin<LargeArrayStreamingStorePass> {
+struct LargeArrayStreamingStorePass : public llvm::PassInfoMixin<LargeArrayStreamingStorePass> {
     static bool isArrayElementStore(const llvm::StoreInst* SI) {
         if (llvm::MDNode* tbaa = SI->getMetadata(llvm::LLVMContext::MD_tbaa)) {
-            if (tbaa->getNumOperands() < 2) return false;
+            if (tbaa->getNumOperands() < 2)
+                return false;
             auto* typeNode = llvm::dyn_cast<llvm::MDNode>(tbaa->getOperand(0));
-            if (!typeNode || typeNode->getNumOperands() < 1) return false;
+            if (!typeNode || typeNode->getNumOperands() < 1)
+                return false;
             auto* s = llvm::dyn_cast<llvm::MDString>(typeNode->getOperand(0));
             return s && s->getString() == "array element";
         }
@@ -436,7 +428,8 @@ struct LargeArrayStreamingStorePass
         for (llvm::BasicBlock* BB : L->blocks()) {
             for (const llvm::Instruction& I : *BB) {
                 auto* LI = llvm::dyn_cast<llvm::LoadInst>(&I);
-                if (!LI || LI->isVolatile() || LI->isAtomic()) continue;
+                if (!LI || LI->isVolatile() || LI->isAtomic())
+                    continue;
                 if (getBasePointer(LI->getPointerOperand()) == storeBase)
                     return true;
             }
@@ -444,10 +437,9 @@ struct LargeArrayStreamingStorePass
         return false;
     }
 
-    llvm::PreservedAnalyses run(llvm::Function& F,
-                                llvm::FunctionAnalysisManager& FAM) {
-        auto& LI  = FAM.getResult<llvm::LoopAnalysis>(F);
-        auto& SE  = FAM.getResult<llvm::ScalarEvolutionAnalysis>(F);
+    llvm::PreservedAnalyses run(llvm::Function& F, llvm::FunctionAnalysisManager& FAM) {
+        auto& LI = FAM.getResult<llvm::LoopAnalysis>(F);
+        auto& SE = FAM.getResult<llvm::ScalarEvolutionAnalysis>(F);
         auto& TTI = FAM.getResult<llvm::TargetIRAnalysis>(F);
         const UnifiedExecutionModel model = buildExecutionModel(F, TTI);
 
@@ -459,31 +451,32 @@ struct LargeArrayStreamingStorePass
                     bbLoop[BB] = L;
             }
             for (llvm::BasicBlock* BB : top->blocks())
-                if (!bbLoop.count(BB)) bbLoop[BB] = top;
+                if (!bbLoop.count(BB))
+                    bbLoop[BB] = top;
         }
 
         // TBAA "array element" type name used by OmScript codegen.
         llvm::LLVMContext& Ctx = F.getContext();
         llvm::MDNode* ntMD = llvm::MDNode::get(
-            Ctx, llvm::ConstantAsMetadata::get(
-                llvm::ConstantInt::get(llvm::Type::getInt32Ty(Ctx), 1)));
+            Ctx, llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(Ctx), 1)));
 
         llvm::DenseMap<llvm::Loop*, unsigned> promotedStoresPerLoop;
         bool changed = false;
         for (llvm::BasicBlock& BB : F) {
             auto it = bbLoop.find(&BB);
-            if (it == bbLoop.end()) continue;
+            if (it == bbLoop.end())
+                continue;
             llvm::Loop* L = it->second;
 
             // Estimate trip count using SCEV.
             llvm::BasicBlock* exitBB = L->getExitingBlock();
-            if (!exitBB) continue;
+            if (!exitBB)
+                continue;
             const llvm::SCEV* tripCount = SE.getBackedgeTakenCount(L);
             if (!tripCount || llvm::isa<llvm::SCEVCouldNotCompute>(tripCount))
                 continue;
             if (auto* constTrip = llvm::dyn_cast<llvm::SCEVConstant>(tripCount)) {
-                if (constTrip->getValue()->getSExtValue()
-                    < static_cast<int64_t>(model.streamingMinElements))
+                if (constTrip->getValue()->getSExtValue() < static_cast<int64_t>(model.streamingMinElements))
                     continue;
             } else {
                 // Non-constant trip count: conservatively skip unless
@@ -492,56 +485,58 @@ struct LargeArrayStreamingStorePass
 
             for (llvm::Instruction& I : BB) {
                 auto* SI = llvm::dyn_cast<llvm::StoreInst>(&I);
-                if (!SI) continue;
-                if (SI->isVolatile() || SI->isAtomic()) continue;
+                if (!SI)
+                    continue;
+                if (SI->isVolatile() || SI->isAtomic())
+                    continue;
                 // Skip stores that are already non-temporal.
-                if (SI->getMetadata(llvm::LLVMContext::MD_nontemporal)) continue;
+                if (SI->getMetadata(llvm::LLVMContext::MD_nontemporal))
+                    continue;
                 // Avoid overwhelming write-combining buffers.
                 if (promotedStoresPerLoop[L] >= model.writeCombiningStoreBudget)
                     continue;
                 // Only promote stores with array-element TBAA.
-                if (!isArrayElementStore(SI)) continue;
+                if (!isArrayElementStore(SI))
+                    continue;
                 // Basic reuse filter: if loop also reads from the same base object,
                 // the data is likely reused and should stay cache-resident.
-                if (loopLikelyReadsStoreTarget(L, SI)) continue;
+                if (loopLikelyReadsStoreTarget(L, SI))
+                    continue;
                 // Promote to non-temporal store.
                 SI->setMetadata(llvm::LLVMContext::MD_nontemporal, ntMD);
                 ++promotedStoresPerLoop[L];
                 changed = true;
             }
         }
-        return changed ? llvm::PreservedAnalyses::none()
-                       : llvm::PreservedAnalyses::all();
+        return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
     }
 };
 
 // ── Memory Access Phase Reordering (MAPR) ─────────────────────────────────────
-struct MemoryAccessPhaseReorderPass
-    : public llvm::PassInfoMixin<MemoryAccessPhaseReorderPass> {
-    llvm::PreservedAnalyses run(llvm::Function& F,
-                                llvm::FunctionAnalysisManager& FAM) {
+struct MemoryAccessPhaseReorderPass : public llvm::PassInfoMixin<MemoryAccessPhaseReorderPass> {
+    llvm::PreservedAnalyses run(llvm::Function& F, llvm::FunctionAnalysisManager& FAM) {
         auto& AA = FAM.getResult<llvm::AAManager>(F);
         auto& TTI = FAM.getResult<llvm::TargetIRAnalysis>(F);
         const UnifiedExecutionModel model = buildExecutionModel(F, TTI);
         bool changed = false;
         for (auto& BB : F)
             changed |= processBlock(BB, AA, model.maprMaxHoistDistance);
-        return changed ? llvm::PreservedAnalyses::none()
-                       : llvm::PreservedAnalyses::all();
+        return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
     }
 
-private:
+  private:
     // Compute the set of instructions in BB that transitively contribute to
-    static llvm::SmallPtrSet<llvm::Instruction*, 8>
-    addressDeps(const llvm::LoadInst* LI, const llvm::BasicBlock* BB) {
+    static llvm::SmallPtrSet<llvm::Instruction*, 8> addressDeps(const llvm::LoadInst* LI, const llvm::BasicBlock* BB) {
         llvm::SmallPtrSet<llvm::Instruction*, 8> deps;
         llvm::SmallVector<const llvm::Value*, 8> wl;
         wl.push_back(LI->getPointerOperand());
         while (!wl.empty()) {
             const auto* V = wl.pop_back_val();
             const auto* I = llvm::dyn_cast<llvm::Instruction>(V);
-            if (!I || I->getParent() != BB) continue;
-            if (!deps.insert(const_cast<llvm::Instruction*>(I)).second) continue;
+            if (!I || I->getParent() != BB)
+                continue;
+            if (!deps.insert(const_cast<llvm::Instruction*>(I)).second)
+                continue;
             for (const auto& op : I->operands())
                 wl.push_back(op.get());
         }
@@ -550,10 +545,9 @@ private:
 
     // Attempt to hoist LI as far toward the top of its basic block as alias
     // analysis and data dependencies allow.  Returns true if the load moved.
-    static bool tryHoistLoad(llvm::LoadInst* LI, llvm::AAResults& AA,
-                             unsigned maxHoistDist) {
+    static bool tryHoistLoad(llvm::LoadInst* LI, llvm::AAResults& AA, unsigned maxHoistDist) {
         llvm::BasicBlock* BB = LI->getParent();
-        const auto deps    = addressDeps(LI, BB);
+        const auto deps = addressDeps(LI, BB);
         const auto loadLoc = llvm::MemoryLocation::get(LI);
 
         // `insertBefore`: the earliest safe instruction we found so far
@@ -569,49 +563,56 @@ private:
 
             // Hard stop: PHI nodes must stay at the top of their basic block.
             // Hoisting the load before a PHI node would violate LLVM IR invariants.
-            if (llvm::isa<llvm::PHINode>(pred)) break;
+            if (llvm::isa<llvm::PHINode>(pred))
+                break;
 
             // Hard stop: `pred` is in the address-computation chain of LI.
             // Moving LI before pred would use pred's result before it exists.
-            if (deps.count(pred)) break;
+            if (deps.count(pred))
+                break;
 
             // Non-volatile, non-atomic loads are pure from a memory-ordering
             // perspective — loads don't conflict with each other.
             if (auto* prevLI = llvm::dyn_cast<llvm::LoadInst>(pred)) {
-                if (prevLI->isVolatile() || prevLI->isAtomic()) break;
+                if (prevLI->isVolatile() || prevLI->isAtomic())
+                    break;
                 insertBefore = pred;
                 continue;
             }
 
             // Store: only safe to hoist past if provably NoAlias.
             if (auto* SI = llvm::dyn_cast<llvm::StoreInst>(pred)) {
-                if (SI->isVolatile() || SI->isAtomic()) break;
+                if (SI->isVolatile() || SI->isAtomic())
+                    break;
                 // Require stronger provenance in addition to AA=NoAlias to
                 // reduce risk from weak/incomplete alias metadata.
-                if (!hasNoAliasProvenance(LI, SI)) break;
-                if (AA.alias(loadLoc, llvm::MemoryLocation::get(SI))
-                        != llvm::AliasResult::NoAlias)
+                if (!hasNoAliasProvenance(LI, SI))
+                    break;
+                if (AA.alias(loadLoc, llvm::MemoryLocation::get(SI)) != llvm::AliasResult::NoAlias)
                     break;
                 insertBefore = pred;
                 continue;
             }
 
             // Fence, call, or any instruction with memory side effects: stop.
-            if (llvm::isa<llvm::FenceInst>(pred))    break;
-            if (pred->mayReadOrWriteMemory())         break;
-            if (pred->mayHaveSideEffects())           break;
+            if (llvm::isa<llvm::FenceInst>(pred))
+                break;
+            if (pred->mayReadOrWriteMemory())
+                break;
+            if (pred->mayHaveSideEffects())
+                break;
 
             // Pure instruction (arithmetic, GEP, cast, …): safe to hoist past.
             insertBefore = pred;
         }
 
-        if (!insertBefore) return false;
+        if (!insertBefore)
+            return false;
         LI->moveBefore(insertBefore);
         return true;
     }
 
-    static bool processBlock(llvm::BasicBlock& BB, llvm::AAResults& AA,
-                             unsigned maxHoistDist) {
+    static bool processBlock(llvm::BasicBlock& BB, llvm::AAResults& AA, unsigned maxHoistDist) {
         // Snapshot loads before we start moving them to avoid iterator issues.
         llvm::SmallVector<llvm::LoadInst*, 16> loads;
         for (auto& I : BB)
@@ -629,24 +630,21 @@ private:
 };
 
 // ── Tree Height Reduction Pass (RPAR) ─────────────────────────────────────────
-struct TreeHeightReductionPass
-    : public llvm::PassInfoMixin<TreeHeightReductionPass> {
+struct TreeHeightReductionPass : public llvm::PassInfoMixin<TreeHeightReductionPass> {
 
     // Minimum number of leaves to make tree balancing profitable.
     static constexpr unsigned kMinLeaves = 4;
 
-    llvm::PreservedAnalyses run(llvm::Function& F,
-                                llvm::FunctionAnalysisManager& FAM) {
+    llvm::PreservedAnalyses run(llvm::Function& F, llvm::FunctionAnalysisManager& FAM) {
         auto& TTI = FAM.getResult<llvm::TargetIRAnalysis>(F);
         const UnifiedExecutionModel model = buildExecutionModel(F, TTI);
         bool changed = false;
         for (auto& BB : F)
             changed |= processBlock(BB, model);
-        return changed ? llvm::PreservedAnalyses::none()
-                       : llvm::PreservedAnalyses::all();
+        return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
     }
 
-private:
+  private:
     using BinOp = llvm::BinaryOperator;
 
     // Returns true if BO can be reassociated (associative + commutative, and
@@ -668,14 +666,11 @@ private:
     }
 
     // Collect all scalar leaves of the binary-op tree rooted at V into
-    static void collectLeaves(llvm::Value* V, unsigned opcode,
-                               llvm::BasicBlock* BB,
-                               llvm::SmallVectorImpl<llvm::Value*>& leaves,
-                               bool isRoot) {
+    static void collectLeaves(llvm::Value* V, unsigned opcode, llvm::BasicBlock* BB,
+                              llvm::SmallVectorImpl<llvm::Value*>& leaves, bool isRoot) {
         auto* BO = llvm::dyn_cast<BinOp>(V);
-        if (!BO || BO->getOpcode() != opcode || BO->getParent() != BB
-                || !isBalanceable(BO)
-                || (!isRoot && !BO->hasOneUse())) {
+        if (!BO || BO->getOpcode() != opcode || BO->getParent() != BB || !isBalanceable(BO) ||
+            (!isRoot && !BO->hasOneUse())) {
             leaves.push_back(V);
             return;
         }
@@ -684,22 +679,30 @@ private:
     }
 
     // Recursively build a balanced binary tree over leaves[lo..hi) using
-    static llvm::Value* buildTree(llvm::SmallVectorImpl<llvm::Value*>& leaves,
-                                   unsigned lo, unsigned hi,
-                                   unsigned opcode,
-                                   llvm::FastMathFlags fmf,
-                                   llvm::IRBuilder<>& B) {
-        if (hi - lo == 1) return leaves[lo];
+    static llvm::Value* buildTree(llvm::SmallVectorImpl<llvm::Value*>& leaves, unsigned lo, unsigned hi,
+                                  unsigned opcode, llvm::FastMathFlags fmf, llvm::IRBuilder<>& B) {
+        if (hi - lo == 1)
+            return leaves[lo];
         const unsigned mid = (lo + hi) / 2;
-        auto* lhs = buildTree(leaves, lo,  mid, opcode, fmf, B);
-        auto* rhs = buildTree(leaves, mid, hi,  opcode, fmf, B);
+        auto* lhs = buildTree(leaves, lo, mid, opcode, fmf, B);
+        auto* rhs = buildTree(leaves, mid, hi, opcode, fmf, B);
         llvm::Value* result = nullptr;
         switch (opcode) {
-        case llvm::Instruction::Add:  result = B.CreateAdd (lhs, rhs); break;
-        case llvm::Instruction::Mul:  result = B.CreateMul (lhs, rhs); break;
-        case llvm::Instruction::And:  result = B.CreateAnd (lhs, rhs); break;
-        case llvm::Instruction::Or:   result = B.CreateOr  (lhs, rhs); break;
-        case llvm::Instruction::Xor:  result = B.CreateXor (lhs, rhs); break;
+        case llvm::Instruction::Add:
+            result = B.CreateAdd(lhs, rhs);
+            break;
+        case llvm::Instruction::Mul:
+            result = B.CreateMul(lhs, rhs);
+            break;
+        case llvm::Instruction::And:
+            result = B.CreateAnd(lhs, rhs);
+            break;
+        case llvm::Instruction::Or:
+            result = B.CreateOr(lhs, rhs);
+            break;
+        case llvm::Instruction::Xor:
+            result = B.CreateXor(lhs, rhs);
+            break;
         case llvm::Instruction::FAdd:
             result = B.CreateFAdd(lhs, rhs);
             llvm::cast<llvm::Instruction>(result)->setFastMathFlags(fmf);
@@ -708,7 +711,8 @@ private:
             result = B.CreateFMul(lhs, rhs);
             llvm::cast<llvm::Instruction>(result)->setFastMathFlags(fmf);
             break;
-        default: llvm_unreachable("unexpected opcode in TreeHeightReduction::buildTree");
+        default:
+            llvm_unreachable("unexpected opcode in TreeHeightReduction::buildTree");
         }
         return result;
     }
@@ -719,7 +723,8 @@ private:
         llvm::SmallVector<BinOp*, 16> roots;
         for (auto& I : BB) {
             auto* BO = llvm::dyn_cast<BinOp>(&I);
-            if (!BO || !isBalanceable(BO)) continue;
+            if (!BO || !isBalanceable(BO))
+                continue;
             const unsigned opc = BO->getOpcode();
             bool isRoot = true;
             for (auto* U : BO->users()) {
@@ -729,7 +734,8 @@ private:
                         break;
                     }
             }
-            if (isRoot) roots.push_back(BO);
+            if (isRoot)
+                roots.push_back(BO);
         }
 
         bool changed = false;
@@ -737,18 +743,20 @@ private:
             const unsigned opc = root->getOpcode();
             llvm::SmallVector<llvm::Value*, 16> leaves;
             collectLeaves(root, opc, &BB, leaves, /*isRoot=*/true);
-            if (leaves.size() < kMinLeaves) continue;
+            if (leaves.size() < kMinLeaves)
+                continue;
             // Guard against register-pressure blowups from very wide trees.
-            if (leaves.size() > model.treeMaxLeaves) continue;
+            if (leaves.size() > model.treeMaxLeaves)
+                continue;
             // Multi-use roots often benefit less and can lengthen live ranges.
-            if (!root->hasOneUse() && leaves.size() > 6) continue;
+            if (!root->hasOneUse() && leaves.size() > 6)
+                continue;
 
             // Build the balanced tree, inserting instructions just before root.
             llvm::IRBuilder<> builder(root);
-            llvm::Value* balanced = buildTree(leaves, 0, leaves.size(),
-                                               opc, root->getFastMathFlags(),
-                                               builder);
-            if (balanced == root) continue;
+            llvm::Value* balanced = buildTree(leaves, 0, leaves.size(), opc, root->getFastMathFlags(), builder);
+            if (balanced == root)
+                continue;
             root->replaceAllUsesWith(balanced);
             // The now-unused linear chain will be removed by ADCE/DCE.
             changed = true;
@@ -758,12 +766,10 @@ private:
 };
 
 // ── Branch Entropy Reduction Pass (BER) ────────────────────────────────────────
-struct BranchEntropyReductionPass
-    : public llvm::PassInfoMixin<BranchEntropyReductionPass> {
+struct BranchEntropyReductionPass : public llvm::PassInfoMixin<BranchEntropyReductionPass> {
     static constexpr uint32_t kProbDen = (1u << 31);
 
-    llvm::PreservedAnalyses run(llvm::Function& F,
-                                llvm::FunctionAnalysisManager& FAM) {
+    llvm::PreservedAnalyses run(llvm::Function& F, llvm::FunctionAnalysisManager& FAM) {
         auto& BPI = FAM.getResult<llvm::BranchProbabilityAnalysis>(F);
         auto& TTI = FAM.getResult<llvm::TargetIRAnalysis>(F);
         const UnifiedExecutionModel model = buildExecutionModel(F, TTI);
@@ -776,19 +782,20 @@ struct BranchEntropyReductionPass
                     candidates.push_back(BI);
         for (auto* BI : candidates)
             changed |= tryConvertDiamond(BI, BPI, TTI, model);
-        return changed ? llvm::PreservedAnalyses::none()
-                       : llvm::PreservedAnalyses::all();
+        return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
     }
 
-private:
+  private:
     // Returns the target-aware uop cost of pure (speculatable) non-terminator instructions in
-    static unsigned estimatePureUops(const llvm::BasicBlock* BB,
-                                     const llvm::TargetTransformInfo& TTI) {
+    static unsigned estimatePureUops(const llvm::BasicBlock* BB, const llvm::TargetTransformInfo& TTI) {
         unsigned n = 0;
         for (const auto& I : *BB) {
-            if (llvm::isa<llvm::DbgInfoIntrinsic>(&I)) continue;
-            if (llvm::isa<llvm::BranchInst>(&I))       continue;
-            if (llvm::isa<llvm::PHINode>(&I))           return UINT_MAX;
+            if (llvm::isa<llvm::DbgInfoIntrinsic>(&I))
+                continue;
+            if (llvm::isa<llvm::BranchInst>(&I))
+                continue;
+            if (llvm::isa<llvm::PHINode>(&I))
+                return UINT_MAX;
             if (I.mayHaveSideEffects() || I.mayReadOrWriteMemory())
                 return UINT_MAX;
             n += instructionUopCost(I, TTI);
@@ -796,14 +803,13 @@ private:
         return n;
     }
 
-    static bool tryConvertDiamond(llvm::BranchInst* BI,
-                                   llvm::BranchProbabilityInfo& BPI,
-                                   const llvm::TargetTransformInfo& TTI,
-                                   const UnifiedExecutionModel& model) {
-        llvm::BasicBlock* head    = BI->getParent();
-        llvm::BasicBlock* trueBB  = BI->getSuccessor(0);
+    static bool tryConvertDiamond(llvm::BranchInst* BI, llvm::BranchProbabilityInfo& BPI,
+                                  const llvm::TargetTransformInfo& TTI, const UnifiedExecutionModel& model) {
+        llvm::BasicBlock* head = BI->getParent();
+        llvm::BasicBlock* trueBB = BI->getSuccessor(0);
         llvm::BasicBlock* falseBB = BI->getSuccessor(1);
-        if (trueBB == falseBB) return false;
+        if (trueBB == falseBB)
+            return false;
 
         const uint32_t num = BPI.getEdgeProbability(head, trueBB).getNumerator();
         const double trueProb = static_cast<double>(num) / static_cast<double>(kProbDen);
@@ -812,56 +818,70 @@ private:
 
         // Both arms must have exactly one predecessor (head) — otherwise
         // cloning their instructions into head would create multiple definitions.
-        if (!trueBB->getSinglePredecessor())  return false;
-        if (!falseBB->getSinglePredecessor()) return false;
+        if (!trueBB->getSinglePredecessor())
+            return false;
+        if (!falseBB->getSinglePredecessor())
+            return false;
 
         // Both arms must end with an unconditional branch to the same merge block.
-        auto* trueTerm  = llvm::dyn_cast<llvm::BranchInst>(trueBB->getTerminator());
+        auto* trueTerm = llvm::dyn_cast<llvm::BranchInst>(trueBB->getTerminator());
         auto* falseTerm = llvm::dyn_cast<llvm::BranchInst>(falseBB->getTerminator());
-        if (!trueTerm  || trueTerm->isConditional())  return false;
-        if (!falseTerm || falseTerm->isConditional()) return false;
+        if (!trueTerm || trueTerm->isConditional())
+            return false;
+        if (!falseTerm || falseTerm->isConditional())
+            return false;
         llvm::BasicBlock* merge = trueTerm->getSuccessor(0);
-        if (falseTerm->getSuccessor(0) != merge) return false;
+        if (falseTerm->getSuccessor(0) != merge)
+            return false;
 
         // Arms must be purely computational; check combined uop budget.
-        const unsigned trueN  = estimatePureUops(trueBB, TTI);
+        const unsigned trueN = estimatePureUops(trueBB, TTI);
         const unsigned falseN = estimatePureUops(falseBB, TTI);
-        if (trueN  == UINT_MAX) return false;
-        if (falseN == UINT_MAX) return false;
-        if (trueN + falseN > model.branchSpeculationUopBudget) return false;
-        if (trueN + falseN == 0)           return false;
+        if (trueN == UINT_MAX)
+            return false;
+        if (falseN == UINT_MAX)
+            return false;
+        if (trueN + falseN > model.branchSpeculationUopBudget)
+            return false;
+        if (trueN + falseN == 0)
+            return false;
         // Expected value model:
         const double confidenceScaledRate = hasProfWeights ? minProb : (minProb * 0.50);
-        const double expectedMispredictCost =
-            confidenceScaledRate * model.branchMispredictPenaltyUops;
+        const double expectedMispredictCost = confidenceScaledRate * model.branchMispredictPenaltyUops;
         if (static_cast<double>(trueN + falseN) >= expectedMispredictCost)
             return false;
 
         // Every phi in the merge block must have exactly two incoming edges,
         // both from our arms.
         for (const auto& phi : merge->phis()) {
-            if (phi.getNumIncomingValues() != 2)        return false;
+            if (phi.getNumIncomingValues() != 2)
+                return false;
             const auto* blk0 = phi.getIncomingBlock(0);
             const auto* blk1 = phi.getIncomingBlock(1);
-            if ((blk0 != trueBB || blk1 != falseBB) &&
-                (blk0 != falseBB || blk1 != trueBB)) return false;
+            if ((blk0 != trueBB || blk1 != falseBB) && (blk0 != falseBB || blk1 != trueBB))
+                return false;
         }
 
         // Verify that arm instructions are only used within their own arm or
         auto checkEscapes = [&](const llvm::BasicBlock* arm) {
             for (const auto& I : *arm) {
-                if (llvm::isa<llvm::BranchInst>(&I)) continue;
+                if (llvm::isa<llvm::BranchInst>(&I))
+                    continue;
                 for (const auto* U : I.users()) {
                     const auto* UI = llvm::dyn_cast<llvm::Instruction>(U);
-                    if (!UI) return false;
-                    if (UI->getParent() == arm)   continue;
-                    if (UI->getParent() == merge && llvm::isa<llvm::PHINode>(UI)) continue;
+                    if (!UI)
+                        return false;
+                    if (UI->getParent() == arm)
+                        continue;
+                    if (UI->getParent() == merge && llvm::isa<llvm::PHINode>(UI))
+                        continue;
                     return false;
                 }
             }
             return true;
         };
-        if (!checkEscapes(trueBB) || !checkEscapes(falseBB)) return false;
+        if (!checkEscapes(trueBB) || !checkEscapes(falseBB))
+            return false;
 
         // ── Transformation ────────────────────────────────────────────────
         llvm::Value* cond = BI->getCondition();
@@ -869,20 +889,21 @@ private:
 
         // Clone arm instructions into head, remapping intra-arm uses.
         llvm::ValueToValueMapTy trueVM, falseVM;
-        auto cloneArm = [&](const llvm::BasicBlock* arm,
-                             llvm::ValueToValueMapTy& vm) {
+        auto cloneArm = [&](const llvm::BasicBlock* arm, llvm::ValueToValueMapTy& vm) {
             for (const auto& I : *arm) {
-                if (llvm::isa<llvm::BranchInst>(&I)) continue;
+                if (llvm::isa<llvm::BranchInst>(&I))
+                    continue;
                 auto* clone = I.clone();
                 for (auto& op : clone->operands()) {
                     llvm::Value* mapped = vm.lookup(op.get());
-                    if (mapped) op = mapped;
+                    if (mapped)
+                        op = mapped;
                 }
                 builder.Insert(clone);
                 vm[&I] = clone;
             }
         };
-        cloneArm(trueBB,  trueVM);
+        cloneArm(trueBB, trueVM);
         cloneArm(falseBB, falseVM);
 
         // Replace phi nodes in merge with select instructions.
@@ -894,14 +915,15 @@ private:
             llvm::Value* fv = phi->getIncomingValueForBlock(falseBB);
             {
                 llvm::Value* m = trueVM.lookup(tv);
-                if (m) tv = m;
+                if (m)
+                    tv = m;
             }
             {
                 llvm::Value* m = falseVM.lookup(fv);
-                if (m) fv = m;
+                if (m)
+                    fv = m;
             }
-            phi->replaceAllUsesWith(
-                builder.CreateSelect(cond, tv, fv, phi->getName()));
+            phi->replaceAllUsesWith(builder.CreateSelect(cond, tv, fv, phi->getName()));
             phi->eraseFromParent();
         }
 
@@ -915,11 +937,9 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-struct StoreWideningPass
-    : public llvm::PassInfoMixin<StoreWideningPass> {
+struct StoreWideningPass : public llvm::PassInfoMixin<StoreWideningPass> {
 
-    llvm::PreservedAnalyses run(llvm::Function& F,
-                                llvm::FunctionAnalysisManager& FAM) {
+    llvm::PreservedAnalyses run(llvm::Function& F, llvm::FunctionAnalysisManager& FAM) {
         auto& DL = F.getParent()->getDataLayout();
         (void)FAM;
         bool changed = false;
@@ -927,20 +947,19 @@ struct StoreWideningPass
         for (auto& BB : F) {
             changed |= widenStoresInBlock(BB, DL);
         }
-        return changed ? llvm::PreservedAnalyses::none()
-                       : llvm::PreservedAnalyses::all();
+        return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
     }
 
-private:
+  private:
     struct StoreInfo {
         llvm::StoreInst* SI;
-        int64_t offset;      // byte offset from base pointer
-        unsigned sizeBytes;  // store size in bytes
+        int64_t offset;     // byte offset from base pointer
+        unsigned sizeBytes; // store size in bytes
     };
 
     // Try to get a base pointer and constant byte offset from a pointer value.
-    static bool decomposePointer(const llvm::Value* ptr, const llvm::DataLayout& DL,
-                                 const llvm::Value*& base, int64_t& offset) {
+    static bool decomposePointer(const llvm::Value* ptr, const llvm::DataLayout& DL, const llvm::Value*& base,
+                                 int64_t& offset) {
         base = ptr;
         offset = 0;
         // Walk through GEPs accumulating constant offsets.
@@ -957,9 +976,7 @@ private:
 
     // Check if there's any instruction between two stores (in the same BB)
     // that could alias with the store target.
-    static bool hasAliasingInstructionBetween(llvm::StoreInst* first,
-                                              llvm::StoreInst* last,
-                                              const llvm::Value* base) {
+    static bool hasAliasingInstructionBetween(llvm::StoreInst* first, llvm::StoreInst* last, const llvm::Value* base) {
         auto it = first->getIterator();
         auto end = last->getIterator();
         for (++it; it != end; ++it) {
@@ -970,16 +987,14 @@ private:
                 if (loadBase == base)
                     return true;
                 // If the load is from an alloca and the store base is different, safe.
-                if (!llvm::isa<llvm::AllocaInst>(loadBase) ||
-                    !llvm::isa<llvm::AllocaInst>(base))
+                if (!llvm::isa<llvm::AllocaInst>(loadBase) || !llvm::isa<llvm::AllocaInst>(base))
                     return true; // conservative for non-alloca
             }
             // Calls might alias anything.
             if (llvm::isa<llvm::CallBase>(&*it)) {
                 // Allow pure intrinsics (dbg, lifetime, etc.)
                 if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&*it)) {
-                    if (CI->getCalledFunction() &&
-                        CI->getCalledFunction()->isIntrinsic() &&
+                    if (CI->getCalledFunction() && CI->getCalledFunction()->isIntrinsic() &&
                         CI->getCalledFunction()->doesNotAccessMemory())
                         continue;
                 }
@@ -988,8 +1003,7 @@ private:
             // Any other store to the same base is a conflict.
             if (auto* otherSI = llvm::dyn_cast<llvm::StoreInst>(&*it)) {
                 if (otherSI != first && otherSI != last) {
-                    const llvm::Value* storeBase =
-                        otherSI->getPointerOperand()->stripPointerCasts();
+                    const llvm::Value* storeBase = otherSI->getPointerOperand()->stripPointerCasts();
                     if (storeBase == base)
                         continue; // same base = will be in our group, not a conflict
                 }
@@ -1003,7 +1017,8 @@ private:
         llvm::SmallVector<StoreInfo, 16> stores;
         for (auto& I : BB) {
             auto* SI = llvm::dyn_cast<llvm::StoreInst>(&I);
-            if (!SI || SI->isVolatile() || SI->isAtomic()) continue;
+            if (!SI || SI->isVolatile() || SI->isAtomic())
+                continue;
             if (!SI->getValueOperand()->getType()->isIntegerTy() &&
                 !SI->getValueOperand()->getType()->isFloatingPointTy())
                 continue;
@@ -1017,7 +1032,8 @@ private:
             stores.push_back({SI, offset, size});
         }
 
-        if (stores.size() < 2) return false;
+        if (stores.size() < 2)
+            return false;
 
         // Group stores by base pointer.
         llvm::DenseMap<const llvm::Value*, llvm::SmallVector<size_t, 8>> groups;
@@ -1030,28 +1046,26 @@ private:
 
         bool changed = false;
         for (auto& [base, indices] : groups) {
-            if (indices.size() < 2) continue;
+            if (indices.size() < 2)
+                continue;
 
             // Sort by offset within this group.
             std::sort(indices.begin(), indices.end(),
-                      [&](size_t a, size_t b) {
-                          return stores[a].offset < stores[b].offset;
-                      });
+                      [&](size_t a, size_t b) { return stores[a].offset < stores[b].offset; });
 
             // Find runs of consecutive constant stores.
             size_t i = 0;
             while (i < indices.size()) {
                 // Start a new run.
                 size_t runStart = i;
-                int64_t expectedOff = stores[indices[i]].offset +
-                                      stores[indices[i]].sizeBytes;
-                bool allConst = llvm::isa<llvm::ConstantInt>(
-                    stores[indices[i]].SI->getValueOperand());
+                int64_t expectedOff = stores[indices[i]].offset + stores[indices[i]].sizeBytes;
+                bool allConst = llvm::isa<llvm::ConstantInt>(stores[indices[i]].SI->getValueOperand());
 
                 size_t j = i + 1;
                 while (j < indices.size()) {
                     auto& s = stores[indices[j]];
-                    if (s.offset != expectedOff) break;
+                    if (s.offset != expectedOff)
+                        break;
                     if (!llvm::isa<llvm::ConstantInt>(s.SI->getValueOperand()))
                         allConst = false;
                     expectedOff = s.offset + s.sizeBytes;
@@ -1070,11 +1084,10 @@ private:
                     while (targetBytes < totalBytes && targetBytes <= 8)
                         targetBytes <<= 1;
 
-                    if (totalBytes == targetBytes && targetBytes >= 2 &&
-                        targetBytes <= 8) {
+                    if (totalBytes == targetBytes && targetBytes >= 2 && targetBytes <= 8) {
                         // Build the merged constant value.
                         llvm::StoreInst* firstSI = stores[indices[runStart]].SI;
-                        llvm::StoreInst* lastSI = stores[indices[j-1]].SI;
+                        llvm::StoreInst* lastSI = stores[indices[j - 1]].SI;
 
                         // Check for aliasing instructions between first and last store.
                         if (hasAliasingInstructionBetween(firstSI, lastSI, base)) {
@@ -1088,8 +1101,7 @@ private:
                         int64_t baseOff = stores[indices[runStart]].offset;
 
                         for (size_t k = runStart; k < j; ++k) {
-                            auto* ci = llvm::cast<llvm::ConstantInt>(
-                                stores[indices[k]].SI->getValueOperand());
+                            auto* ci = llvm::cast<llvm::ConstantInt>(stores[indices[k]].SI->getValueOperand());
                             unsigned bitWidth = stores[indices[k]].sizeBytes * 8;
                             llvm::APInt val = ci->getValue().zextOrTrunc(targetBytes * 8);
                             int64_t relOff = stores[indices[k]].offset - baseOff;
@@ -1097,8 +1109,7 @@ private:
                             if (littleEndian) {
                                 shift = static_cast<unsigned>(relOff * 8);
                             } else {
-                                shift = (targetBytes - relOff -
-                                         stores[indices[k]].sizeBytes) * 8;
+                                shift = (targetBytes - relOff - stores[indices[k]].sizeBytes) * 8;
                             }
                             (void)bitWidth;
                             wideVal |= val.shl(shift);
@@ -1106,10 +1117,8 @@ private:
 
                         // Create the wide store at the last store's position.
                         llvm::IRBuilder<> builder(lastSI);
-                        llvm::Type* wideType = llvm::IntegerType::get(
-                            BB.getContext(), targetBytes * 8);
-                        llvm::Value* wideConst =
-                            llvm::ConstantInt::get(wideType, wideVal);
+                        llvm::Type* wideType = llvm::IntegerType::get(BB.getContext(), targetBytes * 8);
+                        llvm::Value* wideConst = llvm::ConstantInt::get(wideType, wideVal);
 
                         // The store pointer must point to the first (lowest-offset) location.
                         llvm::Value* storePtr = firstSI->getPointerOperand();
@@ -1132,14 +1141,13 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-struct CrossIterLoadReusePass
-    : public llvm::PassInfoMixin<CrossIterLoadReusePass> {
+struct CrossIterLoadReusePass : public llvm::PassInfoMixin<CrossIterLoadReusePass> {
 
-    llvm::PreservedAnalyses run(llvm::Function& F,
-                                llvm::FunctionAnalysisManager& FAM) {
+    llvm::PreservedAnalyses run(llvm::Function& F, llvm::FunctionAnalysisManager& FAM) {
         auto& LI = FAM.getResult<llvm::LoopAnalysis>(F);
         auto& SE = FAM.getResult<llvm::ScalarEvolutionAnalysis>(F);
-        auto& DL = F.getParent()->getDataLayout();        bool changed = false;
+        auto& DL = F.getParent()->getDataLayout();
+        bool changed = false;
 
         for (auto* L : LI) {
             changed |= optimizeLoop(*L, SE, DL);
@@ -1148,41 +1156,45 @@ struct CrossIterLoadReusePass
                 changed |= optimizeLoop(*SubL, SE, DL);
         }
 
-        return changed ? llvm::PreservedAnalyses::none()
-                       : llvm::PreservedAnalyses::all();
+        return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
     }
 
-private:
+  private:
     struct StridedLoad {
         llvm::LoadInst* LI;
-        const llvm::SCEV* baseSCEV;  // loop-invariant base
-        int64_t stride;               // bytes per iteration
-        int64_t offsetInIter;         // additional constant offset within iteration
+        const llvm::SCEV* baseSCEV; // loop-invariant base
+        int64_t stride;             // bytes per iteration
+        int64_t offsetInIter;       // additional constant offset within iteration
     };
 
-    bool optimizeLoop(llvm::Loop& L, llvm::ScalarEvolution& SE,
-                      const llvm::DataLayout& /*DL*/) {
+    bool optimizeLoop(llvm::Loop& L, llvm::ScalarEvolution& SE, const llvm::DataLayout& /*DL*/) {
         // Only handle single-block loops for now (innermost hot loops).
-        if (!L.getLoopLatch() || L.getNumBlocks() != 1) return false;
+        if (!L.getLoopLatch() || L.getNumBlocks() != 1)
+            return false;
         llvm::BasicBlock* body = L.getHeader();
 
         // Collect loads with affine SCEVs.
         llvm::SmallVector<StridedLoad, 8> stridedLoads;
         for (auto& I : *body) {
             auto* load = llvm::dyn_cast<llvm::LoadInst>(&I);
-            if (!load || load->isVolatile() || load->isAtomic()) continue;
+            if (!load || load->isVolatile() || load->isAtomic())
+                continue;
             if (!load->getType()->isIntegerTy() && !load->getType()->isFloatingPointTy())
                 continue;
 
             const llvm::SCEV* ptrSCEV = SE.getSCEV(load->getPointerOperand());
             auto* addRec = llvm::dyn_cast<llvm::SCEVAddRecExpr>(ptrSCEV);
-            if (!addRec || addRec->getLoop() != &L) continue;
-            if (!addRec->isAffine()) continue;
+            if (!addRec || addRec->getLoop() != &L)
+                continue;
+            if (!addRec->isAffine())
+                continue;
 
             auto* stepSCEV = llvm::dyn_cast<llvm::SCEVConstant>(addRec->getStepRecurrence(SE));
-            if (!stepSCEV) continue;
+            if (!stepSCEV)
+                continue;
             int64_t stride = stepSCEV->getAPInt().getSExtValue();
-            if (stride == 0) continue;
+            if (stride == 0)
+                continue;
 
             // The start SCEV is the loop-invariant base + offset.
             const llvm::SCEV* startSCEV = addRec->getStart();
@@ -1190,43 +1202,49 @@ private:
             stridedLoads.push_back({load, startSCEV, stride, 0});
         }
 
-        if (stridedLoads.size() < 2) return false;
+        if (stridedLoads.size() < 2)
+            return false;
 
         // Group loads by (stride, type).  Within each group, look for
         bool changed = false;
         llvm::DenseMap<llvm::LoadInst*, bool> eliminated;
 
         for (size_t i = 0; i < stridedLoads.size(); ++i) {
-            if (eliminated.count(stridedLoads[i].LI)) continue;
+            if (eliminated.count(stridedLoads[i].LI))
+                continue;
 
             for (size_t j = i + 1; j < stridedLoads.size(); ++j) {
-                if (eliminated.count(stridedLoads[j].LI)) continue;
+                if (eliminated.count(stridedLoads[j].LI))
+                    continue;
                 auto& a = stridedLoads[i];
                 auto& b = stridedLoads[j];
 
                 // Must have same stride and same loaded type.
-                if (a.stride != b.stride) continue;
-                if (a.LI->getType() != b.LI->getType()) continue;
+                if (a.stride != b.stride)
+                    continue;
+                if (a.LI->getType() != b.LI->getType())
+                    continue;
 
                 // Check if b's start = a's start + stride.
                 // That means b at iteration i is the same as a at iteration i+1.
                 const llvm::SCEV* diff = SE.getMinusSCEV(b.baseSCEV, a.baseSCEV);
                 auto* diffConst = llvm::dyn_cast<llvm::SCEVConstant>(diff);
-                if (!diffConst) continue;
+                if (!diffConst)
+                    continue;
                 int64_t diffVal = diffConst->getAPInt().getSExtValue();
 
                 if (diffVal == a.stride) {
                     // b[i] == a[i+1]: we can carry a's value forward!
 
                     llvm::BasicBlock* preheader = L.getLoopPreheader();
-                    if (!preheader) continue;
+                    if (!preheader)
+                        continue;
 
                     // Create prologue load in preheader for the initial value.
                     llvm::IRBuilder<> preBuilder(preheader->getTerminator());
                     // b's value at the first iteration = load from b's initial address.
 
-                    llvm::PHINode* phi = llvm::PHINode::Create(
-                        b.LI->getType(), 2, "reuse.phi");
+                    llvm::PHINode* phi = llvm::PHINode::Create(b.LI->getType(), 2, "reuse.phi");
                     phi->insertBefore(body->begin());
 
                     // From the latch (= body for single-block loops): carry a's value.
@@ -1249,8 +1267,7 @@ private:
                         continue;
                     }
 
-                    llvm::Value* initLoad = preBuilder.CreateLoad(
-                        b.LI->getType(), bPtr, "reuse.init");
+                    llvm::Value* initLoad = preBuilder.CreateLoad(b.LI->getType(), bPtr, "reuse.init");
 
                     phi->addIncoming(initLoad, preheader);
 
@@ -1274,11 +1291,9 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-struct AdvancedBranchWeightAnnotationPass
-    : public llvm::PassInfoMixin<AdvancedBranchWeightAnnotationPass> {
+struct AdvancedBranchWeightAnnotationPass : public llvm::PassInfoMixin<AdvancedBranchWeightAnnotationPass> {
 
-    llvm::PreservedAnalyses run(llvm::Function& F,
-                                llvm::FunctionAnalysisManager& FAM) {
+    llvm::PreservedAnalyses run(llvm::Function& F, llvm::FunctionAnalysisManager& FAM) {
         auto& LI = FAM.getResult<llvm::LoopAnalysis>(F);
         auto& SE = FAM.getResult<llvm::ScalarEvolutionAnalysis>(F);
         llvm::MDBuilder MDB(F.getContext());
@@ -1286,20 +1301,22 @@ struct AdvancedBranchWeightAnnotationPass
 
         for (auto& BB : F) {
             auto* BI = llvm::dyn_cast<llvm::BranchInst>(BB.getTerminator());
-            if (!BI || !BI->isConditional()) continue;
+            if (!BI || !BI->isConditional())
+                continue;
             // Skip already-annotated branches (PGO takes precedence).
-            if (BI->getMetadata(llvm::LLVMContext::MD_prof)) continue;
+            if (BI->getMetadata(llvm::LLVMContext::MD_prof))
+                continue;
 
             llvm::Value* cond = BI->getCondition();
-            llvm::BasicBlock* trueBB  = BI->getSuccessor(0);
+            llvm::BasicBlock* trueBB = BI->getSuccessor(0);
             llvm::BasicBlock* falseBB = BI->getSuccessor(1);
 
-            uint32_t trueW = 0, falseW = 0;  // 0 = no opinion yet
+            uint32_t trueW = 0, falseW = 0; // 0 = no opinion yet
 
             // ── 1. SCEV / loop exit heuristic ────────────────────────────────
             llvm::Loop* loop = LI.getLoopFor(&BB);
             if (loop && trueW == 0) {
-                bool trueExits  = !loop->contains(trueBB);
+                bool trueExits = !loop->contains(trueBB);
                 bool falseExits = !loop->contains(falseBB);
                 if (trueExits != falseExits) {
                     // Try to get exact trip count from SCEV.
@@ -1308,17 +1325,22 @@ struct AdvancedBranchWeightAnnotationPass
                     if (tc > 1 && tc <= 256) {
                         // Exact: exit fires once every tc iterations.
                         if (trueExits) {
-                            trueW  = 1;
+                            trueW = 1;
                             falseW = static_cast<uint32_t>(tc - 1);
                         } else {
-                            trueW  = static_cast<uint32_t>(tc - 1);
+                            trueW = static_cast<uint32_t>(tc - 1);
                             falseW = 1;
                         }
                     }
                     // Fallback: generic 88/12 loop-continue heuristic.
                     if (trueW == 0) {
-                        if (trueExits) { trueW = 12; falseW = 88; }
-                        else           { trueW = 88; falseW = 12; }
+                        if (trueExits) {
+                            trueW = 12;
+                            falseW = 88;
+                        } else {
+                            trueW = 88;
+                            falseW = 12;
+                        }
                     }
                 }
             }
@@ -1328,8 +1350,7 @@ struct AdvancedBranchWeightAnnotationPass
                 if (auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(cond)) {
                     bool isEqNull = false, isNeNull = false;
                     for (unsigned oi = 0; oi < 2; ++oi) {
-                        if (llvm::isa<llvm::ConstantPointerNull>(
-                                icmp->getOperand(oi))) {
+                        if (llvm::isa<llvm::ConstantPointerNull>(icmp->getOperand(oi))) {
                             if (icmp->getPredicate() == llvm::ICmpInst::ICMP_EQ)
                                 isEqNull = true;
                             else if (icmp->getPredicate() == llvm::ICmpInst::ICMP_NE)
@@ -1337,8 +1358,13 @@ struct AdvancedBranchWeightAnnotationPass
                             break;
                         }
                     }
-                    if (isEqNull)       { trueW =  1; falseW = 99; }
-                    else if (isNeNull)  { trueW = 99; falseW =  1; }
+                    if (isEqNull) {
+                        trueW = 1;
+                        falseW = 99;
+                    } else if (isNeNull) {
+                        trueW = 99;
+                        falseW = 1;
+                    }
                 }
             }
 
@@ -1350,35 +1376,35 @@ struct AdvancedBranchWeightAnnotationPass
                     // Identify the constant operand (if any).
                     llvm::ConstantInt* constOp = nullptr;
                     for (unsigned oi = 0; oi < 2; ++oi) {
-                        constOp = llvm::dyn_cast<llvm::ConstantInt>(
-                            icmp->getOperand(oi));
-                        if (constOp) break;
+                        constOp = llvm::dyn_cast<llvm::ConstantInt>(icmp->getOperand(oi));
+                        if (constOp)
+                            break;
                     }
 
                     // eq -1 → error sentinel (very cold when true)
-                    if (constOp && pred == llvm::ICmpInst::ICMP_EQ &&
-                        constOp->isMinusOne()) {
-                        trueW = 5; falseW = 95;
+                    if (constOp && pred == llvm::ICmpInst::ICMP_EQ && constOp->isMinusOne()) {
+                        trueW = 5;
+                        falseW = 95;
                     }
                     // eq 0 → zero/false check (usually false in hot code)
-                    else if (constOp && pred == llvm::ICmpInst::ICMP_EQ &&
-                             constOp->isZero()) {
-                        trueW = 20; falseW = 80;
+                    else if (constOp && pred == llvm::ICmpInst::ICMP_EQ && constOp->isZero()) {
+                        trueW = 20;
+                        falseW = 80;
                     }
                     // ne 0 → non-zero check (usually true in hot code)
-                    else if (constOp && pred == llvm::ICmpInst::ICMP_NE &&
-                             constOp->isZero()) {
-                        trueW = 80; falseW = 20;
+                    else if (constOp && pred == llvm::ICmpInst::ICMP_NE && constOp->isZero()) {
+                        trueW = 80;
+                        falseW = 20;
                     }
                     // slt 0 → negative result check (overflow / error, cold)
-                    else if (pred == llvm::ICmpInst::ICMP_SLT && constOp &&
-                             constOp->isZero()) {
-                        trueW = 10; falseW = 90;
+                    else if (pred == llvm::ICmpInst::ICMP_SLT && constOp && constOp->isZero()) {
+                        trueW = 10;
+                        falseW = 90;
                     }
                     // sge 0 → non-negative (usually true)
-                    else if (pred == llvm::ICmpInst::ICMP_SGE && constOp &&
-                             constOp->isZero()) {
-                        trueW = 90; falseW = 10;
+                    else if (pred == llvm::ICmpInst::ICMP_SGE && constOp && constOp->isZero()) {
+                        trueW = 90;
+                        falseW = 10;
                     }
                 }
             }
@@ -1389,34 +1415,36 @@ struct AdvancedBranchWeightAnnotationPass
                     for (auto& I : *blk) {
                         if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I)) {
                             auto* callee = CI->getCalledFunction();
-                            if (!callee) continue;
+                            if (!callee)
+                                continue;
                             llvm::StringRef nm = callee->getName();
-                            if (nm == "abort" || nm == "_abort" ||
-                                nm == "__assert_fail" ||
-                                nm.starts_with("__ubsan_handle") ||
-                                nm.starts_with("__asan_report") ||
+                            if (nm == "abort" || nm == "_abort" || nm == "__assert_fail" ||
+                                nm.starts_with("__ubsan_handle") || nm.starts_with("__asan_report") ||
                                 callee->hasFnAttribute(llvm::Attribute::NoReturn))
                                 return true;
                         }
-                        if (!llvm::isa<llvm::PHINode>(&I)) break;
+                        if (!llvm::isa<llvm::PHINode>(&I))
+                            break;
                     }
                     return false;
                 };
-                if (isColdBlock(trueBB))  { trueW =  1; falseW = 99; }
-                else if (isColdBlock(falseBB)) { trueW = 99; falseW =  1; }
+                if (isColdBlock(trueBB)) {
+                    trueW = 1;
+                    falseW = 99;
+                } else if (isColdBlock(falseBB)) {
+                    trueW = 99;
+                    falseW = 1;
+                }
             }
 
             // ── 5. WithOverflow intrinsic check (overflow is cold) ──────────
             if (trueW == 0) {
                 if (auto* EVI = llvm::dyn_cast<llvm::ExtractValueInst>(cond)) {
                     if (EVI->getNumIndices() == 1 && EVI->getIndices()[0] == 1) {
-                        if (auto* srcTy =
-                                llvm::dyn_cast<llvm::StructType>(
-                                    EVI->getAggregateOperand()->getType())) {
+                        if (auto* srcTy = llvm::dyn_cast<llvm::StructType>(EVI->getAggregateOperand()->getType())) {
                             (void)srcTy;
                             // Check if aggregate comes from a with-overflow op.
-                            if (auto* CI = llvm::dyn_cast<llvm::CallBase>(
-                                    EVI->getAggregateOperand())) {
+                            if (auto* CI = llvm::dyn_cast<llvm::CallBase>(EVI->getAggregateOperand())) {
                                 auto id = CI->getIntrinsicID();
                                 if (id == llvm::Intrinsic::sadd_with_overflow ||
                                     id == llvm::Intrinsic::uadd_with_overflow ||
@@ -1425,7 +1453,8 @@ struct AdvancedBranchWeightAnnotationPass
                                     id == llvm::Intrinsic::smul_with_overflow ||
                                     id == llvm::Intrinsic::umul_with_overflow) {
                                     // Overflow is almost never the case.
-                                    trueW =  5; falseW = 95;
+                                    trueW = 5;
+                                    falseW = 95;
                                 }
                             }
                         }
@@ -1440,20 +1469,17 @@ struct AdvancedBranchWeightAnnotationPass
             }
         }
 
-        return changed ? llvm::PreservedAnalyses::none()
-                       : llvm::PreservedAnalyses::all();
+        return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
     }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-struct ConditionalStoreSinkPass
-    : public llvm::PassInfoMixin<ConditionalStoreSinkPass> {
+struct ConditionalStoreSinkPass : public llvm::PassInfoMixin<ConditionalStoreSinkPass> {
 
     // Maximum number of hot-path blocks to scan for liveness analysis.
     static constexpr unsigned kMaxHotPathBlocks = 12;
 
-    llvm::PreservedAnalyses run(llvm::Function& F,
-                                llvm::FunctionAnalysisManager& FAM) {
+    llvm::PreservedAnalyses run(llvm::Function& F, llvm::FunctionAnalysisManager& FAM) {
         auto& BPI = FAM.getResult<llvm::BranchProbabilityAnalysis>(F);
         bool changed = false;
 
@@ -1472,35 +1498,40 @@ struct ConditionalStoreSinkPass
 
             // Need branch-weight metadata to determine hot/cold;
             // without metadata we have no reliable probability.
-            if (!BI->getMetadata(llvm::LLVMContext::MD_prof)) continue;
+            if (!BI->getMetadata(llvm::LLVMContext::MD_prof))
+                continue;
 
             auto prob0 = BPI.getEdgeProbability(BB, static_cast<unsigned>(0));
             auto prob1 = BPI.getEdgeProbability(BB, static_cast<unsigned>(1));
 
             // Identify the cold successor: probability < 20%.
             llvm::BasicBlock* coldBB = nullptr;
-            llvm::BasicBlock* hotBB  = nullptr;
+            llvm::BasicBlock* hotBB = nullptr;
             if (prob0.getNumerator() * 5 < prob0.getDenominator()) {
                 coldBB = succ0;
-                hotBB  = succ1;
+                hotBB = succ1;
             } else if (prob1.getNumerator() * 5 < prob1.getDenominator()) {
                 coldBB = succ1;
-                hotBB  = succ0;
+                hotBB = succ0;
             }
-            if (!coldBB) continue;
+            if (!coldBB)
+                continue;
 
             // (c) coldBB must have exactly one predecessor (BB).
-            if (coldBB->getSinglePredecessor() != BB) continue;
+            if (coldBB->getSinglePredecessor() != BB)
+                continue;
 
             // Collect stores that satisfy the correctness conditions.
             llvm::SmallVector<llvm::StoreInst*, 4> toSink;
             for (auto& I : *BB) {
                 auto* SI = llvm::dyn_cast<llvm::StoreInst>(&I);
-                if (!SI || SI->isVolatile() || SI->isAtomic()) continue;
+                if (!SI || SI->isVolatile() || SI->isAtomic())
+                    continue;
 
                 // (a) Only store to alloca-derived addresses (stack locals).
                 llvm::Value* ptr = SI->getPointerOperand()->stripPointerCasts();
-                if (!llvm::isa<llvm::AllocaInst>(ptr)) continue;
+                if (!llvm::isa<llvm::AllocaInst>(ptr))
+                    continue;
 
                 // Only simple scalar types (not aggregate stores).
                 if (!SI->getValueOperand()->getType()->isIntegerTy() &&
@@ -1510,21 +1541,29 @@ struct ConditionalStoreSinkPass
 
                 // Values used by the store must be available in coldBB.
                 bool canSink = true;
-                for (auto* op : {SI->getValueOperand(),
-                                  SI->getPointerOperand()}) {
+                for (auto* op : {SI->getValueOperand(), SI->getPointerOperand()}) {
                     auto* opInst = llvm::dyn_cast<llvm::Instruction>(op);
-                    if (!opInst) continue;
+                    if (!opInst)
+                        continue;
                     if (opInst->getParent() == BB) {
                         // Must come before SI in BB.
                         bool foundBefore = false;
                         for (auto& check : *BB) {
-                            if (&check == opInst) { foundBefore = true; break; }
-                            if (&check == SI) break;
+                            if (&check == opInst) {
+                                foundBefore = true;
+                                break;
+                            }
+                            if (&check == SI)
+                                break;
                         }
-                        if (!foundBefore) { canSink = false; break; }
+                        if (!foundBefore) {
+                            canSink = false;
+                            break;
+                        }
                     }
                 }
-                if (!canSink) continue;
+                if (!canSink)
+                    continue;
 
                 // Check that there is no read of ptr between SI and the
                 // branch terminator in the same block.
@@ -1534,12 +1573,14 @@ struct ConditionalStoreSinkPass
                     for (++it; &*it != BI; ++it) {
                         if (auto* LI = llvm::dyn_cast<llvm::LoadInst>(&*it)) {
                             if (LI->getPointerOperand()->stripPointerCasts() == ptr) {
-                                readBetween = true; break;
+                                readBetween = true;
+                                break;
                             }
                         }
                     }
                 }
-                if (readBetween) continue;
+                if (readBetween)
+                    continue;
 
                 // (b) Hot-path liveness check: BFS from hotBB, stop at
                 bool liveOnHotPath = false;
@@ -1549,24 +1590,21 @@ struct ConditionalStoreSinkPass
                     worklist.push_back(hotBB);
                     visited.insert(hotBB);
                     unsigned blocksChecked = 0;
-                    while (!worklist.empty() && !liveOnHotPath &&
-                           blocksChecked < kMaxHotPathBlocks) {
+                    while (!worklist.empty() && !liveOnHotPath && blocksChecked < kMaxHotPathBlocks) {
                         auto* cur = worklist.pop_back_val();
                         ++blocksChecked;
                         for (auto& I2 : *cur) {
                             if (auto* LI2 = llvm::dyn_cast<llvm::LoadInst>(&I2)) {
-                                if (LI2->getPointerOperand()
-                                         ->stripPointerCasts() == ptr) {
-                                    liveOnHotPath = true; break;
+                                if (LI2->getPointerOperand()->stripPointerCasts() == ptr) {
+                                    liveOnHotPath = true;
+                                    break;
                                 }
                             }
                             // A new store to ptr kills liveness — hot path
                             // will get its own fresh value.
-                            if (auto* SI2 =
-                                    llvm::dyn_cast<llvm::StoreInst>(&I2)) {
-                                if (SI2->getPointerOperand()
-                                        ->stripPointerCasts() == ptr) {
-                                    goto next_block;  // ptr overwritten, no liveness
+                            if (auto* SI2 = llvm::dyn_cast<llvm::StoreInst>(&I2)) {
+                                if (SI2->getPointerOperand()->stripPointerCasts() == ptr) {
+                                    goto next_block; // ptr overwritten, no liveness
                                 }
                             }
                         }
@@ -1575,13 +1613,14 @@ struct ConditionalStoreSinkPass
                             if (succ != coldBB && visited.insert(succ).second)
                                 worklist.push_back(succ);
                         }
-                        next_block:;
+                    next_block:;
                     }
                     // If we exceeded the budget, conservatively assume live.
                     if (blocksChecked >= kMaxHotPathBlocks)
                         liveOnHotPath = true;
                 }
-                if (liveOnHotPath) continue;
+                if (liveOnHotPath)
+                    continue;
 
                 toSink.push_back(SI);
             }
@@ -1592,42 +1631,42 @@ struct ConditionalStoreSinkPass
                 changed = true;
             }
         }
-        return changed ? llvm::PreservedAnalyses::none()
-                       : llvm::PreservedAnalyses::all();
+        return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
     }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-struct RangeBoundsCheckHoistPass
-    : public llvm::PassInfoMixin<RangeBoundsCheckHoistPass> {
+struct RangeBoundsCheckHoistPass : public llvm::PassInfoMixin<RangeBoundsCheckHoistPass> {
 
     // Returns true if BB is a trivial abort block:
     //   PHINodes... printf... abort... unreachable   (or just abort + unreachable).
     static bool isAbortBlock(llvm::BasicBlock* BB) {
         bool sawAbort = false;
         for (auto& I : *BB) {
-            if (llvm::isa<llvm::PHINode>(I)) continue;
+            if (llvm::isa<llvm::PHINode>(I))
+                continue;
             if (auto* CI = llvm::dyn_cast<llvm::CallInst>(&I)) {
                 auto* callee = CI->getCalledFunction();
-                if (!callee) continue;
+                if (!callee)
+                    continue;
                 llvm::StringRef nm = callee->getName();
-                if (nm == "abort" || nm == "_abort" ||
-                    nm.starts_with("__ubsan") || nm.starts_with("__asan") ||
+                if (nm == "abort" || nm == "_abort" || nm.starts_with("__ubsan") || nm.starts_with("__asan") ||
                     callee->hasFnAttribute(llvm::Attribute::NoReturn))
                     sawAbort = true;
                 continue;
             }
-            if (llvm::isa<llvm::UnreachableInst>(I)) return sawAbort;
+            if (llvm::isa<llvm::UnreachableInst>(I))
+                return sawAbort;
             // Any other non-call instruction means the block isn't a trivial abort.
-            if (!llvm::isa<llvm::CallInst>(I)) return false;
+            if (!llvm::isa<llvm::CallInst>(I))
+                return false;
         }
         return false;
     }
 
-    llvm::PreservedAnalyses run(llvm::Function& F,
-                                llvm::FunctionAnalysisManager& FAM) {
-        auto& LI  = FAM.getResult<llvm::LoopAnalysis>(F);
-        auto& SE  = FAM.getResult<llvm::ScalarEvolutionAnalysis>(F);
+    llvm::PreservedAnalyses run(llvm::Function& F, llvm::FunctionAnalysisManager& FAM) {
+        auto& LI = FAM.getResult<llvm::LoopAnalysis>(F);
+        auto& SE = FAM.getResult<llvm::ScalarEvolutionAnalysis>(F);
         llvm::MDBuilder MDB(F.getContext());
         bool changed = false;
 
@@ -1643,11 +1682,13 @@ struct RangeBoundsCheckHoistPass
         for (auto* loop : innerLoops) {
             // Need a preheader to insert the combined check.
             auto* preheader = loop->getLoopPreheader();
-            if (!preheader) continue;
+            if (!preheader)
+                continue;
 
             // Need a single exiting block for exit count computation.
             auto* exitingBB = loop->getExitingBlock();
-            if (!exitingBB) continue;
+            if (!exitingBB)
+                continue;
 
             // Collect bounds-check branches: icmp ult IV, len → condBr ok, fail.
             llvm::Value* sharedLen = nullptr;
@@ -1656,16 +1697,20 @@ struct RangeBoundsCheckHoistPass
             bool compatible = true;
             for (auto* BB : loop->blocks()) {
                 auto* BI = llvm::dyn_cast<llvm::BranchInst>(BB->getTerminator());
-                if (!BI || !BI->isConditional()) continue;
+                if (!BI || !BI->isConditional())
+                    continue;
                 auto* cmpInst = llvm::dyn_cast<llvm::ICmpInst>(BI->getCondition());
-                if (!cmpInst) continue;
-                if (cmpInst->getPredicate() != llvm::ICmpInst::ICMP_ULT) continue;
+                if (!cmpInst)
+                    continue;
+                if (cmpInst->getPredicate() != llvm::ICmpInst::ICMP_ULT)
+                    continue;
 
                 // Identify ok / fail successors.
-                llvm::BasicBlock* okBB   = BI->getSuccessor(0);
+                llvm::BasicBlock* okBB = BI->getSuccessor(0);
                 llvm::BasicBlock* failBB = BI->getSuccessor(1);
                 if (!isAbortBlock(failBB)) {
-                    if (!isAbortBlock(okBB)) continue;
+                    if (!isAbortBlock(okBB))
+                        continue;
                     std::swap(okBB, failBB);
                     // Swapped: predicate is ULT and fail is succ(0) — we need
                     (void)okBB;
@@ -1677,16 +1722,21 @@ struct RangeBoundsCheckHoistPass
                 llvm::Value* rhsV = cmpInst->getOperand(1);
                 if (!loop->isLoopInvariant(rhsV)) {
                     std::swap(lhsV, rhsV);
-                    if (!loop->isLoopInvariant(rhsV)) continue;
+                    if (!loop->isLoopInvariant(rhsV))
+                        continue;
                 }
-                if (loop->isLoopInvariant(lhsV)) continue;
+                if (loop->isLoopInvariant(lhsV))
+                    continue;
 
                 // LHS must be an affine add-recurrence with positive step.
                 const llvm::SCEV* lhsSCEV = SE.getSCEV(lhsV);
-                if (!lhsSCEV || llvm::isa<llvm::SCEVCouldNotCompute>(lhsSCEV)) continue;
+                if (!lhsSCEV || llvm::isa<llvm::SCEVCouldNotCompute>(lhsSCEV))
+                    continue;
                 auto* AR = llvm::dyn_cast<llvm::SCEVAddRecExpr>(lhsSCEV);
-                if (!AR || !AR->isAffine() || AR->getLoop() != loop) continue;
-                if (!SE.isKnownPositive(AR->getStepRecurrence(SE))) continue;
+                if (!AR || !AR->isAffine() || AR->getLoop() != loop)
+                    continue;
+                if (!SE.isKnownPositive(AR->getStepRecurrence(SE)))
+                    continue;
 
                 // All checks must use the same len value.
                 if (!sharedLen) {
@@ -1696,10 +1746,12 @@ struct RangeBoundsCheckHoistPass
                     break;
                 }
 
-                checkBranches.push_back({BI, BI->getSuccessor(0) == failBB ? BI->getSuccessor(1) : BI->getSuccessor(0)});
+                checkBranches.push_back(
+                    {BI, BI->getSuccessor(0) == failBB ? BI->getSuccessor(1) : BI->getSuccessor(0)});
             }
 
-            if (!compatible || checkBranches.empty() || !sharedLen) continue;
+            if (!compatible || checkBranches.empty() || !sharedLen)
+                continue;
 
             // Determine the SCEV for the AR in the first bounds check.
             auto* firstBI = checkBranches[0].first;
@@ -1709,41 +1761,38 @@ struct RangeBoundsCheckHoistPass
                 ivVal = firstCmp->getOperand(1);
             const llvm::SCEV* ivSCEV = SE.getSCEV(ivVal);
             auto* AR = llvm::dyn_cast<llvm::SCEVAddRecExpr>(ivSCEV);
-            if (!AR) continue;
+            if (!AR)
+                continue;
 
             // Compute end = start + exitCount (exclusive upper bound of IV).
             const llvm::SCEV* exitCountSCEV = SE.getExitCount(loop, exitingBB);
             if (!exitCountSCEV || llvm::isa<llvm::SCEVCouldNotCompute>(exitCountSCEV))
                 continue;
-            const llvm::SCEV* endSCEV =
-                SE.getAddExpr(AR->getStart(), exitCountSCEV);
-            if (!endSCEV || llvm::isa<llvm::SCEVCouldNotCompute>(endSCEV)) continue;
+            const llvm::SCEV* endSCEV = SE.getAddExpr(AR->getStart(), exitCountSCEV);
+            if (!endSCEV || llvm::isa<llvm::SCEVCouldNotCompute>(endSCEV))
+                continue;
 
-            // Materialise `end` in the preheader.
-            // SCEVExpander dropped the DataLayout parameter in LLVM 22.
+                // Materialise `end` in the preheader.
+                // SCEVExpander dropped the DataLayout parameter in LLVM 22.
 #if LLVM_VERSION_MAJOR >= 22
             llvm::SCEVExpander expander(SE, "rbch");
 #else
             llvm::SCEVExpander expander(SE, F.getParent()->getDataLayout(), "rbch");
 #endif
-            llvm::Value* endVal = expander.expandCodeFor(
-                endSCEV, sharedLen->getType(),
-                preheader->getTerminator());
+            llvm::Value* endVal = expander.expandCodeFor(endSCEV, sharedLen->getType(), preheader->getTerminator());
 
             // Insert pre-loop guard: `br (end <= len) ? loopHeader : failBB`
-            auto* existingFailBB = checkBranches[0].first->getSuccessor(
-                isAbortBlock(checkBranches[0].first->getSuccessor(1)) ? 1 : 0);
+            auto* existingFailBB =
+                checkBranches[0].first->getSuccessor(isAbortBlock(checkBranches[0].first->getSuccessor(1)) ? 1 : 0);
 
             llvm::IRBuilder<> phBuilder(preheader->getTerminator());
-            llvm::Value* safeCheck = phBuilder.CreateICmpULE(
-                endVal, sharedLen, "rbch.safe");
+            llvm::Value* safeCheck = phBuilder.CreateICmpULE(endVal, sharedLen, "rbch.safe");
             llvm::MDNode* weights = MDB.createBranchWeights(1000000, 1);
 
             // Create a new "check" block that contains the original preheader
             // branch (→ loop header).  The preheader will branch to it when safe.
             llvm::BasicBlock* loopHeader = loop->getHeader();
-            llvm::BasicBlock* checkBB = llvm::BasicBlock::Create(
-                F.getContext(), "rbch.check", &F, loopHeader);
+            llvm::BasicBlock* checkBB = llvm::BasicBlock::Create(F.getContext(), "rbch.check", &F, loopHeader);
             // Move the preheader's original terminator into checkBB.
             // Important: do this BEFORE creating the new preheader terminator,
             // because phBuilder's insert point tracks origBr.  After
@@ -1754,9 +1803,8 @@ struct RangeBoundsCheckHoistPass
             origBr->removeFromParent();
             origBr->insertInto(checkBB, checkBB->end());
             // New preheader terminator: condBr safe → checkBB, failBB.
-            llvm::BranchInst::Create(checkBB, existingFailBB, safeCheck,
-                                     preheader)->setMetadata(
-                llvm::LLVMContext::MD_prof, weights);
+            llvm::BranchInst::Create(checkBB, existingFailBB, safeCheck, preheader)
+                ->setMetadata(llvm::LLVMContext::MD_prof, weights);
             // Update PHI nodes in the loop header that referenced the preheader:
             // checkBB is now the direct predecessor of the loop header.
             for (auto& phi : loopHeader->phis()) {
@@ -1774,17 +1822,14 @@ struct RangeBoundsCheckHoistPass
             }
         }
 
-        return changed ? llvm::PreservedAnalyses::none()
-                       : llvm::PreservedAnalyses::all();
+        return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
     }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-struct MACPatternPass
-    : public llvm::PassInfoMixin<MACPatternPass> {
+struct MACPatternPass : public llvm::PassInfoMixin<MACPatternPass> {
 
-    llvm::PreservedAnalyses run(llvm::Function& F,
-                                llvm::FunctionAnalysisManager& FAM) {
+    llvm::PreservedAnalyses run(llvm::Function& F, llvm::FunctionAnalysisManager& FAM) {
         auto& LI = FAM.getResult<llvm::LoopAnalysis>(F);
         bool changed = false;
 
@@ -1798,20 +1843,21 @@ struct MACPatternPass
             changed |= optimizeMAC(*L);
         }
 
-        return changed ? llvm::PreservedAnalyses::none()
-                       : llvm::PreservedAnalyses::all();
+        return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
     }
 
-private:
+  private:
     bool optimizeMAC(llvm::Loop& L) {
         // Look for PHI nodes that are reduction accumulators.
         llvm::BasicBlock* header = L.getHeader();
-        if (!header) return false;
+        if (!header)
+            return false;
 
         bool changed = false;
 
         for (auto& phi : header->phis()) {
-            if (!phi.getType()->isFloatingPointTy()) continue;
+            if (!phi.getType()->isFloatingPointTy())
+                continue;
 
             // Check if this PHI is a reduction: phi(init, update) where
             // update = fadd(phi, something) or update = fadd(something, phi).
@@ -1822,7 +1868,8 @@ private:
                     break;
                 }
             }
-            if (!loopVal) continue;
+            if (!loopVal)
+                continue;
 
             auto* addInst = llvm::dyn_cast<llvm::BinaryOperator>(loopVal);
             if (!addInst || addInst->getOpcode() != llvm::Instruction::FAdd)
@@ -1844,7 +1891,8 @@ private:
                 continue;
 
             // Only convert if the fadd has fast-math flags (or reassoc at minimum).
-            if (!addInst->hasAllowReassoc()) continue;
+            if (!addInst->hasAllowReassoc())
+                continue;
 
             // Convert fadd(phi, fmul(a, b)) → fmuladd(a, b, phi).
             // This generates a single FMA instruction on CPUs that support it.
@@ -1860,10 +1908,8 @@ private:
             llvm::FastMathFlags FMF = addInst->getFastMathFlags();
             builder.setFastMathFlags(FMF);
 
-            llvm::Value* fmaResult = builder.CreateCall(
-                fmuladd,
-                {mulInst->getOperand(0), mulInst->getOperand(1), &phi},
-                "mac");
+            llvm::Value* fmaResult =
+                builder.CreateCall(fmuladd, {mulInst->getOperand(0), mulInst->getOperand(1), &phi}, "mac");
 
             addInst->replaceAllUsesWith(fmaResult);
             addInst->eraseFromParent();
@@ -1880,17 +1926,14 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-struct LoopInvariantReciprocalHoistPass
-    : public llvm::PassInfoMixin<LoopInvariantReciprocalHoistPass> {
+struct LoopInvariantReciprocalHoistPass : public llvm::PassInfoMixin<LoopInvariantReciprocalHoistPass> {
 
-    llvm::PreservedAnalyses run(llvm::Function& F,
-                                llvm::FunctionAnalysisManager& FAM) {
+    llvm::PreservedAnalyses run(llvm::Function& F, llvm::FunctionAnalysisManager& FAM) {
         auto& LI = FAM.getResult<llvm::LoopAnalysis>(F);
 
         // Function-level fast-math attribute permits reciprocal substitution
         // even when individual fdiv instructions don't carry the arcp flag.
-        const bool funcUnsafeFPMath =
-            F.getFnAttribute("unsafe-fp-math").getValueAsString() == "true";
+        const bool funcUnsafeFPMath = F.getFnAttribute("unsafe-fp-math").getValueAsString() == "true";
 
         bool changed = false;
 
@@ -1904,13 +1947,11 @@ struct LoopInvariantReciprocalHoistPass
             changed |= processLoop(*L, funcUnsafeFPMath);
         }
 
-        return changed ? llvm::PreservedAnalyses::none()
-                       : llvm::PreservedAnalyses::all();
+        return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
     }
 
-private:
-    static bool fdivAllowsReciprocal(const llvm::BinaryOperator& BO,
-                                     bool funcUnsafeFPMath) {
+  private:
+    static bool fdivAllowsReciprocal(const llvm::BinaryOperator& BO, bool funcUnsafeFPMath) {
         const llvm::FastMathFlags FMF = BO.getFastMathFlags();
         return FMF.allowReciprocal() || FMF.allowReassoc() || funcUnsafeFPMath;
     }
@@ -1918,7 +1959,8 @@ private:
     bool processLoop(llvm::Loop& L, bool funcUnsafeFPMath) {
         // We need a single-entry preheader to safely host the hoisted
         llvm::BasicBlock* preheader = L.getLoopPreheader();
-        if (!preheader) return false;
+        if (!preheader)
+            return false;
 
         // Bucket eligible fdivs by (divisor, type).  Type is part of the key
         using Key = std::pair<llvm::Value*, llvm::Type*>;
@@ -1927,16 +1969,21 @@ private:
         for (auto* BB : L.blocks()) {
             for (auto& I : *BB) {
                 auto* binOp = llvm::dyn_cast<llvm::BinaryOperator>(&I);
-                if (!binOp) continue;
-                if (binOp->getOpcode() != llvm::Instruction::FDiv) continue;
-                if (!fdivAllowsReciprocal(*binOp, funcUnsafeFPMath)) continue;
+                if (!binOp)
+                    continue;
+                if (binOp->getOpcode() != llvm::Instruction::FDiv)
+                    continue;
+                if (!fdivAllowsReciprocal(*binOp, funcUnsafeFPMath))
+                    continue;
 
                 llvm::Value* divisor = binOp->getOperand(1);
-                if (!L.isLoopInvariant(divisor)) continue;
+                if (!L.isLoopInvariant(divisor))
+                    continue;
 
                 // Skip constants — InstCombine already substitutes a folded
                 // reciprocal for `fdiv x, C` under arcp.
-                if (llvm::isa<llvm::Constant>(divisor)) continue;
+                if (llvm::isa<llvm::Constant>(divisor))
+                    continue;
 
                 buckets[{divisor, binOp->getType()}].push_back(binOp);
             }
@@ -1946,10 +1993,11 @@ private:
         for (auto& kv : buckets) {
             auto& divs = kv.second;
             // Threshold = 2: with a single fdiv there's no win — we'd just
-            if (divs.size() < 2) continue;
+            if (divs.size() < 2)
+                continue;
 
             llvm::Value* divisor = kv.first.first;
-            llvm::Type* ty       = kv.first.second;
+            llvm::Type* ty = kv.first.second;
 
             // Build "1.0" with matching shape.  ConstantFP::get on a vector
             // type produces the splat <1.0, 1.0, ...> automatically.
@@ -1969,8 +2017,7 @@ private:
             for (auto* div : divs) {
                 llvm::IRBuilder<> b(div);
                 b.setFastMathFlags(div->getFastMathFlags());
-                llvm::Value* mul = b.CreateFMul(div->getOperand(0), inv,
-                                                "lirh.mul");
+                llvm::Value* mul = b.CreateFMul(div->getOperand(0), inv, "lirh.mul");
                 div->replaceAllUsesWith(mul);
                 div->eraseFromParent();
             }
@@ -1983,17 +2030,18 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-struct ConstArgPropagationPass
-    : public llvm::PassInfoMixin<ConstArgPropagationPass> {
+struct ConstArgPropagationPass : public llvm::PassInfoMixin<ConstArgPropagationPass> {
 
-    llvm::PreservedAnalyses run(llvm::Module& M,
-                                llvm::ModuleAnalysisManager& /*MAM*/) {
+    llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager& /*MAM*/) {
         bool changed = false;
 
         for (auto& F : M) {
-            if (F.isDeclaration() || !F.hasLocalLinkage()) continue;
-            if (F.use_empty()) continue;
-            if (F.arg_empty()) continue;
+            if (F.isDeclaration() || !F.hasLocalLinkage())
+                continue;
+            if (F.use_empty())
+                continue;
+            if (F.arg_empty())
+                continue;
 
             // For each argument, check if all call sites pass the same constant.
             for (auto& arg : F.args()) {
@@ -2031,8 +2079,7 @@ struct ConstArgPropagationPass
             }
         }
 
-        return changed ? llvm::PreservedAnalyses::none()
-                       : llvm::PreservedAnalyses::all();
+        return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
     }
 };
 
@@ -2056,11 +2103,10 @@ struct ConstArgPropagationPass
 //   are replaced with their concrete callee value, converting all downstream
 //   indirect calls to direct ones and enabling GlobalDCE to remove the global.
 // ─────────────────────────────────────────────────────────────────────────────
-struct AggressiveDevirtualizationPass
-    : public llvm::PassInfoMixin<AggressiveDevirtualizationPass> {
+struct AggressiveDevirtualizationPass : public llvm::PassInfoMixin<AggressiveDevirtualizationPass> {
 
     static constexpr unsigned MaxTargets = 4;
-    static constexpr unsigned MaxDepth   = 16;
+    static constexpr unsigned MaxDepth = 16;
 
     using FnSet = llvm::SmallPtrSet<llvm::Function*, 8>;
 
@@ -2068,16 +2114,17 @@ struct AggressiveDevirtualizationPass
 
     /// Recursively collect all Function* a Value may resolve to.
     /// Returns false when analysis is impossible (too many targets or loops).
-    static bool collectCallees(llvm::Value* V,
-                                FnSet& Out,
-                                llvm::SmallPtrSetImpl<llvm::Value*>& Visited,
-                                unsigned Depth = 0) {
-        if (!V || Depth > MaxDepth) return false;
-        if (!Visited.insert(V).second) return true; // already processed
+    static bool collectCallees(llvm::Value* V, FnSet& Out, llvm::SmallPtrSetImpl<llvm::Value*>& Visited,
+                               unsigned Depth = 0) {
+        if (!V || Depth > MaxDepth)
+            return false;
+        if (!Visited.insert(V).second)
+            return true; // already processed
 
         // Direct function reference.
         if (auto* F = llvm::dyn_cast<llvm::Function>(V)) {
-            if (!F->isDeclaration()) Out.insert(F);
+            if (!F->isDeclaration())
+                Out.insert(F);
             return true;
         }
 
@@ -2089,7 +2136,8 @@ struct AggressiveDevirtualizationPass
             case llvm::Instruction::IntToPtr:
             case llvm::Instruction::PtrToInt:
                 return collectCallees(CE->getOperand(0), Out, Visited, Depth + 1);
-            default: break;
+            default:
+                break;
             }
         }
 
@@ -2121,7 +2169,10 @@ struct AggressiveDevirtualizationPass
                             break;
                         }
                         stored.insert(sub.begin(), sub.end());
-                        if (stored.size() > MaxTargets) { allKnown = false; break; }
+                        if (stored.size() > MaxTargets) {
+                            allKnown = false;
+                            break;
+                        }
                     }
                 }
                 if (allKnown && !stored.empty()) {
@@ -2137,16 +2188,16 @@ struct AggressiveDevirtualizationPass
             for (unsigned i = 0; i < PHI->getNumIncomingValues(); ++i) {
                 if (!collectCallees(PHI->getIncomingValue(i), Out, Visited, Depth + 1))
                     return false;
-                if (Out.size() > MaxTargets) return false;
+                if (Out.size() > MaxTargets)
+                    return false;
             }
             return true;
         }
 
         // Select — true and false values.
         if (auto* Sel = llvm::dyn_cast<llvm::SelectInst>(V)) {
-            return collectCallees(Sel->getTrueValue(),  Out, Visited, Depth + 1) &&
-                   collectCallees(Sel->getFalseValue(), Out, Visited, Depth + 1) &&
-                   Out.size() <= MaxTargets;
+            return collectCallees(Sel->getTrueValue(), Out, Visited, Depth + 1) &&
+                   collectCallees(Sel->getFalseValue(), Out, Visited, Depth + 1) && Out.size() <= MaxTargets;
         }
 
         // Alloca with a single store of a known function pointer.
@@ -2159,10 +2210,14 @@ struct AggressiveDevirtualizationPass
                     llvm::SmallPtrSet<llvm::Value*, 16> innerVisited;
                     FnSet sub;
                     if (!collectCallees(SI->getValueOperand(), sub, innerVisited, Depth + 1)) {
-                        allKnown = false; break;
+                        allKnown = false;
+                        break;
                     }
                     stored.insert(sub.begin(), sub.end());
-                    if (stored.size() > MaxTargets) { allKnown = false; break; }
+                    if (stored.size() > MaxTargets) {
+                        allKnown = false;
+                        break;
+                    }
                 }
             }
             if (hasStore && allKnown && !stored.empty()) {
@@ -2179,18 +2234,18 @@ struct AggressiveDevirtualizationPass
     /// Emits: for each candidate function (sorted by use frequency desc),
     ///   if (callee_ptr == fn_addr) direct_call(fn, args...)
     /// with a final fallback indirect call for the remainder.
-    static bool promoteMultiCallee(llvm::CallBase* CB,
-                                   const llvm::SmallVectorImpl<llvm::Function*>& Targets) {
+    static bool promoteMultiCallee(llvm::CallBase* CB, const llvm::SmallVectorImpl<llvm::Function*>& Targets) {
         // Ensure all targets match the call signature.
         llvm::FunctionType* FTy = CB->getFunctionType();
         for (auto* F : Targets) {
-            if (F->getFunctionType() != FTy) return false;
+            if (F->getFunctionType() != FTy)
+                return false;
         }
 
         llvm::IRBuilder<> B(CB);
         llvm::BasicBlock* OrigBB = CB->getParent();
-        llvm::Function*   Parent = OrigBB->getParent();
-        llvm::LLVMContext& Ctx   = Parent->getContext();
+        llvm::Function* Parent = OrigBB->getParent();
+        llvm::LLVMContext& Ctx = Parent->getContext();
 
         // Split OrigBB at CB to get the "rest" continuation block.
         llvm::BasicBlock* MergeBB = OrigBB->splitBasicBlock(CB, "devirt.merge");
@@ -2212,19 +2267,15 @@ struct AggressiveDevirtualizationPass
 
         for (auto* F : Targets) {
             // Create a "match" block and a "no-match" block.
-            llvm::BasicBlock* MatchBB =
-                llvm::BasicBlock::Create(Ctx, "devirt.match." + F->getName(), Parent, MergeBB);
-            llvm::BasicBlock* NextBB  =
-                llvm::BasicBlock::Create(Ctx, "devirt.next",                  Parent, MergeBB);
+            llvm::BasicBlock* MatchBB = llvm::BasicBlock::Create(Ctx, "devirt.match." + F->getName(), Parent, MergeBB);
+            llvm::BasicBlock* NextBB = llvm::BasicBlock::Create(Ctx, "devirt.next", Parent, MergeBB);
 
             // Guard: callee ptr == address of F
-            llvm::Value* FnPtr = llvm::ConstantExpr::getBitCast(
-                F, CalleePtr->getType());
+            llvm::Value* FnPtr = llvm::ConstantExpr::getBitCast(F, CalleePtr->getType());
             llvm::Value* Cmp = B.CreateICmpEQ(CalleePtr, FnPtr, "devirt.cmp");
             // Hot path: match is more likely than not (10:1 weight).
             llvm::MDBuilder MDB(Ctx);
-            B.CreateCondBr(Cmp, MatchBB, NextBB,
-                           MDB.createBranchWeights(10, 1));
+            B.CreateCondBr(Cmp, MatchBB, NextBB, MDB.createBranchWeights(10, 1));
 
             // Direct call in MatchBB.
             B.SetInsertPoint(MatchBB);
@@ -2261,9 +2312,12 @@ struct AggressiveDevirtualizationPass
         llvm::SmallVector<llvm::GlobalVariable*, 16> ToErase;
 
         for (auto& GV : M.globals()) {
-            if (!GV.hasLocalLinkage()) continue;
-            if (!GV.hasInitializer()) continue;
-            if (GV.isConstant()) continue; // already handled by load-from-const-global
+            if (!GV.hasLocalLinkage())
+                continue;
+            if (!GV.hasInitializer())
+                continue;
+            if (GV.isConstant())
+                continue; // already handled by load-from-const-global
 
             // Collect all stores.
             llvm::SmallPtrSet<llvm::Function*, 4> stored;
@@ -2274,15 +2328,20 @@ struct AggressiveDevirtualizationPass
                     llvm::Value* SV = SI->getValueOperand()->stripPointerCasts();
                     if (auto* F = llvm::dyn_cast<llvm::Function>(SV))
                         stored.insert(F);
-                    else { allFn = false; break; }
+                    else {
+                        allFn = false;
+                        break;
+                    }
                 }
             }
-            if (!hasStore || !allFn || stored.size() != 1) continue;
+            if (!hasStore || !allFn || stored.size() != 1)
+                continue;
             // Also check the initializer itself.
             llvm::Value* InitF = GV.getInitializer()->stripPointerCasts();
             if (auto* F = llvm::dyn_cast<llvm::Function>(InitF))
                 stored.insert(F);
-            if (stored.size() != 1) continue;
+            if (stored.size() != 1)
+                continue;
 
             [[maybe_unused]] llvm::Function* OnlyFn = *stored.begin();
 
@@ -2292,10 +2351,10 @@ struct AggressiveDevirtualizationPass
                 if (auto* LI = llvm::dyn_cast<llvm::LoadInst>(U))
                     Loads.push_back(LI);
 
-            if (Loads.empty()) continue;
+            if (Loads.empty())
+                continue;
             for (auto* LI : Loads) {
-                llvm::Value* Replacement = llvm::ConstantExpr::getBitCast(
-                    OnlyFn, LI->getType());
+                llvm::Value* Replacement = llvm::ConstantExpr::getBitCast(OnlyFn, LI->getType());
                 LI->replaceAllUsesWith(Replacement);
                 LI->eraseFromParent();
                 Changed = true;
@@ -2305,8 +2364,7 @@ struct AggressiveDevirtualizationPass
     }
 
     // ── main run ─────────────────────────────────────────────────────────────
-    llvm::PreservedAnalyses run(llvm::Module& M,
-                                llvm::ModuleAnalysisManager& /*MAM*/) {
+    llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager& /*MAM*/) {
         bool Changed = false;
 
         // Phase 3: sink constant global function-pointer globals first so that
@@ -2317,7 +2375,8 @@ struct AggressiveDevirtualizationPass
         // iterator invalidation during promotion.
         llvm::SmallVector<llvm::CallBase*, 64> IndirectCalls;
         for (auto& F : M) {
-            if (F.isDeclaration()) continue;
+            if (F.isDeclaration())
+                continue;
             for (auto& BB : F)
                 for (auto& I : BB)
                     if (auto* CB = llvm::dyn_cast<llvm::CallBase>(&I))
@@ -2328,37 +2387,38 @@ struct AggressiveDevirtualizationPass
         for (auto* CB : IndirectCalls) {
             // Guard: check the instruction still exists (previous iterations may
             // have erased it via multi-callee promotion).
-            if (!CB->getParent()) continue;
+            if (!CB->getParent())
+                continue;
 
             llvm::Value* Callee = CB->getCalledOperand();
-            if (!Callee) continue;
+            if (!Callee)
+                continue;
 
             FnSet Targets;
             llvm::SmallPtrSet<llvm::Value*, 32> Visited;
-            if (!collectCallees(Callee, Targets, Visited)) continue;
-            if (Targets.empty()) continue;
+            if (!collectCallees(Callee, Targets, Visited))
+                continue;
+            if (Targets.empty())
+                continue;
 
             if (Targets.size() == 1) {
                 // Phase 1: single-target — direct replacement.
                 llvm::Function* F = *Targets.begin();
-                if (F->getFunctionType() != CB->getFunctionType()) continue;
+                if (F->getFunctionType() != CB->getFunctionType())
+                    continue;
                 CB->setCalledOperand(F);
                 Changed = true;
             } else if (Targets.size() <= MaxTargets) {
                 // Phase 2: multi-target — guarded dispatch.
                 // Sort by use count so the most-called callee is in the hot path.
-                llvm::SmallVector<llvm::Function*, MaxTargets> Sorted(
-                    Targets.begin(), Targets.end());
+                llvm::SmallVector<llvm::Function*, MaxTargets> Sorted(Targets.begin(), Targets.end());
                 std::sort(Sorted.begin(), Sorted.end(),
-                    [](llvm::Function* A, llvm::Function* B) {
-                        return A->getNumUses() > B->getNumUses();
-                    });
+                          [](llvm::Function* A, llvm::Function* B) { return A->getNumUses() > B->getNumUses(); });
                 Changed |= promoteMultiCallee(CB, Sorted);
             }
         }
 
-        return Changed ? llvm::PreservedAnalyses::none()
-                       : llvm::PreservedAnalyses::all();
+        return Changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
     }
 };
 
@@ -2389,21 +2449,19 @@ struct AggressiveDevirtualizationPass
 //    iff exactly one of c1, c2 is true.  This frees one GPR and lets the backend
 //    emit POPCNT + test instead of two setcc + xor.
 // ─────────────────────────────────────────────────────────────────────────────
-struct FlagPredicateSchedulingPass
-    : public llvm::PassInfoMixin<FlagPredicateSchedulingPass> {
+struct FlagPredicateSchedulingPass : public llvm::PassInfoMixin<FlagPredicateSchedulingPass> {
 
-    llvm::PreservedAnalyses run(llvm::Function& F,
-                                llvm::FunctionAnalysisManager& /*FAM*/) {
-        if (F.isDeclaration()) return llvm::PreservedAnalyses::all();
+    llvm::PreservedAnalyses run(llvm::Function& F, llvm::FunctionAnalysisManager& /*FAM*/) {
+        if (F.isDeclaration())
+            return llvm::PreservedAnalyses::all();
         unsigned changed = 0;
         changed += eliminateBoolRoundTrips(F);
         changed += deduplicateSameOperandComparisons(F);
         changed += packParityPredicates(F);
-        return changed ? llvm::PreservedAnalyses::none()
-                       : llvm::PreservedAnalyses::all();
+        return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
     }
 
-private:
+  private:
     // ── Phase 1 ──────────────────────────────────────────────────────────────
     // Eliminate patterns:  zext i1 %b to iN  →  icmp ne iN %w, 0  →  %b
     // and symmetrically:   zext i1 %b to iN  →  icmp eq iN %w, 0  →  NOT %b
@@ -2414,7 +2472,8 @@ private:
             for (auto& I : BB) {
                 // Match:  %icmp = icmp ne/eq  iN %zext, 0
                 auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&I);
-                if (!cmp) continue;
+                if (!cmp)
+                    continue;
                 const auto pred = cmp->getPredicate();
                 if (pred != llvm::CmpInst::ICMP_NE && pred != llvm::CmpInst::ICMP_EQ)
                     continue;
@@ -2426,10 +2485,13 @@ private:
                 else if (llvm::isa<llvm::ConstantInt>(cmp->getOperand(0)) &&
                          llvm::cast<llvm::ConstantInt>(cmp->getOperand(0))->isZero())
                     nonZero = cmp->getOperand(1);
-                if (!nonZero) continue;
+                if (!nonZero)
+                    continue;
                 auto* zext = llvm::dyn_cast<llvm::ZExtInst>(nonZero);
-                if (!zext) continue;
-                if (!zext->getSrcTy()->isIntegerTy(1)) continue;
+                if (!zext)
+                    continue;
+                if (!zext->getSrcTy()->isIntegerTy(1))
+                    continue;
                 // Found the pattern.  Replace the icmp with the original i1.
                 llvm::Value* boolSrc = zext->getOperand(0);
                 llvm::Value* replacement = boolSrc;
@@ -2441,12 +2503,14 @@ private:
                 cmp->replaceAllUsesWith(replacement);
                 toErase.push_back(cmp);
                 // If the zext has no remaining non-erase uses, schedule it too.
-                if (zext->hasOneUse()) toErase.push_back(zext);
+                if (zext->hasOneUse())
+                    toErase.push_back(zext);
                 ++n;
             }
         }
         for (auto* I : toErase) {
-            if (I->use_empty()) I->eraseFromParent();
+            if (I->use_empty())
+                I->eraseFromParent();
         }
         return n;
     }
@@ -2479,19 +2543,17 @@ private:
         using CmpKey = std::pair<llvm::Value*, llvm::Value*>;
         // Canonicalize key: always store (smaller ptr, larger ptr) to treat
         // commuted predicates uniformly for the signed/unsigned groups.
-        auto makeKey = [](llvm::Value* a, llvm::Value* b) -> CmpKey {
-            return {a < b ? a : b, a < b ? b : a};
-        };
+        auto makeKey = [](llvm::Value* a, llvm::Value* b) -> CmpKey { return {a < b ? a : b, a < b ? b : a}; };
 
         unsigned n = 0;
         for (auto& BB : F) {
             // Map: (a,b) → {icmp_lt, icmp_eq, icmp_ult} for this block
             struct CmpGroup {
-                llvm::ICmpInst* canonLt  = nullptr; // slt(a,b) or slt(b,a)
-                llvm::ICmpInst* canonEq  = nullptr; // eq(a,b)
+                llvm::ICmpInst* canonLt = nullptr;  // slt(a,b) or slt(b,a)
+                llvm::ICmpInst* canonEq = nullptr;  // eq(a,b)
                 llvm::ICmpInst* canonUlt = nullptr; // ult(a,b) or ult(b,a)
                 // Remember whether the canonical cmp had its operands swapped
-                bool ltSwapped  = false;
+                bool ltSwapped = false;
                 bool ultSwapped = false;
             };
             llvm::SmallDenseMap<CmpKey, CmpGroup, 8> groups;
@@ -2499,7 +2561,8 @@ private:
             // First pass: collect canonical comparisons per operand pair.
             for (auto& I : BB) {
                 auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&I);
-                if (!cmp) continue;
+                if (!cmp)
+                    continue;
                 llvm::Value* a = cmp->getOperand(0);
                 llvm::Value* b = cmp->getOperand(1);
                 const auto pred = cmp->getPredicate();
@@ -2509,20 +2572,33 @@ private:
 
                 switch (pred) {
                 case llvm::CmpInst::ICMP_SLT:
-                    if (!grp.canonLt) { grp.canonLt = cmp; grp.ltSwapped = swapped; }
+                    if (!grp.canonLt) {
+                        grp.canonLt = cmp;
+                        grp.ltSwapped = swapped;
+                    }
                     break;
                 case llvm::CmpInst::ICMP_SGT:
                     // sgt(a,b) == slt(b,a): store with swap note
-                    if (!grp.canonLt) { grp.canonLt = cmp; grp.ltSwapped = !swapped; }
+                    if (!grp.canonLt) {
+                        grp.canonLt = cmp;
+                        grp.ltSwapped = !swapped;
+                    }
                     break;
                 case llvm::CmpInst::ICMP_EQ:
-                    if (!grp.canonEq) grp.canonEq = cmp;
+                    if (!grp.canonEq)
+                        grp.canonEq = cmp;
                     break;
                 case llvm::CmpInst::ICMP_ULT:
-                    if (!grp.canonUlt) { grp.canonUlt = cmp; grp.ultSwapped = swapped; }
+                    if (!grp.canonUlt) {
+                        grp.canonUlt = cmp;
+                        grp.ultSwapped = swapped;
+                    }
                     break;
                 case llvm::CmpInst::ICMP_UGT:
-                    if (!grp.canonUlt) { grp.canonUlt = cmp; grp.ultSwapped = !swapped; }
+                    if (!grp.canonUlt) {
+                        grp.canonUlt = cmp;
+                        grp.ultSwapped = !swapped;
+                    }
                     break;
                 default:
                     break;
@@ -2533,13 +2609,15 @@ private:
             llvm::SmallVector<std::pair<llvm::ICmpInst*, llvm::Value*>, 16> replacements;
             for (auto& I : BB) {
                 auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&I);
-                if (!cmp) continue;
+                if (!cmp)
+                    continue;
                 llvm::Value* a = cmp->getOperand(0);
                 llvm::Value* b = cmp->getOperand(1);
                 const auto pred = cmp->getPredicate();
                 auto key = makeKey(a, b);
                 auto it = groups.find(key);
-                if (it == groups.end()) continue;
+                if (it == groups.end())
+                    continue;
                 const auto& grp = it->second;
                 const bool swapped = (key.first != a);
 
@@ -2548,20 +2626,23 @@ private:
 
                 // Helper: get canonical slt(a,b) as i1 value
                 auto getLt = [&]() -> llvm::Value* {
-                    if (!grp.canonLt || grp.canonLt == cmp) return nullptr;
+                    if (!grp.canonLt || grp.canonLt == cmp)
+                        return nullptr;
                     // Canonical might be slt(b,a) due to swapping; we need slt(a,b)
                     // slt(a,b) vs slt(b,a): if swapped==ltSwapped we get the same direction
                     if (grp.ltSwapped == swapped)
-                        return grp.canonLt;           // same operand order
+                        return grp.canonLt; // same operand order
                     // opposite order: return NOT of canonical
                     return builder.CreateNot(grp.canonLt, "flag.lt.flip");
                 };
                 auto getEq = [&]() -> llvm::Value* {
-                    if (!grp.canonEq || grp.canonEq == cmp) return nullptr;
+                    if (!grp.canonEq || grp.canonEq == cmp)
+                        return nullptr;
                     return grp.canonEq; // eq(a,b) == eq(b,a)
                 };
                 auto getUlt = [&]() -> llvm::Value* {
-                    if (!grp.canonUlt || grp.canonUlt == cmp) return nullptr;
+                    if (!grp.canonUlt || grp.canonUlt == cmp)
+                        return nullptr;
                     if (grp.ultSwapped == swapped)
                         return grp.canonUlt;
                     return builder.CreateNot(grp.canonUlt, "flag.ult.flip");
@@ -2584,7 +2665,8 @@ private:
                 case llvm::CmpInst::ICMP_SGE: {
                     // sge(a,b) = NOT slt(a,b)
                     llvm::Value* lt = getLt();
-                    if (lt) repl = builder.CreateNot(lt, "flag.sge");
+                    if (lt)
+                        repl = builder.CreateNot(lt, "flag.sge");
                     break;
                 }
                 case llvm::CmpInst::ICMP_SGT: {
@@ -2602,26 +2684,29 @@ private:
                 case llvm::CmpInst::ICMP_NE: {
                     // ne(a,b) = NOT eq(a,b)
                     llvm::Value* eq = getEq();
-                    if (eq) repl = builder.CreateNot(eq, "flag.ne");
+                    if (eq)
+                        repl = builder.CreateNot(eq, "flag.ne");
                     break;
                 }
                 case llvm::CmpInst::ICMP_ULE: {
                     // ule(a,b) = ult(a,b) OR eq(a,b)
                     llvm::Value* ult = getUlt();
-                    llvm::Value* eq  = getEq();
-                    if (ult && eq) repl = builder.CreateOr(ult, eq, "flag.ule");
+                    llvm::Value* eq = getEq();
+                    if (ult && eq)
+                        repl = builder.CreateOr(ult, eq, "flag.ule");
                     break;
                 }
                 case llvm::CmpInst::ICMP_UGE: {
                     // uge(a,b) = NOT ult(a,b)
                     llvm::Value* ult = getUlt();
-                    if (ult) repl = builder.CreateNot(ult, "flag.uge");
+                    if (ult)
+                        repl = builder.CreateNot(ult, "flag.uge");
                     break;
                 }
                 case llvm::CmpInst::ICMP_UGT: {
                     // ugt(a,b) = NOT (ult(a,b) OR eq(a,b))
                     llvm::Value* ult = getUlt();
-                    llvm::Value* eq  = getEq();
+                    llvm::Value* eq = getEq();
                     if (ult && eq) {
                         llvm::Value* ule = builder.CreateOr(ult, eq, "flag.ule.tmp");
                         repl = builder.CreateNot(ule, "flag.ugt");
@@ -2678,10 +2763,8 @@ private:
         for (auto& BB : F)
             for (auto& I : BB)
                 if (auto* bop = llvm::dyn_cast<llvm::BinaryOperator>(&I))
-                    if (bop->getOpcode() == llvm::Instruction::Xor &&
-                        bop->getType()->isIntegerTy(1) &&
-                        llvm::isa<llvm::ICmpInst>(bop->getOperand(0)) &&
-                        llvm::isa<llvm::ICmpInst>(bop->getOperand(1)))
+                    if (bop->getOpcode() == llvm::Instruction::Xor && bop->getType()->isIntegerTy(1) &&
+                        llvm::isa<llvm::ICmpInst>(bop->getOperand(0)) && llvm::isa<llvm::ICmpInst>(bop->getOperand(1)))
                         xorCandidates.push_back(bop);
 
         llvm::LLVMContext& ctx = F.getContext();
@@ -2695,19 +2778,20 @@ private:
             F.getParent(), llvm::Intrinsic::ctpop, {i8Ty});
 
         for (auto* xorI : xorCandidates) {
-            if (xorI->use_empty()) continue;
+            if (xorI->use_empty())
+                continue;
             llvm::IRBuilder<> builder(xorI);
             llvm::Value* c1 = xorI->getOperand(0);
             llvm::Value* c2 = xorI->getOperand(1);
             // Pack c1 and c2 into one byte: packed = c1 | (c2 << 1)
-            llvm::Value* b1     = builder.CreateZExt(c1, i8Ty, "pfp.b1");
-            llvm::Value* b2     = builder.CreateZExt(c2, i8Ty, "pfp.b2");
-            llvm::Value* b2s    = builder.CreateShl(b2, llvm::ConstantInt::get(i8Ty, 1), "pfp.b2s");
+            llvm::Value* b1 = builder.CreateZExt(c1, i8Ty, "pfp.b1");
+            llvm::Value* b2 = builder.CreateZExt(c2, i8Ty, "pfp.b2");
+            llvm::Value* b2s = builder.CreateShl(b2, llvm::ConstantInt::get(i8Ty, 1), "pfp.b2s");
             llvm::Value* packed = builder.CreateOr(b1, b2s, "pfp.packed");
             // POPCNT: popcount of a 2-bit value is 0, 1, or 2.
             // popcount & 1 == XOR of the two bits.
-            llvm::Value* pop    = builder.CreateCall(ctpopFn, {packed}, "pfp.pop");
-            llvm::Value* lsb    = builder.CreateAnd(pop, llvm::ConstantInt::get(i8Ty, 1), "pfp.lsb");
+            llvm::Value* pop = builder.CreateCall(ctpopFn, {packed}, "pfp.pop");
+            llvm::Value* lsb = builder.CreateAnd(pop, llvm::ConstantInt::get(i8Ty, 1), "pfp.lsb");
             llvm::Value* result = builder.CreateTrunc(lsb, i1Ty, "pfp.xor");
             xorI->replaceAllUsesWith(result);
             xorI->eraseFromParent();
@@ -2720,21 +2804,23 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-struct InterproceduralNullabilityPass
-    : public llvm::PassInfoMixin<InterproceduralNullabilityPass> {
+struct InterproceduralNullabilityPass : public llvm::PassInfoMixin<InterproceduralNullabilityPass> {
 
-    llvm::PreservedAnalyses run(llvm::Module& M,
-                                llvm::ModuleAnalysisManager& /*MAM*/) {
+    llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager& /*MAM*/) {
         bool changed = false;
         const llvm::DataLayout& DL = M.getDataLayout();
 
         for (auto& F : M) {
-            if (F.isDeclaration() || !F.hasLocalLinkage()) continue;
-            if (F.use_empty() || F.arg_empty()) continue;
+            if (F.isDeclaration() || !F.hasLocalLinkage())
+                continue;
+            if (F.use_empty() || F.arg_empty())
+                continue;
 
             for (auto& arg : F.args()) {
-                if (!arg.getType()->isPointerTy()) continue;
-                if (arg.hasAttribute(llvm::Attribute::NonNull)) continue;
+                if (!arg.getType()->isPointerTy())
+                    continue;
+                if (arg.hasAttribute(llvm::Attribute::NonNull))
+                    continue;
 
                 bool allNonNull = true;
                 bool hasAnyCallSite = false;
@@ -2762,8 +2848,7 @@ struct InterproceduralNullabilityPass
             }
         }
 
-        return changed ? llvm::PreservedAnalyses::none()
-                       : llvm::PreservedAnalyses::all();
+        return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
     }
 };
 
@@ -2910,9 +2995,7 @@ static void addCanonicalLoopBarrier(llvm::FunctionPassManager& FPM) {
 //                  SSA-based load/store redundancy elimination before GVN.
 //   withMemCpy   : include MemCpyOptPass after DSEPass — needed when the
 //                  transformation may have introduced memcpy/memmove patterns.
-static void addCanonicalCleanup(llvm::FunctionPassManager& FPM,
-                                bool withEarlyCSE = true,
-                                bool withMemCpy   = false) {
+static void addCanonicalCleanup(llvm::FunctionPassManager& FPM, bool withEarlyCSE = true, bool withMemCpy = false) {
     if (withEarlyCSE)
         FPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
     FPM.addPass(llvm::SCCPPass());
@@ -2992,23 +3075,23 @@ void CodeGenerator::runOptimizationPasses() {
     // At O1, keep vectorization and unrolling disabled to match LLVM's
     const bool atLeastO2 = optimizationLevel >= OptimizationLevel::O2;
     PTO.LoopVectorization = atLeastO2 && enableVectorize_;
-    PTO.SLPVectorization  = atLeastO2 && enableVectorize_;
+    PTO.SLPVectorization = atLeastO2 && enableVectorize_;
     // Re-enable LLVM's cost-model-driven loop unrolling.  The standard O3
-    PTO.LoopUnrolling    = atLeastO2 && enableUnrollLoops_;
+    PTO.LoopUnrolling = atLeastO2 && enableUnrollLoops_;
     PTO.LoopInterleaving = atLeastO2 && enableVectorize_;
 
     if (verbose_) {
-        const char* levelStr =
-            (optimizationLevel == OptimizationLevel::O1) ? "O1" :
-            (optimizationLevel == OptimizationLevel::O3) ? "O3" : "O2";
+        const char* levelStr = (optimizationLevel == OptimizationLevel::O1)   ? "O1"
+                               : (optimizationLevel == OptimizationLevel::O3) ? "O3"
+                                                                              : "O2";
         std::cout << "    Optimization level: " << levelStr << '\n';
-        std::cout << "    Pipeline options:"
-                  << " vectorize=" << (atLeastO2 && enableVectorize_ ? "on" : "off")
+        std::cout << "    Pipeline options:" << " vectorize=" << (atLeastO2 && enableVectorize_ ? "on" : "off")
                   << ", unroll=" << (atLeastO2 && enableUnrollLoops_ ? "on" : "off")
-                  << ", loop-optimize=" << (enableLoopOptimize_ ? "on" : "off")
-                  << '\n';
-        if (!pgoGenPath_.empty()) std::cout << "    PGO instrumentation: " << pgoGenPath_ << '\n';
-        if (!pgoUsePath_.empty()) std::cout << "    PGO profile-use: " << pgoUsePath_ << '\n';
+                  << ", loop-optimize=" << (enableLoopOptimize_ ? "on" : "off") << '\n';
+        if (!pgoGenPath_.empty())
+            std::cout << "    PGO instrumentation: " << pgoGenPath_ << '\n';
+        if (!pgoUsePath_.empty())
+            std::cout << "    PGO profile-use: " << pgoUsePath_ << '\n';
     }
     // Enable cross-function optimizations at O2 and above:
     if (optimizationLevel >= OptimizationLevel::O2) {
@@ -3075,17 +3158,17 @@ void CodeGenerator::runOptimizationPasses() {
         const bool isO2start = optimizationLevel >= OptimizationLevel::O2;
         PB.registerPipelineStartEPCallback(
             [isO2start](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/) {
-            MPM.addPass(llvm::InferFunctionAttrsPass());
-            llvm::FunctionPassManager EarlyFPM;
-            EarlyFPM.addPass(llvm::LowerExpectIntrinsicPass());
-            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(EarlyFPM)));
+                MPM.addPass(llvm::InferFunctionAttrsPass());
+                llvm::FunctionPassManager EarlyFPM;
+                EarlyFPM.addPass(llvm::LowerExpectIntrinsicPass());
+                MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(EarlyFPM)));
 #if LLVM_VERSION_MAJOR < 20
-            if (isO2start)
-                MPM.addPass(llvm::SyntheticCountsPropagation());
+                if (isO2start)
+                    MPM.addPass(llvm::SyntheticCountsPropagation());
 #else
-            (void)isO2start;
+                (void)isO2start;
 #endif
-        });
+            });
     }
 
     // At O1+, register Reassociate and EarlyCSE early in the function pipeline.
@@ -3101,33 +3184,32 @@ void CodeGenerator::runOptimizationPasses() {
         const bool earlyO3 = optimizationLevel >= OptimizationLevel::O3;
         PB.registerOptimizerEarlyEPCallback(
             [earlyO3](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
-            // O2+: Interprocedural Nullability — scan all call sites; if a pointer
-            MPM.addPass(InterproceduralNullabilityPass());
-            // O2+: Bidirectional function-attribute inference.
-            // Bottom-up: propagate readnone/readonly from leaves to callers.
-            MPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
-                llvm::PostOrderFunctionAttrsPass()));
-            // Top-down: propagate constraints from callers to callees.
-            MPM.addPass(llvm::ReversePostOrderFunctionAttrsPass());
-            // O3: Superblock / hyperblock formation.
-            if (earlyO3) {
-                llvm::FunctionPassManager SuperblockFPM;
-                // Phase 1: Superblock formation — duplicate blocks along
-                // frequently-taken paths to form single-entry traces.
-                SuperblockFPM.addPass(llvm::JumpThreadingPass());
-                SuperblockFPM.addPass(llvm::DFAJumpThreadingPass());
-                // Phase 2: Sharpen value ranges exposed by block duplication.
-                SuperblockFPM.addPass(llvm::CorrelatedValuePropagationPass());
-                // Phase 3: Hoist cheap instructions above remaining branches.
-                SuperblockFPM.addPass(llvm::SpeculativeExecutionPass());
-                // Phase 4: Hyperblock formation — convert branches to selects.
-                SuperblockFPM.addPass(llvm::SimplifyCFGPass(hyperblockCFGOpts()));
-                // Phase 5: Cleanup — combine and eliminate dead code.
-                SuperblockFPM.addPass(llvm::InstCombinePass());
-                SuperblockFPM.addPass(llvm::ADCEPass());
-                MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(SuperblockFPM)));
-            }
-        });
+                // O2+: Interprocedural Nullability — scan all call sites; if a pointer
+                MPM.addPass(InterproceduralNullabilityPass());
+                // O2+: Bidirectional function-attribute inference.
+                // Bottom-up: propagate readnone/readonly from leaves to callers.
+                MPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(llvm::PostOrderFunctionAttrsPass()));
+                // Top-down: propagate constraints from callers to callees.
+                MPM.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+                // O3: Superblock / hyperblock formation.
+                if (earlyO3) {
+                    llvm::FunctionPassManager SuperblockFPM;
+                    // Phase 1: Superblock formation — duplicate blocks along
+                    // frequently-taken paths to form single-entry traces.
+                    SuperblockFPM.addPass(llvm::JumpThreadingPass());
+                    SuperblockFPM.addPass(llvm::DFAJumpThreadingPass());
+                    // Phase 2: Sharpen value ranges exposed by block duplication.
+                    SuperblockFPM.addPass(llvm::CorrelatedValuePropagationPass());
+                    // Phase 3: Hoist cheap instructions above remaining branches.
+                    SuperblockFPM.addPass(llvm::SpeculativeExecutionPass());
+                    // Phase 4: Hyperblock formation — convert branches to selects.
+                    SuperblockFPM.addPass(llvm::SimplifyCFGPass(hyperblockCFGOpts()));
+                    // Phase 5: Cleanup — combine and eliminate dead code.
+                    SuperblockFPM.addPass(llvm::InstCombinePass());
+                    SuperblockFPM.addPass(llvm::ADCEPass());
+                    MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(SuperblockFPM)));
+                }
+            });
     }
 
     // At O2+, register CallSiteSplitting in the scalar optimizer.
@@ -3160,13 +3242,11 @@ void CodeGenerator::runOptimizationPasses() {
                     "-polly-scheduling=dynamic",
                     "-polly-scheduling-chunksize=1",
                 };
-                llvm::cl::ParseCommandLineOptions(
-                    sizeof(pollyArgs) / sizeof(pollyArgs[0]), pollyArgs,
-                    "OmScript Polly auto-parallelization\n");
+                llvm::cl::ParseCommandLineOptions(sizeof(pollyArgs) / sizeof(pollyArgs[0]), pollyArgs,
+                                                  "OmScript Polly auto-parallelization\n");
             }
             if (verbose_) {
-                std::cout << "    Polly plugin loaded successfully"
-                          << (enableParallelize_ ? " (parallel mode)" : "")
+                std::cout << "    Polly plugin loaded successfully" << (enableParallelize_ ? " (parallel mode)" : "")
                           << '\n';
             }
         } else {
@@ -3185,15 +3265,13 @@ void CodeGenerator::runOptimizationPasses() {
 
     // At O3, register ArgumentPromotionPass late in the CGSCC pipeline
     if (optimizationLevel >= OptimizationLevel::O3) {
-        PB.registerCGSCCOptimizerLateEPCallback(
-            [](llvm::CGSCCPassManager& CGPM, llvm::OptimizationLevel /*Level*/) {
+        PB.registerCGSCCOptimizerLateEPCallback([](llvm::CGSCCPassManager& CGPM, llvm::OptimizationLevel /*Level*/) {
             CGPM.addPass(llvm::ArgumentPromotionPass());
         });
     }
     // AttributorCGSCCPass performs context-sensitive, call-graph-aware
     if (optimizationLevel >= OptimizationLevel::O2) {
-        PB.registerCGSCCOptimizerLateEPCallback(
-            [](llvm::CGSCCPassManager& CGPM, llvm::OptimizationLevel /*Level*/) {
+        PB.registerCGSCCOptimizerLateEPCallback([](llvm::CGSCCPassManager& CGPM, llvm::OptimizationLevel /*Level*/) {
             CGPM.addPass(llvm::PostOrderFunctionAttrsPass());
             CGPM.addPass(llvm::AttributorCGSCCPass());
         });
@@ -3205,13 +3283,14 @@ void CodeGenerator::runOptimizationPasses() {
         const bool loopOptOrO3 = loopOpt || (optimizationLevel >= OptimizationLevel::O3);
         // Capture service pointers from the shared OptimizationManager.
         const omscript::LegalityService* legalitySvc = &optMgr.legality();
-        const omscript::CostModel*       costModelPtr = optMgr.costModel();
-        PB.registerVectorizerStartEPCallback(
-            [loopOptOrO3, legalitySvc, costModelPtr](
-                llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
-            if (loopOptOrO3) FPM.addPass(llvm::LoopDistributePass());
+        const omscript::CostModel* costModelPtr = optMgr.costModel();
+        PB.registerVectorizerStartEPCallback([loopOptOrO3, legalitySvc, costModelPtr](
+                                                 llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
+            if (loopOptOrO3)
+                FPM.addPass(llvm::LoopDistributePass());
             FPM.addPass(llvm::LoopLoadEliminationPass());
-            if (loopOptOrO3) FPM.addPass(llvm::LoopFusePass());
+            if (loopOptOrO3)
+                FPM.addPass(llvm::LoopFusePass());
             FPM.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
             FPM.addPass(llvm::PromotePass());
             FPM.addPass(llvm::InstCombinePass());
@@ -3219,13 +3298,13 @@ void CodeGenerator::runOptimizationPasses() {
             // OmPolyOpt: polyhedral loop optimizer.  Runs after loop normalization
             if (loopOptOrO3) {
                 omscript::polyopt::PolyOptConfig polyConfig;
-                polyConfig.legality  = legalitySvc;
+                polyConfig.legality = legalitySvc;
                 polyConfig.costModel = costModelPtr;
                 FPM.addPass(omscript::polyopt::OmPolyOptFunctionPass(polyConfig));
             }
             FPM.addPass(llvm::createFunctionToLoopPassAdaptor(llvm::LoopRotatePass()));
-            FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
-                llvm::LICMPass(llvm::LICMOptions()), /*UseMemorySSA=*/true));
+            FPM.addPass(
+                llvm::createFunctionToLoopPassAdaptor(llvm::LICMPass(llvm::LICMOptions()), /*UseMemorySSA=*/true));
             // Reassociate reorders commutative/associative expressions to
             // expose more CSE opportunities for GVN.
             FPM.addPass(llvm::ReassociatePass());
@@ -3245,8 +3324,9 @@ void CodeGenerator::runOptimizationPasses() {
 
     // At O2+ with -floop-optimize, register LoopInterchangePass at the end of
     if (optimizationLevel >= OptimizationLevel::O2 && enableLoopOptimize_) {
-        PB.registerLoopOptimizerEndEPCallback(
-            [](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) { LPM.addPass(llvm::LoopInterchangePass()); });
+        PB.registerLoopOptimizerEndEPCallback([](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
+            LPM.addPass(llvm::LoopInterchangePass());
+        });
     }
 
     // NOTE: AggressiveInstCombine is already part of the default O2/O3
@@ -3257,45 +3337,47 @@ void CodeGenerator::runOptimizationPasses() {
         const bool loopOpt = enableLoopOptimize_;
 
         if (optimizationLevel >= OptimizationLevel::O2) {
-            PB.registerLateLoopOptimizationsEPCallback([isO3, loopOpt](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
-                LPM.addPass(llvm::SimpleLoopUnswitchPass(/*NonTrivial=*/true));
-                // LoopVersioningLICM creates a versioned copy of the loop
-                if (loopOpt || isO3)
-                    LPM.addPass(llvm::LoopVersioningLICMPass());
-            });
+            PB.registerLateLoopOptimizationsEPCallback(
+                [isO3, loopOpt](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
+                    LPM.addPass(llvm::SimpleLoopUnswitchPass(/*NonTrivial=*/true));
+                    // LoopVersioningLICM creates a versioned copy of the loop
+                    if (loopOpt || isO3)
+                        LPM.addPass(llvm::LoopVersioningLICMPass());
+                });
         }
 
         if (optimizationLevel >= OptimizationLevel::O2) {
-            PB.registerLoopOptimizerEndEPCallback([isO3, loopOpt](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
-                // LoopIdiomRecognize detects loop patterns that implement
-                LPM.addPass(llvm::LoopIdiomRecognizePass());
-                // IndVarSimplify canonicalizes induction variables for
-                // vectorization and unrolling.
-                LPM.addPass(llvm::IndVarSimplifyPass());
-                // LoopDeletion removes provably dead loops.
-                LPM.addPass(llvm::LoopDeletionPass());
-                LPM.addPass(llvm::LoopInstSimplifyPass());
-                LPM.addPass(llvm::LoopSimplifyCFGPass());
-                // CanonicalizeFreezeInLoops moves freeze instructions out of
-                LPM.addPass(llvm::CanonicalizeFreezeInLoopsPass());
-                // LoopFlatten collapses nested loops with a simple inner trip
-                if (isO3 || loopOpt) {
-                    LPM.addPass(llvm::LoopFlattenPass());
-                    // LoopUnrollAndJam unrolls an outer loop and fuses (jams)
-                    LPM.addPass(llvm::LoopUnrollAndJamPass(/*OptLevel=*/isO3 ? 3 : 2));
-                }
-                // LoopPredication converts bounds checks inside loops into
-                LPM.addPass(llvm::LoopPredicationPass());
-                if (isO3) {
+            PB.registerLoopOptimizerEndEPCallback(
+                [isO3, loopOpt](llvm::LoopPassManager& LPM, llvm::OptimizationLevel /*Level*/) {
+                    // LoopIdiomRecognize detects loop patterns that implement
+                    LPM.addPass(llvm::LoopIdiomRecognizePass());
+                    // IndVarSimplify canonicalizes induction variables for
+                    // vectorization and unrolling.
+                    LPM.addPass(llvm::IndVarSimplifyPass());
+                    // LoopDeletion removes provably dead loops.
+                    LPM.addPass(llvm::LoopDeletionPass());
+                    LPM.addPass(llvm::LoopInstSimplifyPass());
+                    LPM.addPass(llvm::LoopSimplifyCFGPass());
+                    // CanonicalizeFreezeInLoops moves freeze instructions out of
+                    LPM.addPass(llvm::CanonicalizeFreezeInLoopsPass());
+                    // LoopFlatten collapses nested loops with a simple inner trip
+                    if (isO3 || loopOpt) {
+                        LPM.addPass(llvm::LoopFlattenPass());
+                        // LoopUnrollAndJam unrolls an outer loop and fuses (jams)
+                        LPM.addPass(llvm::LoopUnrollAndJamPass(/*OptLevel=*/isO3 ? 3 : 2));
+                    }
+                    // LoopPredication converts bounds checks inside loops into
+                    LPM.addPass(llvm::LoopPredicationPass());
+                    if (isO3) {
 #if LLVM_VERSION_MAJOR >= 20
-                    // LoopBoundSplit splits loops by bounds to enable better
-                    LPM.addPass(llvm::LoopBoundSplitPass());
+                        // LoopBoundSplit splits loops by bounds to enable better
+                        LPM.addPass(llvm::LoopBoundSplitPass());
 #else
-                    // LoopReroll recognizes manually-unrolled loop patterns and
-                    LPM.addPass(llvm::LoopRerollPass());
+                        // LoopReroll recognizes manually-unrolled loop patterns and
+                        LPM.addPass(llvm::LoopRerollPass());
 #endif
-                }
-            });
+                    }
+                });
         }
     }
 
@@ -3303,61 +3385,63 @@ void CodeGenerator::runOptimizationPasses() {
     if (optimizationLevel >= OptimizationLevel::O2) {
         const bool isO3 = optimizationLevel >= OptimizationLevel::O3;
         const bool loopOpt = enableLoopOptimize_;
-        PB.registerScalarOptimizerLateEPCallback([isO3, loopOpt](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
-            // LoopDataPrefetch inserts software prefetch instructions for loops
-            if (isO3 || loopOpt) FPM.addPass(llvm::LoopDataPrefetchPass());
-            // CVP uses value-range info to sharpen comparisons and convert
-            // signed ops to unsigned.
-            FPM.addPass(llvm::CorrelatedValuePropagationPass());
-            FPM.addPass(llvm::BDCEPass());
-            // ADCE removes dead code more aggressively than DCE.
-            FPM.addPass(llvm::ADCEPass());
-            // DSE removes stores whose values are never read.
-            FPM.addPass(llvm::DSEPass());
-            // MemCpyOpt optimizes memory transfer operations.
-            FPM.addPass(llvm::MemCpyOptPass());
-            // Float2Int converts float operations to integer when possible.
-            FPM.addPass(llvm::Float2IntPass());
-            // TailCallElim converts tail-recursive calls into loops.
-            FPM.addPass(llvm::TailCallElimPass());
-            FPM.addPass(llvm::MergeICmpsPass());
-            FPM.addPass(llvm::MergedLoadStoreMotionPass());
-            FPM.addPass(llvm::StraightLineStrengthReducePass());
-            FPM.addPass(llvm::NaryReassociatePass());
-            FPM.addPass(llvm::ReassociatePass());
-            FPM.addPass(llvm::InferAlignmentPass());
-            // SCCP: sparse conditional constant propagation — more powerful
-            FPM.addPass(llvm::SCCPPass());
-            FPM.addPass(llvm::InstCombinePass());
-            // ConstraintElimination uses branch conditions to narrow value
-            FPM.addPass(llvm::ConstraintEliminationPass());
-            // JumpThreading threads branches through basic blocks with
-            FPM.addPass(llvm::JumpThreadingPass());
-            // DivRemPairs reuses quotient from div for rem, saving an
-            FPM.addPass(llvm::DivRemPairsPass());
-            // ConstantHoisting materializes expensive constants once and
-            FPM.addPass(llvm::ConstantHoistingPass());
-            // IRCE (Inductive Range Check Elimination) removes bounds checks
-            FPM.addPass(llvm::IRCEPass());
-            // PartiallyInlineLibCalls inlines the fast path of math library
-            FPM.addPass(llvm::PartiallyInlineLibCallsPass());
-            // SeparateConstOffsetFromGEP canonicalizes GEP chains by factoring
-            FPM.addPass(llvm::SeparateConstOffsetFromGEPPass());
-            // GuardWidening merges multiple guard checks into a single
-            FPM.addPass(llvm::GuardWideningPass());
-            if (isO3) {
-                // LibCallsShrinkWrap wraps math library calls (sqrt, exp2, pow,
-                FPM.addPass(llvm::LibCallsShrinkWrapPass());
-                FPM.addPass(llvm::SpeculativeExecutionPass());
-                FPM.addPass(llvm::DFAJumpThreadingPass());
-                FPM.addPass(llvm::SinkingPass());
-                // NewGVN is a graph-based GVN that catches redundancies
-                // classic GVN misses (e.g. through PHI nodes and memory).
-                FPM.addPass(llvm::NewGVNPass());
-            }
-            // Aggressive SimplifyCFG at the end to convert if-else chains
-            FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
-        });
+        PB.registerScalarOptimizerLateEPCallback(
+            [isO3, loopOpt](llvm::FunctionPassManager& FPM, llvm::OptimizationLevel /*Level*/) {
+                // LoopDataPrefetch inserts software prefetch instructions for loops
+                if (isO3 || loopOpt)
+                    FPM.addPass(llvm::LoopDataPrefetchPass());
+                // CVP uses value-range info to sharpen comparisons and convert
+                // signed ops to unsigned.
+                FPM.addPass(llvm::CorrelatedValuePropagationPass());
+                FPM.addPass(llvm::BDCEPass());
+                // ADCE removes dead code more aggressively than DCE.
+                FPM.addPass(llvm::ADCEPass());
+                // DSE removes stores whose values are never read.
+                FPM.addPass(llvm::DSEPass());
+                // MemCpyOpt optimizes memory transfer operations.
+                FPM.addPass(llvm::MemCpyOptPass());
+                // Float2Int converts float operations to integer when possible.
+                FPM.addPass(llvm::Float2IntPass());
+                // TailCallElim converts tail-recursive calls into loops.
+                FPM.addPass(llvm::TailCallElimPass());
+                FPM.addPass(llvm::MergeICmpsPass());
+                FPM.addPass(llvm::MergedLoadStoreMotionPass());
+                FPM.addPass(llvm::StraightLineStrengthReducePass());
+                FPM.addPass(llvm::NaryReassociatePass());
+                FPM.addPass(llvm::ReassociatePass());
+                FPM.addPass(llvm::InferAlignmentPass());
+                // SCCP: sparse conditional constant propagation — more powerful
+                FPM.addPass(llvm::SCCPPass());
+                FPM.addPass(llvm::InstCombinePass());
+                // ConstraintElimination uses branch conditions to narrow value
+                FPM.addPass(llvm::ConstraintEliminationPass());
+                // JumpThreading threads branches through basic blocks with
+                FPM.addPass(llvm::JumpThreadingPass());
+                // DivRemPairs reuses quotient from div for rem, saving an
+                FPM.addPass(llvm::DivRemPairsPass());
+                // ConstantHoisting materializes expensive constants once and
+                FPM.addPass(llvm::ConstantHoistingPass());
+                // IRCE (Inductive Range Check Elimination) removes bounds checks
+                FPM.addPass(llvm::IRCEPass());
+                // PartiallyInlineLibCalls inlines the fast path of math library
+                FPM.addPass(llvm::PartiallyInlineLibCallsPass());
+                // SeparateConstOffsetFromGEP canonicalizes GEP chains by factoring
+                FPM.addPass(llvm::SeparateConstOffsetFromGEPPass());
+                // GuardWidening merges multiple guard checks into a single
+                FPM.addPass(llvm::GuardWideningPass());
+                if (isO3) {
+                    // LibCallsShrinkWrap wraps math library calls (sqrt, exp2, pow,
+                    FPM.addPass(llvm::LibCallsShrinkWrapPass());
+                    FPM.addPass(llvm::SpeculativeExecutionPass());
+                    FPM.addPass(llvm::DFAJumpThreadingPass());
+                    FPM.addPass(llvm::SinkingPass());
+                    // NewGVN is a graph-based GVN that catches redundancies
+                    // classic GVN misses (e.g. through PHI nodes and memory).
+                    FPM.addPass(llvm::NewGVNPass());
+                }
+                // Aggressive SimplifyCFG at the end to convert if-else chains
+                FPM.addPass(llvm::SimplifyCFGPass(aggressiveCFGOpts()));
+            });
     }
 
     // ── Flag Predicate Scheduling ─────────────────────────────────────────────
@@ -3369,75 +3453,74 @@ void CodeGenerator::runOptimizationPasses() {
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerLastEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
-            llvm::FunctionPassManager FlagFPM;
-            FlagFPM.addPass(FlagPredicateSchedulingPass());
-            // Follow with InstCombine so it can fold the new boolean chains.
-            FlagFPM.addPass(llvm::InstCombinePass());
-            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FlagFPM)));
-        });
+                llvm::FunctionPassManager FlagFPM;
+                FlagFPM.addPass(FlagPredicateSchedulingPass());
+                // Follow with InstCombine so it can fold the new boolean chains.
+                FlagFPM.addPass(llvm::InstCombinePass());
+                MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FlagFPM)));
+            });
     }
 
     // At O2+, register VectorCombinePass and LoopSinkPass as one of the last
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerLastEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
-            llvm::FunctionPassManager FPM;
-            FPM.addPass(llvm::VectorCombinePass());
-            FPM.addPass(llvm::LoopSinkPass());
-            // LoadStoreVectorizer combines adjacent scalar loads/stores into
-            FPM.addPass(llvm::LoadStoreVectorizerPass());
-            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
-            // CalledValuePropagation propagates known function pointer values
-            // through indirect calls, enabling devirtualization and inlining.
-            MPM.addPass(AggressiveDevirtualizationPass());
-            MPM.addPass(llvm::CalledValuePropagationPass());
-            MPM.addPass(AggressiveDevirtualizationPass());
-            // ConstantMerge deduplicates identical global constants across the
-            MPM.addPass(llvm::ConstantMergePass());
-        });
+                llvm::FunctionPassManager FPM;
+                FPM.addPass(llvm::VectorCombinePass());
+                FPM.addPass(llvm::LoopSinkPass());
+                // LoadStoreVectorizer combines adjacent scalar loads/stores into
+                FPM.addPass(llvm::LoadStoreVectorizerPass());
+                MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
+                // CalledValuePropagation propagates known function pointer values
+                // through indirect calls, enabling devirtualization and inlining.
+                MPM.addPass(AggressiveDevirtualizationPass());
+                MPM.addPass(llvm::CalledValuePropagationPass());
+                MPM.addPass(AggressiveDevirtualizationPass());
+                // ConstantMerge deduplicates identical global constants across the
+                MPM.addPass(llvm::ConstantMergePass());
+            });
     }
 
     // ── Loop Re-Optimization Pass ──────────────────────────────────
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerOptimizerLastEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
-            llvm::FunctionPassManager ReOptFPM;
-            // EarlyCSE with MemorySSA catches common redundancies.
-            ReOptFPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
-            // Re-run LICM to hoist newly-invariant code out of loops.
-            llvm::LoopPassManager ReOptLPM;
-            ReOptLPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
-            ReOptLPM.addPass(llvm::LoopInstSimplifyPass());
-            ReOptLPM.addPass(llvm::IndVarSimplifyPass());
-            ReOptFPM.addPass(llvm::createFunctionToLoopPassAdaptor(
-                std::move(ReOptLPM), /*UseMemorySSA=*/true));
-            // Clean up with InstCombine after loop re-optimization.
-            ReOptFPM.addPass(llvm::InstCombinePass());
-            // Re-run DSE to catch stores made dead by loop transformations.
-            ReOptFPM.addPass(llvm::DSEPass());
-            // Re-run SLP vectorizer to catch new vectorization
-            // opportunities in inlined code.
-            ReOptFPM.addPass(llvm::SLPVectorizerPass());
-            // NewGVN catches deep redundancies using MemorySSA for more
-            // precise memory dependency analysis than classic GVN.
-            ReOptFPM.addPass(llvm::NewGVNPass());
-            // Final CFG cleanup.
-            ReOptFPM.addPass(llvm::SimplifyCFGPass());
-            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(ReOptFPM)));
-        });
+                llvm::FunctionPassManager ReOptFPM;
+                // EarlyCSE with MemorySSA catches common redundancies.
+                ReOptFPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/true));
+                // Re-run LICM to hoist newly-invariant code out of loops.
+                llvm::LoopPassManager ReOptLPM;
+                ReOptLPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
+                ReOptLPM.addPass(llvm::LoopInstSimplifyPass());
+                ReOptLPM.addPass(llvm::IndVarSimplifyPass());
+                ReOptFPM.addPass(llvm::createFunctionToLoopPassAdaptor(std::move(ReOptLPM), /*UseMemorySSA=*/true));
+                // Clean up with InstCombine after loop re-optimization.
+                ReOptFPM.addPass(llvm::InstCombinePass());
+                // Re-run DSE to catch stores made dead by loop transformations.
+                ReOptFPM.addPass(llvm::DSEPass());
+                // Re-run SLP vectorizer to catch new vectorization
+                // opportunities in inlined code.
+                ReOptFPM.addPass(llvm::SLPVectorizerPass());
+                // NewGVN catches deep redundancies using MemorySSA for more
+                // precise memory dependency analysis than classic GVN.
+                ReOptFPM.addPass(llvm::NewGVNPass());
+                // Final CFG cleanup.
+                ReOptFPM.addPass(llvm::SimplifyCFGPass());
+                MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(ReOptFPM)));
+            });
     }
 
     // At O3, add a post-vectorizer superblock formation phase.  After the
     if (optimizationLevel >= OptimizationLevel::O3) {
         PB.registerOptimizerLastEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
-            llvm::FunctionPassManager PostVecFPM;
-            PostVecFPM.addPass(llvm::JumpThreadingPass());
-            PostVecFPM.addPass(llvm::SpeculativeExecutionPass());
-            PostVecFPM.addPass(llvm::SimplifyCFGPass(hyperblockCFGOpts()));
-            PostVecFPM.addPass(llvm::InstCombinePass());
-            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(PostVecFPM)));
-        });
+                llvm::FunctionPassManager PostVecFPM;
+                PostVecFPM.addPass(llvm::JumpThreadingPass());
+                PostVecFPM.addPass(llvm::SpeculativeExecutionPass());
+                PostVecFPM.addPass(llvm::SimplifyCFGPass(hyperblockCFGOpts()));
+                PostVecFPM.addPass(llvm::InstCombinePass());
+                MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(PostVecFPM)));
+            });
     }
 
     // At O3, run dead argument elimination to remove unused function
@@ -3445,47 +3528,45 @@ void CodeGenerator::runOptimizationPasses() {
         const bool isO3 = optimizationLevel >= OptimizationLevel::O3;
         PB.registerOptimizerLastEPCallback(
             [isO3](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
-            // IPSCCPPass performs inter-procedural sparse conditional constant
-            MPM.addPass(llvm::IPSCCPPass());
-            MPM.addPass(llvm::DeadArgumentEliminationPass());
-            // PartialInlinerPass outlines cold regions (error handling, slow
-            MPM.addPass(llvm::PartialInlinerPass());
-
-            // ── Second IPO constant-propagation round (O3 only) ────────────
-            if (isO3) {
+                // IPSCCPPass performs inter-procedural sparse conditional constant
                 MPM.addPass(llvm::IPSCCPPass());
-                llvm::FunctionPassManager IPO2FPM;
-                IPO2FPM.addPass(llvm::SCCPPass());
-                IPO2FPM.addPass(llvm::InstCombinePass());
-                IPO2FPM.addPass(llvm::NewGVNPass());
-                IPO2FPM.addPass(llvm::ADCEPass());
-                MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(IPO2FPM)));
                 MPM.addPass(llvm::DeadArgumentEliminationPass());
+                // PartialInlinerPass outlines cold regions (error handling, slow
+                MPM.addPass(llvm::PartialInlinerPass());
 
-                // After the second IPSCCP + constant folding round, re-run
-                MPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
-                    llvm::PostOrderFunctionAttrsPass()));
-                MPM.addPass(llvm::ReversePostOrderFunctionAttrsPass());
-                // InferFunctionAttrsPass re-annotates library functions whose
-                MPM.addPass(llvm::InferFunctionAttrsPass());
-            }
+                // ── Second IPO constant-propagation round (O3 only) ────────────
+                if (isO3) {
+                    MPM.addPass(llvm::IPSCCPPass());
+                    llvm::FunctionPassManager IPO2FPM;
+                    IPO2FPM.addPass(llvm::SCCPPass());
+                    IPO2FPM.addPass(llvm::InstCombinePass());
+                    IPO2FPM.addPass(llvm::NewGVNPass());
+                    IPO2FPM.addPass(llvm::ADCEPass());
+                    MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(IPO2FPM)));
+                    MPM.addPass(llvm::DeadArgumentEliminationPass());
 
-            // EliminateAvailableExternallyPass removes bodies of externally-
-            MPM.addPass(llvm::EliminateAvailableExternallyPass());
-        });
+                    // After the second IPSCCP + constant folding round, re-run
+                    MPM.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(llvm::PostOrderFunctionAttrsPass()));
+                    MPM.addPass(llvm::ReversePostOrderFunctionAttrsPass());
+                    // InferFunctionAttrsPass re-annotates library functions whose
+                    MPM.addPass(llvm::InferFunctionAttrsPass());
+                }
+
+                // EliminateAvailableExternallyPass removes bodies of externally-
+                MPM.addPass(llvm::EliminateAvailableExternallyPass());
+            });
     }
 
     // At O3, add a module-level AttributorPass after the main IPSCCP/inliner
     if (optimizationLevel >= OptimizationLevel::O3) {
-        PB.registerOptimizerLastEPCallback(
-            [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
+        PB.registerOptimizerLastEPCallback([](llvm::ModulePassManager& MPM,
+                                              llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
             MPM.addPass(llvm::AttributorPass());
             // After Attributor propagates new attributes (e.g. marks functions
             llvm::FunctionPassManager PostAttrFPM;
             llvm::LoopPassManager PostAttrLPM;
             PostAttrLPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
-            PostAttrFPM.addPass(llvm::createFunctionToLoopPassAdaptor(
-                std::move(PostAttrLPM), /*UseMemorySSA=*/true));
+            PostAttrFPM.addPass(llvm::createFunctionToLoopPassAdaptor(std::move(PostAttrLPM), /*UseMemorySSA=*/true));
             PostAttrFPM.addPass(llvm::InstCombinePass());
             MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(PostAttrFPM)));
         });
@@ -3495,15 +3576,14 @@ void CodeGenerator::runOptimizationPasses() {
     if (optimizationLevel >= OptimizationLevel::O2) {
         PB.registerOptimizerLastEPCallback(
             [](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
-            struct SRemToURemPass : public llvm::PassInfoMixin<SRemToURemPass> {
-                llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager&) {
-                    const unsigned total = runSignedToUnsignedConverge(M, 4);
-                    return total > 0 ? llvm::PreservedAnalyses::none()
-                                     : llvm::PreservedAnalyses::all();
-                }
-            };
-            MPM.addPass(SRemToURemPass());
-        });
+                struct SRemToURemPass : public llvm::PassInfoMixin<SRemToURemPass> {
+                    llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager&) {
+                        const unsigned total = runSignedToUnsignedConverge(M, 4);
+                        return total > 0 ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
+                    }
+                };
+                MPM.addPass(SRemToURemPass());
+            });
     }
 
     // ── Loop-structure annotation + hot/cold splitting ───────────────────────
@@ -3511,23 +3591,23 @@ void CodeGenerator::runOptimizationPasses() {
         const bool isO3last = optimizationLevel >= OptimizationLevel::O3;
         PB.registerOptimizerLastEPCallback(
             [isO3last](llvm::ModulePassManager& MPM, llvm::OptimizationLevel /*Level*/ OM_MODULE_EP_EXTRA_PARAM) {
-            // Rule 4: annotate over-large loop bodies for µop-cache partitioning.
-            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(OpcacheLoopPartitionPass()));
-            // Rule 5: promote large streaming-write loops to non-temporal stores.
-            MPM.addPass(llvm::createModuleToFunctionPassAdaptor(LargeArrayStreamingStorePass()));
-            // HotColdSplitting outlines cold code regions (error handlers, assertion
-            MPM.addPass(llvm::HotColdSplittingPass());
-            // StripDeadPrototypes removes unused external function declarations.
-            MPM.addPass(llvm::StripDeadPrototypesPass());
-            // GlobalSplit splits internal globals with multiple fields into
-            MPM.addPass(llvm::GlobalSplitPass());
-            if (isO3last) {
-                // MergeFunctions deduplicates identical function bodies, reducing
-                MPM.addPass(llvm::MergeFunctionsPass());
-            }
-            // AlwaysInlinerPass at the very end: PartialInlinerPass can create
-            MPM.addPass(llvm::AlwaysInlinerPass());
-        });
+                // Rule 4: annotate over-large loop bodies for µop-cache partitioning.
+                MPM.addPass(llvm::createModuleToFunctionPassAdaptor(OpcacheLoopPartitionPass()));
+                // Rule 5: promote large streaming-write loops to non-temporal stores.
+                MPM.addPass(llvm::createModuleToFunctionPassAdaptor(LargeArrayStreamingStorePass()));
+                // HotColdSplitting outlines cold code regions (error handlers, assertion
+                MPM.addPass(llvm::HotColdSplittingPass());
+                // StripDeadPrototypes removes unused external function declarations.
+                MPM.addPass(llvm::StripDeadPrototypesPass());
+                // GlobalSplit splits internal globals with multiple fields into
+                MPM.addPass(llvm::GlobalSplitPass());
+                if (isO3last) {
+                    // MergeFunctions deduplicates identical function bodies, reducing
+                    MPM.addPass(llvm::MergeFunctionsPass());
+                }
+                // AlwaysInlinerPass at the very end: PartialInlinerPass can create
+                MPM.addPass(llvm::AlwaysInlinerPass());
+            });
     }
 
     llvm::LoopAnalysisManager LAM;
@@ -3561,9 +3641,9 @@ void CodeGenerator::runOptimizationPasses() {
         MPM = PB.buildLTOPreLinkDefaultPipeline(newPMLevel);
     } else {
         if (verbose_) {
-            const char* levelStr =
-                (optimizationLevel == OptimizationLevel::O1) ? "O1" :
-                (optimizationLevel == OptimizationLevel::O3) ? "O3" : "O2";
+            const char* levelStr = (optimizationLevel == OptimizationLevel::O1)   ? "O1"
+                                   : (optimizationLevel == OptimizationLevel::O3) ? "O3"
+                                                                                  : "O2";
             std::cout << "    Building per-module default pipeline at " << levelStr << "..." << '\n';
         }
         MPM = PB.buildPerModuleDefaultPipeline(newPMLevel);
@@ -3598,21 +3678,24 @@ void CodeGenerator::runOptimizationPasses() {
     // ── Pre-pipeline: CF-CTRE uniform-return IR folding ───────────────────
     if (optCtx_ && optimizationLevel >= OptimizationLevel::O2) {
         for (auto& [fnName, ctVal] : optCtx_->uniformReturnValues()) {
-            if (!optCtx_->isCTPure(fnName)) continue;
+            if (!optCtx_->isCTPure(fnName))
+                continue;
             auto* F = module->getFunction(fnName);
-            if (!F || F->isDeclaration() || F->use_empty()) continue;
+            if (!F || F->isDeclaration() || F->use_empty())
+                continue;
             llvm::Type* retType = F->getReturnType();
-            if (retType->isVoidTy()) continue;
+            if (retType->isVoidTy())
+                continue;
 
             // Build the LLVM constant matching the CF-CTRE result type.
             llvm::Constant* C = nullptr;
             if (ctVal.isInt() && retType->isIntegerTy())
-                C = llvm::ConstantInt::get(retType,
-                        static_cast<uint64_t>(ctVal.asI64()), /*isSigned=*/true);
+                C = llvm::ConstantInt::get(retType, static_cast<uint64_t>(ctVal.asI64()), /*isSigned=*/true);
             else if (ctVal.isFloat() && retType->isFloatingPointTy())
                 C = llvm::ConstantFP::get(retType, ctVal.asF64());
 
-            if (!C) continue;
+            if (!C)
+                continue;
 
             // Collect call sites first (iterator-invalidation safety).
             llvm::SmallVector<llvm::CallBase*, 16> toFold;
@@ -3654,8 +3737,10 @@ void CodeGenerator::runOptimizationPasses() {
     // Strip `cold` and `minsize` attributes from user-defined functions.
     if (optimizationLevel >= OptimizationLevel::O2) {
         for (auto& F : *module) {
-            if (F.isDeclaration()) continue;
-            if (userAnnotatedColdFunctions_.count(F.getName())) continue; // preserve @cold
+            if (F.isDeclaration())
+                continue;
+            if (userAnnotatedColdFunctions_.count(F.getName()))
+                continue; // preserve @cold
             F.removeFnAttr(llvm::Attribute::Cold);
             F.removeFnAttr(llvm::Attribute::MinSize);
         }
@@ -3664,27 +3749,36 @@ void CodeGenerator::runOptimizationPasses() {
     // Strip `nofree` from any non-declaration function that directly or
     if (optimizationLevel >= OptimizationLevel::O2) {
         for (auto& F : *module) {
-            if (F.isDeclaration()) continue;
-            if (!F.hasFnAttribute(llvm::Attribute::NoFree)) continue;
+            if (F.isDeclaration())
+                continue;
+            if (!F.hasFnAttribute(llvm::Attribute::NoFree))
+                continue;
             bool callsFree = false;
             for (auto& BB : F) {
                 for (auto& I : BB) {
                     auto* call = llvm::dyn_cast<llvm::CallBase>(&I);
-                    if (!call) continue;
+                    if (!call)
+                        continue;
                     auto* callee = call->getCalledFunction();
-                    if (!callee) continue;
+                    if (!callee)
+                        continue;
                     // Check if callee is a free-like function (allockind "free").
                     if (callee->hasFnAttribute("allockind")) {
                         auto val = callee->getFnAttribute("allockind").getValueAsString();
-                        if (val.contains("free")) { callsFree = true; break; }
+                        if (val.contains("free")) {
+                            callsFree = true;
+                            break;
+                        }
                     }
                     // Also match by name: free / __libc_free / cfree etc.
                     llvm::StringRef name = callee->getName();
                     if (name == "free" || name == "cfree" || name.starts_with("__libc_free")) {
-                        callsFree = true; break;
+                        callsFree = true;
+                        break;
                     }
                 }
-                if (callsFree) break;
+                if (callsFree)
+                    break;
             }
             if (callsFree)
                 F.removeFnAttr(llvm::Attribute::NoFree);
@@ -3694,11 +3788,11 @@ void CodeGenerator::runOptimizationPasses() {
     // ── Shared post-pipeline analysis infrastructure ──────────────────────
     llvm::PipelineTuningOptions PTOPost;
     PTOPost.LoopVectorization = atLeastO2 && enableVectorize_;
-    PTOPost.SLPVectorization  = atLeastO2 && enableVectorize_;
-    PTOPost.LoopInterleaving  = atLeastO2 && enableVectorize_;
-    PTOPost.LoopUnrolling     = false;
+    PTOPost.SLPVectorization = atLeastO2 && enableVectorize_;
+    PTOPost.LoopInterleaving = atLeastO2 && enableVectorize_;
+    PTOPost.LoopUnrolling = false;
     llvm::PassBuilder PostPB(targetMachine.get(), PTOPost);
-    llvm::LoopAnalysisManager  PostLAM;
+    llvm::LoopAnalysisManager PostLAM;
     llvm::FunctionAnalysisManager PostFAM;
     llvm::CGSCCAnalysisManager PostCGAM;
     llvm::ModuleAnalysisManager PostMAM;
@@ -3720,13 +3814,10 @@ void CodeGenerator::runOptimizationPasses() {
         ++waveIndex;
         auto s = omscript::computeProgramFacts(*module, PostMAM, waveIndex);
         if (verbose) {
-            std::cout << "    [wave " << waveIndex << " / " << waveName << "] "
-                      << s.definedFunctions << " functions, "
-                      << s.totalInstructions << " instrs, "
-                      << s.pureFunctions.size() << " pure, "
-                      << s.totalConstArgCallSites << " const-arg sites, "
-                      << s.unreachableFunctions.size() << " unreachable"
-                      << '\n';
+            std::cout << "    [wave " << waveIndex << " / " << waveName << "] " << s.definedFunctions << " functions, "
+                      << s.totalInstructions << " instrs, " << s.pureFunctions.size() << " pure, "
+                      << s.totalConstArgCallSites << " const-arg sites, " << s.unreachableFunctions.size()
+                      << " unreachable" << '\n';
         }
         return s;
     };
@@ -3735,20 +3826,16 @@ void CodeGenerator::runOptimizationPasses() {
     omscript::ProgramFactsSnapshot snapshot = advanceWave(verbose_, "main-pipeline");
 
     // Helper: run an FPM on a specific subset of functions using PostMAM.
-    auto runPostFPMOnFuncs = [&](llvm::FunctionPassManager FPM,
-                                 std::vector<llvm::Function*> funcs) {
-        if (funcs.empty()) return;
+    auto runPostFPMOnFuncs = [&](llvm::FunctionPassManager FPM, std::vector<llvm::Function*> funcs) {
+        if (funcs.empty())
+            return;
         struct FilteredFuncPass : public llvm::PassInfoMixin<FilteredFuncPass> {
             llvm::FunctionPassManager FPM;
             std::vector<llvm::Function*> funcs;
-            FilteredFuncPass(llvm::FunctionPassManager fpm,
-                             std::vector<llvm::Function*> f)
+            FilteredFuncPass(llvm::FunctionPassManager fpm, std::vector<llvm::Function*> f)
                 : FPM(std::move(fpm)), funcs(std::move(f)) {}
-            llvm::PreservedAnalyses run(llvm::Module& M,
-                                        llvm::ModuleAnalysisManager& MAM) {
-                auto& FAM =
-                    MAM.getResult<llvm::FunctionAnalysisManagerModuleProxy>(M)
-                       .getManager();
+            llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager& MAM) {
+                auto& FAM = MAM.getResult<llvm::FunctionAnalysisManagerModuleProxy>(M).getManager();
                 bool changed = false;
                 for (auto* F : funcs) {
                     if (F && !F->isDeclaration()) {
@@ -3756,8 +3843,7 @@ void CodeGenerator::runOptimizationPasses() {
                         changed |= !PA.areAllPreserved();
                     }
                 }
-                return changed ? llvm::PreservedAnalyses::none()
-                               : llvm::PreservedAnalyses::all();
+                return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
             }
         };
         llvm::ModulePassManager MPMPost;
@@ -3768,8 +3854,7 @@ void CodeGenerator::runOptimizationPasses() {
     // Helper: run an FPM on ALL non-declaration functions using PostMAM.
     auto runPostFPMOnAll = [&](llvm::FunctionPassManager FPM) {
         llvm::ModulePassManager MPMPost;
-        MPMPost.addPass(
-            llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
+        MPMPost.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
         MPMPost.run(*module, PostMAM);
     };
 
@@ -3780,9 +3865,11 @@ void CodeGenerator::runOptimizationPasses() {
         static constexpr unsigned kMaxPreInlineSize = 350;
         llvm::SmallVector<llvm::Function*, 4> inlinedFuncs;
         for (auto& F : *module) {
-            if (F.isDeclaration() || F.getName() == "main") continue;
+            if (F.isDeclaration() || F.getName() == "main")
+                continue;
             const unsigned preSize = F.getInstructionCount();
-            if (preSize > kMaxPreInlineSize) continue;
+            if (preSize > kMaxPreInlineSize)
+                continue;
 
             // Only inline functions that still contain a self-call.
             bool hasSelfCall = false;
@@ -3795,9 +3882,11 @@ void CodeGenerator::runOptimizationPasses() {
                         }
                     }
                 }
-                if (hasSelfCall) break;
+                if (hasSelfCall)
+                    break;
             }
-            if (!hasSelfCall) continue;
+            if (!hasSelfCall)
+                continue;
 
             for (unsigned level = 0; level < kRecursiveInlineDepth; ++level) {
                 llvm::SmallVector<llvm::CallBase*, 4> selfCalls;
@@ -3810,17 +3899,21 @@ void CodeGenerator::runOptimizationPasses() {
                         }
                     }
                 }
-                if (selfCalls.empty()) break;
+                if (selfCalls.empty())
+                    break;
 
                 // Only inline the first self-call per level to avoid
                 unsigned inlined = 0;
                 for (auto* CB : selfCalls) {
-                    if (F.getInstructionCount() > preSize * 8) break;
+                    if (F.getInstructionCount() > preSize * 8)
+                        break;
                     llvm::InlineFunctionInfo IFI;
                     auto result = llvm::InlineFunction(*CB, IFI);
-                    if (result.isSuccess()) ++inlined;
+                    if (result.isSuccess())
+                        ++inlined;
                 }
-                if (inlined == 0) break;
+                if (inlined == 0)
+                    break;
             }
             // Only functions with successful inlining need cleanup
             inlinedFuncs.push_back(&F);
@@ -3832,8 +3925,7 @@ void CodeGenerator::runOptimizationPasses() {
         if (!inlinedFuncs.empty()) {
             llvm::FunctionPassManager PostInlineFPM;
             addCanonicalCleanup(PostInlineFPM);
-            runPostFPMOnFuncs(std::move(PostInlineFPM),
-                              {inlinedFuncs.begin(), inlinedFuncs.end()});
+            runPostFPMOnFuncs(std::move(PostInlineFPM), {inlinedFuncs.begin(), inlinedFuncs.end()});
         }
     }
 
@@ -3860,21 +3952,28 @@ void CodeGenerator::runOptimizationPasses() {
         }
 
         for (auto& F : *module) {
-            if (F.isDeclaration()) continue;
+            if (F.isDeclaration())
+                continue;
             const std::string callerName = F.getName().str();
             auto filterIt = specFilter.find(callerName);
             for (auto& BB : F) {
                 for (auto& I : BB) {
                     auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
-                    if (!CB) continue;
+                    if (!CB)
+                        continue;
                     auto* callee = CB->getCalledFunction();
-                    if (!callee || callee->isDeclaration()) continue;
-                    if (callee->hasExactDefinition() == false) continue;
-                    if (callee->getInstructionCount() > kMaxFuncSizeForSpec) continue;
-                    if (callee == &F) continue;  // skip self-recursion
+                    if (!callee || callee->isDeclaration())
+                        continue;
+                    if (callee->hasExactDefinition() == false)
+                        continue;
+                    if (callee->getInstructionCount() > kMaxFuncSizeForSpec)
+                        continue;
+                    if (callee == &F)
+                        continue; // skip self-recursion
                     // If this caller has a specialize list, only target listed callees.
                     if (filterIt != specFilter.end()) {
-                        if (!filterIt->second.count(callee->getName().str())) continue;
+                        if (!filterIt->second.count(callee->getName().str()))
+                            continue;
                     }
                     llvm::SmallVector<unsigned, 4> constArgs;
                     for (unsigned i = 0; i < CB->arg_size(); ++i) {
@@ -3893,12 +3992,14 @@ void CodeGenerator::runOptimizationPasses() {
         // Group candidates by callee and specialize
         std::unordered_map<llvm::Function*, unsigned> specCount;
         for (auto& cand : candidates) {
-            if (specCount[cand.callee] >= kMaxSpecsPerFunc) continue;
+            if (specCount[cand.callee] >= kMaxSpecsPerFunc)
+                continue;
 
             // Create the specialized clone
             llvm::ValueToValueMapTy VMap;
             auto* clone = llvm::CloneFunction(cand.callee, VMap);
-            if (!clone) continue;
+            if (!clone)
+                continue;
 
             // Set constant arguments in the clone
             for (unsigned argIdx : cand.constArgIndices) {
@@ -3910,8 +4011,7 @@ void CodeGenerator::runOptimizationPasses() {
             }
 
             // Give the clone a unique name and internal linkage
-            clone->setName(cand.callee->getName() + ".spec." +
-                          std::to_string(specCount[cand.callee]));
+            clone->setName(cand.callee->getName() + ".spec." + std::to_string(specCount[cand.callee]));
             clone->setLinkage(llvm::GlobalValue::InternalLinkage);
 
             // Redirect the call site to use the specialized version
@@ -3922,8 +4022,7 @@ void CodeGenerator::runOptimizationPasses() {
         }
 
         if (verbose_ && totalSpecialized > 0) {
-            std::cout << "    Function specialization: " << totalSpecialized
-                      << " call sites specialized" << '\n';
+            std::cout << "    Function specialization: " << totalSpecialized << " call sites specialized" << '\n';
         }
 
         // Run a new-PM cleanup pass on specialized functions.
@@ -3965,8 +4064,7 @@ void CodeGenerator::runOptimizationPasses() {
         if (verbose_) {
             std::cout << "    Running superoptimizer (level " << superoptLevel_
                       << ": idiom recognition, algebraic simplification"
-                      << (superoptLevel_ >= 2 ? ", synthesis, branch-opt" : "")
-                      << ")..." << '\n';
+                      << (superoptLevel_ >= 2 ? ", synthesis, branch-opt" : "") << ")..." << '\n';
         }
         superopt::SuperoptimizerConfig superConfig;
         // Configure based on superopt level:
@@ -3997,15 +4095,13 @@ void CodeGenerator::runOptimizationPasses() {
         }
         auto superStats = superopt::superoptimizeModule(*module, superConfig);
         const unsigned totalSuperOpts = superStats.idiomsReplaced + superStats.synthReplacements +
-                                 superStats.algebraicSimplified + superStats.branchesSimplified +
-                                 superStats.deadCodeEliminated;
+                                        superStats.algebraicSimplified + superStats.branchesSimplified +
+                                        superStats.deadCodeEliminated;
         if (verbose_) {
-            std::cout << "    Superoptimizer complete: "
-                      << superStats.idiomsReplaced << " idioms replaced, "
+            std::cout << "    Superoptimizer complete: " << superStats.idiomsReplaced << " idioms replaced, "
                       << superStats.algebraicSimplified << " algebraic simplifications, "
-                      << superStats.synthReplacements << " synthesis replacements, "
-                      << superStats.branchesSimplified << " branches simplified, "
-                      << superStats.deadCodeEliminated << " dead instructions eliminated"
+                      << superStats.synthReplacements << " synthesis replacements, " << superStats.branchesSimplified
+                      << " branches simplified, " << superStats.deadCodeEliminated << " dead instructions eliminated"
                       << " (" << totalSuperOpts << " total optimizations)" << '\n';
         }
 
@@ -4030,13 +4126,12 @@ void CodeGenerator::runOptimizationPasses() {
             // At O3, run a second superoptimizer pass after the cleanup.
             if (optimizationLevel >= OptimizationLevel::O3) {
                 superopt::SuperoptimizerConfig superConfig2 = superConfig;
-                superConfig2.enableSynthesis = false;  // skip expensive synthesis on pass 2
+                superConfig2.enableSynthesis = false; // skip expensive synthesis on pass 2
                 auto stats2 = superopt::superoptimizeModule(*module, superConfig2);
-                const unsigned total2 = stats2.idiomsReplaced + stats2.algebraicSimplified +
-                                        stats2.branchesSimplified + stats2.deadCodeEliminated;
+                const unsigned total2 = stats2.idiomsReplaced + stats2.algebraicSimplified + stats2.branchesSimplified +
+                                        stats2.deadCodeEliminated;
                 if (verbose_ && total2 > 0) {
-                    std::cout << "    Superoptimizer pass 2: "
-                              << total2 << " additional optimizations" << '\n';
+                    std::cout << "    Superoptimizer pass 2: " << total2 << " additional optimizations" << '\n';
                 }
 
                 // Lightweight cleanup after pass 2.  Without this, pass-2
@@ -4059,8 +4154,7 @@ void CodeGenerator::runOptimizationPasses() {
         // Each round first infers nuw flags (exposing more conversion targets),
         const unsigned postConvCount = runSignedToUnsignedConverge(*module, 3);
         if (verbose_ && postConvCount > 0) {
-            std::cout << "    Post-pipeline signed→unsigned: "
-                      << postConvCount << " conversions" << '\n';
+            std::cout << "    Post-pipeline signed→unsigned: " << postConvCount << " conversions" << '\n';
         }
     }
 
@@ -4073,8 +4167,10 @@ void CodeGenerator::runOptimizationPasses() {
     if (enableHGOE_ && optimizationLevel >= OptimizationLevel::O2) {
         if (verbose_) {
             std::cout << "    Running Hardware Graph Optimization Engine";
-            if (!marchCpu_.empty()) std::cout << " (march=" << marchCpu_ << ")";
-            if (!mtuneCpu_.empty()) std::cout << " (mtune=" << mtuneCpu_ << ")";
+            if (!marchCpu_.empty())
+                std::cout << " (march=" << marchCpu_ << ")";
+            if (!mtuneCpu_.empty())
+                std::cout << " (mtune=" << mtuneCpu_ << ")";
             std::cout << "..." << '\n';
         }
         hgoe::HGOEConfig hgoeConfig;
@@ -4085,9 +4181,8 @@ void CodeGenerator::runOptimizationPasses() {
         auto hgoeStats = hgoe::optimizeModule(*module, hgoeConfig);
         if (verbose_) {
             if (hgoeStats.activated) {
-                std::cout << "    HGOE complete: arch=" << hgoeStats.resolvedArch
-                          << ", " << hgoeStats.functionsOptimized << " functions optimized"
-                          << '\n';
+                std::cout << "    HGOE complete: arch=" << hgoeStats.resolvedArch << ", "
+                          << hgoeStats.functionsOptimized << " functions optimized" << '\n';
             } else {
                 std::cout << "    HGOE not activated (no explicit -march/-mtune)" << '\n';
             }
@@ -4095,12 +4190,10 @@ void CodeGenerator::runOptimizationPasses() {
     }
 
     // Post-HGOE srem→urem and sdiv→udiv conversion.
-    if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2
-        && enableHGOE_ && !marchCpu_.empty()) {
+    if (enableSuperopt_ && optimizationLevel >= OptimizationLevel::O2 && enableHGOE_ && !marchCpu_.empty()) {
         const unsigned postHGOECount = runSignedToUnsignedConverge(*module, 2);
         if (verbose_ && postHGOECount > 0) {
-            std::cout << "    Post-HGOE signed→unsigned: "
-                      << postHGOECount << " conversions" << '\n';
+            std::cout << "    Post-HGOE signed→unsigned: " << postHGOECount << " conversions" << '\n';
         }
     }
 
@@ -4111,28 +4204,26 @@ void CodeGenerator::runOptimizationPasses() {
 
     // ── Speculative Devectorization & Revectorization (SDR) ────────────────
     if (enableSDR_ && optimizationLevel >= OptimizationLevel::O2) {
-        if (verbose_) std::cout << "    Running SDR pass..." << '\n';
+        if (verbose_)
+            std::cout << "    Running SDR pass..." << '\n';
         sdr::SdrConfig sdrCfg;
         // At O3 / optmax, allow more aggressive widening.
         if (optimizationLevel >= OptimizationLevel::O3) {
-            sdrCfg.maxWidenLanes    = 16;
-            sdrCfg.costThreshold    = 0.85;
+            sdrCfg.maxWidenLanes = 16;
+            sdrCfg.costThreshold = 0.85;
             sdrCfg.partialUseFraction = 0.75;
         }
-        auto sdrStats = sdr::runSDR(*module,
+        auto sdrStats = sdr::runSDR(
+            *module,
             [&](llvm::Function& F) -> llvm::TargetTransformInfo {
                 return targetMachine ? targetMachine->getTargetTransformInfo(F)
                                      : llvm::TargetTransformInfo(F.getParent()->getDataLayout());
             },
             sdrCfg);
         if (verbose_) {
-            std::cout << "    SDR complete: "
-                      << sdrStats.regionsDetected << " regions detected, "
-                      << sdrStats.narrowed        << " narrowed, "
-                      << sdrStats.widened         << " widened, "
-                      << sdrStats.reductionsReplaced << " reductions replaced"
-                      << " (" << sdrStats.totalTransformed() << " total)"
-                      << '\n';
+            std::cout << "    SDR complete: " << sdrStats.regionsDetected << " regions detected, " << sdrStats.narrowed
+                      << " narrowed, " << sdrStats.widened << " widened, " << sdrStats.reductionsReplaced
+                      << " reductions replaced" << " (" << sdrStats.totalTransformed() << " total)" << '\n';
         }
     } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableSDR_) {
         std::cout << "    SDR disabled (-fno-sdr)" << '\n';
@@ -4146,31 +4237,25 @@ void CodeGenerator::runOptimizationPasses() {
     // ── Implicit Phase Ordering Fixer (IPOF) ────────────────────────────────
     if (enableIPOF_ && optimizationLevel >= OptimizationLevel::O2) {
         // Derive aggression level from optimization level unless explicitly set.
-        const unsigned level = (ipofLevel_ > 0) ? ipofLevel_
-            : (optimizationLevel >= OptimizationLevel::O3 ? 2u : 1u);
+        const unsigned level = (ipofLevel_ > 0) ? ipofLevel_ : (optimizationLevel >= OptimizationLevel::O3 ? 2u : 1u);
 
         if (verbose_) {
             std::cout << "    Running IPOF (level " << level << ")..." << '\n';
         }
         ipof::IpofConfig ipofCfg;
         ipofCfg.aggressionLevel = level;
-        ipofCfg.maxIterations   = (level >= 3) ? 3u : (level == 2 ? 2u : 1u);
+        ipofCfg.maxIterations = (level >= 3) ? 3u : (level == 2 ? 2u : 1u);
         ipofCfg.enableNearVectorizable = (level >= 3);
-        ipofCfg.enableCallWithConst    = (level >= 2);
+        ipofCfg.enableCallWithConst = (level >= 2);
 
         auto ipofStats = ipof::runIPOF(*module, ipofCfg);
 
         if (verbose_) {
-            std::cout << "    IPOF complete: "
-                      << ipofStats.opportunitiesFound << " opportunities found, "
-                      << ipofStats.acceptedImprovements << " accepted"
-                      << " (constants=" << ipofStats.foldedConstants
-                      << " cse="        << ipofStats.eliminatedCSE
-                      << " dead="       << ipofStats.eliminatedDead
-                      << " loads="      << ipofStats.eliminatedLoads
-                      << " inline="     << ipofStats.inlinedAndFolded
-                      << ") net -"      << ipofStats.netInstrReduction
-                      << " instrs" << '\n';
+            std::cout << "    IPOF complete: " << ipofStats.opportunitiesFound << " opportunities found, "
+                      << ipofStats.acceptedImprovements << " accepted" << " (constants=" << ipofStats.foldedConstants
+                      << " cse=" << ipofStats.eliminatedCSE << " dead=" << ipofStats.eliminatedDead
+                      << " loads=" << ipofStats.eliminatedLoads << " inline=" << ipofStats.inlinedAndFolded << ") net -"
+                      << ipofStats.netInstrReduction << " instrs" << '\n';
         }
     } else if (verbose_ && optimizationLevel >= OptimizationLevel::O2 && !enableIPOF_) {
         std::cout << "    IPOF disabled (-fno-ipof)" << '\n';
@@ -4186,12 +4271,14 @@ void CodeGenerator::runOptimizationPasses() {
     if (optimizationLevel >= OptimizationLevel::O2) {
         unsigned prefetchesRemoved = 0;
         for (auto& F : *module) {
-            if (F.isDeclaration()) continue;
+            if (F.isDeclaration())
+                continue;
             llvm::SmallVector<llvm::CallInst*, 8> toRemove;
             for (auto& BB : F) {
                 for (auto& I : BB) {
                     auto* call = llvm::dyn_cast<llvm::CallInst>(&I);
-                    if (!call) continue;
+                    if (!call)
+                        continue;
                     auto* callee = call->getCalledFunction();
                     if (!callee || callee->getIntrinsicID() != llvm::Intrinsic::prefetch)
                         continue;
@@ -4235,23 +4322,23 @@ void CodeGenerator::runOptimizationPasses() {
                         llvm::Value* underlying = ptr->stripPointerCasts();
                         bool hasMemoryUser = false;
                         for (auto* user : underlying->users()) {
-                            if (user == call) continue; // skip the prefetch itself
-                            if (llvm::isa<llvm::LoadInst>(user) ||
-                                llvm::isa<llvm::StoreInst>(user)) {
+                            if (user == call)
+                                continue; // skip the prefetch itself
+                            if (llvm::isa<llvm::LoadInst>(user) || llvm::isa<llvm::StoreInst>(user)) {
                                 hasMemoryUser = true;
                                 break;
                             }
                             // GEPs with load/store users also count
                             if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(user)) {
                                 for (auto* gepUser : gep->users()) {
-                                    if (llvm::isa<llvm::LoadInst>(gepUser) ||
-                                        llvm::isa<llvm::StoreInst>(gepUser)) {
+                                    if (llvm::isa<llvm::LoadInst>(gepUser) || llvm::isa<llvm::StoreInst>(gepUser)) {
                                         hasMemoryUser = true;
                                         break;
                                     }
                                 }
                             }
-                            if (hasMemoryUser) break;
+                            if (hasMemoryUser)
+                                break;
                         }
                         if (!hasMemoryUser) {
                             shouldRemove = true;
@@ -4277,9 +4364,8 @@ void CodeGenerator::runOptimizationPasses() {
             }
         }
         if (verbose_ && prefetchesRemoved > 0) {
-            std::cout << "    Post-optimization prefetch cleanup: "
-                      << prefetchesRemoved << " redundant prefetch(es) removed"
-                      << '\n';
+            std::cout << "    Post-optimization prefetch cleanup: " << prefetchesRemoved
+                      << " redundant prefetch(es) removed" << '\n';
         }
 
         // ── Unified new-PM closing pipeline ──────────────────────────────────
@@ -4308,8 +4394,7 @@ void CodeGenerator::runOptimizationPasses() {
                 llvm::LoopPassManager LPMClose;
                 LPMClose.addPass(llvm::IndVarSimplifyPass());
                 LPMClose.addPass(llvm::LICMPass(llvm::LICMOptions()));
-                CloseFPM.addPass(llvm::createFunctionToLoopPassAdaptor(
-                    std::move(LPMClose), /*UseMemorySSA=*/true));
+                CloseFPM.addPass(llvm::createFunctionToLoopPassAdaptor(std::move(LPMClose), /*UseMemorySSA=*/true));
             }
             // Cross-iteration load reuse: detect stencil/sliding-window patterns
             CloseFPM.addPass(CrossIterLoadReusePass());
@@ -4352,8 +4437,7 @@ void CodeGenerator::runOptimizationPasses() {
                 std::vector<llvm::Function*> closingTargets;
                 closingTargets.reserve(snapshot.definedFunctions);
                 for (auto& F : *module) {
-                    if (!F.isDeclaration() &&
-                        !snapshot.isUnreachable(F.getName().str()))
+                    if (!F.isDeclaration() && !snapshot.isUnreachable(F.getName().str()))
                         closingTargets.push_back(&F);
                 }
                 runPostFPMOnFuncs(std::move(CloseFPM), std::move(closingTargets));
@@ -4373,8 +4457,8 @@ void CodeGenerator::runOptimizationPasses() {
                     moduloExpanded += superopt::constantModuloStrengthReduce(func);
             }
             if (verbose_ && moduloExpanded > 0) {
-                std::cout << "    Post-pipeline modulo strength reduction: "
-                          << moduloExpanded << " urem instructions expanded" << '\n';
+                std::cout << "    Post-pipeline modulo strength reduction: " << moduloExpanded
+                          << " urem instructions expanded" << '\n';
             }
         }
     }
@@ -4382,10 +4466,11 @@ void CodeGenerator::runOptimizationPasses() {
 
 void CodeGenerator::optimizeFunction(llvm::Function* func) {
     // Per-function optimization using the new pass manager.
-    if (!func || func->isDeclaration()) return;
+    if (!func || func->isDeclaration())
+        return;
     auto tm = createTargetMachine();
     llvm::PassBuilder PBFunc(tm.get());
-    llvm::LoopAnalysisManager  LAMFunc;
+    llvm::LoopAnalysisManager LAMFunc;
     llvm::FunctionAnalysisManager FAMFunc;
     llvm::CGSCCAnalysisManager CGAMFunc;
     llvm::ModuleAnalysisManager MAMFunc;
@@ -4407,17 +4492,12 @@ void CodeGenerator::optimizeFunction(llvm::Function* func) {
 
     // Run via module-level adapter so TargetIRAnalysis and library-info
     // analyses are properly initialized through the ModuleAnalysisManager proxy.
-    struct SingleFuncModulePass
-        : public llvm::PassInfoMixin<SingleFuncModulePass> {
+    struct SingleFuncModulePass : public llvm::PassInfoMixin<SingleFuncModulePass> {
         llvm::FunctionPassManager FPM;
         llvm::Function* Target;
-        SingleFuncModulePass(llvm::FunctionPassManager fpm, llvm::Function* F)
-            : FPM(std::move(fpm)), Target(F) {}
-        llvm::PreservedAnalyses run(llvm::Module& M,
-                                    llvm::ModuleAnalysisManager& MAM) {
-            auto& FAM =
-                MAM.getResult<llvm::FunctionAnalysisManagerModuleProxy>(M)
-                   .getManager();
+        SingleFuncModulePass(llvm::FunctionPassManager fpm, llvm::Function* F) : FPM(std::move(fpm)), Target(F) {}
+        llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager& MAM) {
+            auto& FAM = MAM.getResult<llvm::FunctionAnalysisManagerModuleProxy>(M).getManager();
             FPM.run(*Target, FAM);
             return llvm::PreservedAnalyses::none();
         }
@@ -4435,8 +4515,7 @@ void CodeGenerator::optimizeFunction(llvm::Function* func) {
 // or @optmax(loop.unrollCount=8) are reflected in the LLVM loop metadata before
 // the vectoriser and unroller fire, so the cost model respects the annotation.
 // ─────────────────────────────────────────────────────────────────────────────
-struct OptMaxLoopAnnotationPass
-    : public llvm::PassInfoMixin<OptMaxLoopAnnotationPass> {
+struct OptMaxLoopAnnotationPass : public llvm::PassInfoMixin<OptMaxLoopAnnotationPass> {
 
     LoopConfig cfg;
     explicit OptMaxLoopAnnotationPass(LoopConfig c) : cfg(c) {}
@@ -4457,15 +4536,12 @@ struct OptMaxLoopAnnotationPass
         }
 
         auto addMDFlag = [&](llvm::StringRef key) {
-            MDs.push_back(llvm::MDNode::get(
-                Ctx, {llvm::MDString::get(Ctx, key)}));
+            MDs.push_back(llvm::MDNode::get(Ctx, {llvm::MDString::get(Ctx, key)}));
         };
         auto addMDInt = [&](llvm::StringRef key, unsigned val) {
             MDs.push_back(llvm::MDNode::get(
                 Ctx, {llvm::MDString::get(Ctx, key),
-                      llvm::ConstantAsMetadata::get(
-                          llvm::ConstantInt::get(
-                              llvm::Type::getInt32Ty(Ctx), val))}));
+                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(Ctx), val))}));
         };
 
         if (cfg.vectorize)
@@ -4473,8 +4549,7 @@ struct OptMaxLoopAnnotationPass
         if (cfg.noVectorize)
             addMDFlag("llvm.loop.vectorize.disable");
         if (cfg.unrollCount > 0)
-            addMDInt("llvm.loop.unroll.count",
-                     static_cast<unsigned>(cfg.unrollCount));
+            addMDInt("llvm.loop.unroll.count", static_cast<unsigned>(cfg.unrollCount));
         if (cfg.independent) {
             // Mark the loop as having no cross-iteration memory dependencies so
             // the vectorizer and interleaver can proceed without alias checks.
@@ -4487,8 +4562,7 @@ struct OptMaxLoopAnnotationPass
             // For example, tileSize=4 tells the cost model to issue 4
             // independent iterations to fill latency slots on an out-of-order
             // core, improving pipeline utilisation for memory-bound loops.
-            addMDInt("llvm.loop.interleave.count",
-                     static_cast<unsigned>(cfg.tileSize));
+            addMDInt("llvm.loop.interleave.count", static_cast<unsigned>(cfg.tileSize));
         }
         if (cfg.parallel) {
             // loop.parallel=true: emit an access-group MDNode attached to the
@@ -4500,24 +4574,17 @@ struct OptMaxLoopAnnotationPass
             // guards, under the user's assertion that all accesses are safe to
             // reorder.
             llvm::MDNode* accessGroup = llvm::MDNode::getDistinct(Ctx, {});
-            MDs.push_back(llvm::MDNode::get(
-                Ctx, {llvm::MDString::get(Ctx, "llvm.loop.parallel_accesses"),
-                      accessGroup}));
+            MDs.push_back(
+                llvm::MDNode::get(Ctx, {llvm::MDString::get(Ctx, "llvm.loop.parallel_accesses"), accessGroup}));
             // Walk the loop blocks and attach the same access group to every
             // load and store so the vectorizer can prove they're in the group.
             for (llvm::BasicBlock* BB : L->blocks()) {
                 for (llvm::Instruction& I : *BB) {
-                    if (llvm::isa<llvm::LoadInst>(I) ||
-                        llvm::isa<llvm::StoreInst>(I)) {
-                        llvm::MDNode* existing =
-                            I.getMetadata(llvm::LLVMContext::MD_access_group);
+                    if (llvm::isa<llvm::LoadInst>(I) || llvm::isa<llvm::StoreInst>(I)) {
+                        llvm::MDNode* existing = I.getMetadata(llvm::LLVMContext::MD_access_group);
                         llvm::MDNode* updated =
-                            existing
-                            ? llvm::MDNode::get(
-                                  Ctx, {existing, accessGroup})
-                            : accessGroup;
-                        I.setMetadata(llvm::LLVMContext::MD_access_group,
-                                      updated);
+                            existing ? llvm::MDNode::get(Ctx, {existing, accessGroup}) : accessGroup;
+                        I.setMetadata(llvm::LLVMContext::MD_access_group, updated);
                     }
                 }
             }
@@ -4528,10 +4595,8 @@ struct OptMaxLoopAnnotationPass
             // partitions.  This is the correct directive when the programmer
             // wants adjacent loops to be fused together: LoopFusePass will
             // merge them, but only if neither has been distributed first.
-            MDs.push_back(llvm::MDNode::get(
-                Ctx, {llvm::MDString::get(Ctx, "llvm.loop.distribute.enable"),
-                      llvm::ConstantAsMetadata::get(
-                          llvm::ConstantInt::getFalse(Ctx))}));
+            MDs.push_back(llvm::MDNode::get(Ctx, {llvm::MDString::get(Ctx, "llvm.loop.distribute.enable"),
+                                                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::getFalse(Ctx))}));
         }
 
         if (MDs.size() == 1 && !existingMD)
@@ -4547,16 +4612,17 @@ struct OptMaxLoopAnnotationPass
             annotateLoop(sub, cfg);
     }
 
-    llvm::PreservedAnalyses run(llvm::Function& F,
-                                llvm::FunctionAnalysisManager& FAM) {
-        if (F.isDeclaration()) return llvm::PreservedAnalyses::all();
+    llvm::PreservedAnalyses run(llvm::Function& F, llvm::FunctionAnalysisManager& FAM) {
+        if (F.isDeclaration())
+            return llvm::PreservedAnalyses::all();
         auto& LI = FAM.getResult<llvm::LoopAnalysis>(F);
         bool changed = false;
         for (llvm::Loop* L : LI) {
             annotateLoop(L, cfg);
             changed = true;
         }
-        if (!changed) return llvm::PreservedAnalyses::all();
+        if (!changed)
+            return llvm::PreservedAnalyses::all();
         llvm::PreservedAnalyses PA;
         PA.preserveSet<llvm::CFGAnalyses>();
         return PA;
@@ -4633,8 +4699,7 @@ static llvm::FunctionPassManager buildOptMaxScalarFPM(const OptMaxConfig& cfg) {
         LPM.addPass(llvm::LoopInstSimplifyPass());
         LPM.addPass(llvm::LoopSimplifyCFGPass());
         LPM.addPass(llvm::CanonicalizeFreezeInLoopsPass());
-        FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
-            std::move(LPM), /*UseMemorySSA=*/true));
+        FPM.addPass(llvm::createFunctionToLoopPassAdaptor(std::move(LPM), /*UseMemorySSA=*/true));
     }
     // Software prefetch for predictable-stride loops.
     FPM.addPass(llvm::LoopDataPrefetchPass());
@@ -4643,8 +4708,7 @@ static llvm::FunctionPassManager buildOptMaxScalarFPM(const OptMaxConfig& cfg) {
     // and vectoriser see them before they fire.  All six LoopConfig fields are
     // now wired up: vectorize, noVectorize, unrollCount, independent, tileSize,
     // parallel, fuse.
-    if (cfg.loop.vectorize || cfg.loop.noVectorize ||
-        cfg.loop.unrollCount > 0 || cfg.loop.independent ||
+    if (cfg.loop.vectorize || cfg.loop.noVectorize || cfg.loop.unrollCount > 0 || cfg.loop.independent ||
         cfg.loop.tileSize > 0 || cfg.loop.parallel || cfg.loop.fuse) {
         FPM.addPass(OptMaxLoopAnnotationPass(cfg.loop));
     }
@@ -4689,8 +4753,7 @@ static llvm::FunctionPassManager buildOptMaxScalarFPM(const OptMaxConfig& cfg) {
     {
         llvm::LoopPassManager LPMPostUnroll;
         LPMPostUnroll.addPass(llvm::IndVarSimplifyPass());
-        FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
-            std::move(LPMPostUnroll), /*UseMemorySSA=*/true));
+        FPM.addPass(llvm::createFunctionToLoopPassAdaptor(std::move(LPMPostUnroll), /*UseMemorySSA=*/true));
     }
     // Post-unroll redundancy elimination.
     FPM.addPass(llvm::NewGVNPass());
@@ -4702,8 +4765,7 @@ static llvm::FunctionPassManager buildOptMaxScalarFPM(const OptMaxConfig& cfg) {
     FPM.addPass(llvm::SpeculativeExecutionPass());
     // safety=Off: use hyperblock-aggressive CFG opts (higher speculation bonus,
     // no canonical-loop requirement) for maximal if-conversion.
-    FPM.addPass(llvm::SimplifyCFGPass(safetyOff ? hyperblockCFGOpts()
-                                                 : aggressiveCFGOpts()));
+    FPM.addPass(llvm::SimplifyCFGPass(safetyOff ? hyperblockCFGOpts() : aggressiveCFGOpts()));
     FPM.addPass(llvm::InstCombinePass());
     FPM.addPass(llvm::ADCEPass());
 
@@ -4804,8 +4866,7 @@ static llvm::FunctionPassManager buildOptMaxVecFPM(const OptMaxConfig& cfg) {
         LPM.addPass(llvm::LoopInterchangePass());
         LPM.addPass(llvm::LoopVersioningLICMPass());
         LPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
-        FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
-            std::move(LPM), /*UseMemorySSA=*/true));
+        FPM.addPass(llvm::createFunctionToLoopPassAdaptor(std::move(LPM), /*UseMemorySSA=*/true));
     }
     FPM.addPass(llvm::LoopDistributePass());
     FPM.addPass(llvm::LoopFusePass());
@@ -4817,12 +4878,11 @@ static llvm::FunctionPassManager buildOptMaxVecFPM(const OptMaxConfig& cfg) {
     FPM.addPass(llvm::InstCombinePass());
     FPM.addPass(llvm::IRCEPass());
     // Loop vectorizer.
-    FPM.addPass(llvm::LoopVectorizePass(
-        llvm::LoopVectorizeOptions(/*InterleaveOnlyWhenForced=*/false,
-                                   /*VectorizeOnlyWhenForced=*/
-                                   // safety=On: respect cost model; otherwise
-                                   // force vectorization when hints say so.
-                                   false)));
+    FPM.addPass(llvm::LoopVectorizePass(llvm::LoopVectorizeOptions(/*InterleaveOnlyWhenForced=*/false,
+                                                                   /*VectorizeOnlyWhenForced=*/
+                                                                   // safety=On: respect cost model; otherwise
+                                                                   // force vectorization when hints say so.
+                                                                   false)));
     // SLP vectorizer: pack independent scalar ops into SIMD ops.
     FPM.addPass(llvm::SLPVectorizerPass());
     FPM.addPass(llvm::VectorCombinePass());
@@ -4839,8 +4899,7 @@ static llvm::FunctionPassManager buildOptMaxVecFPM(const OptMaxConfig& cfg) {
     {
         llvm::LoopPassManager LPM;
         LPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
-        FPM.addPass(llvm::createFunctionToLoopPassAdaptor(
-            std::move(LPM), /*UseMemorySSA=*/true));
+        FPM.addPass(llvm::createFunctionToLoopPassAdaptor(std::move(LPM), /*UseMemorySSA=*/true));
     }
     FPM.addPass(llvm::DSEPass());
     FPM.addPass(llvm::MemCpyOptPass());
@@ -4913,8 +4972,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         {
             const std::string nameStrSafe = name.str();
             auto cfgSafeIt = optMaxFunctionConfigs_.find(nameStrSafe);
-            if (cfgSafeIt != optMaxFunctionConfigs_.end()
-                    && cfgSafeIt->second.safety == SafetyLevel::Off) {
+            if (cfgSafeIt != optMaxFunctionConfigs_.end() && cfgSafeIt->second.safety == SafetyLevel::Off) {
                 func.addFnAttr(llvm::Attribute::Speculatable);
             }
         }
@@ -4928,8 +4986,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // segmentation fault.  The cost-model IPO inliner (InlinerThreshold=3000)
         // still handles cross-boundary inlining for these functions when it is
         // profitable — this guard only prevents unconditional forced inlining.
-        if (func.getInstructionCount() < kAlwaysInlineThreshold
-                && !func.hasFnAttribute(llvm::Attribute::NoInline)) {
+        if (func.getInstructionCount() < kAlwaysInlineThreshold && !func.hasFnAttribute(llvm::Attribute::NoInline)) {
             bool onlyCalledFromOptMax = true;
             for (auto* user : func.users()) {
                 auto* CB = llvm::dyn_cast<llvm::CallBase>(user);
@@ -5030,10 +5087,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
                 }
             }
             if (!hasPointerParam) {
-                const SafetyLevel sl =
-                    (cfgIt != optMaxFunctionConfigs_.end())
-                    ? cfgIt->second.safety
-                    : SafetyLevel::On;
+                const SafetyLevel sl = (cfgIt != optMaxFunctionConfigs_.end()) ? cfgIt->second.safety : SafetyLevel::On;
                 if (sl == SafetyLevel::Off) {
                     // Pure value-to-value kernel: no pointer params, user asserts
                     // no side effects.  Mark readnone so LLVM treats calls to this
@@ -5050,15 +5104,11 @@ void CodeGenerator::optimizeOptMaxFunctions() {
                             for (auto& I : BB) {
                                 if (auto* call = llvm::dyn_cast<llvm::CallBase>(&I)) {
                                     llvm::Function* callee = call->getCalledFunction();
-                                    if (callee && !callee->isIntrinsic()
-                                            && callee->isDeclaration()) {
-                                        llvm::errs()
-                                            << "omsc: note: [optmax safety=Off] '"
-                                            << func.getName()
-                                            << "' calls external function '"
-                                            << callee->getName()
-                                            << "' — readnone annotation may be "
-                                               "incorrect if it has side effects\n";
+                                    if (callee && !callee->isIntrinsic() && callee->isDeclaration()) {
+                                        llvm::errs() << "omsc: note: [optmax safety=Off] '" << func.getName()
+                                                     << "' calls external function '" << callee->getName()
+                                                     << "' — readnone annotation may be "
+                                                        "incorrect if it has side effects\n";
                                     }
                                 }
                             }
@@ -5068,9 +5118,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
                 } else {
                     // May access globals/inaccessible mem, but definitely cannot
                     // access ArgMem.  Subtract ArgMem from the unknown() bitset.
-                    func.setMemoryEffects(
-                        llvm::MemoryEffects::unknown()
-                            .getWithoutLoc(llvm::IRMemLocation::ArgMem));
+                    func.setMemoryEffects(llvm::MemoryEffects::unknown().getWithoutLoc(llvm::IRMemLocation::ArgMem));
                 }
             }
         }
@@ -5078,7 +5126,8 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         optMaxFuncNames.push_back(name.str());
     }
 
-    if (optMaxFuncNames.empty()) return;
+    if (optMaxFuncNames.empty())
+        return;
 
     // ── Unified new-PM OPTMAX infrastructure ──────────────────────────────
     // Ensure the native target is initialized before creating a TargetMachine.
@@ -5113,22 +5162,22 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // Enable vectorization cost-model infrastructure so that LoopVectorizePass
     // and SLPVectorizerPass inside the per-function FPMs get accurate TTI.
     PTOMax.LoopVectorization = true;
-    PTOMax.SLPVectorization  = true;
-    PTOMax.LoopInterleaving  = true;
+    PTOMax.SLPVectorization = true;
+    PTOMax.LoopInterleaving = true;
     // Unrolling is handled explicitly in buildOptMaxScalarFPM.
-    PTOMax.LoopUnrolling     = false;
+    PTOMax.LoopUnrolling = false;
     // Aggressive inlining threshold for OPTMAX: 3000 (vs the O3 default of 225).
     // OPTMAX functions are hot kernels where larger-body inlining pays off by
     // exposing constant arguments, enabling vectorization, and eliminating call
     // overhead inside tight loops.
-    PTOMax.InlinerThreshold  = 3000;
+    PTOMax.InlinerThreshold = 3000;
     // Enable cross-function optimizations unconditionally for OPTMAX.
-    PTOMax.MergeFunctions    = true;
-    PTOMax.CallGraphProfile  = true;
+    PTOMax.MergeFunctions = true;
+    PTOMax.CallGraphProfile = true;
     PTOMax.ForgetAllSCEVInLoopUnroll = true;
 
     llvm::PassBuilder PBMax(tm.get(), PTOMax);
-    llvm::LoopAnalysisManager  LAMMax;
+    llvm::LoopAnalysisManager LAMMax;
     llvm::FunctionAnalysisManager FAMMax;
     llvm::CGSCCAnalysisManager CGAMMax;
     llvm::ModuleAnalysisManager MAMMax;
@@ -5183,8 +5232,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // AttributorCGSCC: context-sensitive Attributor pass at CGSCC granularity.
         // Works bottom-up through the call graph SCC by SCC, enabling more precise
         // deduction for mutually-recursive function groups.
-        PreIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
-            llvm::AttributorCGSCCPass()));
+        PreIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(llvm::AttributorCGSCCPass()));
         // ConstArgPropagation: for internal functions where every call site
         // passes the same concrete constant, replace the formal argument with
         // that constant — enabling SCCP / InstCombine to fold much deeper.
@@ -5197,12 +5245,10 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // values where the pointer is only accessed directly (no escape, no
         // address-taken use).  Enables register allocation and eliminates
         // load/store overhead for small struct/array parameters.
-        PreIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
-            llvm::ArgumentPromotionPass()));
+        PreIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(llvm::ArgumentPromotionPass()));
         // PostOrderFunctionAttrs: infer nounwind / readonly / writeonly / pure
         // attributes in bottom-up CGSCC order so callers can reason about effects.
-        PreIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
-            llvm::PostOrderFunctionAttrsPass()));
+        PreIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(llvm::PostOrderFunctionAttrsPass()));
         // ReversePostOrderFunctionAttrs: propagate attribute information
         // top-down so callees inherit caller assumptions (e.g. nounwind context).
         PreIPO.addPass(llvm::ReversePostOrderFunctionAttrsPass());
@@ -5221,20 +5267,16 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // Stripping the attribute from surviving definitions lets downstream
         // passes make clean inlining decisions based on cost models.
         {
-            struct AlwaysInlineCleanupPass
-                : public llvm::PassInfoMixin<AlwaysInlineCleanupPass> {
-                llvm::PreservedAnalyses run(llvm::Module& M,
-                                            llvm::ModuleAnalysisManager&) {
+            struct AlwaysInlineCleanupPass : public llvm::PassInfoMixin<AlwaysInlineCleanupPass> {
+                llvm::PreservedAnalyses run(llvm::Module& M, llvm::ModuleAnalysisManager&) {
                     bool changed = false;
                     for (auto& F : M) {
-                        if (!F.isDeclaration()
-                                && F.hasFnAttribute(llvm::Attribute::AlwaysInline)) {
+                        if (!F.isDeclaration() && F.hasFnAttribute(llvm::Attribute::AlwaysInline)) {
                             F.removeFnAttr(llvm::Attribute::AlwaysInline);
                             changed = true;
                         }
                     }
-                    return changed ? llvm::PreservedAnalyses::none()
-                                   : llvm::PreservedAnalyses::all();
+                    return changed ? llvm::PreservedAnalyses::none() : llvm::PreservedAnalyses::all();
                 }
             };
             PreIPO.addPass(AlwaysInlineCleanupPass());
@@ -5249,10 +5291,8 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         unsigned omWave = 100; // OPTMAX waves start at 100 to distinguish from main pipeline
         auto omSnapshot = omscript::computeProgramFacts(*module, MAMMax, omWave);
         if (verbose_) {
-            std::cout << "    [optmax-wave 1 / pre-ipo] "
-                      << omSnapshot.definedFunctions << " functions, "
-                      << omSnapshot.totalInstructions << " instrs, "
-                      << omSnapshot.pureFunctions.size() << " pure"
+            std::cout << "    [optmax-wave 1 / pre-ipo] " << omSnapshot.definedFunctions << " functions, "
+                      << omSnapshot.totalInstructions << " instrs, " << omSnapshot.pureFunctions.size() << " pure"
                       << '\n';
         }
     }
@@ -5281,26 +5321,26 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // AllowFuncSpec=true) may have specialized or deleted the original
         // Function object, invalidating any pointer saved before PreIPO ran.
         llvm::Function* func = module->getFunction(fname);
-        if (!func || func->isDeclaration()) continue;
+        if (!func || func->isDeclaration())
+            continue;
         // Re-check size here: the function may have grown during PreIPO.
-        if (func->getInstructionCount() > kMaxOptMaxFPMInstructions) continue;
+        if (func->getInstructionCount() > kMaxOptMaxFPMInstructions)
+            continue;
 
         auto cfgIt2 = optMaxFunctionConfigs_.find(fname);
-        const OptMaxConfig& cfg =
-            (cfgIt2 != optMaxFunctionConfigs_.end())
-            ? cfgIt2->second
-            : OptMaxConfig{};
+        const OptMaxConfig& cfg = (cfgIt2 != optMaxFunctionConfigs_.end()) ? cfgIt2->second : OptMaxConfig{};
 
         // Build per-function scalar and vectorization FPMs.
         llvm::FunctionPassManager scalarFPM = buildOptMaxScalarFPM(cfg);
-        llvm::FunctionPassManager vecFPM    = buildOptMaxVecFPM(cfg);
+        llvm::FunctionPassManager vecFPM = buildOptMaxVecFPM(cfg);
 
         // Scalar convergence loop (Phases 1–3).
         unsigned prevCount = func->getInstructionCount();
         for (int i = 0; i < optMaxScalarIterations; ++i) {
             auto PA = scalarFPM.run(*func, FAMMax);
             const unsigned newCount = func->getInstructionCount();
-            if (PA.areAllPreserved() || newCount == prevCount) break;
+            if (PA.areAllPreserved() || newCount == prevCount)
+                break;
             prevCount = newCount;
         }
 
@@ -5310,29 +5350,43 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         // report=true: print a compact per-function optimization summary to
         // stdout so the programmer can see the result of the OPTMAX pipeline.
         if (cfg.report) {
-            std::cout << "[optmax report] " << fname << ": "
-                      << func->getInstructionCount() << " instructions after optimization";
-            if (cfg.fastMath)             std::cout << ", fast_math";
-            if (cfg.aggressiveVec)        std::cout << ", aggressive_vec";
-            if (cfg.safety == SafetyLevel::Off)     std::cout << ", safety=off";
-            else if (cfg.safety == SafetyLevel::Relaxed) std::cout << ", safety=relaxed";
-            if (cfg.memory.noalias)       std::cout << ", memory.noalias";
-            if (cfg.memory.prefetch)      std::cout << ", memory.prefetch";
+            std::cout << "[optmax report] " << fname << ": " << func->getInstructionCount()
+                      << " instructions after optimization";
+            if (cfg.fastMath)
+                std::cout << ", fast_math";
+            if (cfg.aggressiveVec)
+                std::cout << ", aggressive_vec";
+            if (cfg.safety == SafetyLevel::Off)
+                std::cout << ", safety=off";
+            else if (cfg.safety == SafetyLevel::Relaxed)
+                std::cout << ", safety=relaxed";
+            if (cfg.memory.noalias)
+                std::cout << ", memory.noalias";
+            if (cfg.memory.prefetch)
+                std::cout << ", memory.prefetch";
             if (!cfg.assumes.empty()) {
                 std::cout << ", assumes=[";
                 for (size_t i = 0; i < cfg.assumes.size(); ++i) {
-                    if (i) std::cout << ", ";
+                    if (i)
+                        std::cout << ", ";
                     std::cout << "\"" << cfg.assumes[i] << "\"";
                 }
                 std::cout << "]";
             }
-            if (cfg.loop.vectorize)        std::cout << ", loop.vectorize";
-            if (cfg.loop.noVectorize)      std::cout << ", loop.noVectorize";
-            if (cfg.loop.unrollCount > 0)  std::cout << ", loop.unrollCount=" << cfg.loop.unrollCount;
-            if (cfg.loop.independent)      std::cout << ", loop.independent";
-            if (cfg.loop.tileSize > 0)     std::cout << ", loop.tileSize=" << cfg.loop.tileSize;
-            if (cfg.loop.parallel)         std::cout << ", loop.parallel";
-            if (cfg.loop.fuse)             std::cout << ", loop.fuse";
+            if (cfg.loop.vectorize)
+                std::cout << ", loop.vectorize";
+            if (cfg.loop.noVectorize)
+                std::cout << ", loop.noVectorize";
+            if (cfg.loop.unrollCount > 0)
+                std::cout << ", loop.unrollCount=" << cfg.loop.unrollCount;
+            if (cfg.loop.independent)
+                std::cout << ", loop.independent";
+            if (cfg.loop.tileSize > 0)
+                std::cout << ", loop.tileSize=" << cfg.loop.tileSize;
+            if (cfg.loop.parallel)
+                std::cout << ", loop.parallel";
+            if (cfg.loop.fuse)
+                std::cout << ", loop.fuse";
             if (cfg.safety == SafetyLevel::Off)
                 std::cout << ", unroll.fullMax=512";
             else if (cfg.safety == SafetyLevel::Relaxed)
@@ -5352,11 +5406,9 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         unsigned omWave = 101;
         auto omSnapshot = omscript::computeProgramFacts(*module, MAMMax, omWave);
         if (verbose_) {
-            std::cout << "    [optmax-wave 2 / per-function] "
-                      << omSnapshot.definedFunctions << " functions, "
-                      << omSnapshot.totalInstructions << " instrs, "
-                      << omSnapshot.unreachableFunctions.size() << " unreachable (GlobalDCE targets)"
-                      << '\n';
+            std::cout << "    [optmax-wave 2 / per-function] " << omSnapshot.definedFunctions << " functions, "
+                      << omSnapshot.totalInstructions << " instrs, " << omSnapshot.unreachableFunctions.size()
+                      << " unreachable (GlobalDCE targets)" << '\n';
         }
     }
 
@@ -5372,12 +5424,10 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     {
         llvm::ModulePassManager Wave25;
         Wave25.addPass(llvm::InferFunctionAttrsPass());
-        Wave25.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
-            llvm::PostOrderFunctionAttrsPass()));
+        Wave25.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(llvm::PostOrderFunctionAttrsPass()));
         Wave25.addPass(llvm::ReversePostOrderFunctionAttrsPass());
         Wave25.addPass(llvm::AttributorPass());
-        Wave25.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
-            llvm::AttributorCGSCCPass()));
+        Wave25.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(llvm::AttributorCGSCCPass()));
         // IPSCCP with function specialization: now that attribute info is
         // richer, a second IPSCCP pass finds more inter-procedural constants
         // and may specialize callee clones for constant arguments seen at
@@ -5452,26 +5502,26 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     // Round 1.5 inliner cannot pull OPTMAX callees into them.
     llvm::SmallVector<llvm::Function*, 16> tempNoInline;
     for (auto& F : *module) {
-        if (F.isDeclaration()) continue;
-        if (optMaxFunctions.count(F.getName())) continue; // OPTMAX: leave as-is
-        if (F.hasFnAttribute(llvm::Attribute::NoInline)) continue;
+        if (F.isDeclaration())
+            continue;
+        if (optMaxFunctions.count(F.getName()))
+            continue; // OPTMAX: leave as-is
+        if (F.hasFnAttribute(llvm::Attribute::NoInline))
+            continue;
         F.addFnAttr(llvm::Attribute::NoInline);
         tempNoInline.push_back(&F);
     }
     {
         llvm::ModulePassManager PostIPO_inline;
-        PostIPO_inline.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
-            llvm::InlinerPass()));
+        PostIPO_inline.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(llvm::InlinerPass()));
         // Post-inlining attribute refresh: after the inliner folds callees into
         // callers, run PostOrderFunctionAttrs + Attributor at CGSCC granularity
         // to re-derive memory-effect, nounwind, and purity attributes for the
         // merged bodies.  This ensures Round 2 IPSCCP and ConstArgProp start
         // from the sharpest possible attribute set.
-        PostIPO_inline.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
-            llvm::PostOrderFunctionAttrsPass()));
+        PostIPO_inline.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(llvm::PostOrderFunctionAttrsPass()));
         PostIPO_inline.addPass(llvm::ReversePostOrderFunctionAttrsPass());
-        PostIPO_inline.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
-            llvm::AttributorCGSCCPass()));
+        PostIPO_inline.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(llvm::AttributorCGSCCPass()));
         // Re-run GlobalDCE after inlining to remove callee bodies that were
         // fully inlined (no callers remaining).
         PostIPO_inline.addPass(llvm::GlobalDCEPass());
@@ -5502,8 +5552,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
         PostIPO.addPass(llvm::MergeFunctionsPass());
         // Re-run function attrs (post-order + reverse) before the full Attributor
         // so Attributor starts from the most up-to-date deduction state.
-        PostIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(
-            llvm::PostOrderFunctionAttrsPass()));
+        PostIPO.addPass(llvm::createModuleToPostOrderCGSCCPassAdaptor(llvm::PostOrderFunctionAttrsPass()));
         PostIPO.addPass(llvm::ReversePostOrderFunctionAttrsPass());
         // Attributor round 2: after IPSCCP, ConstArgProp, and MergeFunctions
         // have significantly reduced the module, re-run the Attributor to
@@ -5537,8 +5586,8 @@ void CodeGenerator::optimizeOptMaxFunctions() {
                 llvm::LoopPassManager PostCleanLPM;
                 PostCleanLPM.addPass(llvm::LICMPass(llvm::LICMOptions()));
                 PostCleanLPM.addPass(llvm::IndVarSimplifyPass());
-                PostCleanFPM.addPass(llvm::createFunctionToLoopPassAdaptor(
-                    std::move(PostCleanLPM), /*UseMemorySSA=*/true));
+                PostCleanFPM.addPass(
+                    llvm::createFunctionToLoopPassAdaptor(std::move(PostCleanLPM), /*UseMemorySSA=*/true));
             }
             // A second SCCP + InstCombine sweep after LICM: hoisting may
             // expose new constant-folding targets (e.g., a hoisted load of a
@@ -5547,8 +5596,7 @@ void CodeGenerator::optimizeOptMaxFunctions() {
             PostCleanFPM.addPass(llvm::SCCPPass());
             PostCleanFPM.addPass(llvm::InstCombinePass());
             PostCleanFPM.addPass(llvm::ADCEPass());
-            PostIPO.addPass(
-                llvm::createModuleToFunctionPassAdaptor(std::move(PostCleanFPM)));
+            PostIPO.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(PostCleanFPM)));
         }
 
         // ── Round 3: final dead-code sweep ───────────────────────────────
@@ -5569,11 +5617,8 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     if (verbose_) {
         unsigned omWave = 102;
         auto omSnapshot = omscript::computeProgramFacts(*module, MAMMax, omWave);
-        std::cout << "    [optmax-wave 3 / post-ipo] "
-                  << omSnapshot.definedFunctions << " functions, "
-                  << omSnapshot.totalInstructions << " instrs, "
-                  << omSnapshot.pureFunctions.size() << " pure"
-                  << '\n';
+        std::cout << "    [optmax-wave 3 / post-ipo] " << omSnapshot.definedFunctions << " functions, "
+                  << omSnapshot.totalInstructions << " instrs, " << omSnapshot.pureFunctions.size() << " pure" << '\n';
     }
 
     // ── OPTMAX Round 2: second per-function pass after PostIPO ────────────
@@ -5598,25 +5643,26 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     {
         constexpr int optMaxScalarIterations2 = 4;
         for (auto& func : *module) {
-            if (func.isDeclaration()) continue;
-            if (!optMaxFunctions.count(func.getName())) continue;
-            if (func.getInstructionCount() > kMaxOptMaxFPMInstructions) continue;
+            if (func.isDeclaration())
+                continue;
+            if (!optMaxFunctions.count(func.getName()))
+                continue;
+            if (func.getInstructionCount() > kMaxOptMaxFPMInstructions)
+                continue;
 
             const std::string fname2 = func.getName().str();
             auto cfgIt3 = optMaxFunctionConfigs_.find(fname2);
-            const OptMaxConfig& cfg2 =
-                (cfgIt3 != optMaxFunctionConfigs_.end())
-                ? cfgIt3->second
-                : OptMaxConfig{};
+            const OptMaxConfig& cfg2 = (cfgIt3 != optMaxFunctionConfigs_.end()) ? cfgIt3->second : OptMaxConfig{};
 
             llvm::FunctionPassManager scalarFPM2 = buildOptMaxScalarFPM(cfg2);
-            llvm::FunctionPassManager vecFPM2    = buildOptMaxVecFPM(cfg2);
+            llvm::FunctionPassManager vecFPM2 = buildOptMaxVecFPM(cfg2);
 
             unsigned prevCount2 = func.getInstructionCount();
             for (int i = 0; i < optMaxScalarIterations2; ++i) {
                 auto PA2 = scalarFPM2.run(func, FAMMax);
                 const unsigned newCount2 = func.getInstructionCount();
-                if (PA2.areAllPreserved() || newCount2 == prevCount2) break;
+                if (PA2.areAllPreserved() || newCount2 == prevCount2)
+                    break;
                 prevCount2 = newCount2;
             }
             vecFPM2.run(func, FAMMax);
@@ -5640,10 +5686,8 @@ void CodeGenerator::optimizeOptMaxFunctions() {
     if (verbose_) {
         unsigned omWave = 103;
         auto omSnapshot = omscript::computeProgramFacts(*module, MAMMax, omWave);
-        std::cout << "    [optmax-wave 4 / round2+final-dce] "
-                  << omSnapshot.definedFunctions << " functions, "
-                  << omSnapshot.totalInstructions << " instrs"
-                  << '\n';
+        std::cout << "    [optmax-wave 4 / round2+final-dce] " << omSnapshot.definedFunctions << " functions, "
+                  << omSnapshot.totalInstructions << " instrs" << '\n';
     }
 }
 

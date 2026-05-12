@@ -40,8 +40,8 @@
 /// polyhedral model.  The LegalityService handles the coarser, effect-level
 /// checks that can rule out whole classes of transforms cheaply.
 
-#include "opt_context.h"   // AnalysisCache, PassContract, OptimizationContext
-#include "opt_pass.h"      // PassMetadata, AnalysisKey, IRInvariant
+#include "opt_context.h" // AnalysisCache, PassContract, OptimizationContext
+#include "opt_pass.h"    // PassMetadata, AnalysisKey, IRInvariant
 #include <functional>
 #include <memory>
 #include <unordered_map>
@@ -57,7 +57,9 @@ class Function;
 } // namespace llvm
 
 // Forward declaration for demand-driven scheduling.
-namespace omscript { class Program; }
+namespace omscript {
+class Program;
+}
 
 namespace omscript {
 
@@ -123,7 +125,7 @@ enum class PipelineStage : uint8_t {
 /// **Thread safety**: implementations MUST be safe to call concurrently from
 /// multiple threads (each call pipeline runs on its own thread).
 class CostModel {
-public:
+  public:
     virtual ~CostModel() = default;
 
     /// Return the estimated execution cost (latency in cycles) of @p inst.
@@ -134,8 +136,7 @@ public:
     /// cost @p newCost is considered profitable under @p threshold.
     ///
     /// Default: profitable when newCost < oldCost × threshold (0.95 = 5% gain).
-    virtual bool isProfitable(double newCost, double oldCost,
-                              double threshold = 0.95) const noexcept {
+    virtual bool isProfitable(double newCost, double oldCost, double threshold = 0.95) const noexcept {
         return oldCost > 0.0 && newCost < oldCost * threshold;
     }
 };
@@ -161,7 +162,7 @@ enum class LoopTransform : uint8_t {
 // LegalityVerdict — result of a high-level legality check
 // ─────────────────────────────────────────────────────────────────────────────
 enum class LegalityVerdict : uint8_t {
-    Legal   = 0, ///< Transform is definitely safe to apply
+    Legal = 0,   ///< Transform is definitely safe to apply
     Illegal = 1, ///< Transform is definitely unsafe (would change semantics)
     Unknown = 2, ///< Cannot determine from available information;
                  ///  callers should defer to fine-grained analysis (e.g. polyopt)
@@ -177,11 +178,11 @@ enum class LegalityVerdict : uint8_t {
 /// that remains in polyopt.  This context covers the coarser concerns:
 /// function effects (I/O, global mutation), and loop structural properties.
 struct LoopLegalityContext {
-    llvm::Function* function  = nullptr; ///< The LLVM function containing the loop
-    llvm::Loop*     outerLoop = nullptr; ///< The outermost loop in the nest
-    llvm::Loop*     innerLoop = nullptr; ///< The innermost loop (may equal outerLoop)
-    unsigned        loopDepth = 0;       ///< Depth of the loop nest
-    int64_t         skewFactor = 1;      ///< Skewing factor (for Skewing checks)
+    llvm::Function* function = nullptr; ///< The LLVM function containing the loop
+    llvm::Loop* outerLoop = nullptr;    ///< The outermost loop in the nest
+    llvm::Loop* innerLoop = nullptr;    ///< The innermost loop (may equal outerLoop)
+    unsigned loopDepth = 0;             ///< Depth of the loop nest
+    int64_t skewFactor = 1;             ///< Skewing factor (for Skewing checks)
 
     /// Function effect summary from OmScript's pre-pass analysis.
     /// If null, the service falls back to a conservative Unknown verdict.
@@ -212,7 +213,7 @@ struct LoopLegalityContext {
 /// aliasing information from an external alias analysis or to tighten the
 /// effect-based rules.
 class LegalityService {
-public:
+  public:
     virtual ~LegalityService() = default;
 
     /// High-level check: can ANY loop transformation be applied to the function
@@ -222,17 +223,14 @@ public:
     ///   • Returns Illegal if ctx.effects reports I/O or unconditional mutation.
     ///   • Returns Unknown if ctx.effects is null.
     ///   • Returns Legal otherwise (fine-grained dependence check is in polyopt).
-    virtual LegalityVerdict canTransformLoops(
-        const LoopLegalityContext& ctx) const noexcept;
+    virtual LegalityVerdict canTransformLoops(const LoopLegalityContext& ctx) const noexcept;
 
     /// Per-transform legality check.
     ///
     /// Default implementation:
     ///   Interchange/Tiling/Reversal/Skewing → delegate to canTransformLoops.
     ///   Fusion/Fission → Unknown (require knowledge of adjacent loop spaces).
-    virtual LegalityVerdict checkLegality(
-        LoopTransform transform,
-        const LoopLegalityContext& ctx) const noexcept;
+    virtual LegalityVerdict checkLegality(LoopTransform transform, const LoopLegalityContext& ctx) const noexcept;
 
     /// IR-level function legality check using LLVM function attributes.
     ///
@@ -249,8 +247,7 @@ public:
     /// Note: a Legal verdict from this check is weaker than one from
     /// canTransformLoops() with valid FunctionEffects — dependence analysis in
     /// polyopt must still confirm that the specific transform is safe.
-    virtual LegalityVerdict canTransformFunction(
-        const llvm::Function& F) const noexcept;
+    virtual LegalityVerdict canTransformFunction(const llvm::Function& F) const noexcept;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -277,7 +274,7 @@ public:
 ///      enables on-demand analysis: a downstream consumer can request a fact
 ///      without knowing the full pipeline order.
 class PassScheduler {
-public:
+  public:
     /// Callable type for pass wrappers stored in the dispatch map.
     using Runner = std::function<void(Program*, OptimizationContext&)>;
 
@@ -285,8 +282,12 @@ public:
 
     /// Set strict mode.  Default: false (release), true in debug builds.
     /// Strict mode asserts on precondition failures rather than skipping.
-    void setStrictMode(bool strict) noexcept { strict_ = strict; }
-    bool strictMode() const noexcept { return strict_; }
+    void setStrictMode(bool strict) noexcept {
+        strict_ = strict;
+    }
+    bool strictMode() const noexcept {
+        return strict_;
+    }
 
     /// Return true if all facts required by @p meta are currently valid.
     /// Logs a warning for each missing requirement.  In strict mode, also
@@ -320,14 +321,12 @@ public:
     /// **Cycle detection**: runToProvide() tracks the call stack via an
     /// in-progress set and returns false if a circular dependency is detected,
     /// rather than recursing infinitely.
-    bool runToProvide(const std::string& targetFact,
-                      Program* program,
+    bool runToProvide(const std::string& targetFact, Program* program,
                       const std::unordered_map<uint32_t, Runner>& dispatch);
 
-private:
+  private:
     /// Internal recursive worker for runToProvide.
-    bool runToProvideImpl(const std::string& targetFact,
-                          Program* program,
+    bool runToProvideImpl(const std::string& targetFact, Program* program,
                           const std::unordered_map<uint32_t, Runner>& dispatch,
                           std::unordered_set<std::string>& inProgress);
 
@@ -360,12 +359,12 @@ private:
 /// sched.setStrictMode(true);
 /// ```
 class OptimizationManager {
-public:
+  public:
     OptimizationManager() = default;
     ~OptimizationManager() = default;
 
     // Non-copyable.
-    OptimizationManager(const OptimizationManager&)            = delete;
+    OptimizationManager(const OptimizationManager&) = delete;
     OptimizationManager& operator=(const OptimizationManager&) = delete;
 
     // ── Cost model ────────────────────────────────────────────────────────
@@ -374,14 +373,22 @@ public:
     void setCostModel(std::unique_ptr<CostModel> model) noexcept;
 
     /// Return the active cost model, or nullptr if none has been set.
-    const CostModel* costModel() const noexcept { return costModel_.get(); }
-    CostModel*       costModel()       noexcept { return costModel_.get(); }
+    const CostModel* costModel() const noexcept {
+        return costModel_.get();
+    }
+    CostModel* costModel() noexcept {
+        return costModel_.get();
+    }
 
     // ── Legality service ──────────────────────────────────────────────────
 
     /// Return the legality service for high-level transform safety checks.
-    LegalityService&       legality()       noexcept { return legality_; }
-    const LegalityService& legality() const noexcept { return legality_; }
+    LegalityService& legality() noexcept {
+        return legality_;
+    }
+    const LegalityService& legality() const noexcept {
+        return legality_;
+    }
 
     // ── Pass scheduler factory ────────────────────────────────────────────
 
@@ -389,8 +396,8 @@ public:
     /// In debug builds the scheduler is created in strict mode (assertions).
     PassScheduler createScheduler(OptimizationContext& ctx) const;
 
-private:
-    LegalityService            legality_;
+  private:
+    LegalityService legality_;
     std::unique_ptr<CostModel> costModel_;
 };
 

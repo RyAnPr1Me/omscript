@@ -36,8 +36,7 @@ char* omsc_http_post(const char* url, const char* body, const char* content_type
 /// @param body         NUL-terminated request body (may be NULL).
 /// @param headers_str  Newline-separated "Name: Value" header lines (may be NULL).
 /// @return             malloc'd response body string.  Caller must free().
-char* omsc_http_request(const char* method, const char* url,
-                        const char* body, const char* headers_str);
+char* omsc_http_request(const char* method, const char* url, const char* body, const char* headers_str);
 
 /// Return the HTTP status code for a GET request.
 /// @param url  NUL-terminated URL string.

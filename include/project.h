@@ -48,57 +48,57 @@ namespace omscript {
 /// flag that the build system passes to the underlying Compiler driver.
 struct BuildProfile {
     /// LLVM optimization level (0–3).
-    OptimizationLevel optLevel    = OptimizationLevel::O2;
+    OptimizationLevel optLevel = OptimizationLevel::O2;
 
     /// Enable E-graph equality-saturation (O2+ default: on).
-    bool egraph                   = true;
+    bool egraph = true;
 
     /// Enable the superoptimizer pass (O2+ default: on).
-    bool superopt                 = true;
+    bool superopt = true;
 
     /// Superoptimizer aggressiveness level (0 = off, 1–3 = increasing).
-    unsigned superoptLevel        = 2;
+    unsigned superoptLevel = 2;
 
     /// Emit DWARF debug info into the output binary.
-    bool debugInfo                = false;
+    bool debugInfo = false;
 
     /// Strip symbols from the output binary.
-    bool strip                    = false;
+    bool strip = false;
 
     /// Enable full link-time optimization.
-    bool lto                      = false;
+    bool lto = false;
 
     /// Enable unsafe floating-point math optimizations.
-    bool fastMath                 = false;
+    bool fastMath = false;
 
     /// Enable OPTMAX block specialization.
-    bool optMax                   = true;
+    bool optMax = true;
 
     /// Emit SIMD vectorization hints.
-    bool vectorize                = true;
+    bool vectorize = true;
 
     /// Emit loop-unrolling hints.
-    bool unrollLoops              = true;
+    bool unrollLoops = true;
 
     /// Enable polyhedral-style loop optimizations.
-    bool loopOptimize             = true;
+    bool loopOptimize = true;
 
     /// Enable automatic loop parallelization.
-    bool parallelize              = true;
+    bool parallelize = true;
 
     /// Enable the Hardware Graph Optimization Engine.
-    bool hgoe                     = true;
+    bool hgoe = true;
 
     /// Run the optimizer over the merged whole-program AST rather than
     /// per-file.  Enables cross-file inlining, DCE, and global constant
     /// propagation.  Implied by opt_level >= 2 in the release profile.
-    bool wholeProgram             = false;
+    bool wholeProgram = false;
 
     /// Enable the stack protector (-fstack-protector).
-    bool stackProtector           = false;
+    bool stackProtector = false;
 
     /// Link statically (-static).
-    bool staticLink               = false;
+    bool staticLink = false;
 
     /// Output directory for this profile relative to the project root,
     /// e.g. "target/debug" or "target/release".
@@ -116,13 +116,13 @@ struct BuildProfile {
 /// Parsed representation of an oms.toml project manifest.
 struct OmsManifest {
     /// Project name — also used as the output binary name.
-    std::string name    = "project";
+    std::string name = "project";
 
     /// Semantic version string (informational).
     std::string version = "0.1.0";
 
     /// Entry-point file path relative to the project root.
-    std::string entry   = "src/main.om";
+    std::string entry = "src/main.om";
 
     /// Named build profiles; always contains at least "debug" and "release".
     std::map<std::string, BuildProfile> profiles;
@@ -162,8 +162,7 @@ std::optional<ProjectContext> loadProjectContext(const std::string& startDir);
 
 /// Wrap a single source file as an ephemeral (unnamed) project so that the
 /// build system can treat single-file and project-mode uniformly.
-ProjectContext makeEphemeralProject(const std::string& sourceFile,
-                                    const std::string& profileName = "debug");
+ProjectContext makeEphemeralProject(const std::string& sourceFile, const std::string& profileName = "debug");
 
 // ── Project initialisation ───────────────────────────────────────────────────
 

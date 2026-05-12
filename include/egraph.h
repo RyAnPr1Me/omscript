@@ -54,9 +54,9 @@ static constexpr ClassId INVALID_CLASS = std::numeric_limits<ClassId>::max();
 /// Operation tag for e-nodes.
 enum class Op : uint8_t {
     // Constants & variables
-    Const,   ///< Integer constant (value stored in ENode::value)
-    ConstF,  ///< Float constant (value stored in ENode::fvalue)
-    Var,     ///< Named variable (name stored in ENode::name)
+    Const,  ///< Integer constant (value stored in ENode::value)
+    ConstF, ///< Float constant (value stored in ENode::fvalue)
+    Var,    ///< Named variable (name stored in ENode::name)
 
     // Arithmetic
     Add,
@@ -64,7 +64,7 @@ enum class Op : uint8_t {
     Mul,
     Div,
     Mod,
-    Neg,     ///< Unary negation
+    Neg, ///< Unary negation
 
     // Bitwise
     BitAnd,
@@ -100,9 +100,9 @@ enum class Op : uint8_t {
 /// A single node in the e-graph representing one way to compute a value.
 struct ENode {
     Op op;
-    long long value = 0;        ///< For Const nodes
-    double fvalue = 0.0;        ///< For ConstF nodes
-    std::string name;           ///< For Var / Call nodes
+    long long value = 0; ///< For Const nodes
+    double fvalue = 0.0; ///< For ConstF nodes
+    std::string name;    ///< For Var / Call nodes
     std::vector<ClassId> children;
 
     ENode() : op(Op::Nop) {}
@@ -111,12 +111,10 @@ struct ENode {
     ENode(Op o, double v) : op(o), fvalue(v) {}
     ENode(Op o, const std::string& n) : op(o), name(n) {}
     ENode(Op o, std::vector<ClassId> c) : op(o), children(std::move(c)) {}
-    ENode(Op o, const std::string& n, std::vector<ClassId> c)
-        : op(o), name(n), children(std::move(c)) {}
+    ENode(Op o, const std::string& n, std::vector<ClassId> c) : op(o), name(n), children(std::move(c)) {}
 
     bool operator==(const ENode& other) const {
-        if (op != other.op || value != other.value || name != other.name ||
-            children != other.children)
+        if (op != other.op || value != other.value || name != other.name || children != other.children)
             return false;
         // Use bit-pattern equality for doubles so that two NaN constants with
         // the same bit pattern compare equal (and two with different payloads
@@ -161,13 +159,13 @@ struct NodeMeta {
     ///   0 = IntArith,  1 = IntMul,  2 = IntDiv,  3 = FPArith, 4 = FPMul,
     ///   5 = FPDiv,     6 = VectorOp, 7 = Load,   8 = Store,   9 = Branch,
     ///  10 = Shift,    11 = Comparison, 12 = Other
-    uint8_t instrClass = 12;    ///< Instruction class (OpClass as uint8_t)
+    uint8_t instrClass = 12; ///< Instruction class (OpClass as uint8_t)
 
-    bool readsMemory  = false;  ///< Node may read from memory (Load-like)
-    bool writesMemory = false;  ///< Node may write to memory (Store-like)
-    bool hasBranch    = false;  ///< Node introduces control flow (Ternary)
-    bool vectorizable = false;  ///< Node is a candidate for SIMD vectorization
-    bool ownershipDep = false;  ///< Node depends on ownership/uniqueness facts
+    bool readsMemory = false;  ///< Node may read from memory (Load-like)
+    bool writesMemory = false; ///< Node may write to memory (Store-like)
+    bool hasBranch = false;    ///< Node introduces control flow (Ternary)
+    bool vectorizable = false; ///< Node is a candidate for SIMD vectorization
+    bool ownershipDep = false; ///< Node depends on ownership/uniqueness facts
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -178,19 +176,18 @@ struct NodeMeta {
 /// dimensions).  The HGOE scorer linearises this into a single scalar via a
 /// weighted dot-product tuned to the target microarchitecture.
 struct MultiCost {
-    double cycles             = 0.0; ///< Estimated execution cycles
-    double uops               = 0.0; ///< Micro-op count (issue pressure)
-    double latency            = 0.0; ///< Critical-path latency in cycles
+    double cycles = 0.0;             ///< Estimated execution cycles
+    double uops = 0.0;               ///< Micro-op count (issue pressure)
+    double latency = 0.0;            ///< Critical-path latency in cycles
     double throughputPressure = 0.0; ///< Port-contention throughput pressure
-    double registerPressure   = 0.0; ///< Simultaneous live-value estimate
-    double memoryPressure     = 0.0; ///< Memory-subsystem pressure (loads/stores)
-    double branchPenalty      = 0.0; ///< Expected misprediction penalty
+    double registerPressure = 0.0;   ///< Simultaneous live-value estimate
+    double memoryPressure = 0.0;     ///< Memory-subsystem pressure (loads/stores)
+    double branchPenalty = 0.0;      ///< Expected misprediction penalty
 
     /// Scalar total using a generic equal-weight model (used when no HGOE
     /// profile is available).
     [[nodiscard]] double total() const noexcept {
-        return cycles + uops + latency + throughputPressure +
-               registerPressure + memoryPressure + branchPenalty;
+        return cycles + uops + latency + throughputPressure + registerPressure + memoryPressure + branchPenalty;
     }
 
     static MultiCost infinite() noexcept {
@@ -217,20 +214,20 @@ struct FeatureVec {
     static constexpr size_t kNumClasses = 13;
     uint16_t opCounts[kNumClasses] = {};
 
-    uint16_t totalNodes     = 0; ///< Total ENodes in the class
-    uint16_t depth          = 0; ///< Critical-path depth of best node
-    uint16_t regPressure    = 0; ///< Register-pressure estimate (Sethi-Ullman)
-    bool     hasMemory      = false; ///< Any node reads/writes memory
-    bool     hasBranch      = false; ///< Any node introduces control flow
-    bool     hasOwnership   = false; ///< Any node depends on ownership facts
-    bool     isConstant     = false; ///< Class contains a constant node
+    uint16_t totalNodes = 0;   ///< Total ENodes in the class
+    uint16_t depth = 0;        ///< Critical-path depth of best node
+    uint16_t regPressure = 0;  ///< Register-pressure estimate (Sethi-Ullman)
+    bool hasMemory = false;    ///< Any node reads/writes memory
+    bool hasBranch = false;    ///< Any node introduces control flow
+    bool hasOwnership = false; ///< Any node depends on ownership facts
+    bool isConstant = false;   ///< Class contains a constant node
 
     void addNode(const NodeMeta& m) noexcept {
         if (m.instrClass < kNumClasses)
             ++opCounts[m.instrClass];
         ++totalNodes;
-        hasMemory    |= (m.readsMemory | m.writesMemory);
-        hasBranch    |= m.hasBranch;
+        hasMemory |= (m.readsMemory | m.writesMemory);
+        hasBranch |= m.hasBranch;
         hasOwnership |= m.ownershipDep;
     }
 };
@@ -242,9 +239,9 @@ struct FeatureVec {
 /// Cached HGOE scoring result for one equivalence class.
 /// Invalidated whenever the class receives new nodes or its best-node changes.
 struct HGOEState {
-    FeatureVec features;      ///< Last features submitted to the scorer
-    MultiCost  scoredCost;    ///< Returned multi-dimensional cost
-    bool       valid = false; ///< Whether the cache is still fresh
+    FeatureVec features;  ///< Last features submitted to the scorer
+    MultiCost scoredCost; ///< Returned multi-dimensional cost
+    bool valid = false;   ///< Whether the cache is still fresh
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -254,31 +251,31 @@ struct HGOEState {
 /// An equivalence class containing all known representations of a value.
 struct EClass {
     ClassId id;
-    std::vector<ENode> nodes;    ///< All equivalent representations
+    std::vector<ENode> nodes; ///< All equivalent representations
 
     // ── Analysis data for richer relational reasoning ─────────────────────
-    std::optional<long long> constVal;  ///< Cached constant value if known
-    bool isZero = false;                ///< True if class contains constant 0
-    bool isOne = false;                 ///< True if class contains constant 1
-    bool isNonNeg = false;              ///< True if all values are >= 0 (by analysis)
-    bool isPowerOfTwo = false;          ///< True if value is a power of 2 (1,2,4,8,...)
-    bool isBoolean = false;             ///< True if value is 0 or 1 (comparison result)
-    bool isFloat = false;               ///< Provably float-typed (contains ConstF or
-                                        ///< derives from a float-typed operand).  Used
-                                        ///< by `fp_*` rewrite rules to avoid unifying
-                                        ///< integer and float constants via congruence.
-    bool isInt = false;                 ///< Provably integer-typed (contains Const,
-                                        ///< Shl/Shr/BitOp output, or derives from int
-                                        ///< operands).  Used by integer-only rules to
-                                        ///< avoid firing on float-typed operands.
+    std::optional<long long> constVal; ///< Cached constant value if known
+    bool isZero = false;               ///< True if class contains constant 0
+    bool isOne = false;                ///< True if class contains constant 1
+    bool isNonNeg = false;             ///< True if all values are >= 0 (by analysis)
+    bool isPowerOfTwo = false;         ///< True if value is a power of 2 (1,2,4,8,...)
+    bool isBoolean = false;            ///< True if value is 0 or 1 (comparison result)
+    bool isFloat = false;              ///< Provably float-typed (contains ConstF or
+                                       ///< derives from a float-typed operand).  Used
+                                       ///< by `fp_*` rewrite rules to avoid unifying
+                                       ///< integer and float constants via congruence.
+    bool isInt = false;                ///< Provably integer-typed (contains Const,
+                                       ///< Shl/Shr/BitOp output, or derives from int
+                                       ///< operands).  Used by integer-only rules to
+                                       ///< avoid firing on float-typed operands.
 
     // ── HGOE-guided superoptimizer fields ─────────────────────────────────
-    std::optional<ENode> bestNode;      ///< Current cheapest representative
-    MultiCost            bestCost = MultiCost::infinite(); ///< Cost of bestNode
-    MultiCost            lowerBound;    ///< Optimistic lower bound on achievable cost
-    MultiCost            upperBound = MultiCost::infinite(); ///< Cost of best complete candidate
-    HGOEState            hgoeState;     ///< Cached HGOE scoring input/output
-    bool                 hgoePruned = false; ///< Class has been pruned from exploration
+    std::optional<ENode> bestNode;                ///< Current cheapest representative
+    MultiCost bestCost = MultiCost::infinite();   ///< Cost of bestNode
+    MultiCost lowerBound;                         ///< Optimistic lower bound on achievable cost
+    MultiCost upperBound = MultiCost::infinite(); ///< Cost of best complete candidate
+    HGOEState hgoeState;                          ///< Cached HGOE scoring input/output
+    bool hgoePruned = false;                      ///< Class has been pruned from exploration
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -289,13 +286,13 @@ struct EClass {
 struct Pattern {
     enum class Kind { Wildcard, OpMatch };
     Kind kind;
-    std::string wildcard;             ///< Name of wildcard variable (e.g., "?a")
-    Op op = Op::Nop;                  ///< Required operation
-    long long constVal = 0;           ///< Required constant value (for Const match)
-    double constFVal = 0.0;           ///< Required float constant (for ConstF match)
-    bool matchConst = false;          ///< If true, match specific constant value
-    bool matchConstF = false;         ///< If true, match specific float constant
-    std::vector<Pattern> children;    ///< Sub-patterns for children
+    std::string wildcard;          ///< Name of wildcard variable (e.g., "?a")
+    Op op = Op::Nop;               ///< Required operation
+    long long constVal = 0;        ///< Required constant value (for Const match)
+    double constFVal = 0.0;        ///< Required float constant (for ConstF match)
+    bool matchConst = false;       ///< If true, match specific constant value
+    bool matchConstF = false;      ///< If true, match specific float constant
+    std::vector<Pattern> children; ///< Sub-patterns for children
 
     /// Create a wildcard pattern.
     static Pattern Wild(const std::string& name) {
@@ -342,7 +339,7 @@ struct Pattern {
         return p;
     }
 
-private:
+  private:
     Pattern() : kind(Kind::Wildcard) {}
 };
 
@@ -367,13 +364,12 @@ using RuleGuard = std::function<bool(const EGraph&, const Subst&)>;
 
 /// A single rewrite rule: when the LHS pattern matches, apply the RHS builder.
 struct RewriteRule {
-    std::string name;          ///< Human-readable rule name (for diagnostics)
-    Pattern lhs;               ///< Left-hand side pattern to match
-    RhsBuilder rhs;            ///< Builds the replacement expression
-    RuleGuard guard;           ///< Optional relational guard predicate
+    std::string name; ///< Human-readable rule name (for diagnostics)
+    Pattern lhs;      ///< Left-hand side pattern to match
+    RhsBuilder rhs;   ///< Builds the replacement expression
+    RuleGuard guard;  ///< Optional relational guard predicate
 
-    RewriteRule(const std::string& n, Pattern l, RhsBuilder r)
-        : name(n), lhs(std::move(l)), rhs(std::move(r)) {}
+    RewriteRule(const std::string& n, Pattern l, RhsBuilder r) : name(n), lhs(std::move(l)), rhs(std::move(r)) {}
 
     /// Construct a guarded (relational) rewrite rule.
     RewriteRule(const std::string& n, Pattern l, RhsBuilder r, RuleGuard g)
@@ -434,15 +430,15 @@ struct CostModel {
 
 /// Configuration for the e-graph saturation loop.
 struct SaturationConfig {
-    size_t maxNodes = 50000;        ///< Stop adding nodes beyond this limit
-    size_t maxIterations = 30;      ///< Maximum saturation iterations
+    size_t maxNodes = 50000;   ///< Stop adding nodes beyond this limit
+    size_t maxIterations = 30; ///< Maximum saturation iterations
     bool enableConstantFolding = true;
 };
 
 /// The e-graph: stores equivalence classes of expressions and supports
 /// equality saturation via rewrite rules.
 class EGraph {
-public:
+  public:
     EGraph();
     explicit EGraph(SaturationConfig config);
 
@@ -540,7 +536,7 @@ public:
     /// Get the operation type of the best (cheapest/first) node in an e-class.
     std::optional<Op> getClassOp(ClassId cls) const;
 
-private:
+  private:
     /// Union-find parent array.
     mutable std::vector<ClassId> parent_;
 
@@ -576,7 +572,7 @@ private:
     /// either they themselves received a merge or one of their children's
     /// canonical class id changed.  Drained by `rebuild()`.
     std::vector<ClassId> dirty_;
-    std::vector<bool>    dirtyMark_;
+    std::vector<bool> dirtyMark_;
 
     /// Per-op index of classes whose node-list contains at least one node
     /// of that op.  Populated by `add()` (one entry per new class+op
@@ -600,7 +596,7 @@ private:
     /// On generation overflow we zero the buffer once and reset the
     /// counter.  Mutable because `match()` is `const`.
     mutable std::vector<uint32_t> matchSeen_;
-    mutable uint32_t              matchSeenGen_ = 0;
+    mutable uint32_t matchSeenGen_ = 0;
 
     /// Cheap O(1) test for "does the e-graph contain at least one
     /// e-class with a node of op `op`?" — used by `applyRules` to skip
@@ -639,7 +635,7 @@ private:
     /// Internal: constant folding pass on an e-class.
     void foldConstants(ClassId cls);
 
-public:
+  public:
     /// Extract helper returning cost + best node per class.
     ///
     /// The extractor selects, for each e-class, the e-node that minimises
@@ -654,32 +650,31 @@ public:
     /// AST conversion.  The previous flow re-ran extractAll for every
     /// visited class via `EGraph::extract`, yielding O(N²) behaviour.
     struct ExtractionResult {
-        Cost cost;          ///< Pure latency cost (sum of node + children costs,
-                            ///< with DAG-sharing discount applied).
-        Cost effCost = 0;   ///< Effective cost = cost + spillPenalty *
-                            ///< max(0, regPressure - regBudget).  This is
-                            ///< the metric the selection refinement
-                            ///< minimises after the initial latency-only
-                            ///< extraction has produced an estimate of
-                            ///< parent counts (= sharing structure).
+        Cost cost;        ///< Pure latency cost (sum of node + children costs,
+                          ///< with DAG-sharing discount applied).
+        Cost effCost = 0; ///< Effective cost = cost + spillPenalty *
+                          ///< max(0, regPressure - regBudget).  This is
+                          ///< the metric the selection refinement
+                          ///< minimises after the initial latency-only
+                          ///< extraction has produced an estimate of
+                          ///< parent counts (= sharing structure).
         ENode bestNode;
-        unsigned depth = 0; ///< Critical-path depth (0 = leaf).  Used as a
-                            ///< secondary tie-breaker after effCost/cost.
+        unsigned depth = 0;       ///< Critical-path depth (0 = leaf).  Used as a
+                                  ///< secondary tie-breaker after effCost/cost.
         unsigned regPressure = 1; ///< Sethi-Ullman simultaneous-live-value
-                            ///< estimate for evaluating this sub-DAG.  For
-                            ///< a leaf this is 1; for an internal node
-                            ///< with k unshared children sorted by
-                            ///< descending pressure p_i, it is
-                            ///< sharedCount + max_i (p_i + i - 1), capturing
-                            ///< the registers held for already-evaluated
-                            ///< siblings while later siblings are computed.
-                            ///< Shared children (parentCount > 1 in the
-                            ///< extracted DAG) contribute exactly one
-                            ///< register each because their result is
-                            ///< computed once and reused.
+                                  ///< estimate for evaluating this sub-DAG.  For
+                                  ///< a leaf this is 1; for an internal node
+                                  ///< with k unshared children sorted by
+                                  ///< descending pressure p_i, it is
+                                  ///< sharedCount + max_i (p_i + i - 1), capturing
+                                  ///< the registers held for already-evaluated
+                                  ///< siblings while later siblings are computed.
+                                  ///< Shared children (parentCount > 1 in the
+                                  ///< extracted DAG) contribute exactly one
+                                  ///< register each because their result is
+                                  ///< computed once and reused.
     };
-    std::unordered_map<ClassId, ExtractionResult>
-    extractAll(ClassId root, const CostModel& model);
+    std::unordered_map<ClassId, ExtractionResult> extractAll(ClassId root, const CostModel& model);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -749,13 +744,12 @@ namespace egraph {
 ///                    algebraic rules (e.g. distributivity) to fire across
 ///                    call boundaries.
 struct EGraphOptContext {
-    SaturationConfig                       config;
+    SaturationConfig config;
     const std::unordered_set<std::string>* pureUserFuncs = nullptr; // non-owning
 };
 
 /// Optimize a single AST expression with an explicit context.
-std::unique_ptr<Expression> optimizeExpression(const Expression* expr,
-                                                const EGraphOptContext& ctx);
+std::unique_ptr<Expression> optimizeExpression(const Expression* expr, const EGraphOptContext& ctx);
 
 /// Optimize all expressions in a function body with an explicit context.
 void optimizeFunction(FunctionDecl* func, const EGraphOptContext& ctx);

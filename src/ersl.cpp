@@ -19,8 +19,7 @@ bool effectsConflict(const RefinedEffect& A, const RefinedEffect& B) noexcept {
     // Rule 2: different memory regions → no conflict
     // (two effects on disjoint regions can always be reordered).
     // Unknown region is treated conservatively: it may alias anything.
-    if (A.region != Region::Unknown && B.region != Region::Unknown &&
-        A.region != B.region)
+    if (A.region != Region::Unknown && B.region != Region::Unknown && A.region != B.region)
         return false;
 
     // Rule 3: both reads (no writes, no IO) → no conflict.
@@ -47,9 +46,9 @@ EffectSummary deriveEffectSummary(const FunctionEffects& fe) noexcept {
     EffectSummary es;
 
     // ── Mirror the existing flags ─────────────────────────────────────────
-    es.hasIO        = fe.hasIO;
+    es.hasIO = fe.hasIO;
     es.writesGlobal = fe.writesGlobal;
-    es.writesArg    = fe.hasMutation || fe.anyParamMutated();
+    es.writesArg = fe.hasMutation || fe.anyParamMutated();
 
     // ── Determine stability ────────────────────────────────────────────────
     // A function is Stable when:
@@ -61,8 +60,7 @@ EffectSummary deriveEffectSummary(const FunctionEffects& fe) noexcept {
     // Note: readsMemory alone does NOT break stability — a function that only reads
     // memory is InputDependent (result may vary if caller mutates the memory between
     // calls), but is still safe to CSE within the same call path.
-    const bool noWriteSideEffects = !fe.writesGlobal && !fe.writesMemory
-                                     && !fe.hasMutation;
+    const bool noWriteSideEffects = !fe.writesGlobal && !fe.writesMemory && !fe.hasMutation;
     const bool noExternalDependency = !fe.hasIO && !fe.hasIndirectCall;
 
     if (fe.isReadNone()) {
@@ -83,15 +81,12 @@ EffectSummary deriveEffectSummary(const FunctionEffects& fe) noexcept {
     // non-idempotent unless the writes are provably local (which inferFunctionEffects
     // currently doesn't distinguish).  writesGlobal and writesArg are the
     // observable write tests.
-    es.isIdempotent = es.isStable && !es.writesGlobal && !es.writesArg
-                      && !fe.allocates && !fe.deallocates;
+    es.isIdempotent = es.isStable && !es.writesGlobal && !es.writesArg && !fe.allocates && !fe.deallocates;
 
     // ── Derive speculation safety ─────────────────────────────────────────
     // canSpeculate: safe to hoist out of a branch / loop even if not taken.
     // Requires: stable + no I/O + no writes to escaping regions.
-    es.canSpeculate = es.isStable && !es.hasIO
-                      && !es.writesGlobal && !es.writesArg
-                      && !fe.mayThrow;
+    es.canSpeculate = es.isStable && !es.hasIO && !es.writesGlobal && !es.writesArg && !fe.mayThrow;
 
     // ── Derive duplication safety ─────────────────────────────────────────
     es.canDuplicate = es.isIdempotent;

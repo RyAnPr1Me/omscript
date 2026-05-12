@@ -46,38 +46,38 @@ enum class OptimizationLevel {
 /// Counters tracking which optimizations fired during compilation.
 /// Printed when verbose mode is on or @optmax(report=true) is set.
 struct OptStats {
-    unsigned constFolded      = 0; ///< Expressions folded to compile-time constants
-    unsigned callsInlined     = 0; ///< Call sites inlined
+    unsigned constFolded = 0;       ///< Expressions folded to compile-time constants
+    unsigned callsInlined = 0;      ///< Call sites inlined
     unsigned escapeStackAllocs = 0; ///< Array/struct allocations moved to stack (escape analysis)
-    unsigned roGlobalArrays   = 0; ///< Read-only array literals bound directly to a private global (no alloc, no copy)
+    unsigned roGlobalArrays = 0;    ///< Read-only array literals bound directly to a private global (no alloc, no copy)
     unsigned foreachRangeFused = 0; ///< `for x in range(a,b)` lowered to a direct counting loop (no array alloc)
-    unsigned loopsFused       = 0; ///< Loop pairs fused by the @fuse pre-pass
-    unsigned borrowsFrozen    = 0; ///< Variables frozen (freeze + alias propagation)
-    unsigned independentLoops = 0; ///< Loops annotated with @independent
-    unsigned allocatorFuncs   = 0; ///< User functions annotated as @allocator
-    unsigned regionsCoalesced = 0; ///< Region pairs coalesced by the RLC pass
+    unsigned loopsFused = 0;        ///< Loop pairs fused by the @fuse pre-pass
+    unsigned borrowsFrozen = 0;     ///< Variables frozen (freeze + alias propagation)
+    unsigned independentLoops = 0;  ///< Loops annotated with @independent
+    unsigned allocatorFuncs = 0;    ///< User functions annotated as @allocator
+    unsigned regionsCoalesced = 0;  ///< Region pairs coalesced by the RLC pass
 
     // ── CF-CTRE / abstract-interpretation statistics ──────────────────────
     // Populated from CTEngine::stats() at print time when a CT engine is
     // available.  Surface the analysis evidence the optimizer collected, so
     // users can see which proofs/folds the engine made and which did not fire.
-    unsigned pureFunctions       = 0; ///< Pure user functions detected by purity analysis
-    unsigned uniformReturnFns    = 0; ///< Pure functions with always-the-same constant return
-    unsigned deadFunctions       = 0; ///< Functions unreachable from any entry point
-    unsigned loopsReasoned       = 0; ///< For-loops handled by closed-form symbolic reasoning
-    unsigned branchMerges        = 0; ///< Path-sensitive branch merges (symbolic-IF folds)
-    unsigned partialEvalFolds    = 0; ///< Partial-specialisation cache hits
-    unsigned algebraicFolds      = 0; ///< Algebraic identity simplifications (x+0, x-x, …)
-    unsigned constraintFolds     = 0; ///< Branch-constraint folds (range narrowing)
-    unsigned deadBranches        = 0; ///< Branches proven always-dead by abstract interpretation
-    unsigned safeArrayAccesses   = 0; ///< Array accesses proven in-bounds
-    unsigned safeDivisions       = 0; ///< Divisions proven non-zero divisor
-    unsigned cheaperRewrites     = 0; ///< Range-conditioned strength reductions
+    unsigned pureFunctions = 0;     ///< Pure user functions detected by purity analysis
+    unsigned uniformReturnFns = 0;  ///< Pure functions with always-the-same constant return
+    unsigned deadFunctions = 0;     ///< Functions unreachable from any entry point
+    unsigned loopsReasoned = 0;     ///< For-loops handled by closed-form symbolic reasoning
+    unsigned branchMerges = 0;      ///< Path-sensitive branch merges (symbolic-IF folds)
+    unsigned partialEvalFolds = 0;  ///< Partial-specialisation cache hits
+    unsigned algebraicFolds = 0;    ///< Algebraic identity simplifications (x+0, x-x, …)
+    unsigned constraintFolds = 0;   ///< Branch-constraint folds (range narrowing)
+    unsigned deadBranches = 0;      ///< Branches proven always-dead by abstract interpretation
+    unsigned safeArrayAccesses = 0; ///< Array accesses proven in-bounds
+    unsigned safeDivisions = 0;     ///< Divisions proven non-zero divisor
+    unsigned cheaperRewrites = 0;   ///< Range-conditioned strength reductions
 
     // ── Missed-opportunity hints ─────────────────────────────────────────
     // Higher-level diagnostic counts the user can act on:
-    unsigned almostPureFns       = 0; ///< @pure-annotated functions whose body looks impure
-    unsigned untaggedPureFns     = 0; ///< Pure functions without an explicit @pure annotation
+    unsigned almostPureFns = 0;   ///< @pure-annotated functions whose body looks impure
+    unsigned untaggedPureFns = 0; ///< Pure functions without an explicit @pure annotation
 
     void print() const {
         std::cout << "\n[opt-report] Optimization statistics:\n"
@@ -94,10 +94,9 @@ struct OptStats {
 
         // Only print the CF-CTRE block when at least one CT-engine counter is
         // non-zero (avoids visual clutter for pipelines that don't run CTRE).
-        const bool anyCtre = pureFunctions | uniformReturnFns | deadFunctions
-                           | loopsReasoned | branchMerges | partialEvalFolds
-                           | algebraicFolds | constraintFolds | deadBranches
-                           | safeArrayAccesses | safeDivisions | cheaperRewrites;
+        const bool anyCtre = pureFunctions | uniformReturnFns | deadFunctions | loopsReasoned | branchMerges |
+                             partialEvalFolds | algebraicFolds | constraintFolds | deadBranches | safeArrayAccesses |
+                             safeDivisions | cheaperRewrites;
         if (anyCtre) {
             std::cout << "  --- compile-time reasoning ---\n"
                       << "  pure functions           : " << pureFunctions << "\n"
@@ -118,11 +117,9 @@ struct OptStats {
         if (almostPureFns || untaggedPureFns) {
             std::cout << "  --- optimization opportunities ---\n";
             if (untaggedPureFns)
-                std::cout << "  unannotated pure fns     : " << untaggedPureFns
-                          << "  (consider adding @pure)\n";
+                std::cout << "  unannotated pure fns     : " << untaggedPureFns << "  (consider adding @pure)\n";
             if (almostPureFns)
-                std::cout << "  @pure with impure body   : " << almostPureFns
-                          << "  (annotation may be incorrect)\n";
+                std::cout << "  @pure with impure body   : " << almostPureFns << "  (annotation may be incorrect)\n";
         }
     }
 };
@@ -130,39 +127,49 @@ struct OptStats {
 /// Ownership lattice states for compile-time memory safety.
 /// Owned→Borrowed/MutBorrowed/Frozen/Shared/Moved/Invalidated; see VarBorrowState.
 enum class OwnershipState {
-    Owned,        ///< Variable owns its value — full read/write access
-    Borrowed,     ///< Has ≥1 immutable borrows — readable but not writable
-    MutBorrowed,  ///< Has one mutable alias — source is completely locked
-    Frozen,       ///< Permanently immutable — all loads are invariant
-    Shared,       ///< Read-only aliasable ownership (Ω spec §3.1) — multiple immut borrows ok
-    Moved,        ///< Ownership transferred out — use is a compile error
-    Invalidated   ///< Explicitly killed — use is a compile error
+    Owned,       ///< Variable owns its value — full read/write access
+    Borrowed,    ///< Has ≥1 immutable borrows — readable but not writable
+    MutBorrowed, ///< Has one mutable alias — source is completely locked
+    Frozen,      ///< Permanently immutable — all loads are invariant
+    Shared,      ///< Read-only aliasable ownership (Ω spec §3.1) — multiple immut borrows ok
+    Moved,       ///< Ownership transferred out — use is a compile error
+    Invalidated  ///< Explicitly killed — use is a compile error
 };
 
 /// Per-variable borrow state (count-based ownership tracking).
 struct VarBorrowState {
-    int  immutBorrowCount = 0;  ///< Number of active immutable borrows
-    bool mutBorrowed      = false; ///< True if there is one active mutable borrow
-    bool moved            = false;
-    bool invalidated      = false;
-    bool frozen           = false;
-    bool shared           = false;  ///< True after `shared x;` (Ω spec §3.1)
+    int immutBorrowCount = 0; ///< Number of active immutable borrows
+    bool mutBorrowed = false; ///< True if there is one active mutable borrow
+    bool moved = false;
+    bool invalidated = false;
+    bool frozen = false;
+    bool shared = false; ///< True after `shared x;` (Ω spec §3.1)
 
-    bool isDead()     const { return moved || invalidated; }
+    bool isDead() const {
+        return moved || invalidated;
+    }
     /// Source can be read when not mutably borrowed and not dead.
-    bool isReadable() const { return !isDead() && !mutBorrowed; }
+    bool isReadable() const {
+        return !isDead() && !mutBorrowed;
+    }
     /// Source can be written only when no borrows exist, not frozen, not shared, not dead.
     bool isWritable() const {
         return !isDead() && !mutBorrowed && immutBorrowCount == 0 && !frozen && !shared;
     }
     /// Derive the canonical OwnershipState.
     OwnershipState state() const {
-        if (invalidated)          return OwnershipState::Invalidated;
-        if (moved)                return OwnershipState::Moved;
-        if (frozen)               return OwnershipState::Frozen;
-        if (shared)               return OwnershipState::Shared;
-        if (mutBorrowed)          return OwnershipState::MutBorrowed;
-        if (immutBorrowCount > 0) return OwnershipState::Borrowed;
+        if (invalidated)
+            return OwnershipState::Invalidated;
+        if (moved)
+            return OwnershipState::Moved;
+        if (frozen)
+            return OwnershipState::Frozen;
+        if (shared)
+            return OwnershipState::Shared;
+        if (mutBorrowed)
+            return OwnershipState::MutBorrowed;
+        if (immutBorrowCount > 0)
+            return OwnershipState::Borrowed;
         return OwnershipState::Owned;
     }
 };
@@ -170,9 +177,9 @@ struct VarBorrowState {
 /// Per-scope record of the borrow aliases introduced in that scope.
 /// When the scope ends every borrow is released.
 struct BorrowInfo {
-    std::string refVar;    ///< Name of the borrow variable (the alias)
-    std::string srcVar;    ///< Name of the source variable being borrowed
-    bool        isMut;     ///< true for mutable borrow, false for immutable
+    std::string refVar; ///< Name of the borrow variable (the alias)
+    std::string srcVar; ///< Name of the source variable being borrowed
+    bool isMut;         ///< true for mutable borrow, false for immutable
 };
 
 class CodeGenerator {
@@ -270,8 +277,8 @@ class CodeGenerator {
 
     /// Set IPOF aggression level (0=off, 1=fast, 2=balanced, 3=aggressive).
     void setIPOFLevel(unsigned level) {
-        ipofLevel_   = std::min(level, 3u);
-        enableIPOF_  = (level > 0);
+        ipofLevel_ = std::min(level, 3u);
+        enableIPOF_ = (level > 0);
     }
 
     /// Enable/disable post-codegen LLVM IR optimization pipeline (default: true).
@@ -283,13 +290,17 @@ class CodeGenerator {
     void setNoOwnershipChecks(bool enable) {
         noOwnershipChecks_ = enable;
     }
-    [[nodiscard]] bool isNoOwnershipChecks() const noexcept { return noOwnershipChecks_; }
+    [[nodiscard]] bool isNoOwnershipChecks() const noexcept {
+        return noOwnershipChecks_;
+    }
 
     /// Enable compile-time path-sensitive memory-safety diagnostics (Ω spec §7: --mem-sanitize).
     void setMemSanitize(bool enable) {
         memSanitize_ = enable;
     }
-    [[nodiscard]] bool isMemSanitize() const noexcept { return memSanitize_; }
+    [[nodiscard]] bool isMemSanitize() const noexcept {
+        return memSanitize_;
+    }
 
     /// Enable PGO instrumentation generation mode (writes .profraw to profilePath).
     void setPGOGen(const std::string& profilePath) {
@@ -402,8 +413,8 @@ class CodeGenerator {
     /// The queue is a flat vector of (alloca, type) pairs: no per-invalidation
     /// heap allocations, no pointer chasing, O(1) push, O(n) drain at exit.
     struct DeferredFreeEntry {
-        llvm::AllocaInst* alloca;   ///< alloca that holds the heap pointer
-        llvm::Type*       elemType; ///< type stored in the alloca slot
+        llvm::AllocaInst* alloca; ///< alloca that holds the heap pointer
+        llvm::Type* elemType;     ///< type stored in the alloca slot
     };
     std::vector<DeferredFreeEntry> deferredFreeQueue_;
 
@@ -482,7 +493,7 @@ class CodeGenerator {
     std::unordered_map<std::string, std::vector<StructField>> structFieldDecls_;
     // @repr layout hint per struct.
     std::unordered_map<std::string, StructRepr> structReprs_;
-    std::unordered_map<std::string, int>         structReprAlignN_;
+    std::unordered_map<std::string, int> structReprAlignN_;
     // Variables known to hold struct values, maps var name → struct type name.
     std::unordered_map<std::string, std::string> structVars_;
     // Per-struct LLVM StructType (built lazily; enables SROA/mem2reg for small structs).
@@ -573,18 +584,18 @@ class CodeGenerator {
 
     /// TBAA metadata: length (slot 0) and elements (slots 1+) don't alias,
     /// enabling LLVM to hoist length loads out of element-mutating loops.
-    llvm::MDNode* tbaaRoot_ = nullptr;       ///< Root of TBAA type hierarchy
-    llvm::MDNode* tbaaArrayLen_ = nullptr;   ///< TBAA access tag for array length (slot 0)
-    llvm::MDNode* tbaaArrayElem_ = nullptr;  ///< TBAA access tag for array elements (slots 1+)
-    llvm::MDNode* tbaaStructField_ = nullptr; ///< TBAA access tag for struct field loads/stores (generic)
+    llvm::MDNode* tbaaRoot_ = nullptr;           ///< Root of TBAA type hierarchy
+    llvm::MDNode* tbaaArrayLen_ = nullptr;       ///< TBAA access tag for array length (slot 0)
+    llvm::MDNode* tbaaArrayElem_ = nullptr;      ///< TBAA access tag for array elements (slots 1+)
+    llvm::MDNode* tbaaStructField_ = nullptr;    ///< TBAA access tag for struct field loads/stores (generic)
     llvm::MDNode* tbaaStructTypeNode_ = nullptr; ///< TBAA type node for "struct field" (parent of per-field types)
-    llvm::MDNode* tbaaStringLen_  = nullptr;  ///< TBAA access tag for string length field  (offset 0)
-    llvm::MDNode* tbaaStringCap_  = nullptr;  ///< TBAA access tag for string capacity field (offset 8)
-    llvm::MDNode* tbaaStringData_ = nullptr;  ///< TBAA access tag for string character data (offset 16+)
-    llvm::MDNode* tbaaMapKey_ = nullptr;      ///< TBAA access tag for map key slots
-    llvm::MDNode* tbaaMapVal_ = nullptr;      ///< TBAA access tag for map value slots
-    llvm::MDNode* tbaaMapHash_ = nullptr;     ///< TBAA access tag for map hash slots
-    llvm::MDNode* tbaaMapMeta_ = nullptr;     ///< TBAA access tag for map header (capacity/size)
+    llvm::MDNode* tbaaStringLen_ = nullptr;      ///< TBAA access tag for string length field  (offset 0)
+    llvm::MDNode* tbaaStringCap_ = nullptr;      ///< TBAA access tag for string capacity field (offset 8)
+    llvm::MDNode* tbaaStringData_ = nullptr;     ///< TBAA access tag for string character data (offset 16+)
+    llvm::MDNode* tbaaMapKey_ = nullptr;         ///< TBAA access tag for map key slots
+    llvm::MDNode* tbaaMapVal_ = nullptr;         ///< TBAA access tag for map value slots
+    llvm::MDNode* tbaaMapHash_ = nullptr;        ///< TBAA access tag for map hash slots
+    llvm::MDNode* tbaaMapMeta_ = nullptr;        ///< TBAA access tag for map header (capacity/size)
     /// TBAA access tag for scalar variable slots (alloca/global variable storage).
     /// Disambiguates named-variable loads/stores from heap-allocated array/struct/map data.
     llvm::MDNode* tbaaScalar_ = nullptr;
@@ -640,45 +651,60 @@ class CodeGenerator {
     llvm::StringMap<std::string> constStringFolds_;
 
     /// Evaluate a @const_eval function at compile time (nullopt = falls back to runtime).
-    std::optional<int64_t> tryConstEval(const FunctionDecl* func,
-                                        const std::vector<int64_t>& argVals);
+    std::optional<int64_t> tryConstEval(const FunctionDecl* func, const std::vector<int64_t>& argVals);
 
     /// Compile-time constant value (int, string, or array) for unified constant propagation.
     struct ConstValue {
         enum class Kind { Integer, Float, String, Array } kind = Kind::Integer;
         int64_t intVal = 0;
-        double  floatVal = 0.0;
+        double floatVal = 0.0;
         std::string strVal;
-        std::vector<ConstValue> arrVal;  // for Kind::Array
-        static ConstValue fromInt(int64_t v)     { ConstValue c; c.kind = Kind::Integer; c.intVal = v; return c; }
-        static ConstValue fromFloat(double v)    { ConstValue c; c.kind = Kind::Float;   c.floatVal = v; return c; }
-        static ConstValue fromStr(std::string s) { ConstValue c; c.kind = Kind::String;  c.strVal = std::move(s); return c; }
-        static ConstValue fromArr(std::vector<ConstValue> a)
-                                                 { ConstValue c; c.kind = Kind::Array;   c.arrVal = std::move(a); return c; }
+        std::vector<ConstValue> arrVal; // for Kind::Array
+        static ConstValue fromInt(int64_t v) {
+            ConstValue c;
+            c.kind = Kind::Integer;
+            c.intVal = v;
+            return c;
+        }
+        static ConstValue fromFloat(double v) {
+            ConstValue c;
+            c.kind = Kind::Float;
+            c.floatVal = v;
+            return c;
+        }
+        static ConstValue fromStr(std::string s) {
+            ConstValue c;
+            c.kind = Kind::String;
+            c.strVal = std::move(s);
+            return c;
+        }
+        static ConstValue fromArr(std::vector<ConstValue> a) {
+            ConstValue c;
+            c.kind = Kind::Array;
+            c.arrVal = std::move(a);
+            return c;
+        }
     };
 
     /// Compile-time array values for `const` arrays (enables array index folding).
     llvm::StringMap<std::vector<ConstValue>> constArrayFolds_;
 
     /// Try to reduce any expression to a compile-time constant (nullopt if runtime needed).
-    std::optional<ConstValue> tryFoldExprToConst(Expression* expr,
-                                                 int depth = 0) const;
+    std::optional<ConstValue> tryFoldExprToConst(Expression* expr, int depth = 0) const;
 
     /// Evaluate a function body at compile time given a fully-known argument environment.
-    std::optional<ConstValue> tryConstEvalFull(
-        const FunctionDecl* func,
-        const std::unordered_map<std::string, ConstValue>& argEnv,
-        int depth = 0) const;
+    std::optional<ConstValue> tryConstEvalFull(const FunctionDecl* func,
+                                               const std::unordered_map<std::string, ConstValue>& argEnv,
+                                               int depth = 0) const;
 
     /// Overload that evaluates a BlockStmt directly (used by comptime blocks).
-    std::optional<ConstValue> tryConstEvalFull(
-        const BlockStmt* body,
-        const std::unordered_map<std::string, ConstValue>& argEnv,
-        int depth = 0) const;
+    std::optional<ConstValue> tryConstEvalFull(const BlockStmt* body,
+                                               const std::unordered_map<std::string, ConstValue>& argEnv,
+                                               int depth = 0) const;
 
     /// Fold an expression to a compile-time integer or string (more powerful than getConstantInt).
-    std::optional<int64_t>     tryFoldInt(Expression* e) const;
-    std::optional<double>      tryFoldFloat(Expression* e) const;
+    std::optional<int64_t> tryFoldInt(Expression* e) const;
+    std::optional<double> tryFoldFloat(Expression* e) const;
     std::optional<std::string> tryFoldStr(Expression* e) const;
 
     /// Emit a compile-time constant array as a private global (OmScript array layout).
@@ -762,9 +788,9 @@ class CodeGenerator {
     static constexpr uint64_t kFuncArenaSlabSize = 65536u;
 
     /// Entry-block static alloca for the arena slab ([kFuncArenaSlabSize x i8], null = unused).
-    llvm::AllocaInst* funcArenaBaseAlloca_  = nullptr;
+    llvm::AllocaInst* funcArenaBaseAlloca_ = nullptr;
     /// Compile-time bytes consumed in the arena so far for the current function.
-    uint64_t          funcArenaUsedBytes_   = 0u;
+    uint64_t funcArenaUsedBytes_ = 0u;
     /// Variable names whose alloc<T> memory is backed by the function arena.
     /// invalidate() emits no free() for these; lifetime.end is emitted at function exit.
     llvm::StringSet<> arenaPtrVarNames_;
@@ -779,19 +805,37 @@ class CodeGenerator {
     bool currentFuncHintNoVectorize_ = false;
     bool currentFuncHintParallelize_ = false;
     bool currentFuncHintNoParallelize_ = false;
-    bool currentFuncHintHot_ = false;  ///< Current function has @hot annotation
+    bool currentFuncHintHot_ = false;               ///< Current function has @hot annotation
     const FunctionDecl* currentFuncDecl_ = nullptr; ///< Currently-generating function declaration
-    unsigned loopNestDepth_ = 0; ///< Current for-loop nesting depth (0 = not in a loop)
-    bool bodyHasInnerLoop_ = false; ///< Set when a while/for loop is found inside a for-loop body
-    bool bodyHasNonPow2Modulo_ = false; ///< Set when a for-loop body has non-power-of-2 modulo
-    bool bodyHasNonPow2ModuloValue_ = false; ///< Set when non-pow2 modulo result is used as a VALUE (not just in a comparison). Combined with bodyHasNonPow2Modulo_, suppresses vectorize.enable=false when true — the profitable abs/min/max vectorization outweighs the cost of vector urem.
-    bool bodyHasNonPow2ModuloArrayStore_ = false; ///< Set when a non-pow2 modulo result is stored to an array element (arr[i] = expr%K). Disables forced vectorization because urem <N x i64> scalarizes on x86-64, and the extra extract/insert round-trip is slower than scalar ILP from unrolled code.
-    bool inIndexAssignValueContext_ = false; ///< True while generating the VALUE expression of an IndexAssignExpr (arr[i] = VALUE). Used to detect modulo operations that produce array-element values, which enables bodyHasNonPow2ModuloArrayStore_ tracking.
-    bool bodyHasBackwardArrayRef_ = false; ///< Set when a for-loop body has a backward array reference (arr[i-K] where K>0) AND the same array is written to in the same loop body. Only true loop-carried write-read dependencies should suppress parallel_accesses and LICM versioning.
-    llvm::StringSet<> loopWrittenArrays_; ///< Arrays written to (via IndexAssignExpr) in the current for-loop body. Used to refine bodyHasBackwardArrayRef_ detection.
-    llvm::StringSet<> loopBackwardReadArrays_; ///< Arrays read with backward references (arr[i-K]) in the current for-loop body. Combined with loopWrittenArrays_ to detect true loop-carried dependencies.
-    std::unordered_set<std::string> loopIterVars_; ///< Names of all active for-loop iterators (populated unconditionally, used to detect backward array refs at any optimization level).
-    bool inComparisonContext_ = false; ///< True while generating operands of == != < > <= >= (used to classify urem as "for branch" vs "for value")
+    unsigned loopNestDepth_ = 0;                    ///< Current for-loop nesting depth (0 = not in a loop)
+    bool bodyHasInnerLoop_ = false;                 ///< Set when a while/for loop is found inside a for-loop body
+    bool bodyHasNonPow2Modulo_ = false;             ///< Set when a for-loop body has non-power-of-2 modulo
+    bool bodyHasNonPow2ModuloValue_ =
+        false; ///< Set when non-pow2 modulo result is used as a VALUE (not just in a comparison). Combined with
+               ///< bodyHasNonPow2Modulo_, suppresses vectorize.enable=false when true — the profitable abs/min/max
+               ///< vectorization outweighs the cost of vector urem.
+    bool bodyHasNonPow2ModuloArrayStore_ =
+        false; ///< Set when a non-pow2 modulo result is stored to an array element (arr[i] = expr%K). Disables forced
+               ///< vectorization because urem <N x i64> scalarizes on x86-64, and the extra extract/insert round-trip
+               ///< is slower than scalar ILP from unrolled code.
+    bool inIndexAssignValueContext_ =
+        false; ///< True while generating the VALUE expression of an IndexAssignExpr (arr[i] = VALUE). Used to detect
+               ///< modulo operations that produce array-element values, which enables bodyHasNonPow2ModuloArrayStore_
+               ///< tracking.
+    bool bodyHasBackwardArrayRef_ =
+        false; ///< Set when a for-loop body has a backward array reference (arr[i-K] where K>0) AND the same array is
+               ///< written to in the same loop body. Only true loop-carried write-read dependencies should suppress
+               ///< parallel_accesses and LICM versioning.
+    llvm::StringSet<> loopWrittenArrays_; ///< Arrays written to (via IndexAssignExpr) in the current for-loop body.
+                                          ///< Used to refine bodyHasBackwardArrayRef_ detection.
+    llvm::StringSet<>
+        loopBackwardReadArrays_; ///< Arrays read with backward references (arr[i-K]) in the current for-loop body.
+                                 ///< Combined with loopWrittenArrays_ to detect true loop-carried dependencies.
+    std::unordered_set<std::string>
+        loopIterVars_; ///< Names of all active for-loop iterators (populated unconditionally, used to detect backward
+                       ///< array refs at any optimization level).
+    bool inComparisonContext_ = false; ///< True while generating operands of == != < > <= >= (used to classify urem as
+                                       ///< "for branch" vs "for value")
     /// Per-alloca upper bound from `x % C`; emits llvm.assume(value ult C) on loads
     /// to propagate [0,C) range through PHI nodes for conditional-subtract optimization.
     llvm::DenseMap<llvm::Value*, int64_t> allocaUpperBound_;
@@ -878,14 +922,13 @@ class CodeGenerator {
     /// Emit inline map_get (equivalent to map_get(mapVal, keyVal, 0)).
     llvm::Value* emitMapGet(llvm::Value* mapVal, llvm::Value* keyVal);
     llvm::Value* generateIndexAssign(IndexAssignExpr* expr);
-    llvm::Value* generateDerefAssign(DerefAssignExpr* expr);  ///< *p = v (Ω spec §4.2)
+    llvm::Value* generateDerefAssign(DerefAssignExpr* expr); ///< *p = v (Ω spec §4.2)
     llvm::Value* generateStructLiteral(StructLiteralExpr* expr);
     llvm::Value* generateFieldAccess(FieldAccessExpr* expr);
     llvm::Value* generateFieldAssign(FieldAssignExpr* expr);
 
     std::string resolveStructType(Expression* objExpr) const;
-    size_t resolveFieldIndex(const std::string& structType, const std::string& fieldName,
-                             const ASTNode* errorNode);
+    size_t resolveFieldIndex(const std::string& structType, const std::string& fieldName, const ASTNode* errorNode);
     /// Resolve fieldName to index, owner struct, and field LLVM type.
     struct ResolvedField {
         size_t index;
@@ -894,8 +937,7 @@ class CodeGenerator {
         llvm::Type* fieldType;
         std::string fieldTypeAnnot; ///< Original annotation text (for signedness)
     };
-    ResolvedField resolveField(const std::string& structHint, const std::string& fieldName,
-                               const ASTNode* errorNode);
+    ResolvedField resolveField(const std::string& structHint, const std::string& fieldName, const ASTNode* errorNode);
     /// Build (and cache) the LLVM StructType for a declared struct (nullptr if unknown).
     llvm::StructType* getOrCreateStructLLVMType(const std::string& name);
     /// Widen a narrow field value (sign/zero-extend integers, float→double).
@@ -917,23 +959,19 @@ class CodeGenerator {
     /// Assign (or look up) a unique compile-time integer ID for a string error code.
     int64_t getCatchStringId(const std::string& s);
     /// Pre-pass: register catch(code) BasicBlocks before generating the function body.
-    void buildCatchTable(const std::vector<std::unique_ptr<Statement>>& stmts,
-                         llvm::Function* fn);
+    void buildCatchTable(const std::vector<std::unique_ptr<Statement>>& stmts, llvm::Function* fn);
     void generateInvalidate(InvalidateStmt* stmt);
     void generateMoveDecl(MoveDecl* stmt);
     void generateFreeze(FreezeStmt* stmt);
-    void generateShared(SharedStmt* stmt);  ///< shared x; — Ω spec §3.1
-    void generateOwn(OwnStmt* stmt);        ///< own x;    — Ω spec §3.1
-    void generateConstruct(ConstructStmt* stmt);  ///< construct ptr { field: val, ... };
+    void generateShared(SharedStmt* stmt);                     ///< shared x; — Ω spec §3.1
+    void generateOwn(OwnStmt* stmt);                           ///< own x;    — Ω spec §3.1
+    void generateConstruct(ConstructStmt* stmt);               ///< construct ptr { field: val, ... };
     llvm::Value* generateNewConstruct(NewConstructExpr* expr); ///< new T { field: val, ... }
     /// Shared back-end: emit one GEP+store per field into @p basePtr.
     /// Reused by both generateConstruct (statement) and generateNewConstruct (expression).
-    void emitConstructFieldsInto(
-        llvm::Value* basePtr,
-        const std::string& structHint,
-        const std::vector<std::pair<std::string,
-                                    std::unique_ptr<Expression>>>& fields,
-        const ASTNode* errorNode);
+    void emitConstructFieldsInto(llvm::Value* basePtr, const std::string& structHint,
+                                 const std::vector<std::pair<std::string, std::unique_ptr<Expression>>>& fields,
+                                 const ASTNode* errorNode);
     void generatePrefetch(PrefetchStmt* stmt);
     void generateAssume(AssumeStmt* stmt);
     void generatePipeline(PipelineStmt* stmt);
@@ -942,8 +980,7 @@ class CodeGenerator {
     /// Emit an in-place string-append for `x = x + rhs` when x is unique.
     /// Uses realloc(x, len(x)+len(rhs)+1) + memcpy(rhs only), saving the full
     /// memcpy of x's existing content present in the regular malloc path.
-    llvm::Value* generateInplaceStringAppend(AssignExpr* assignExpr,
-                                              Expression* rhs);
+    llvm::Value* generateInplaceStringAppend(AssignExpr* assignExpr, Expression* rhs);
     llvm::Value* generateReborrowExpr(ReborrowExpr* expr);
 
     /// Lower `@range[lo, hi] expr`: emits llvm.assume + !range metadata (pure optimization hint).
@@ -1009,8 +1046,8 @@ class CodeGenerator {
     void endScope();
     void bindVariable(const std::string& name, llvm::Value* value, bool isConst = false);
     /// Bind a variable with its type annotation (for signed/unsigned tracking).
-    void bindVariableAnnotated(const std::string& name, llvm::Value* value,
-                               const std::string& typeAnnot, bool isConst = false);
+    void bindVariableAnnotated(const std::string& name, llvm::Value* value, const std::string& typeAnnot,
+                               bool isConst = false);
     /// Returns true for unsigned type annotation strings: "uint", "uN" (N=1..256).
     [[nodiscard]] static bool isUnsignedAnnot(const std::string& annot);
     /// Returns true if \p v is an unsigned integer value based on its declared type annotation.
@@ -1029,8 +1066,7 @@ class CodeGenerator {
     void attachLoopMetadata(llvm::BranchInst* backEdgeBr);
 
     /// Like attachLoopMetadata but also adds vectorize.enable=1 and interleave.count at O2+.
-    void attachLoopMetadataVec(llvm::BranchInst* backEdgeBr,
-                               unsigned interleaveCount = 4);
+    void attachLoopMetadataVec(llvm::BranchInst* backEdgeBr, unsigned interleaveCount = 4);
 
     // IR emit helpers: each performs one logical operation with all required metadata attached.
 
@@ -1059,17 +1095,14 @@ class CodeGenerator {
 
     /// Information returned by emitCountingLoop.
     struct CountingLoopInfo {
-        llvm::PHINode*    idx;    ///< The induction-variable PHI node inside loopBB.
+        llvm::PHINode* idx;       ///< The induction-variable PHI node inside loopBB.
         llvm::BasicBlock* doneBB; ///< The exit block (insert point after the call returns).
     };
 
     /// Emit a standard counting loop: for (idx=start; idx<limit; ++idx) calling bodyFn(idx, loopBB).
-    CountingLoopInfo emitCountingLoop(
-        llvm::StringRef prefix,
-        llvm::Value* limit,
-        llvm::Value* start,
-        unsigned interleaveCount,
-        const std::function<void(llvm::PHINode* /*idx*/, llvm::BasicBlock* /*loopBB*/)>& bodyFn);
+    CountingLoopInfo
+    emitCountingLoop(llvm::StringRef prefix, llvm::Value* limit, llvm::Value* start, unsigned interleaveCount,
+                     const std::function<void(llvm::PHINode* /*idx*/, llvm::BasicBlock* /*loopBB*/)>& bodyFn);
 
     /// RAII guard: calls beginScope() on construction and endScope() on destruction.
     class ScopeGuard {
@@ -1101,38 +1134,38 @@ class CodeGenerator {
     void scanStmtForStringCalls(Statement* stmt);
 
     // Target CPU configuration for LLVM code generation.
-    std::string marchCpu_;            // -march: CPU arch for instruction selection ("" = native)
-    std::string mtuneCpu_;            // -mtune: CPU for scheduling tuning ("" = same as march)
-    bool usePIC_ = true;              // -fpic / -fno-pic
-    bool useFastMath_ = false;        // -ffast-math / -fno-fast-math
-    bool enableOptMax_ = true;        // -foptmax / -fno-optmax
-    bool enableVectorize_ = true;     // -fvectorize / -fno-vectorize
-    bool enableUnrollLoops_ = true;   // -funroll-loops / -fno-unroll-loops
-    bool enableLoopOptimize_ = true;  // -floop-optimize / -fno-loop-optimize
-    bool enableParallelize_ = true;   // -fparallelize / -fno-parallelize
-    bool enableEGraph_ = true;        // -fegraph / -fno-egraph (e-graph equality saturation)
-    bool enableSuperopt_ = true;      // -fsuperopt / -fno-superopt (superoptimizer)
-    unsigned superoptLevel_ = 2;      // -fsuperopt-level=0/1/2/3 (default: 2)
-    bool enableHGOE_ = true;          // -fhgoe / -fno-hgoe (hardware graph optimization)
-    bool enableSDR_  = true;          // -fsdr / -fno-sdr (speculative devectorization & revectorization)
-    bool enableIPOF_ = true;          // -fipof / -fno-ipof (implicit phase ordering fixer)
-    unsigned ipofLevel_ = 0;          // 0 = auto (set from optimization level at call time)
-    bool runIRPasses_ = true;         // Run runOptimizationPasses() after codegen (set false in IR unit tests).
-    bool noOwnershipChecks_ = false;  // --no-ownership-checks (Ω spec §6.2)
-    bool memSanitize_       = false;  // --mem-sanitize        (Ω spec §7)
+    std::string marchCpu_;              // -march: CPU arch for instruction selection ("" = native)
+    std::string mtuneCpu_;              // -mtune: CPU for scheduling tuning ("" = same as march)
+    bool usePIC_ = true;                // -fpic / -fno-pic
+    bool useFastMath_ = false;          // -ffast-math / -fno-fast-math
+    bool enableOptMax_ = true;          // -foptmax / -fno-optmax
+    bool enableVectorize_ = true;       // -fvectorize / -fno-vectorize
+    bool enableUnrollLoops_ = true;     // -funroll-loops / -fno-unroll-loops
+    bool enableLoopOptimize_ = true;    // -floop-optimize / -fno-loop-optimize
+    bool enableParallelize_ = true;     // -fparallelize / -fno-parallelize
+    bool enableEGraph_ = true;          // -fegraph / -fno-egraph (e-graph equality saturation)
+    bool enableSuperopt_ = true;        // -fsuperopt / -fno-superopt (superoptimizer)
+    unsigned superoptLevel_ = 2;        // -fsuperopt-level=0/1/2/3 (default: 2)
+    bool enableHGOE_ = true;            // -fhgoe / -fno-hgoe (hardware graph optimization)
+    bool enableSDR_ = true;             // -fsdr / -fno-sdr (speculative devectorization & revectorization)
+    bool enableIPOF_ = true;            // -fipof / -fno-ipof (implicit phase ordering fixer)
+    unsigned ipofLevel_ = 0;            // 0 = auto (set from optimization level at call time)
+    bool runIRPasses_ = true;           // Run runOptimizationPasses() after codegen (set false in IR unit tests).
+    bool noOwnershipChecks_ = false;    // --no-ownership-checks (Ω spec §6.2)
+    bool memSanitize_ = false;          // --mem-sanitize        (Ω spec §7)
     unsigned preferredVectorWidth_ = 4; // SIMD vector width for loop hints (target-aware)
-    std::string pgoGenPath_;          // --pgo-gen=<path>: emit raw profile to this file
-    std::string pgoUsePath_;          // --pgo-use=<path>: read profile data from this file
-    bool lto_ = false;                // LTO mode: use pre-link pipeline
-    bool verbose_ = false;            // -V: print optimization pass messages
+    std::string pgoGenPath_;            // --pgo-gen=<path>: emit raw profile to this file
+    std::string pgoUsePath_;            // --pgo-use=<path>: read profile data from this file
+    bool lto_ = false;                  // LTO mode: use pre-link pipeline
+    bool verbose_ = false;              // -V: print optimization pass messages
 
     // DWARF debug info infrastructure
-    bool debugMode_ = false;                       // -g: emit debug metadata
-    std::string sourceFilename_;                   // Source file for debug CU
+    bool debugMode_ = false;                        // -g: emit debug metadata
+    std::string sourceFilename_;                    // Source file for debug CU
     std::unique_ptr<llvm::DIBuilder> debugBuilder_; // Debug info builder (null if !debugMode_)
-    llvm::DICompileUnit* debugCU_ = nullptr;       // DWARF compile unit
-    llvm::DIFile* debugFile_ = nullptr;            // DWARF file descriptor
-    llvm::DIScope* debugScope_ = nullptr;          // Current debug scope (CU or subprogram)
+    llvm::DICompileUnit* debugCU_ = nullptr;        // DWARF compile unit
+    llvm::DIFile* debugFile_ = nullptr;             // DWARF file descriptor
+    llvm::DIScope* debugScope_ = nullptr;           // Current debug scope (CU or subprogram)
 
     /// Compile-time resource budget (not atomic — CodeGenerator is not thread-shared).
     static constexpr size_t kMaxFunctions = 10000;
@@ -1177,8 +1210,7 @@ class CodeGenerator {
     void emitStoreStringCap(llvm::Value* cap, llvm::Value* strPtr);
     /// Allocate a new string: malloc(16+cap+1), store len and cap.
     /// Returns a pointer to the header.  Caller fills in char data via emitStringData().
-    llvm::Value* emitAllocString(llvm::Value* len, llvm::Value* cap,
-                                 const llvm::Twine& name = "str.alloc");
+    llvm::Value* emitAllocString(llvm::Value* len, llvm::Value* cap, const llvm::Twine& name = "str.alloc");
     // ────────────────────────────────────────────────────────────────────────
     llvm::Function* getOrDeclareMalloc();
     llvm::Function* getOrDeclareAlignedAlloc();
@@ -1296,18 +1328,16 @@ class CodeGenerator {
                                 const ASTNode* errorNode);
 
     /// Returns true if arr[index] can provably skip the runtime bounds check (patterns A–F).
-    bool canElideBoundsCheck(Expression* arrayExpr, Expression* indexExpr,
-                             llvm::Value* basePtr, bool isStr,
+    bool canElideBoundsCheck(Expression* arrayExpr, Expression* indexExpr, llvm::Value* basePtr, bool isStr,
                              const char* prefix);
 
     /// Emit a runtime bounds check (compare+branch+abort); insertion point is success block on return.
-    void emitBoundsCheck(llvm::Value* idxVal, llvm::Value* basePtr,
-                         bool isStr, bool isBorrowed, const char* prefix, int line = 0);
+    void emitBoundsCheck(llvm::Value* idxVal, llvm::Value* basePtr, bool isStr, bool isBorrowed, const char* prefix,
+                         int line = 0);
 
     /// Pre-scan loop body: collect arrays accessed ONLY as arr[iterVar] with no length-modifying calls.
     /// Map value: true = written in body, false = read-only (both eligible for pointer-mode opt).
-    std::unordered_map<std::string, bool> preScanLoopArrayAccesses(
-        const Statement* body, const std::string& iterVar);
+    std::unordered_map<std::string, bool> preScanLoopArrayAccesses(const Statement* body, const std::string& iterVar);
 
     // Optimization methods
     void runOptimizationPasses();
@@ -1342,7 +1372,9 @@ class CodeGenerator {
     /// Returns the raw CTEngine pointer (may be null before runCFCTRE runs).
     /// Used by OptimizationOrchestrator to re-sync OptimizationContext after
     /// runCFCTRE recreates ctEngine_ (freeing the old instance).
-    CTEngine* getCTEngine() const noexcept { return ctEngine_.get(); }
+    CTEngine* getCTEngine() const noexcept {
+        return ctEngine_.get();
+    }
 };
 
 } // namespace omscript

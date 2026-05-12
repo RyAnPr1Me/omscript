@@ -60,7 +60,7 @@
 ///       prove inter-parameter non-aliasing.
 
 #include "ast.h"
-#include "opt_context.h"  // BuiltinEffectTable
+#include "opt_context.h" // BuiltinEffectTable
 
 #include <string>
 #include <unordered_set>
@@ -103,10 +103,8 @@ struct UniquenessAnalysis {
 /// @returns A `UniquenessAnalysis` whose `uniqueVars` contains every
 ///          string/array variable that is provably unique throughout @p fn.
 ///          Variables with unknown uniqueness are absent from `uniqueVars`.
-UniquenessAnalysis computeUniqueness(
-    const FunctionDecl&                    fn,
-    const std::unordered_set<std::string>& strVarHints,
-    const std::unordered_set<std::string>& arrVarHints);
+UniquenessAnalysis computeUniqueness(const FunctionDecl& fn, const std::unordered_set<std::string>& strVarHints,
+                                     const std::unordered_set<std::string>& arrVarHints);
 
 } // namespace omscript
 

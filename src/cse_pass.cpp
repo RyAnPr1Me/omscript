@@ -25,7 +25,7 @@
 ///   to be eligible; this keeps the canonicalisation simple and the key unique.
 
 #include "cse_pass.h"
-#include "opt_pass.h"   // isCommutativeOp, isPureBinaryOp
+#include "opt_pass.h" // isCommutativeOp, isPureBinaryOp
 #include "pass_utils.h"
 
 #include <algorithm>
@@ -51,7 +51,8 @@ using OpaqueSet = std::unordered_set<std::string>;
 /// re-loaded every time and cannot participate in CSE.
 static std::string leafRepr(const Expression* expr, const OpaqueSet& opaque) {
     if (const auto* id = asIdentifier(expr)) {
-        if (opaque.count(id->name)) return ""; // volatile/atomic — not a CSE leaf
+        if (opaque.count(id->name))
+            return ""; // volatile/atomic — not a CSE leaf
         return id->name;
     }
     long long v = 0;
@@ -64,16 +65,16 @@ static std::string leafRepr(const Expression* expr, const OpaqueSet& opaque) {
 /// if either operand is not a leaf (we only CSE one level deep at each pass;
 /// deeper nesting is handled by running the pass multiple times or by the
 /// e-graph).
-static std::string binaryKey(const std::string& op,
-                              const Expression* left,
-                              const Expression* right,
-                              const OpaqueSet& opaque) {
-    std::string l = leafRepr(left,  opaque);
+static std::string binaryKey(const std::string& op, const Expression* left, const Expression* right,
+                             const OpaqueSet& opaque) {
+    std::string l = leafRepr(left, opaque);
     std::string r = leafRepr(right, opaque);
-    if (l.empty() || r.empty()) return "";
+    if (l.empty() || r.empty())
+        return "";
 
     // Normalise commutative operators so a+b and b+a share the same key.
-    if (isCommutativeOp(op) && l > r) std::swap(l, r);
+    if (isCommutativeOp(op) && l > r)
+        std::swap(l, r);
 
     return op + ":" + l + ":" + r;
 }
@@ -83,13 +84,13 @@ static std::string binaryKey(const std::string& op,
 ///
 /// Format: "CALL:<callee>:<arg0>:<arg1>:…"
 /// Arguments are NOT reordered (function calls are not commutative).
-static std::string callKey(const std::string& callee,
-                            const std::vector<std::unique_ptr<Expression>>& args,
-                            const OpaqueSet& opaque) {
+static std::string callKey(const std::string& callee, const std::vector<std::unique_ptr<Expression>>& args,
+                           const OpaqueSet& opaque) {
     std::string key = "CALL:" + callee;
     for (const auto& arg : args) {
         const std::string leaf = leafRepr(arg.get(), opaque);
-        if (leaf.empty()) return ""; // non-leaf arg → not eligible
+        if (leaf.empty())
+            return ""; // non-leaf arg → not eligible
         key += ":" + leaf;
     }
     return key;
@@ -98,18 +99,18 @@ static std::string callKey(const std::string& callee,
 // Expression tree traversal — collect candidate subexpression keys
 // ─────────────────────────────────────────────────────────────────────────────
 
-static void collectKeys(const Expression* expr,
-                        std::unordered_map<std::string, int>& freq,
-                        const std::unordered_map<std::string, EffectSummary>* idempotent,
-                        const OpaqueSet& opaque) {
-    if (!expr) return;
+static void collectKeys(const Expression* expr, std::unordered_map<std::string, int>& freq,
+                        const std::unordered_map<std::string, EffectSummary>* idempotent, const OpaqueSet& opaque) {
+    if (!expr)
+        return;
 
     if (expr->type == ASTNodeType::BINARY_EXPR) {
         const auto* bin = static_cast<const BinaryExpr*>(expr);
         // Only consider operators that are pure integer/bitwise ops.
         if (isPureBinaryOp(bin->op)) {
             std::string key = binaryKey(bin->op, bin->left.get(), bin->right.get(), opaque);
-            if (!key.empty()) freq[key]++;
+            if (!key.empty())
+                freq[key]++;
         }
         // Recurse.
         collectKeys(bin->left.get(), freq, idempotent, opaque);
@@ -120,7 +121,8 @@ static void collectKeys(const Expression* expr,
         auto it = idempotent->find(call->callee);
         if (it != idempotent->end() && it->second.canDuplicate) {
             std::string key = callKey(call->callee, call->arguments, opaque);
-            if (!key.empty()) freq[key]++;
+            if (!key.empty())
+                freq[key]++;
         }
         // Recurse into arguments to catch inner binary CSE candidates
         // (e.g. `f(a+b, a+b)` — the `a+b` subexpressions are still pure).
@@ -143,11 +145,11 @@ static void collectKeys(const Expression* expr,
     // Do not descend into non-idempotent CallExpr (may have side effects).
 }
 
-static void collectKeysFromStmt(const Statement* stmt,
-                                std::unordered_map<std::string, int>& freq,
+static void collectKeysFromStmt(const Statement* stmt, std::unordered_map<std::string, int>& freq,
                                 const std::unordered_map<std::string, EffectSummary>* idempotent,
                                 const OpaqueSet& opaque) {
-    if (!stmt) return;
+    if (!stmt)
+        return;
     switch (stmt->type) {
     case ASTNodeType::EXPR_STMT:
         collectKeys(static_cast<const ExprStmt*>(stmt)->expression.get(), freq, idempotent, opaque);
@@ -178,11 +180,10 @@ static void collectKeysFromStmt(const Statement* stmt,
 
 /// If @p expr matches @p key, replace it with an identifier reference to
 /// @p varName and return true.  Otherwise recurse and return false.
-static bool replaceInExpr(std::unique_ptr<Expression>& expr,
-                          const std::string& key,
-                          const std::string& varName,
+static bool replaceInExpr(std::unique_ptr<Expression>& expr, const std::string& key, const std::string& varName,
                           const std::unordered_map<std::string, EffectSummary>* idempotent) {
-    if (!expr) return false;
+    if (!expr)
+        return false;
 
     if (expr->type == ASTNodeType::BINARY_EXPR) {
         auto* bin = static_cast<BinaryExpr*>(expr.get());
@@ -196,7 +197,7 @@ static bool replaceInExpr(std::unique_ptr<Expression>& expr,
         }
         // Recurse into children (stop at the first replacement to avoid
         // double-counting — the next pass iteration handles deeper matches).
-        replaceInExpr(bin->left,  key, varName, idempotent);
+        replaceInExpr(bin->left, key, varName, idempotent);
         replaceInExpr(bin->right, key, varName, idempotent);
     } else if (expr->type == ASTNodeType::CALL_EXPR && idempotent) {
         // ERSL extension: replace idempotent call with the CSE variable.
@@ -212,17 +213,16 @@ static bool replaceInExpr(std::unique_ptr<Expression>& expr,
     } else if (expr->type == ASTNodeType::TERNARY_EXPR) {
         auto* tern = static_cast<TernaryExpr*>(expr.get());
         replaceInExpr(tern->condition, key, varName, idempotent);
-        replaceInExpr(tern->thenExpr,  key, varName, idempotent);
-        replaceInExpr(tern->elseExpr,  key, varName, idempotent);
+        replaceInExpr(tern->thenExpr, key, varName, idempotent);
+        replaceInExpr(tern->elseExpr, key, varName, idempotent);
     }
     return false;
 }
 
-static void replaceInStmt(Statement* stmt,
-                          const std::string& key,
-                          const std::string& varName,
+static void replaceInStmt(Statement* stmt, const std::string& key, const std::string& varName,
                           const std::unordered_map<std::string, EffectSummary>* idempotent) {
-    if (!stmt) return;
+    if (!stmt)
+        return;
     switch (stmt->type) {
     case ASTNodeType::EXPR_STMT:
         replaceInExpr(static_cast<ExprStmt*>(stmt)->expression, key, varName, idempotent);
@@ -256,7 +256,8 @@ static std::unique_ptr<Expression> makeLeaf(const std::string& token) {
         long long v = std::stoll(token, &pos);
         if (pos == token.size())
             return makeIntLiteral(v);
-    } catch (...) {}
+    } catch (...) {
+    }
     return makeIdentifier(token);
 }
 
@@ -268,7 +269,8 @@ static std::unique_ptr<Expression> makeLeaf(const std::string& token) {
 /// Returns nullptr if the key cannot be parsed.
 static std::unique_ptr<Expression> exprFromKey(const std::string& key) {
     const size_t first = key.find(':');
-    if (first == std::string::npos) return nullptr;
+    if (first == std::string::npos)
+        return nullptr;
 
     // Check whether this is a call key.
     const std::string prefix = key.substr(0, first);
@@ -286,11 +288,10 @@ static std::unique_ptr<Expression> exprFromKey(const std::string& key) {
             size_t pos = nameEnd + 1;
             while (pos < key.size()) {
                 size_t next = key.find(':', pos);
-                const std::string tok = (next == std::string::npos)
-                                            ? key.substr(pos)
-                                            : key.substr(pos, next - pos);
+                const std::string tok = (next == std::string::npos) ? key.substr(pos) : key.substr(pos, next - pos);
                 args.push_back(makeLeaf(tok));
-                if (next == std::string::npos) break;
+                if (next == std::string::npos)
+                    break;
                 pos = next + 1;
             }
         }
@@ -299,9 +300,10 @@ static std::unique_ptr<Expression> exprFromKey(const std::string& key) {
 
     // Binary key: "OP:lhs:rhs"
     const size_t second = key.find(':', first + 1);
-    if (second == std::string::npos) return nullptr;
+    if (second == std::string::npos)
+        return nullptr;
 
-    std::string op  = key.substr(0, first);
+    std::string op = key.substr(0, first);
     std::string lhs = key.substr(first + 1, second - first - 1);
     std::string rhs = key.substr(second + 1);
 
@@ -314,14 +316,14 @@ static std::unique_ptr<Expression> exprFromKey(const std::string& key) {
 
 // Forward declaration for mutual recursion.
 static CSEStats processBlock(BlockStmt* block, unsigned& nextId,
-                             const std::unordered_map<std::string, EffectSummary>* idempotent,
-                             const OpaqueSet& opaque);
+                             const std::unordered_map<std::string, EffectSummary>* idempotent, const OpaqueSet& opaque);
 
 static CSEStats processBlock(BlockStmt* block, unsigned& nextId,
                              const std::unordered_map<std::string, EffectSummary>* idempotent,
                              const OpaqueSet& opaque) {
     CSEStats stats;
-    if (!block || block->statements.empty()) return stats;
+    if (!block || block->statements.empty())
+        return stats;
 
     // ── Step 1: collect frequency of CSE-eligible subexpressions ───────────
     std::unordered_map<std::string, int> freq;
@@ -332,12 +334,14 @@ static CSEStats processBlock(BlockStmt* block, unsigned& nextId,
     // Process candidates in deterministic order (sort by key).
     std::vector<std::string> candidates;
     for (const auto& [k, cnt] : freq)
-        if (cnt >= 2) candidates.push_back(k);
+        if (cnt >= 2)
+            candidates.push_back(k);
     std::sort(candidates.begin(), candidates.end());
 
     for (const std::string& key : candidates) {
         auto initExpr = exprFromKey(key);
-        if (!initExpr) continue;
+        if (!initExpr)
+            continue;
 
         const std::string varName = "_cse_" + std::to_string(nextId++);
 
@@ -348,10 +352,14 @@ static CSEStats processBlock(BlockStmt* block, unsigned& nextId,
             for (size_t i = 0; i < block->statements.size(); ++i) {
                 probe.clear();
                 collectKeysFromStmt(block->statements[i].get(), probe, idempotent, opaque);
-                if (probe.count(key)) { insertPos = i; break; }
+                if (probe.count(key)) {
+                    insertPos = i;
+                    break;
+                }
             }
         }
-        if (insertPos == block->statements.size()) continue;
+        if (insertPos == block->statements.size())
+            continue;
 
         // Insert `var _cse_N = <expr>` before insertPos.
         insertCompilerVarDecl(block, insertPos, varName, std::move(initExpr), /*isConst=*/true);
@@ -373,7 +381,8 @@ static CSEStats processBlock(BlockStmt* block, unsigned& nextId,
 
     // ── Step 3: recurse into nested blocks ──────────────────────────────────
     for (auto& stmt : block->statements) {
-        if (!stmt) continue;
+        if (!stmt)
+            continue;
         if (stmt->type == ASTNodeType::BLOCK) {
             auto sub = processBlock(static_cast<BlockStmt*>(stmt.get()), nextId, idempotent, opaque);
             stats.expressionsHoisted += sub.expressionsHoisted;
@@ -445,7 +454,8 @@ static void collectOpaqueVarsInList(const std::vector<std::unique_ptr<Statement>
 
 /// Collect all volatile/atomic variable names in a block (recursive).
 static void collectOpaqueVars(const BlockStmt* block, OpaqueSet& out) {
-    if (!block) return;
+    if (!block)
+        return;
     collectOpaqueVarsInList(block->statements, out);
 }
 
@@ -457,11 +467,13 @@ static void collectOpaqueVarsInList(const std::vector<std::unique_ptr<Statement>
 
 /// Walk a single statement accumulating volatile/atomic var names.
 static void collectOpaqueVarsInStmt(const Statement* stmt, OpaqueSet& out) {
-    if (!stmt) return;
+    if (!stmt)
+        return;
     switch (stmt->type) {
     case ASTNodeType::VAR_DECL: {
         const auto* vd = static_cast<const VarDecl*>(stmt);
-        if (vd->isVolatile || vd->isAtomic) out.insert(vd->name);
+        if (vd->isVolatile || vd->isAtomic)
+            out.insert(vd->name);
         break;
     }
     case ASTNodeType::BLOCK:
@@ -540,8 +552,7 @@ static void collectOpaqueVarsInStmt(const Statement* stmt, OpaqueSet& out) {
     }
 }
 
-CSEStats runCSEPass(Program* program,
-                    bool verbose,
+CSEStats runCSEPass(Program* program, bool verbose,
                     const std::unordered_map<std::string, EffectSummary>* idempotentFuncs) {
     CSEStats total;
 
@@ -559,11 +570,8 @@ CSEStats runCSEPass(Program* program,
         total.tempVarsIntroduced += fnStats.tempVarsIntroduced;
 
         if (verbose && fnStats.tempVarsIntroduced > 0) {
-            std::cerr << "[CSE] " << fn->name
-                      << ": " << fnStats.tempVarsIntroduced
-                      << " temp var(s) introduced, "
-                      << fnStats.expressionsHoisted
-                      << " occurrence(s) replaced\n";
+            std::cerr << "[CSE] " << fn->name << ": " << fnStats.tempVarsIntroduced << " temp var(s) introduced, "
+                      << fnStats.expressionsHoisted << " occurrence(s) replaced\n";
         }
     });
 

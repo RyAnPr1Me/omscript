@@ -1,6 +1,6 @@
 #include "parser.h"
 #include "diagnostic.h"
-#include "pass_utils.h"   // isIntWidthTypeName, isKnownScalarTypeName
+#include "pass_utils.h" // isIntWidthTypeName, isKnownScalarTypeName
 #include "preprocessor.h"
 #include <filesystem>
 #include <fstream>
@@ -30,144 +30,225 @@ void Parser::registerStdNamespace() {
     // by the CF-CTRE evaluator and the synthesis pre-codegen pass.
     static const std::vector<std::pair<std::string, std::string>> kStdFunctions = {
         // ── Math ────────────────────────────────────────────────────────────
-        {"abs",        "abs"},        {"min",        "min"},
-        {"max",        "max"},        {"sign",       "sign"},
-        {"clamp",      "clamp"},      {"pow",        "pow"},
-        {"sqrt",       "sqrt"},       {"cbrt",       "cbrt"},
-        {"floor",      "floor"},      {"ceil",       "ceil"},
-        {"round",      "round"},      {"log",        "log"},
-        {"log2",       "log2"},       {"log10",      "log10"},
-        {"exp",        "exp"},        {"exp2",       "exp2"},
-        {"gcd",        "gcd"},        {"lcm",        "lcm"},
-        {"hypot",      "hypot"},      {"fma",        "fma"},
-        {"copysign",   "copysign"},   {"min_float",  "min_float"},
-        {"max_float",  "max_float"},
+        {"abs", "abs"},
+        {"min", "min"},
+        {"max", "max"},
+        {"sign", "sign"},
+        {"clamp", "clamp"},
+        {"pow", "pow"},
+        {"sqrt", "sqrt"},
+        {"cbrt", "cbrt"},
+        {"floor", "floor"},
+        {"ceil", "ceil"},
+        {"round", "round"},
+        {"log", "log"},
+        {"log2", "log2"},
+        {"log10", "log10"},
+        {"exp", "exp"},
+        {"exp2", "exp2"},
+        {"gcd", "gcd"},
+        {"lcm", "lcm"},
+        {"hypot", "hypot"},
+        {"fma", "fma"},
+        {"copysign", "copysign"},
+        {"min_float", "min_float"},
+        {"max_float", "max_float"},
         // ── Trig ────────────────────────────────────────────────────────────
-        {"sin",        "sin"},        {"cos",        "cos"},
-        {"tan",        "tan"},        {"asin",       "asin"},
-        {"acos",       "acos"},       {"atan",       "atan"},
-        {"atan2",      "atan2"},
+        {"sin", "sin"},
+        {"cos", "cos"},
+        {"tan", "tan"},
+        {"asin", "asin"},
+        {"acos", "acos"},
+        {"atan", "atan"},
+        {"atan2", "atan2"},
         // ── Bit ops ─────────────────────────────────────────────────────────
-        {"popcount",   "popcount"},   {"clz",        "clz"},
-        {"ctz",        "ctz"},        {"bitreverse", "bitreverse"},
-        {"bswap",      "bswap"},
-        {"rotate_left","rotate_left"},{"rotate_right","rotate_right"},
-        {"saturating_add","saturating_add"},
-        {"saturating_sub","saturating_sub"},
-        {"is_power_of_2","is_power_of_2"},
-        {"is_even",    "is_even"},    {"is_odd",     "is_odd"},
+        {"popcount", "popcount"},
+        {"clz", "clz"},
+        {"ctz", "ctz"},
+        {"bitreverse", "bitreverse"},
+        {"bswap", "bswap"},
+        {"rotate_left", "rotate_left"},
+        {"rotate_right", "rotate_right"},
+        {"saturating_add", "saturating_add"},
+        {"saturating_sub", "saturating_sub"},
+        {"is_power_of_2", "is_power_of_2"},
+        {"is_even", "is_even"},
+        {"is_odd", "is_odd"},
         // ── Type casts / numeric ─────────────────────────────────────────────
-        {"to_int",     "to_int"},     {"to_float",   "to_float"},
-        {"to_string",  "to_string"},  {"to_char",    "to_char"},
-        {"number_to_string","number_to_string"},
-        {"string_to_number","string_to_number"},
-        {"str_to_int", "str_to_int"},{"str_to_float","str_to_float"},
-        {"typeof",     "typeof"},
+        {"to_int", "to_int"},
+        {"to_float", "to_float"},
+        {"to_string", "to_string"},
+        {"to_char", "to_char"},
+        {"number_to_string", "number_to_string"},
+        {"string_to_number", "string_to_number"},
+        {"str_to_int", "str_to_int"},
+        {"str_to_float", "str_to_float"},
+        {"typeof", "typeof"},
         // ── String ──────────────────────────────────────────────────────────
-        {"len",        "len"},        {"str_len",    "str_len"},
-        {"str_eq",     "str_eq"},     {"str_concat", "str_concat"},
-        {"str_find",   "str_find"},   {"str_index_of","str_index_of"},
-        {"str_contains","str_contains"},
-        {"str_starts_with","str_starts_with"},
-        {"str_ends_with","str_ends_with"},
-        {"str_substr", "str_substr"}, {"str_upper",  "str_upper"},
-        {"str_lower",  "str_lower"},  {"str_trim",   "str_trim"},
-        {"str_lstrip", "str_lstrip"}, {"str_rstrip", "str_rstrip"},
-        {"str_reverse","str_reverse"},{"str_repeat", "str_repeat"},
-        {"str_count",  "str_count"},  {"str_replace","str_replace"},
-        {"str_pad_left","str_pad_left"},
-        {"str_pad_right","str_pad_right"},
-        {"str_chars",  "str_chars"},  {"str_split",  "str_split"},
-        {"str_join",   "str_join"},   {"str_filter", "str_filter"},
-        {"str_remove", "str_remove"}, {"str_format", "str_format"},
-        {"char_at",    "char_at"},    {"char_code",  "char_code"},
-        {"is_alpha",   "is_alpha"},   {"is_digit",   "is_digit"},
-        {"is_upper",   "is_upper"},   {"is_lower",   "is_lower"},
-        {"is_space",   "is_space"},   {"is_alnum",   "is_alnum"},
+        {"len", "len"},
+        {"str_len", "str_len"},
+        {"str_eq", "str_eq"},
+        {"str_concat", "str_concat"},
+        {"str_find", "str_find"},
+        {"str_index_of", "str_index_of"},
+        {"str_contains", "str_contains"},
+        {"str_starts_with", "str_starts_with"},
+        {"str_ends_with", "str_ends_with"},
+        {"str_substr", "str_substr"},
+        {"str_upper", "str_upper"},
+        {"str_lower", "str_lower"},
+        {"str_trim", "str_trim"},
+        {"str_lstrip", "str_lstrip"},
+        {"str_rstrip", "str_rstrip"},
+        {"str_reverse", "str_reverse"},
+        {"str_repeat", "str_repeat"},
+        {"str_count", "str_count"},
+        {"str_replace", "str_replace"},
+        {"str_pad_left", "str_pad_left"},
+        {"str_pad_right", "str_pad_right"},
+        {"str_chars", "str_chars"},
+        {"str_split", "str_split"},
+        {"str_join", "str_join"},
+        {"str_filter", "str_filter"},
+        {"str_remove", "str_remove"},
+        {"str_format", "str_format"},
+        {"char_at", "char_at"},
+        {"char_code", "char_code"},
+        {"is_alpha", "is_alpha"},
+        {"is_digit", "is_digit"},
+        {"is_upper", "is_upper"},
+        {"is_lower", "is_lower"},
+        {"is_space", "is_space"},
+        {"is_alnum", "is_alnum"},
         // ── Array ────────────────────────────────────────────────────────────
-        {"push",       "push"},       {"pop",        "pop"},
-        {"shift",      "shift"},      {"unshift",    "unshift"},
-        {"len",        "len"},        {"reverse",    "reverse"},
-        {"sort",       "sort"},       {"sum",        "sum"},
-        {"index_of",   "index_of"},   {"swap",       "swap"},
-        {"array_fill", "array_fill"}, {"range",      "range"},
-        {"range_step", "range_step"}, {"array_concat","array_concat"},
-        {"array_slice","array_slice"},{"array_copy", "array_copy"},
-        {"array_contains","array_contains"},
-        {"array_find", "array_find"}, {"array_min",  "array_min"},
-        {"array_max",  "array_max"},  {"array_last", "array_last"},
-        {"array_product","array_product"},
-        {"array_map",  "array_map"},  {"array_filter","array_filter"},
-        {"array_reduce","array_reduce"},
-        {"array_any",  "array_any"},  {"array_every","array_every"},
-        {"array_count","array_count"},{"array_unique","array_unique"},
-        {"array_zip",  "array_zip"},  {"array_take", "array_take"},
-        {"array_drop", "array_drop"}, {"array_rotate","array_rotate"},
-        {"array_insert","array_insert"},
-        {"array_remove","array_remove"},
+        {"push", "push"},
+        {"pop", "pop"},
+        {"shift", "shift"},
+        {"unshift", "unshift"},
+        {"len", "len"},
+        {"reverse", "reverse"},
+        {"sort", "sort"},
+        {"sum", "sum"},
+        {"index_of", "index_of"},
+        {"swap", "swap"},
+        {"array_fill", "array_fill"},
+        {"range", "range"},
+        {"range_step", "range_step"},
+        {"array_concat", "array_concat"},
+        {"array_slice", "array_slice"},
+        {"array_copy", "array_copy"},
+        {"array_contains", "array_contains"},
+        {"array_find", "array_find"},
+        {"array_min", "array_min"},
+        {"array_max", "array_max"},
+        {"array_last", "array_last"},
+        {"array_product", "array_product"},
+        {"array_map", "array_map"},
+        {"array_filter", "array_filter"},
+        {"array_reduce", "array_reduce"},
+        {"array_any", "array_any"},
+        {"array_every", "array_every"},
+        {"array_count", "array_count"},
+        {"array_unique", "array_unique"},
+        {"array_zip", "array_zip"},
+        {"array_take", "array_take"},
+        {"array_drop", "array_drop"},
+        {"array_rotate", "array_rotate"},
+        {"array_insert", "array_insert"},
+        {"array_remove", "array_remove"},
         {"array_mean", "array_mean"},
         // ── Map ─────────────────────────────────────────────────────────────
-        {"map_new",    "map_new"},    {"map_get",    "map_get"},
-        {"map_set",    "map_set"},    {"map_has",    "map_has"},
-        {"map_remove", "map_remove"}, {"map_keys",   "map_keys"},
-        {"map_values", "map_values"}, {"map_size",   "map_size"},
-        {"map_merge",  "map_merge"},  {"map_filter", "map_filter"},
+        {"map_new", "map_new"},
+        {"map_get", "map_get"},
+        {"map_set", "map_set"},
+        {"map_has", "map_has"},
+        {"map_remove", "map_remove"},
+        {"map_keys", "map_keys"},
+        {"map_values", "map_values"},
+        {"map_size", "map_size"},
+        {"map_merge", "map_merge"},
+        {"map_filter", "map_filter"},
         {"map_invert", "map_invert"},
         // ── Generic ──────────────────────────────────────────────────────────
-        {"filter",     "filter"},
+        {"filter", "filter"},
         // ── I/O ─────────────────────────────────────────────────────────────
-        {"print",      "print"},      {"println",    "println"},
-        {"write",      "write"},      {"print_char", "print_char"},
-        {"input",      "input"},      {"input_line", "input_line"},
-        {"file_read",  "file_read"},  {"file_write", "file_write"},
-        {"file_append","file_append"},{"file_exists","file_exists"},
+        {"print", "print"},
+        {"println", "println"},
+        {"write", "write"},
+        {"print_char", "print_char"},
+        {"input", "input"},
+        {"input_line", "input_line"},
+        {"file_read", "file_read"},
+        {"file_write", "file_write"},
+        {"file_append", "file_append"},
+        {"file_exists", "file_exists"},
         // ── System ──────────────────────────────────────────────────────────
-        {"exit",       "exit"},       {"exit_program","exit_program"},
-        {"command",    "command"},    {"shell",      "shell"},
-        {"sudo_command","sudo_command"},
-        {"env_get",    "env_get"},    {"env_set",    "env_set"},
-        {"time",       "time"},       {"sleep",      "sleep"},
-        {"random",     "random"},
+        {"exit", "exit"},
+        {"exit_program", "exit_program"},
+        {"command", "command"},
+        {"shell", "shell"},
+        {"sudo_command", "sudo_command"},
+        {"env_get", "env_get"},
+        {"env_set", "env_set"},
+        {"time", "time"},
+        {"sleep", "sleep"},
+        {"random", "random"},
         // ── Threading ────────────────────────────────────────────────────────
-        {"thread_create","thread_create"},{"thread_join","thread_join"},
-        {"mutex_new",  "mutex_new"},  {"mutex_lock", "mutex_lock"},
-        {"mutex_unlock","mutex_unlock"},
-        {"mutex_destroy","mutex_destroy"},
+        {"thread_create", "thread_create"},
+        {"thread_join", "thread_join"},
+        {"mutex_new", "mutex_new"},
+        {"mutex_lock", "mutex_lock"},
+        {"mutex_unlock", "mutex_unlock"},
+        {"mutex_destroy", "mutex_destroy"},
         // ── Assertions / hints ────────────────────────────────────────────────
-        {"assert",     "assert"},     {"expect",     "expect"},
-        {"assume",     "assume"},     {"unreachable","unreachable"},
+        {"assert", "assert"},
+        {"expect", "expect"},
+        {"assume", "assume"},
+        {"unreachable", "unreachable"},
         // ── BigInt ───────────────────────────────────────────────────────────
-        {"bigint",         "bigint"},
-        {"bigint_add",     "bigint_add"},   {"bigint_sub",  "bigint_sub"},
-        {"bigint_mul",     "bigint_mul"},   {"bigint_div",  "bigint_div"},
-        {"bigint_mod",     "bigint_mod"},   {"bigint_neg",  "bigint_neg"},
-        {"bigint_abs",     "bigint_abs"},   {"bigint_pow",  "bigint_pow"},
-        {"bigint_gcd",     "bigint_gcd"},   {"bigint_cmp",  "bigint_cmp"},
-        {"bigint_eq",      "bigint_eq"},    {"bigint_lt",   "bigint_lt"},
-        {"bigint_le",      "bigint_le"},    {"bigint_gt",   "bigint_gt"},
-        {"bigint_ge",      "bigint_ge"},
-        {"bigint_tostring","bigint_tostring"},
-        {"bigint_to_i64",  "bigint_to_i64"},
-        {"bigint_shl",     "bigint_shl"},   {"bigint_shr",  "bigint_shr"},
-        {"bigint_bit_length","bigint_bit_length"},
-        {"bigint_is_zero","bigint_is_zero"},
-        {"bigint_is_negative","bigint_is_negative"},
+        {"bigint", "bigint"},
+        {"bigint_add", "bigint_add"},
+        {"bigint_sub", "bigint_sub"},
+        {"bigint_mul", "bigint_mul"},
+        {"bigint_div", "bigint_div"},
+        {"bigint_mod", "bigint_mod"},
+        {"bigint_neg", "bigint_neg"},
+        {"bigint_abs", "bigint_abs"},
+        {"bigint_pow", "bigint_pow"},
+        {"bigint_gcd", "bigint_gcd"},
+        {"bigint_cmp", "bigint_cmp"},
+        {"bigint_eq", "bigint_eq"},
+        {"bigint_lt", "bigint_lt"},
+        {"bigint_le", "bigint_le"},
+        {"bigint_gt", "bigint_gt"},
+        {"bigint_ge", "bigint_ge"},
+        {"bigint_tostring", "bigint_tostring"},
+        {"bigint_to_i64", "bigint_to_i64"},
+        {"bigint_shl", "bigint_shl"},
+        {"bigint_shr", "bigint_shr"},
+        {"bigint_bit_length", "bigint_bit_length"},
+        {"bigint_is_zero", "bigint_is_zero"},
+        {"bigint_is_negative", "bigint_is_negative"},
         // ── Fast / precise arithmetic ─────────────────────────────────────────
-        {"fast_add",   "fast_add"},   {"fast_sub",   "fast_sub"},
-        {"fast_mul",   "fast_mul"},   {"fast_div",   "fast_div"},
-        {"precise_add","precise_add"},{"precise_sub","precise_sub"},
-        {"precise_mul","precise_mul"},{"precise_div","precise_div"},
+        {"fast_add", "fast_add"},
+        {"fast_sub", "fast_sub"},
+        {"fast_mul", "fast_mul"},
+        {"fast_div", "fast_div"},
+        {"precise_add", "precise_add"},
+        {"precise_sub", "precise_sub"},
+        {"precise_mul", "precise_mul"},
+        {"precise_div", "precise_div"},
         // ── std::synthesize — the program synthesis stdlib function ───────────
         // Resolves to the internal name "std__synthesize" so that the CF-CTRE
         // builtin evaluator and the synthesis pre-codegen pass can identify it.
         {"synthesize", "std__synthesize"},
         // ── Type-specific fast builtins ───────────────────────────────────────
-        {"mulhi",      "mulhi"},
-        {"mulhi_u",    "mulhi_u"},
-        {"absdiff",    "absdiff"},
-        {"fast_sqrt",  "fast_sqrt"},
-        {"is_nan",     "is_nan"},
-        {"is_inf",     "is_inf"},
+        {"mulhi", "mulhi"},
+        {"mulhi_u", "mulhi_u"},
+        {"absdiff", "absdiff"},
+        {"fast_sqrt", "fast_sqrt"},
+        {"is_nan", "is_nan"},
+        {"is_inf", "is_inf"},
     };
 
     auto& stdNS = importNamespaces_["std"];
@@ -258,13 +339,11 @@ void Parser::synchronize() {
 void Parser::prescanCustomOperators() {
     const size_t saved = current;
     for (size_t i = 0; i + 1 < tokens.size(); ++i) {
-        if (tokens[i].type  == TokenType::IDENTIFIER &&
-            tokens[i].lexeme == "operator") {
+        if (tokens[i].type == TokenType::IDENTIFIER && tokens[i].lexeme == "operator") {
             // Collect tokens between 'operator' and the first '('
             std::string opStr;
             size_t j = i + 1;
-            while (j < tokens.size() &&
-                   tokens[j].type != TokenType::LPAREN &&
+            while (j < tokens.size() && tokens[j].type != TokenType::LPAREN &&
                    tokens[j].type != TokenType::END_OF_FILE) {
                 // Skip quoted-string names — they are only callable via backtick.
                 // Raw token-sequence symbols (e.g. "<=>" from LE + GT) are what
@@ -273,8 +352,7 @@ void Parser::prescanCustomOperators() {
                     opStr += tokens[j].lexeme;
                 ++j;
             }
-            if (!opStr.empty() && j < tokens.size() &&
-                tokens[j].type == TokenType::LPAREN) {
+            if (!opStr.empty() && j < tokens.size() && tokens[j].type == TokenType::LPAREN) {
                 customOperatorSymbols_.insert(opStr);
             }
         }
@@ -389,11 +467,11 @@ std::unique_ptr<Program> Parser::parse() {
                 // the name is not defined.
                 auto getComptimeVar = [&](const std::string& name) -> std::optional<CVal> {
 #if defined(_WIN32) || defined(_WIN64)
-                    static constexpr const char* kOS   = "windows";
+                    static constexpr const char* kOS = "windows";
 #elif defined(__APPLE__)
-                    static constexpr const char* kOS   = "macos";
+                    static constexpr const char* kOS = "macos";
 #else
-                    static constexpr const char* kOS   = "linux";
+                    static constexpr const char* kOS = "linux";
 #endif
 #if defined(__x86_64__) || defined(_M_X64)
                     static constexpr const char* kArch = "x86_64";
@@ -404,9 +482,12 @@ std::unique_ptr<Program> Parser::parse() {
 #else
                     static constexpr const char* kArch = "unknown";
 #endif
-                    if (name == "OS")      return CVal{true,  0, kOS};
-                    if (name == "ARCH")    return CVal{true,  0, kArch};
-                    if (name == "VERSION") return CVal{true,  0, OMSC_VERSION};
+                    if (name == "OS")
+                        return CVal{true, 0, kOS};
+                    if (name == "ARCH")
+                        return CVal{true, 0, kArch};
+                    if (name == "VERSION")
+                        return CVal{true, 0, OMSC_VERSION};
                     {
                         auto it = comptimeConstants_.find(name);
                         if (it != comptimeConstants_.end())
@@ -430,10 +511,10 @@ std::unique_ptr<Program> Parser::parse() {
                 //
                 // evalOr is declared first so that evalPrimary can capture it
                 // by reference for parenthesised sub-expressions.
-                std::function<bool()>  evalOr;
-                std::function<bool()>  evalAnd;
-                std::function<CVal()>  evalCmp;
-                std::function<CVal()>  evalPrimary;
+                std::function<bool()> evalOr;
+                std::function<bool()> evalAnd;
+                std::function<CVal()> evalCmp;
+                std::function<CVal()> evalPrimary;
 
                 evalPrimary = [&]() -> CVal {
                     // Logical NOT
@@ -444,7 +525,8 @@ std::unique_ptr<Program> Parser::parse() {
                     // Parenthesised sub-expression
                     if (match(TokenType::LPAREN)) {
                         bool r = evalOr();
-                        if (check(TokenType::RPAREN)) advance();
+                        if (check(TokenType::RPAREN))
+                            advance();
                         return CVal{false, r ? 1LL : 0LL, ""};
                     }
                     // String literal
@@ -467,8 +549,10 @@ std::unique_ptr<Program> Parser::parse() {
                         return CVal{false, (long long)advance().floatValue, ""};
                     }
                     // Boolean literals
-                    if (match(TokenType::TRUE))  return CVal{false, 1, ""};
-                    if (match(TokenType::FALSE)) return CVal{false, 0, ""};
+                    if (match(TokenType::TRUE))
+                        return CVal{false, 1, ""};
+                    if (match(TokenType::FALSE))
+                        return CVal{false, 0, ""};
                     // Identifier — comptime var ref or defined(name) predicate
                     if (check(TokenType::IDENTIFIER)) {
                         const std::string name = advance().lexeme;
@@ -477,10 +561,11 @@ std::unique_ptr<Program> Parser::parse() {
                         if (name == "defined" && check(TokenType::LPAREN)) {
                             advance(); // consume '('
                             std::string dname;
-                            if (check(TokenType::IDENTIFIER)) dname = advance().lexeme;
-                            if (check(TokenType::RPAREN)) advance(); // consume ')'
-                            const bool isDef = comptimeConstants_.count(dname) > 0 ||
-                                               comptimeStrings_.count(dname)    > 0;
+                            if (check(TokenType::IDENTIFIER))
+                                dname = advance().lexeme;
+                            if (check(TokenType::RPAREN))
+                                advance(); // consume ')'
+                            const bool isDef = comptimeConstants_.count(dname) > 0 || comptimeStrings_.count(dname) > 0;
                             return CVal{false, isDef ? 1LL : 0LL, ""};
                         }
                         auto v = getComptimeVar(name);
@@ -491,30 +576,41 @@ std::unique_ptr<Program> Parser::parse() {
 
                 evalCmp = [&]() -> CVal {
                     CVal lhs = evalPrimary();
-                    if (!check(TokenType::EQ) && !check(TokenType::NE) &&
-                        !check(TokenType::LT) && !check(TokenType::LE) &&
-                        !check(TokenType::GT) && !check(TokenType::GE)) {
+                    if (!check(TokenType::EQ) && !check(TokenType::NE) && !check(TokenType::LT) &&
+                        !check(TokenType::LE) && !check(TokenType::GT) && !check(TokenType::GE)) {
                         return lhs;
                     }
                     const TokenType op = advance().type; // consume comparison operator
                     CVal rhs = evalPrimary();
                     bool result = false;
                     if (lhs.isStr && rhs.isStr) {
-                        if      (op == TokenType::EQ) result = lhs.s == rhs.s;
-                        else if (op == TokenType::NE) result = lhs.s != rhs.s;
-                        else if (op == TokenType::LT) result = lhs.s <  rhs.s;
-                        else if (op == TokenType::LE) result = lhs.s <= rhs.s;
-                        else if (op == TokenType::GT) result = lhs.s >  rhs.s;
-                        else if (op == TokenType::GE) result = lhs.s >= rhs.s;
+                        if (op == TokenType::EQ)
+                            result = lhs.s == rhs.s;
+                        else if (op == TokenType::NE)
+                            result = lhs.s != rhs.s;
+                        else if (op == TokenType::LT)
+                            result = lhs.s < rhs.s;
+                        else if (op == TokenType::LE)
+                            result = lhs.s <= rhs.s;
+                        else if (op == TokenType::GT)
+                            result = lhs.s > rhs.s;
+                        else if (op == TokenType::GE)
+                            result = lhs.s >= rhs.s;
                     } else {
                         const long long l = lhs.isStr ? 0LL : lhs.i;
                         const long long r = rhs.isStr ? 0LL : rhs.i;
-                        if      (op == TokenType::EQ) result = l == r;
-                        else if (op == TokenType::NE) result = l != r;
-                        else if (op == TokenType::LT) result = l <  r;
-                        else if (op == TokenType::LE) result = l <= r;
-                        else if (op == TokenType::GT) result = l >  r;
-                        else if (op == TokenType::GE) result = l >= r;
+                        if (op == TokenType::EQ)
+                            result = l == r;
+                        else if (op == TokenType::NE)
+                            result = l != r;
+                        else if (op == TokenType::LT)
+                            result = l < r;
+                        else if (op == TokenType::LE)
+                            result = l <= r;
+                        else if (op == TokenType::GT)
+                            result = l > r;
+                        else if (op == TokenType::GE)
+                            result = l >= r;
                     }
                     return CVal{false, result ? 1LL : 0LL, ""};
                 };
@@ -552,279 +648,222 @@ std::unique_ptr<Program> Parser::parse() {
                         // ── const declaration ──────────────────────────────
                         if (match(TokenType::CONST)) {
                             const Token cname = consume(TokenType::IDENTIFIER,
-                                "Expected constant name after 'const' in comptime block");
+                                                        "Expected constant name after 'const' in comptime block");
                             std::string typeName;
                             if (match(TokenType::COLON)) {
                                 typeName = parseTypeAnnotation();
                             }
-                            consume(TokenType::ASSIGN,
-                                "Expected '=' in comptime const declaration");
+                            consume(TokenType::ASSIGN, "Expected '=' in comptime const declaration");
                             // Determine the value's kind.
                             const bool neg = match(TokenType::MINUS);
                             if (check(TokenType::INTEGER)) {
-                                const long long val = neg
-                                    ? -(long long)advance().intValue
-                                    :  (long long)advance().intValue;
-                                consume(TokenType::SEMICOLON,
-                                    "Expected ';' after comptime const");
+                                const long long val =
+                                    neg ? -(long long)advance().intValue : (long long)advance().intValue;
+                                consume(TokenType::SEMICOLON, "Expected ';' after comptime const");
                                 if (active) {
                                     comptimeConstants_[cname.lexeme] = val;
-                                    const std::string tn =
-                                        typeName.empty() ? "int" : typeName;
+                                    const std::string tn = typeName.empty() ? "int" : typeName;
                                     auto initExpr = std::make_unique<LiteralExpr>(val);
-                                    auto gv = std::make_unique<VarDecl>(
-                                        cname.lexeme, std::move(initExpr),
-                                        /*isConst=*/true, tn);
+                                    auto gv = std::make_unique<VarDecl>(cname.lexeme, std::move(initExpr),
+                                                                        /*isConst=*/true, tn);
                                     gv->isCompilerGenerated = true;
-                                    gv->line   = cname.line;
+                                    gv->line = cname.line;
                                     gv->column = cname.column;
                                     globals.push_back(std::move(gv));
                                 }
                             } else if (check(TokenType::FLOAT)) {
-                                const double fval = neg
-                                    ? -advance().floatValue
-                                    :  advance().floatValue;
-                                consume(TokenType::SEMICOLON,
-                                    "Expected ';' after comptime const");
+                                const double fval = neg ? -advance().floatValue : advance().floatValue;
+                                consume(TokenType::SEMICOLON, "Expected ';' after comptime const");
                                 if (active) {
                                     // Store truncated integer for numeric
                                     // comptime-if comparisons.
-                                    comptimeConstants_[cname.lexeme] =
-                                        (long long)fval;
-                                    const std::string tn =
-                                        typeName.empty() ? "float" : typeName;
-                                    auto initExpr =
-                                        std::make_unique<LiteralExpr>(fval);
-                                    auto gv = std::make_unique<VarDecl>(
-                                        cname.lexeme, std::move(initExpr),
-                                        /*isConst=*/true, tn);
+                                    comptimeConstants_[cname.lexeme] = (long long)fval;
+                                    const std::string tn = typeName.empty() ? "float" : typeName;
+                                    auto initExpr = std::make_unique<LiteralExpr>(fval);
+                                    auto gv = std::make_unique<VarDecl>(cname.lexeme, std::move(initExpr),
+                                                                        /*isConst=*/true, tn);
                                     gv->isCompilerGenerated = true;
-                                    gv->line   = cname.line;
+                                    gv->line = cname.line;
                                     gv->column = cname.column;
                                     globals.push_back(std::move(gv));
                                 }
                             } else if (!neg && check(TokenType::STRING)) {
                                 const std::string sval = advance().lexeme;
-                                consume(TokenType::SEMICOLON,
-                                    "Expected ';' after comptime const");
+                                consume(TokenType::SEMICOLON, "Expected ';' after comptime const");
                                 if (active) {
                                     comptimeStrings_[cname.lexeme] = sval;
-                                    const std::string tn =
-                                        typeName.empty() ? "string" : typeName;
-                                    auto initExpr =
-                                        std::make_unique<LiteralExpr>(sval);
-                                    auto gv = std::make_unique<VarDecl>(
-                                        cname.lexeme, std::move(initExpr),
-                                        /*isConst=*/true, tn);
+                                    const std::string tn = typeName.empty() ? "string" : typeName;
+                                    auto initExpr = std::make_unique<LiteralExpr>(sval);
+                                    auto gv = std::make_unique<VarDecl>(cname.lexeme, std::move(initExpr),
+                                                                        /*isConst=*/true, tn);
                                     gv->isCompilerGenerated = true;
-                                    gv->line   = cname.line;
+                                    gv->line = cname.line;
                                     gv->column = cname.column;
                                     globals.push_back(std::move(gv));
                                 }
                             } else if (!neg && match(TokenType::TRUE)) {
-                                consume(TokenType::SEMICOLON,
-                                    "Expected ';' after comptime const");
+                                consume(TokenType::SEMICOLON, "Expected ';' after comptime const");
                                 if (active) {
                                     comptimeConstants_[cname.lexeme] = 1;
-                                    const std::string tn =
-                                        typeName.empty() ? "bool" : typeName;
-                                    auto initExpr =
-                                        std::make_unique<LiteralExpr>(1LL);
-                                    auto gv = std::make_unique<VarDecl>(
-                                        cname.lexeme, std::move(initExpr),
-                                        /*isConst=*/true, tn);
+                                    const std::string tn = typeName.empty() ? "bool" : typeName;
+                                    auto initExpr = std::make_unique<LiteralExpr>(1LL);
+                                    auto gv = std::make_unique<VarDecl>(cname.lexeme, std::move(initExpr),
+                                                                        /*isConst=*/true, tn);
                                     gv->isCompilerGenerated = true;
-                                    gv->line   = cname.line;
+                                    gv->line = cname.line;
                                     gv->column = cname.column;
                                     globals.push_back(std::move(gv));
                                 }
                             } else if (!neg && match(TokenType::FALSE)) {
-                                consume(TokenType::SEMICOLON,
-                                    "Expected ';' after comptime const");
+                                consume(TokenType::SEMICOLON, "Expected ';' after comptime const");
                                 if (active) {
                                     comptimeConstants_[cname.lexeme] = 0;
-                                    const std::string tn =
-                                        typeName.empty() ? "bool" : typeName;
-                                    auto initExpr =
-                                        std::make_unique<LiteralExpr>(0LL);
-                                    auto gv = std::make_unique<VarDecl>(
-                                        cname.lexeme, std::move(initExpr),
-                                        /*isConst=*/true, tn);
+                                    const std::string tn = typeName.empty() ? "bool" : typeName;
+                                    auto initExpr = std::make_unique<LiteralExpr>(0LL);
+                                    auto gv = std::make_unique<VarDecl>(cname.lexeme, std::move(initExpr),
+                                                                        /*isConst=*/true, tn);
                                     gv->isCompilerGenerated = true;
-                                    gv->line   = cname.line;
+                                    gv->line = cname.line;
                                     gv->column = cname.column;
                                     globals.push_back(std::move(gv));
                                 }
                             } else if (!neg && check(TokenType::IDENTIFIER)) {
                                 // Reference to an already-defined comptime const.
                                 const std::string refName = advance().lexeme;
-                                consume(TokenType::SEMICOLON,
-                                    "Expected ';' after comptime const");
+                                consume(TokenType::SEMICOLON, "Expected ';' after comptime const");
                                 if (active) {
-                                    const auto itI =
-                                        comptimeConstants_.find(refName);
-                                    const auto itS =
-                                        comptimeStrings_.find(refName);
+                                    const auto itI = comptimeConstants_.find(refName);
+                                    const auto itS = comptimeStrings_.find(refName);
                                     auto bv = getComptimeVar(refName);
                                     if (bv && !bv->isStr) {
                                         // Integer or built-in numeric
-                                        comptimeConstants_[cname.lexeme] =
-                                            bv->i;
-                                        const std::string tn =
-                                            typeName.empty() ? "int" : typeName;
-                                        auto initExpr =
-                                            std::make_unique<LiteralExpr>(bv->i);
-                                        auto gv = std::make_unique<VarDecl>(
-                                            cname.lexeme, std::move(initExpr),
-                                            /*isConst=*/true, tn);
+                                        comptimeConstants_[cname.lexeme] = bv->i;
+                                        const std::string tn = typeName.empty() ? "int" : typeName;
+                                        auto initExpr = std::make_unique<LiteralExpr>(bv->i);
+                                        auto gv = std::make_unique<VarDecl>(cname.lexeme, std::move(initExpr),
+                                                                            /*isConst=*/true, tn);
                                         gv->isCompilerGenerated = true;
-                                        gv->line   = cname.line;
+                                        gv->line = cname.line;
                                         gv->column = cname.column;
                                         globals.push_back(std::move(gv));
                                     } else if (bv && bv->isStr) {
                                         // String (user-defined or built-in
                                         // OS/ARCH/VERSION)
                                         comptimeStrings_[cname.lexeme] = bv->s;
-                                        const std::string tn =
-                                            typeName.empty() ? "string" : typeName;
-                                        auto initExpr =
-                                            std::make_unique<LiteralExpr>(bv->s);
-                                        auto gv = std::make_unique<VarDecl>(
-                                            cname.lexeme, std::move(initExpr),
-                                            /*isConst=*/true, tn);
+                                        const std::string tn = typeName.empty() ? "string" : typeName;
+                                        auto initExpr = std::make_unique<LiteralExpr>(bv->s);
+                                        auto gv = std::make_unique<VarDecl>(cname.lexeme, std::move(initExpr),
+                                                                            /*isConst=*/true, tn);
                                         gv->isCompilerGenerated = true;
-                                        gv->line   = cname.line;
+                                        gv->line = cname.line;
                                         gv->column = cname.column;
                                         globals.push_back(std::move(gv));
                                     } else if (itI != comptimeConstants_.end()) {
                                         // Already checked via getComptimeVar but
                                         // keep as fallback for non-builtin ints.
-                                        comptimeConstants_[cname.lexeme] =
-                                            itI->second;
-                                        const std::string tn =
-                                            typeName.empty() ? "int" : typeName;
-                                        auto initExpr =
-                                            std::make_unique<LiteralExpr>(
-                                                itI->second);
-                                        auto gv = std::make_unique<VarDecl>(
-                                            cname.lexeme, std::move(initExpr),
-                                            /*isConst=*/true, tn);
+                                        comptimeConstants_[cname.lexeme] = itI->second;
+                                        const std::string tn = typeName.empty() ? "int" : typeName;
+                                        auto initExpr = std::make_unique<LiteralExpr>(itI->second);
+                                        auto gv = std::make_unique<VarDecl>(cname.lexeme, std::move(initExpr),
+                                                                            /*isConst=*/true, tn);
                                         gv->isCompilerGenerated = true;
-                                        gv->line   = cname.line;
+                                        gv->line = cname.line;
                                         gv->column = cname.column;
                                         globals.push_back(std::move(gv));
                                     } else if (itS != comptimeStrings_.end()) {
-                                        comptimeStrings_[cname.lexeme] =
-                                            itS->second;
-                                        const std::string tn =
-                                            typeName.empty() ? "string" : typeName;
-                                        auto initExpr =
-                                            std::make_unique<LiteralExpr>(
-                                                itS->second);
-                                        auto gv = std::make_unique<VarDecl>(
-                                            cname.lexeme, std::move(initExpr),
-                                            /*isConst=*/true, tn);
+                                        comptimeStrings_[cname.lexeme] = itS->second;
+                                        const std::string tn = typeName.empty() ? "string" : typeName;
+                                        auto initExpr = std::make_unique<LiteralExpr>(itS->second);
+                                        auto gv = std::make_unique<VarDecl>(cname.lexeme, std::move(initExpr),
+                                                                            /*isConst=*/true, tn);
                                         gv->isCompilerGenerated = true;
-                                        gv->line   = cname.line;
+                                        gv->line = cname.line;
                                         gv->column = cname.column;
                                         globals.push_back(std::move(gv));
                                     } else {
-                                        errors_.push_back(
-                                            "comptime const '" + cname.lexeme +
-                                            "': undefined reference to comptime "
-                                            "constant '" + refName + "'");
+                                        errors_.push_back("comptime const '" + cname.lexeme +
+                                                          "': undefined reference to comptime "
+                                                          "constant '" +
+                                                          refName + "'");
                                     }
                                 }
                             } else {
                                 // Unrecognised value form — skip to semicolon.
-                                while (!check(TokenType::SEMICOLON) &&
-                                       !check(TokenType::RBRACE) && !isAtEnd())
+                                while (!check(TokenType::SEMICOLON) && !check(TokenType::RBRACE) && !isAtEnd())
                                     advance();
-                                if (check(TokenType::SEMICOLON)) advance();
+                                if (check(TokenType::SEMICOLON))
+                                    advance();
                             }
                         }
                         // ── comptime if / else if / else ───────────────────
                         else if (match(TokenType::IF)) {
-                            consume(TokenType::LPAREN,
-                                "Expected '(' after 'if' in comptime block");
+                            consume(TokenType::LPAREN, "Expected '(' after 'if' in comptime block");
                             const bool cond = evalOr();
-                            consume(TokenType::RPAREN,
-                                "Expected ')' after condition in comptime if");
-                            consume(TokenType::LBRACE,
-                                "Expected '{' after comptime if condition");
+                            consume(TokenType::RPAREN, "Expected ')' after condition in comptime if");
+                            consume(TokenType::LBRACE, "Expected '{' after comptime if condition");
                             parseBody(active && cond);
-                            consume(TokenType::RBRACE,
-                                "Expected '}' to close comptime if block");
+                            consume(TokenType::RBRACE, "Expected '}' to close comptime if block");
                             bool handled = cond; // true branch was taken
                             while (check(TokenType::ELSE)) {
                                 advance(); // consume 'else'
                                 if (match(TokenType::IF)) {
                                     // else if (COND) { ... }
-                                    consume(TokenType::LPAREN,
-                                        "Expected '(' after 'else if' in "
-                                        "comptime block");
+                                    consume(TokenType::LPAREN, "Expected '(' after 'else if' in "
+                                                               "comptime block");
                                     const bool elseIfCond = evalOr();
-                                    consume(TokenType::RPAREN,
-                                        "Expected ')' after comptime else if "
-                                        "condition");
-                                    consume(TokenType::LBRACE,
-                                        "Expected '{' after comptime else if "
-                                        "condition");
+                                    consume(TokenType::RPAREN, "Expected ')' after comptime else if "
+                                                               "condition");
+                                    consume(TokenType::LBRACE, "Expected '{' after comptime else if "
+                                                               "condition");
                                     parseBody(active && !handled && elseIfCond);
-                                    consume(TokenType::RBRACE,
-                                        "Expected '}' to close comptime else if "
-                                        "block");
-                                    if (elseIfCond) handled = true;
+                                    consume(TokenType::RBRACE, "Expected '}' to close comptime else if "
+                                                               "block");
+                                    if (elseIfCond)
+                                        handled = true;
                                 } else {
                                     // plain else { ... }
-                                    consume(TokenType::LBRACE,
-                                        "Expected '{' after 'else' in comptime "
-                                        "block");
+                                    consume(TokenType::LBRACE, "Expected '{' after 'else' in comptime "
+                                                               "block");
                                     parseBody(active && !handled);
-                                    consume(TokenType::RBRACE,
-                                        "Expected '}' to close comptime else "
-                                        "block");
+                                    consume(TokenType::RBRACE, "Expected '}' to close comptime else "
+                                                               "block");
                                     break; // no more branches after else
                                 }
                             }
                         }
                         // ── error("msg") / warning("msg") ─────────────────
                         else if (check(TokenType::IDENTIFIER) &&
-                                 (tokens[current].lexeme == "error" ||
-                                  tokens[current].lexeme == "warning")) {
+                                 (tokens[current].lexeme == "error" || tokens[current].lexeme == "warning")) {
                             const std::string fname = advance().lexeme;
                             if (match(TokenType::LPAREN)) {
                                 std::string msg;
                                 if (check(TokenType::STRING))
                                     msg = advance().lexeme;
-                                if (check(TokenType::RPAREN)) advance();
-                                if (check(TokenType::SEMICOLON)) advance();
+                                if (check(TokenType::RPAREN))
+                                    advance();
+                                if (check(TokenType::SEMICOLON))
+                                    advance();
                                 if (active) {
                                     if (fname == "error") {
-                                        errors_.push_back(
-                                            "comptime error: " + msg);
+                                        errors_.push_back("comptime error: " + msg);
                                     } else {
-                                        warnings_.push_back(
-                                            "comptime warning: " + msg);
+                                        warnings_.push_back("comptime warning: " + msg);
                                     }
                                 }
                             } else {
-                                while (!check(TokenType::SEMICOLON) &&
-                                       !check(TokenType::RBRACE) && !isAtEnd())
+                                while (!check(TokenType::SEMICOLON) && !check(TokenType::RBRACE) && !isAtEnd())
                                     advance();
-                                if (check(TokenType::SEMICOLON)) advance();
+                                if (check(TokenType::SEMICOLON))
+                                    advance();
                             }
                         }
                         // ── skip anything else (future-proofing) ──────────
                         else {
-                            while (!check(TokenType::SEMICOLON) &&
-                                   !check(TokenType::RBRACE)    &&
-                                   !check(TokenType::IF)        &&
-                                   !check(TokenType::ELSE)      &&
-                                   !check(TokenType::CONST)     &&
-                                   !isAtEnd())
+                            while (!check(TokenType::SEMICOLON) && !check(TokenType::RBRACE) && !check(TokenType::IF) &&
+                                   !check(TokenType::ELSE) && !check(TokenType::CONST) && !isAtEnd())
                                 advance();
-                            if (check(TokenType::SEMICOLON)) advance();
+                            if (check(TokenType::SEMICOLON))
+                                advance();
                         }
                     }
                 };
@@ -868,7 +907,8 @@ std::unique_ptr<Program> Parser::parse() {
                     // Handle array suffix: type[]
                     while (check(TokenType::LBRACKET) && current + 1 < tokens.size() &&
                            tokens[current + 1].type == TokenType::RBRACKET) {
-                        advance(); advance();
+                        advance();
+                        advance();
                         typeName += "[]";
                     }
                 } else {
@@ -892,8 +932,7 @@ std::unique_ptr<Program> Parser::parse() {
             continue;
         }
         // @repr(...) struct annotation — must appear immediately before 'struct'
-        if (check(TokenType::AT) && current + 1 < tokens.size() &&
-            tokens[current + 1].type == TokenType::IDENTIFIER &&
+        if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].type == TokenType::IDENTIFIER &&
             tokens[current + 1].lexeme == "repr") {
             try {
                 advance(); // consume '@'
@@ -902,7 +941,8 @@ std::unique_ptr<Program> Parser::parse() {
                 StructRepr repr = StructRepr::Auto;
                 int reprAlignN = 0;
                 if (!check(TokenType::RPAREN)) {
-                    const Token reprTok = consume(TokenType::IDENTIFIER, "Expected repr kind: C, packed, auto, soa, or align");
+                    const Token reprTok =
+                        consume(TokenType::IDENTIFIER, "Expected repr kind: C, packed, auto, soa, or align");
                     if (reprTok.lexeme == "C") {
                         repr = StructRepr::C;
                     } else if (reprTok.lexeme == "packed") {
@@ -931,8 +971,7 @@ std::unique_ptr<Program> Parser::parse() {
             continue;
         }
         // @packed — shorthand for @repr(packed), must appear immediately before 'struct'
-        if (check(TokenType::AT) && current + 1 < tokens.size() &&
-            tokens[current + 1].type == TokenType::IDENTIFIER &&
+        if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].type == TokenType::IDENTIFIER &&
             tokens[current + 1].lexeme == "packed") {
             try {
                 advance(); // consume '@'
@@ -956,7 +995,9 @@ std::unique_ptr<Program> Parser::parse() {
                 if (check(TokenType::IDENTIFIER) && peek().lexeme == "noalias") {
                     advance(); // consume 'noalias'
                     // Check if the next thing is NOT a function-related token
-                    if (check(TokenType::AT) || check(TokenType::FN) || check(TokenType::STRUCT) || check(TokenType::ENUM) || check(TokenType::OPTMAX_START) || check(TokenType::IMPORT) || isAtEnd()) {
+                    if (check(TokenType::AT) || check(TokenType::FN) || check(TokenType::STRUCT) ||
+                        check(TokenType::ENUM) || check(TokenType::OPTMAX_START) || check(TokenType::IMPORT) ||
+                        isAtEnd()) {
                         // This is a file-level @noalias directive
                         fileNoAlias = true;
                         continue;
@@ -981,7 +1022,7 @@ std::unique_ptr<Program> Parser::parse() {
             bool hintWillReturn = false;
             bool hintNoSync = false;
             bool hintNoFree = false;
-            int  hintAlign = 0;
+            int hintAlign = 0;
             bool isOptMaxFromAnnotation = false;
             OptMaxConfig optMaxCfgFromAnnotation;
             int allocatorSizeParam = -1;
@@ -999,21 +1040,33 @@ std::unique_ptr<Program> Parser::parse() {
                 if (ann.lexeme == "opt") {
                     consume(TokenType::LPAREN, "Expected '(' after @opt");
                     while (!check(TokenType::RPAREN) && !isAtEnd()) {
-                        const Token key = consume(TokenType::IDENTIFIER,
-                            "Expected option name in @opt(...)");
-                        if (key.lexeme == "inline")          hintInline      = true;
-                        else if (key.lexeme == "noinline")   hintNoInline    = true;
-                        else if (key.lexeme == "hot")        hintHot         = true;
-                        else if (key.lexeme == "cold")       hintCold        = true;
-                        else if (key.lexeme == "vectorize")  hintVectorize   = true;
-                        else if (key.lexeme == "novectorize")hintNoVectorize = true;
-                        else if (key.lexeme == "unroll")     hintUnroll      = true;
-                        else if (key.lexeme == "nounroll")   hintNoUnroll    = true;
-                        else if (key.lexeme == "parallel")   hintParallelize = true;
-                        else if (key.lexeme == "noparallel") hintNoParallelize = true;
-                        else if (key.lexeme == "flatten")    hintFlatten     = true;
-                        else if (key.lexeme == "minsize")    hintMinSize     = true;
-                        else if (key.lexeme == "optnone")    hintOptNone     = true;
+                        const Token key = consume(TokenType::IDENTIFIER, "Expected option name in @opt(...)");
+                        if (key.lexeme == "inline")
+                            hintInline = true;
+                        else if (key.lexeme == "noinline")
+                            hintNoInline = true;
+                        else if (key.lexeme == "hot")
+                            hintHot = true;
+                        else if (key.lexeme == "cold")
+                            hintCold = true;
+                        else if (key.lexeme == "vectorize")
+                            hintVectorize = true;
+                        else if (key.lexeme == "novectorize")
+                            hintNoVectorize = true;
+                        else if (key.lexeme == "unroll")
+                            hintUnroll = true;
+                        else if (key.lexeme == "nounroll")
+                            hintNoUnroll = true;
+                        else if (key.lexeme == "parallel")
+                            hintParallelize = true;
+                        else if (key.lexeme == "noparallel")
+                            hintNoParallelize = true;
+                        else if (key.lexeme == "flatten")
+                            hintFlatten = true;
+                        else if (key.lexeme == "minsize")
+                            hintMinSize = true;
+                        else if (key.lexeme == "optnone")
+                            hintOptNone = true;
                         else if (key.lexeme == "align") {
                             if (match(TokenType::ASSIGN)) {
                                 // align=AUTO  →  cache-line optimal (same as bare align)
@@ -1024,11 +1077,12 @@ std::unique_ptr<Program> Parser::parse() {
                                         hintAlign = -1;
                                     } else {
                                         error("Expected integer or AUTO after align= in @opt;"
-                                              " got '" + v.lexeme + "'");
+                                              " got '" +
+                                              v.lexeme + "'");
                                     }
                                 } else {
-                                    const Token v = consume(TokenType::INTEGER,
-                                        "Expected integer or AUTO after align= in @opt");
+                                    const Token v =
+                                        consume(TokenType::INTEGER, "Expected integer or AUTO after align= in @opt");
                                     hintAlign = static_cast<int>(v.intValue);
                                 }
                             } else {
@@ -1041,25 +1095,35 @@ std::unique_ptr<Program> Parser::parse() {
                                   " novectorize, unroll, nounroll, parallel, noparallel,"
                                   " flatten, minsize, optnone, align, align=N, align=AUTO");
                         }
-                        if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
+                        if (!check(TokenType::RPAREN))
+                            match(TokenType::COMMA);
                     }
                     consume(TokenType::RPAREN, "Expected ')' after @opt options");
 
                 } else if (ann.lexeme == "semantics") {
                     consume(TokenType::LPAREN, "Expected '(' after @semantics");
                     while (!check(TokenType::RPAREN) && !isAtEnd()) {
-                        const Token key = consume(TokenType::IDENTIFIER,
-                            "Expected attribute in @semantics(...)");
-                        if (key.lexeme == "pure")            hintPure         = true;
-                        else if (key.lexeme == "speculatable")hintSpeculatable= true;
-                        else if (key.lexeme == "noreturn")   hintNoReturn     = true;
-                        else if (key.lexeme == "nounwind")   hintNoUnwind     = true;
-                        else if (key.lexeme == "restrict")   hintRestrict     = true;
-                        else if (key.lexeme == "noalias")    hintRestrict     = true;
-                        else if (key.lexeme == "const_eval") hintConstEval    = true;
-                        else if (key.lexeme == "willreturn") hintWillReturn   = true;
-                        else if (key.lexeme == "nosync")     hintNoSync       = true;
-                        else if (key.lexeme == "nofree")     hintNoFree       = true;
+                        const Token key = consume(TokenType::IDENTIFIER, "Expected attribute in @semantics(...)");
+                        if (key.lexeme == "pure")
+                            hintPure = true;
+                        else if (key.lexeme == "speculatable")
+                            hintSpeculatable = true;
+                        else if (key.lexeme == "noreturn")
+                            hintNoReturn = true;
+                        else if (key.lexeme == "nounwind")
+                            hintNoUnwind = true;
+                        else if (key.lexeme == "restrict")
+                            hintRestrict = true;
+                        else if (key.lexeme == "noalias")
+                            hintRestrict = true;
+                        else if (key.lexeme == "const_eval")
+                            hintConstEval = true;
+                        else if (key.lexeme == "willreturn")
+                            hintWillReturn = true;
+                        else if (key.lexeme == "nosync")
+                            hintNoSync = true;
+                        else if (key.lexeme == "nofree")
+                            hintNoFree = true;
                         else {
                             error("Unknown attribute '" + key.lexeme +
                                   "' in @semantics(...);"
@@ -1067,34 +1131,33 @@ std::unique_ptr<Program> Parser::parse() {
                                   " restrict, noalias, const_eval,"
                                   " willreturn, nosync, nofree");
                         }
-                        if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
+                        if (!check(TokenType::RPAREN))
+                            match(TokenType::COMMA);
                     }
                     consume(TokenType::RPAREN, "Expected ')' after @semantics attributes");
 
                 } else if (ann.lexeme == "memory") {
                     consume(TokenType::LPAREN, "Expected '(' after @memory");
                     while (!check(TokenType::RPAREN) && !isAtEnd()) {
-                        const Token key = consume(TokenType::IDENTIFIER,
-                            "Expected option in @memory(...)");
+                        const Token key = consume(TokenType::IDENTIFIER, "Expected option in @memory(...)");
                         if (key.lexeme == "allocator") {
                             // `allocator` enables the allocator attribute with default
                             // size-param index 0.  A subsequent `size=N` in the same
                             // annotation overrides the index; `size=N` appearing BEFORE
                             // `allocator` in the list is also respected (the guard keeps
                             // the already-set value).
-                            if (allocatorSizeParam < 0) allocatorSizeParam = 0;
+                            if (allocatorSizeParam < 0)
+                                allocatorSizeParam = 0;
                         } else if (key.lexeme == "size") {
                             consume(TokenType::ASSIGN, "Expected '=' after size in @memory");
-                            const Token v = consume(TokenType::INTEGER,
-                                "Expected integer after size= in @memory");
+                            const Token v = consume(TokenType::INTEGER, "Expected integer after size= in @memory");
                             allocatorSizeParam = static_cast<int>(v.intValue);
                         } else if (key.lexeme == "count") {
                             consume(TokenType::ASSIGN, "Expected '=' after count in @memory");
-                            const Token v = consume(TokenType::INTEGER,
-                                "Expected integer after count= in @memory");
+                            const Token v = consume(TokenType::INTEGER, "Expected integer after count= in @memory");
                             allocatorCountParam = static_cast<int>(v.intValue);
 
-                        // ── Memory-access level options (mutually exclusive) ───
+                            // ── Memory-access level options (mutually exclusive) ───
                         } else if (key.lexeme == "none") {
                             hintMemoryEffect = FunctionDecl::MemoryEffect::None;
                         } else if (key.lexeme == "readonly") {
@@ -1112,7 +1175,7 @@ std::unique_ptr<Program> Parser::parse() {
                         } else if (key.lexeme == "inaccessiblemem") {
                             hintMemoryEffect = FunctionDecl::MemoryEffect::InaccessibleMem;
 
-                        // ── Aliasing hint ──────────────────────────────────────
+                            // ── Aliasing hint ──────────────────────────────────────
                         } else if (key.lexeme == "noalias_ret") {
                             hintNoAliasReturn = true;
 
@@ -1125,11 +1188,12 @@ std::unique_ptr<Program> Parser::parse() {
                                   "              inaccessiblemem, inaccessiblemem_or_argmem\n"
                                   "  Aliasing  : noalias_ret");
                         }
-                        if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
+                        if (!check(TokenType::RPAREN))
+                            match(TokenType::COMMA);
                     }
                     consume(TokenType::RPAREN, "Expected ')' after @memory options");
 
-                // ── Non-compound annotations kept as-is ──────────────────────
+                    // ── Non-compound annotations kept as-is ──────────────────────
                 } else if (ann.lexeme == "static") {
                     hintStatic = true;
                 } else if (ann.lexeme == "optmax") {
@@ -1138,117 +1202,118 @@ std::unique_ptr<Program> Parser::parse() {
                         optMaxCfgFromAnnotation = parseOptMaxConfig();
                     }
 
-                // ── Deprecated flat forms — accepted but emit a warning ───────
-                // Use @opt(...), @semantics(...), or @memory(...) instead.
+                    // ── Deprecated flat forms — accepted but emit a warning ───────
+                    // Use @opt(...), @semantics(...), or @memory(...) instead.
                 } else if (ann.lexeme == "inline") {
                     hintInline = true;
                     warnings_.push_back("warning: '@inline' is deprecated;"
-                        " use '@opt(inline)' instead");
+                                        " use '@opt(inline)' instead");
                 } else if (ann.lexeme == "noinline") {
                     hintNoInline = true;
                     warnings_.push_back("warning: '@noinline' is deprecated;"
-                        " use '@opt(noinline)' instead");
+                                        " use '@opt(noinline)' instead");
                 } else if (ann.lexeme == "hot") {
                     hintHot = true;
                     warnings_.push_back("warning: '@hot' is deprecated;"
-                        " use '@opt(hot)' instead");
+                                        " use '@opt(hot)' instead");
                 } else if (ann.lexeme == "cold") {
                     hintCold = true;
                     warnings_.push_back("warning: '@cold' is deprecated;"
-                        " use '@opt(cold)' instead");
+                                        " use '@opt(cold)' instead");
                 } else if (ann.lexeme == "flatten") {
                     hintFlatten = true;
                     warnings_.push_back("warning: '@flatten' is deprecated;"
-                        " use '@opt(flatten)' instead");
+                                        " use '@opt(flatten)' instead");
                 } else if (ann.lexeme == "unroll") {
                     hintUnroll = true;
                     warnings_.push_back("warning: '@unroll' is deprecated;"
-                        " use '@opt(unroll)' instead");
+                                        " use '@opt(unroll)' instead");
                 } else if (ann.lexeme == "nounroll") {
                     hintNoUnroll = true;
                     warnings_.push_back("warning: '@nounroll' is deprecated;"
-                        " use '@opt(nounroll)' instead");
+                                        " use '@opt(nounroll)' instead");
                 } else if (ann.lexeme == "vectorize") {
                     hintVectorize = true;
                     warnings_.push_back("warning: '@vectorize' is deprecated;"
-                        " use '@opt(vectorize)' instead");
+                                        " use '@opt(vectorize)' instead");
                 } else if (ann.lexeme == "novectorize") {
                     hintNoVectorize = true;
                     warnings_.push_back("warning: '@novectorize' is deprecated;"
-                        " use '@opt(novectorize)' instead");
+                                        " use '@opt(novectorize)' instead");
                 } else if (ann.lexeme == "parallel") {
                     hintParallelize = true;
                     warnings_.push_back("warning: '@parallel' is deprecated;"
-                        " use '@opt(parallel)' instead");
+                                        " use '@opt(parallel)' instead");
                 } else if (ann.lexeme == "noparallel") {
                     hintNoParallelize = true;
                     warnings_.push_back("warning: '@noparallel' is deprecated;"
-                        " use '@opt(noparallel)' instead");
+                                        " use '@opt(noparallel)' instead");
                 } else if (ann.lexeme == "minsize") {
                     hintMinSize = true;
                     warnings_.push_back("warning: '@minsize' is deprecated;"
-                        " use '@opt(minsize)' instead");
+                                        " use '@opt(minsize)' instead");
                 } else if (ann.lexeme == "optnone") {
                     hintOptNone = true;
                     warnings_.push_back("warning: '@optnone' is deprecated;"
-                        " use '@opt(optnone)' instead");
+                                        " use '@opt(optnone)' instead");
                 } else if (ann.lexeme == "align") {
                     consume(TokenType::LPAREN, "Expected '(' after @align");
                     if (check(TokenType::RPAREN)) {
                         hintAlign = -1;
                     } else {
-                        const Token alignVal = consume(TokenType::INTEGER,
-                            "Expected integer alignment value");
+                        const Token alignVal = consume(TokenType::INTEGER, "Expected integer alignment value");
                         hintAlign = static_cast<int>(alignVal.intValue);
                     }
                     consume(TokenType::RPAREN, "Expected ')' after @align value");
                     warnings_.push_back("warning: '@align(N)' is deprecated;"
-                        " use '@opt(align=N)' or '@opt(align)' instead");
+                                        " use '@opt(align=N)' or '@opt(align)' instead");
                 } else if (ann.lexeme == "pure") {
                     hintPure = true;
                     warnings_.push_back("warning: '@pure' is deprecated;"
-                        " use '@semantics(pure)' instead");
+                                        " use '@semantics(pure)' instead");
                 } else if (ann.lexeme == "speculatable") {
                     hintSpeculatable = true;
                     warnings_.push_back("warning: '@speculatable' is deprecated;"
-                        " use '@semantics(speculatable)' instead");
+                                        " use '@semantics(speculatable)' instead");
                 } else if (ann.lexeme == "noreturn") {
                     hintNoReturn = true;
                     warnings_.push_back("warning: '@noreturn' is deprecated;"
-                        " use '@semantics(noreturn)' instead");
+                                        " use '@semantics(noreturn)' instead");
                 } else if (ann.lexeme == "nounwind") {
                     hintNoUnwind = true;
                     warnings_.push_back("warning: '@nounwind' is deprecated;"
-                        " use '@semantics(nounwind)' instead");
+                                        " use '@semantics(nounwind)' instead");
                 } else if (ann.lexeme == "restrict") {
                     hintRestrict = true;
                     warnings_.push_back("warning: '@restrict' is deprecated;"
-                        " use '@semantics(restrict)' instead");
+                                        " use '@semantics(restrict)' instead");
                 } else if (ann.lexeme == "noalias") {
                     hintRestrict = true;
                     warnings_.push_back("warning: '@noalias' is deprecated;"
-                        " use '@semantics(noalias)' instead");
+                                        " use '@semantics(noalias)' instead");
                 } else if (ann.lexeme == "const_eval") {
                     hintConstEval = true;
                     warnings_.push_back("warning: '@const_eval' is deprecated;"
-                        " use '@semantics(const_eval)' instead");
+                                        " use '@semantics(const_eval)' instead");
                 } else if (ann.lexeme == "allocator") {
                     consume(TokenType::LPAREN, "Expected '(' after @allocator");
                     while (!check(TokenType::RPAREN) && !isAtEnd()) {
-                        const Token paramKey = consume(TokenType::IDENTIFIER,
-                            "Expected param name in @allocator");
+                        const Token paramKey = consume(TokenType::IDENTIFIER, "Expected param name in @allocator");
                         consume(TokenType::ASSIGN, "Expected '=' in @allocator");
                         const Token paramVal = advance();
                         int idx = 0;
                         if (paramVal.type == TokenType::INTEGER)
                             idx = static_cast<int>(paramVal.intValue);
-                        if (paramKey.lexeme == "size")       allocatorSizeParam  = idx;
-                        else if (paramKey.lexeme == "count") allocatorCountParam = idx;
-                        if (!check(TokenType::RPAREN)) match(TokenType::COMMA);
+                        if (paramKey.lexeme == "size")
+                            allocatorSizeParam = idx;
+                        else if (paramKey.lexeme == "count")
+                            allocatorCountParam = idx;
+                        if (!check(TokenType::RPAREN))
+                            match(TokenType::COMMA);
                     }
                     consume(TokenType::RPAREN, "Expected ')' after @allocator params");
                     warnings_.push_back("warning: '@allocator(...)' is deprecated;"
-                        " use '@memory(allocator, size=N)' instead");
+                                        " use '@memory(allocator, size=N)' instead");
                 } else {
                     error("Unknown function annotation '@" + ann.lexeme +
                           "';\n"
@@ -1304,58 +1369,59 @@ std::unique_ptr<Program> Parser::parse() {
             // Warn about conflicting annotations at parse time.
             // optnone is the strongest suppressor — nothing else is meaningful with it.
             if (hintOptNone && hintInline) {
-                warnings_.push_back("warning: '@opt(optnone)' and '@opt(inline)' are mutually exclusive on function '"
-                    + func->name + "' — inline will be ignored (optnone requires noinline)");
+                warnings_.push_back("warning: '@opt(optnone)' and '@opt(inline)' are mutually exclusive on function '" +
+                                    func->name + "' — inline will be ignored (optnone requires noinline)");
             }
             if (hintOptNone && hintHot) {
-                warnings_.push_back("warning: '@opt(optnone)' disables all optimizations on function '"
-                    + func->name + "' — hot hint will have no effect");
+                warnings_.push_back("warning: '@opt(optnone)' disables all optimizations on function '" + func->name +
+                                    "' — hot hint will have no effect");
             }
             // Paired contradictions.
             if (hintHot && hintCold) {
-                warnings_.push_back("warning: '@opt(hot)' and '@opt(cold)' are contradictory on function '"
-                    + func->name + "' — hot takes precedence");
+                warnings_.push_back("warning: '@opt(hot)' and '@opt(cold)' are contradictory on function '" +
+                                    func->name + "' — hot takes precedence");
             }
             if (hintInline && hintNoInline) {
-                warnings_.push_back("warning: '@opt(inline)' and '@opt(noinline)' are contradictory on function '"
-                    + func->name + "' — noinline takes precedence");
+                warnings_.push_back("warning: '@opt(inline)' and '@opt(noinline)' are contradictory on function '" +
+                                    func->name + "' — noinline takes precedence");
             }
             if (hintVectorize && hintNoVectorize) {
-                warnings_.push_back("warning: '@opt(vectorize)' and '@opt(novectorize)' are contradictory on function '"
-                    + func->name + "' — novectorize takes precedence");
+                warnings_.push_back(
+                    "warning: '@opt(vectorize)' and '@opt(novectorize)' are contradictory on function '" + func->name +
+                    "' — novectorize takes precedence");
             }
             if (hintUnroll && hintNoUnroll) {
-                warnings_.push_back("warning: '@opt(unroll)' and '@opt(nounroll)' are contradictory on function '"
-                    + func->name + "' — nounroll takes precedence");
+                warnings_.push_back("warning: '@opt(unroll)' and '@opt(nounroll)' are contradictory on function '" +
+                                    func->name + "' — nounroll takes precedence");
             }
             if (hintParallelize && hintNoParallelize) {
-                warnings_.push_back("warning: '@opt(parallel)' and '@opt(noparallel)' are contradictory on function '"
-                    + func->name + "' — noparallel takes precedence");
+                warnings_.push_back("warning: '@opt(parallel)' and '@opt(noparallel)' are contradictory on function '" +
+                                    func->name + "' — noparallel takes precedence");
             }
             // @semantics(willreturn) and @semantics(noreturn) are contradictory.
             if (hintWillReturn && hintNoReturn) {
-                warnings_.push_back("warning: '@semantics(willreturn)' and '@semantics(noreturn)' are contradictory on function '"
-                    + func->name + "' — noreturn takes precedence");
+                warnings_.push_back(
+                    "warning: '@semantics(willreturn)' and '@semantics(noreturn)' are contradictory on function '" +
+                    func->name + "' — noreturn takes precedence");
                 hintWillReturn = false; // noreturn wins
             }
             // @semantics(pure) implies memory(none) or memory(read) — warn if
             // an explicit @memory access level contradicts that contract.
             using ME = FunctionDecl::MemoryEffect;
-            if (hintPure && (hintMemoryEffect == ME::WriteOnly ||
-                             hintMemoryEffect == ME::ArgMem    ||
+            if (hintPure && (hintMemoryEffect == ME::WriteOnly || hintMemoryEffect == ME::ArgMem ||
                              hintMemoryEffect == ME::ReadWrite)) {
                 warnings_.push_back("warning: '@semantics(pure)' and '@memory(" +
-                    std::string(hintMemoryEffect == ME::WriteOnly ? "writeonly"
-                              : hintMemoryEffect == ME::ArgMem    ? "argmem"
-                                                                  : "readwrite") +
-                    ")' are contradictory on function '" + func->name +
-                    "' — pure implies readonly or no-memory access");
+                                    std::string(hintMemoryEffect == ME::WriteOnly ? "writeonly"
+                                                : hintMemoryEffect == ME::ArgMem  ? "argmem"
+                                                                                  : "readwrite") +
+                                    ")' are contradictory on function '" + func->name +
+                                    "' — pure implies readonly or no-memory access");
             }
             // allocator + none is a contradiction (allocator must write memory).
             if (func->allocatorSizeParam >= 0 && hintMemoryEffect == ME::None) {
                 warnings_.push_back("warning: '@memory(allocator)' and '@memory(none)' are"
-                    " contradictory on function '" + func->name +
-                    "' — an allocator must write memory");
+                                    " contradictory on function '" +
+                                    func->name + "' — an allocator must write memory");
             }
             functions.push_back(std::move(func));
         } catch (const std::exception& e) {
@@ -1393,7 +1459,8 @@ std::unique_ptr<Program> Parser::parse() {
     }
     pendingGlobals_.clear();
 
-    return std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs), fileNoAlias, std::move(globals), globallyImportedNamespaces_);
+    return std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs), fileNoAlias,
+                                     std::move(globals), globallyImportedNamespaces_);
 }
 
 void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
@@ -1491,8 +1558,7 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     if (!file.is_open()) {
         error("Cannot open imported file: " + fullPath);
     }
-    std::string source((std::istreambuf_iterator<char>(file)),
-                        std::istreambuf_iterator<char>());
+    std::string source((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 
     // Preprocess then lex the imported file
     {
@@ -1555,7 +1621,8 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
         globalAlias = std::filesystem::path(filename).stem().string();
     }
     for (auto& gv : importedProgram->globals) {
-        if (!gv) continue;
+        if (!gv)
+            continue;
         // No mangling: the global keeps its original name as the LLVM symbol.
         // The namespace registry (importedGlobalVars_) is the only level of
         // indirection; the actual LLVM global is just named by gv->name.
@@ -1566,8 +1633,8 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
 }
 
 void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& functions,
-                             std::vector<std::unique_ptr<EnumDecl>>& enums,
-                             std::vector<std::unique_ptr<StructDecl>>& structs) {
+                            std::vector<std::unique_ptr<EnumDecl>>& enums,
+                            std::vector<std::unique_ptr<StructDecl>>& structs) {
     const Token nsNameTok = consume(TokenType::IDENTIFIER, "Expected namespace name");
     const std::string nsName = nsNameTok.lexeme;
     consume(TokenType::LBRACE, "Expected '{' after namespace name");
@@ -1579,7 +1646,7 @@ void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& function
             auto func = parseFunction(false);
             // Prefix the function name with the namespace.
             const std::string shortName = func->name;
-            const std::string qualName  = nsName + "::" + shortName;
+            const std::string qualName = nsName + "::" + shortName;
             func->name = qualName;
             nsMap[shortName] = qualName;
             functions.push_back(std::move(func));
@@ -1587,7 +1654,7 @@ void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& function
             auto st = parseStructDecl();
             // Rename struct to qualified name and register in all tables.
             const std::string shortName = st->name;
-            const std::string qualName  = nsName + "::" + shortName;
+            const std::string qualName = nsName + "::" + shortName;
             // structNames_ already has shortName from parseStructDecl; add qualified name.
             structNames_.insert(qualName);
             st->name = qualName;
@@ -1596,7 +1663,7 @@ void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& function
         } else if (match(TokenType::ENUM)) {
             auto en = parseEnumDecl();
             const std::string shortName = en->name;
-            const std::string qualName  = nsName + "::" + shortName;
+            const std::string qualName = nsName + "::" + shortName;
             en->name = qualName;
             nsMap[shortName] = qualName;
             enums.push_back(std::move(en));
@@ -1616,16 +1683,19 @@ std::string Parser::resolveNamespacedPath(const std::vector<std::string>& segmen
     for (int cut = (int)segments.size() - 1; cut >= 1; --cut) {
         std::string ns;
         for (int i = 0; i < cut; ++i) {
-            if (i > 0) ns += "::";
+            if (i > 0)
+                ns += "::";
             ns += segments[i];
         }
         auto nsIt = importNamespaces_.find(ns);
-        if (nsIt == importNamespaces_.end()) continue;
+        if (nsIt == importNamespaces_.end())
+            continue;
 
         // Namespace found — build function name from remaining segments.
         std::string fn;
         for (int i = cut; i < (int)segments.size(); ++i) {
-            if (i > cut) fn += "::";
+            if (i > cut)
+                fn += "::";
             fn += segments[i];
         }
         auto fnIt = nsIt->second.find(fn);
@@ -1654,8 +1724,7 @@ std::string Parser::parseTypeAnnotation() {
     // Handle parameterised SIMD types: u64x{N}, u32x{N}, i32x{N}, f32x{N}, etc.
     // u64x{LANES} where LANES is a comptime constant resolves to u64x2/4/8, etc.
     if (check(TokenType::LBRACE) && typeName.size() >= 3 &&
-        (typeName[0] == 'u' || typeName[0] == 'i' || typeName[0] == 'f') &&
-        typeName.find('x') != std::string::npos) {
+        (typeName[0] == 'u' || typeName[0] == 'i' || typeName[0] == 'f') && typeName.find('x') != std::string::npos) {
         advance(); // consume '{'
         std::string sizeStr;
         if (check(TokenType::IDENTIFIER)) {
@@ -1681,14 +1750,14 @@ std::string Parser::parseTypeAnnotation() {
     // Support ptr<T> generic pointer annotation: ptr<i64>, ptr<i32[]>, ptr<ptr<i32>>, etc.
     // Uses <T> angle-bracket syntax (LT / GT tokens).
     if (typeName == "ptr" && check(TokenType::LT)) {
-        advance(); // consume '<'
+        advance();                                 // consume '<'
         std::string inner = parseTypeAnnotation(); // recursively parse element type
         consume(TokenType::GT, "Expected '>' to close ptr<T> type parameter");
         typeName = "ptr<" + inner + ">";
     }
     // Support pslice<T> fat-pointer slice annotation: pslice<i64>, pslice<f64>, etc.
     if (typeName == "pslice" && check(TokenType::LT)) {
-        advance(); // consume '<'
+        advance();                                 // consume '<'
         std::string inner = parseTypeAnnotation(); // recursively parse element type
         consume(TokenType::GT, "Expected '>' to close pslice<T> type parameter");
         typeName = "pslice<" + inner + ">";
@@ -1703,9 +1772,15 @@ std::string Parser::parseTypeAnnotation() {
         int depth = 1;
         while (!isAtEnd() && depth > 0) {
             const Token& t = advance();
-            if (t.type == TokenType::LBRACKET) depth++;
-            else if (t.type == TokenType::RBRACKET) { depth--; if (depth == 0) break; }
-            if (depth > 0) typeParams += t.lexeme;
+            if (t.type == TokenType::LBRACKET)
+                depth++;
+            else if (t.type == TokenType::RBRACKET) {
+                depth--;
+                if (depth == 0)
+                    break;
+            }
+            if (depth > 0)
+                typeParams += t.lexeme;
         }
         typeName += "[" + typeParams + "]";
     }
@@ -1730,8 +1805,8 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
         advance(); // consume '::'
         // Accept IDENTIFIER or keyword tokens (e.g. 'swap') as method names.
         Token seg = (check(TokenType::IDENTIFIER) || check(TokenType::SWAP))
-            ? advance()
-            : consume(TokenType::IDENTIFIER, "Expected method name after '::'");
+                        ? advance()
+                        : consume(TokenType::IDENTIFIER, "Expected method name after '::'");
         qualifiedName += "::" + seg.lexeme;
         name = seg; // keep line/column at the method segment for error reporting
     }
@@ -1768,8 +1843,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
                     if (ann.lexeme == "prefetch") {
                         paramPrefetch = true;
                     } else {
-                        error("Unknown parameter annotation '@" + ann.lexeme +
-                              "'; supported: @prefetch");
+                        error("Unknown parameter annotation '@" + ann.lexeme + "'; supported: @prefetch");
                     }
                 }
             }
@@ -1813,12 +1887,10 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
     if (match(TokenType::EQ)) {
         // Collect the full target path.
         std::vector<std::string> segs;
-        segs.push_back(
-            consume(TokenType::IDENTIFIER, "Expected function path after '=='").lexeme);
+        segs.push_back(consume(TokenType::IDENTIFIER, "Expected function path after '=='").lexeme);
         while (check(TokenType::SCOPE)) {
             advance(); // consume '::'
-            segs.push_back(
-                consume(TokenType::IDENTIFIER, "Expected identifier in function path").lexeme);
+            segs.push_back(consume(TokenType::IDENTIFIER, "Expected identifier in function path").lexeme);
         }
         consume(TokenType::SEMICOLON, "Expected ';' after function alias");
         // Resolve via namespace registry.
@@ -1833,7 +1905,8 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
                 // Build a helpful error: the user wrote a multi-segment path
                 // that couldn't be resolved through any imported namespace.
                 std::string path = segs[0];
-                for (size_t i = 1; i < segs.size(); ++i) path += "::" + segs[i];
+                for (size_t i = 1; i < segs.size(); ++i)
+                    path += "::" + segs[i];
                 error("Cannot resolve function alias target '" + path +
                       "': no matching namespace found. "
                       "Import the file with 'import \"file\" as alias' first.");
@@ -1869,7 +1942,8 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 
     inOptMaxFunction = savedOptMaxState;
 
-    auto funcDecl = std::make_unique<FunctionDecl>(name.lexeme, std::move(typeParams), std::move(parameters), std::move(body), isOptMax, returnType);
+    auto funcDecl = std::make_unique<FunctionDecl>(name.lexeme, std::move(typeParams), std::move(parameters),
+                                                   std::move(body), isOptMax, returnType);
     funcDecl->line = name.line;
     funcDecl->column = name.column;
     return funcDecl;
@@ -2174,8 +2248,10 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         consume(TokenType::SEMICOLON, "Expected ';' after register variable declaration");
 
         if (typeName.empty() && !init) {
-            error("Variable '" + name.lexeme + "' requires an explicit type annotation "
-                  "(e.g., '" + name.lexeme + ":i64'). Untyped variables without an initializer are not allowed.");
+            error("Variable '" + name.lexeme +
+                  "' requires an explicit type annotation "
+                  "(e.g., '" +
+                  name.lexeme + ":i64'). Untyped variables without an initializer are not allowed.");
         }
         auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init), isConst, typeName);
         decl->isRegister = true;
@@ -2203,8 +2279,10 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         consume(TokenType::SEMICOLON, "Expected ';' after global variable declaration");
 
         if (typeName.empty() && !init) {
-            error("Variable '" + name.lexeme + "' requires an explicit type annotation "
-                  "(e.g., '" + name.lexeme + ":i64'). Untyped variables without an initializer are not allowed.");
+            error("Variable '" + name.lexeme +
+                  "' requires an explicit type annotation "
+                  "(e.g., '" +
+                  name.lexeme + ":i64'). Untyped variables without an initializer are not allowed.");
         }
         auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init), isConst, typeName);
         decl->isGlobal = true;
@@ -2227,7 +2305,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     // constant and can have no externally-visible storage to guard).
     if (check(TokenType::ATOMIC) || check(TokenType::VOLATILE)) {
         bool isAtom = false;
-        bool isVol  = false;
+        bool isVol = false;
 
         // Capture the first qualifier token for accurate source location.
         const Token firstKw = tokens[current];
@@ -2235,20 +2313,23 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         // Consume one or two qualifiers.
         if (match(TokenType::ATOMIC)) {
             isAtom = true;
-            if (match(TokenType::VOLATILE)) isVol = true;
+            if (match(TokenType::VOLATILE))
+                isVol = true;
         } else if (match(TokenType::VOLATILE)) {
             isVol = true;
-            if (match(TokenType::ATOMIC)) isAtom = true;
+            if (match(TokenType::ATOMIC))
+                isAtom = true;
         }
 
         if (!match(TokenType::VAR)) {
             error(std::string("Expected 'var' after '") +
-                  (isAtom && isVol ? "atomic volatile" :
-                   isAtom          ? "atomic"          : "volatile") + "'");
+                  (isAtom && isVol ? "atomic volatile"
+                   : isAtom        ? "atomic"
+                                   : "volatile") +
+                  "'");
         }
 
-        const Token name = consume(TokenType::IDENTIFIER,
-            "Expected variable name after qualifier");
+        const Token name = consume(TokenType::IDENTIFIER, "Expected variable name after qualifier");
         std::string typeName;
         if (match(TokenType::COLON)) {
             typeName = parseTypeAnnotation();
@@ -2260,15 +2341,14 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
 
         if (typeName.empty() && !init) {
-            error("Variable '" + name.lexeme +
-                  "' requires an explicit type annotation or initializer.");
+            error("Variable '" + name.lexeme + "' requires an explicit type annotation or initializer.");
         }
 
         auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init),
                                               /*isConst=*/false, typeName);
-        decl->isAtomic   = isAtom;
+        decl->isAtomic = isAtom;
         decl->isVolatile = isVol;
-        decl->line   = firstKw.line;
+        decl->line = firstKw.line;
         decl->column = firstKw.column;
         return decl;
     }
@@ -2293,8 +2373,16 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         bool hintImmut = false;
         while (check(TokenType::IDENTIFIER) && !isAtEnd()) {
             const std::string& attrName = peek().lexeme;
-            if (attrName == "hot") { hintHot = true; advance(); continue; }
-            if (attrName == "immut") { hintImmut = true; advance(); continue; }
+            if (attrName == "hot") {
+                hintHot = true;
+                advance();
+                continue;
+            }
+            if (attrName == "immut") {
+                hintImmut = true;
+                advance();
+                continue;
+            }
             break;
         }
         // Determine if this is a variable declaration or standalone prefetch.
@@ -2315,8 +2403,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
                 if (lookahead < tokens.size() && tokens[lookahead].type == TokenType::IDENTIFIER)
                     lookahead++; // skip type name
                 // Skip optional array brackets []
-                while (lookahead + 1 < tokens.size() &&
-                       tokens[lookahead].type == TokenType::LBRACKET &&
+                while (lookahead + 1 < tokens.size() && tokens[lookahead].type == TokenType::LBRACKET &&
                        tokens[lookahead + 1].type == TokenType::RBRACKET)
                     lookahead += 2;
             }
@@ -2381,7 +2468,7 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         // Could be: move <type> <name> = <expr>;
         // or just: move used as expression context (handled elsewhere)
         if (check(TokenType::VAR) || (check(TokenType::IDENTIFIER) && current + 1 < tokens.size() &&
-            tokens[current + 1].type == TokenType::IDENTIFIER)) {
+                                      tokens[current + 1].type == TokenType::IDENTIFIER)) {
             // `move var x = expr;` or `move var x:type = expr;` or `move int x = expr;`
             std::string typeName;
             if (match(TokenType::VAR)) {
@@ -2473,7 +2560,8 @@ std::unique_ptr<Statement> Parser::parseStatement() {
             consume(TokenType::RBRACKET, "Expected ']' after index in reborrow");
         }
         consume(TokenType::SEMICOLON, "Expected ';' after reborrow declaration");
-        auto reborrowExpr = std::make_unique<ReborrowExpr>(std::move(src), isMut, std::move(fieldName), std::move(indexExpr));
+        auto reborrowExpr =
+            std::make_unique<ReborrowExpr>(std::move(src), isMut, std::move(fieldName), std::move(indexExpr));
         reborrowExpr->line = kw.line;
         reborrowExpr->column = kw.column;
         auto stmt = std::make_unique<VarDecl>(name.lexeme, std::move(reborrowExpr), false, "");
@@ -2528,19 +2616,18 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         consume(TokenType::LBRACE, "Expected '{' after construct target expression");
         std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fields;
         while (!check(TokenType::RBRACE) && !isAtEnd()) {
-            const Token fname = consume(TokenType::IDENTIFIER,
-                "Expected field name in construct block");
+            const Token fname = consume(TokenType::IDENTIFIER, "Expected field name in construct block");
             consume(TokenType::COLON, "Expected ':' after field name in construct block");
             auto val = parseExpression();
             fields.emplace_back(fname.lexeme, std::move(val));
             // Allow trailing comma
-            if (check(TokenType::COMMA)) advance();
+            if (check(TokenType::COMMA))
+                advance();
         }
         consume(TokenType::RBRACE, "Expected '}' to close construct block");
         consume(TokenType::SEMICOLON, "Expected ';' after construct statement");
-        auto stmt = std::make_unique<ConstructStmt>(std::move(target), /*typeName=*/"",
-                                                    std::move(fields));
-        stmt->line   = kw.line;
+        auto stmt = std::make_unique<ConstructStmt>(std::move(target), /*typeName=*/"", std::move(fields));
+        stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
     }
@@ -2624,8 +2711,11 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
     // is present.  An uninitialised, untyped declaration however leaves the
     // compiler with nothing to work from and remains an error.
     if (typeName.empty() && !initializer) {
-        error("Variable '" + name.lexeme + "' requires an explicit type annotation "
-              "(e.g., 'var " + name.lexeme + ":i64 = ...'). "
+        error("Variable '" + name.lexeme +
+              "' requires an explicit type annotation "
+              "(e.g., 'var " +
+              name.lexeme +
+              ":i64 = ...'). "
               "Untyped variables are not allowed; the compiler no longer "
               "silently defaults to 'i64'.");
     }
@@ -2633,8 +2723,7 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
     // Shorthand borrow: `var name: &T = &expr;` → equivalent to `borrow var name: &T = &expr;`
     // If the type annotation is a reference type (&T) and an initializer is present,
     // automatically wrap the initializer in a BorrowExpr so the reference codegen path fires.
-    if (!typeName.empty() && typeName[0] == '&' && initializer &&
-        initializer->type != ASTNodeType::BORROW_EXPR) {
+    if (!typeName.empty() && typeName[0] == '&' && initializer && initializer->type != ASTNodeType::BORROW_EXPR) {
         auto borrowExpr = std::make_unique<BorrowExpr>(std::move(initializer), isBorrowMut);
         borrowExpr->line = name.line;
         borrowExpr->column = name.column;
@@ -2656,11 +2745,11 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
             const auto* lit = static_cast<const LiteralExpr*>(init);
             // Only null (integer 0) is valid; non-zero integers, floats, and
             // string literals are rejected.
-            valid = (lit->literalType == LiteralExpr::LiteralType::INTEGER &&
-                     lit->intValue == 0);
+            valid = (lit->literalType == LiteralExpr::LiteralType::INTEGER && lit->intValue == 0);
         }
         if (!valid) {
-            error("Pointer variable '" + name.lexeme + "' cannot be initialized "
+            error("Pointer variable '" + name.lexeme +
+                  "' cannot be initialized "
                   "with a non-pointer literal. Use &var, a function call, null/nullptr, "
                   "or another pointer expression.");
         }
@@ -2676,8 +2765,7 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
 /// declaration (e.g., the `b = 2` and `c = 3` in `var a:i64 = 1, b = 2, c = 3`).
 /// If the variable has no explicit `:type` annotation, `inheritedType` is used
 /// instead, which is the type of the first variable in the declaration.
-std::unique_ptr<Statement> Parser::parseVarDeclWithInheritedType(
-        bool isConst, const std::string& inheritedType) {
+std::unique_ptr<Statement> Parser::parseVarDeclWithInheritedType(bool isConst, const std::string& inheritedType) {
     const Token name = consume(TokenType::IDENTIFIER, "Expected variable name");
     std::string typeName;
     if (match(TokenType::COLON)) {
@@ -2695,8 +2783,10 @@ std::unique_ptr<Statement> Parser::parseVarDeclWithInheritedType(
     // Same relaxed rule as parseVarDecl: omit-type-with-init is allowed; a
     // bare `var x` with neither type nor initializer is the only error case.
     if (typeName.empty() && !initializer) {
-        error("Variable '" + name.lexeme + "' requires an explicit type annotation "
-              "(e.g., 'var " + name.lexeme + ":i64 = ...'). Untyped variables without an initializer are not allowed.");
+        error("Variable '" + name.lexeme +
+              "' requires an explicit type annotation "
+              "(e.g., 'var " +
+              name.lexeme + ":i64 = ...'). Untyped variables without an initializer are not allowed.");
     }
 
     auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(initializer), isConst, typeName);
@@ -2848,8 +2938,8 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         lenArgs.push_back(std::make_unique<IdentifierExpr>(arrTmp));
         auto lenCall = std::make_unique<CallExpr>("len", std::move(lenArgs));
         lenCall->fromStdNamespace = true; // compiler-generated
-        auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(zero), std::move(lenCall),
-                                                  nullptr, std::move(innerBlock));
+        auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(zero), std::move(lenCall), nullptr,
+                                                 std::move(innerBlock));
         forStmt->line = varName.line;
         forStmt->column = varName.column;
         outerStmts.push_back(std::move(forStmt));
@@ -2889,7 +2979,7 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         }
         auto body = parseStatement();
         auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end), std::move(step),
-                                         std::move(body), iteratorType);
+                                                 std::move(body), iteratorType);
         forStmt->loopHints = loopHints;
         return forStmt;
     }
@@ -2915,7 +3005,7 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
             auto body = parseStatement();
             auto negStep = std::make_unique<UnaryExpr>("-", std::move(stepExpr));
             auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
-                                             std::move(negStep), std::move(body), iteratorType);
+                                                     std::move(negStep), std::move(body), iteratorType);
             forStmt->loopHints = loopHints;
             return forStmt;
         }
@@ -2930,7 +3020,7 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         auto body = parseStatement();
         auto negOne = std::make_unique<LiteralExpr>(static_cast<long long>(-1));
         auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
-                                         std::move(negOne), std::move(body), iteratorType);
+                                                 std::move(negOne), std::move(body), iteratorType);
         forStmt->loopHints = loopHints;
         return forStmt;
     }
@@ -3181,7 +3271,8 @@ std::unique_ptr<Statement> Parser::parseWhenStmt() {
             values.push_back(parseExpression());
             while (match(TokenType::COMMA)) {
                 // Check if next is '=>' (end of value list)
-                if (check(TokenType::FAT_ARROW)) break;
+                if (check(TokenType::FAT_ARROW))
+                    break;
                 values.push_back(parseExpression());
             }
             consume(TokenType::FAT_ARROW, "Expected '=>' after value(s) in when clause");
@@ -3268,8 +3359,8 @@ std::unique_ptr<Statement> Parser::parseForEachStmt() {
         lenArgs.push_back(std::make_unique<IdentifierExpr>(arrTmp));
         auto lenCall = std::make_unique<CallExpr>("len", std::move(lenArgs));
         lenCall->fromStdNamespace = true; // compiler-generated
-        auto forStmt = std::make_unique<ForStmt>(firstName.lexeme, std::move(zero), std::move(lenCall),
-                                                  nullptr, std::move(innerBlock));
+        auto forStmt = std::make_unique<ForStmt>(firstName.lexeme, std::move(zero), std::move(lenCall), nullptr,
+                                                 std::move(innerBlock));
         forStmt->line = firstName.line;
         forStmt->column = firstName.column;
         outerStmts.push_back(std::move(forStmt));
@@ -3338,7 +3429,11 @@ std::unique_ptr<Statement> Parser::parseSwapStmt() {
 
     // var __swap_tmp = first;
     auto tmpInit = std::make_unique<IdentifierExpr>(names[0]);
-    { auto _cg = std::make_unique<VarDecl>(tmpName, std::move(tmpInit)); _cg->isCompilerGenerated = true; stmts.push_back(std::move(_cg)); }
+    {
+        auto _cg = std::make_unique<VarDecl>(tmpName, std::move(tmpInit));
+        _cg->isCompilerGenerated = true;
+        stmts.push_back(std::move(_cg));
+    }
 
     // Circular rotation: names[0] = names[1]; names[1] = names[2]; ...
     for (size_t i = 0; i + 1 < names.size(); ++i) {
@@ -3470,7 +3565,8 @@ std::vector<std::unique_ptr<Statement>> Parser::parseDestructuringDecl(bool isCo
             names.push_back(name.lexeme);
         }
         while (match(TokenType::COMMA)) {
-            if (check(TokenType::RBRACKET)) break; // trailing comma
+            if (check(TokenType::RBRACKET))
+                break; // trailing comma
             if (check(TokenType::IDENTIFIER) && peek().lexeme == "_") {
                 advance();
                 names.push_back("_");
@@ -3504,7 +3600,8 @@ std::vector<std::unique_ptr<Statement>> Parser::parseDestructuringDecl(bool isCo
 
     // var a = __destructure_N[0]; var b = __destructure_N[1]; ...
     for (size_t i = 0; i < names.size(); ++i) {
-        if (names[i] == "_") continue; // skip placeholder
+        if (names[i] == "_")
+            continue; // skip placeholder
 
         auto tmpRef = std::make_unique<IdentifierExpr>(tmpName);
         auto idx = std::make_unique<LiteralExpr>(static_cast<long long>(i));
@@ -3559,13 +3656,12 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl(StructRepr repr, int reprAli
 
     while (!check(TokenType::RBRACE) && !isAtEnd()) {
         // Check for operator overload: fn operator+(...) -> Type { ... }
-        if (check(TokenType::FN) && current + 1 < tokens.size() &&
-            tokens[current + 1].type == TokenType::IDENTIFIER &&
+        if (check(TokenType::FN) && current + 1 < tokens.size() && tokens[current + 1].type == TokenType::IDENTIFIER &&
             tokens[current + 1].lexeme == "operator") {
             advance(); // consume 'fn'
             advance(); // consume 'operator'
 
-                        // Parse the operator symbol.
+            // Parse the operator symbol.
             //
             // Three forms are accepted:
             //
@@ -3636,9 +3732,8 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl(StructRepr repr, int reprAli
 
             auto body = parseBlock();
 
-            auto funcDecl = std::make_unique<FunctionDecl>(
-                funcName, std::vector<std::string>{}, std::move(params),
-                std::move(body), false, returnType);
+            auto funcDecl = std::make_unique<FunctionDecl>(funcName, std::vector<std::string>{}, std::move(params),
+                                                           std::move(body), false, returnType);
             funcDecl->line = nameToken.line;
             funcDecl->column = nameToken.column;
             funcDecl->hintInline = true; // Operator overloads should be inlined
@@ -3657,12 +3752,32 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl(StructRepr repr, int reprAli
         FieldAttrs attrs;
         while ((check(TokenType::IDENTIFIER) || check(TokenType::MOVE)) && !isAtEnd()) {
             // Handle 'move' keyword as field attribute first
-            if (check(TokenType::MOVE)) { attrs.isMove = true; advance(); continue; }
+            if (check(TokenType::MOVE)) {
+                attrs.isMove = true;
+                advance();
+                continue;
+            }
             const std::string& kw = peek().lexeme;
-            if (kw == "hot") { attrs.hot = true; advance(); continue; }
-            if (kw == "cold") { attrs.cold = true; advance(); continue; }
-            if (kw == "noalias") { attrs.noalias = true; advance(); continue; }
-            if (kw == "immut") { attrs.immut = true; advance(); continue; }
+            if (kw == "hot") {
+                attrs.hot = true;
+                advance();
+                continue;
+            }
+            if (kw == "cold") {
+                attrs.cold = true;
+                advance();
+                continue;
+            }
+            if (kw == "noalias") {
+                attrs.noalias = true;
+                advance();
+                continue;
+            }
+            if (kw == "immut") {
+                attrs.immut = true;
+                advance();
+                continue;
+            }
             if (kw == "align") {
                 advance(); // consume 'align'
                 consume(TokenType::LPAREN, "Expected '(' after 'align'");
@@ -3965,7 +4080,8 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             node->column = expr->column;
             return node;
         } else {
-            error("Compound assignment (e.g., '+=') is only supported on variables, array elements (arr[i]), and struct fields (s.x)");
+            error("Compound assignment (e.g., '+=') is only supported on variables, array elements (arr[i]), and "
+                  "struct fields (s.x)");
         }
     }
 
@@ -4071,7 +4187,10 @@ std::string Parser::tryMatchCustomOperator() const {
         size_t symIdx = 0;
         while (symIdx < opSym.size() && tokIdx < tokens.size()) {
             const std::string& lex = tokens[tokIdx].lexeme;
-            if (opSym.compare(symIdx, lex.size(), lex) != 0) { symIdx = opSym.size() + 1; break; }
+            if (opSym.compare(symIdx, lex.size(), lex) != 0) {
+                symIdx = opSym.size() + 1;
+                break;
+            }
             symIdx += lex.size();
             ++tokIdx;
         }
@@ -4084,7 +4203,7 @@ std::string Parser::tryMatchCustomOperator() const {
 size_t Parser::customOpTokenCount(const std::string& opSym) const {
     size_t tokIdx = current;
     size_t symIdx = 0;
-    size_t count  = 0;
+    size_t count = 0;
     while (symIdx < opSym.size() && tokIdx < tokens.size()) {
         symIdx += tokens[tokIdx].lexeme.size();
         ++tokIdx;
@@ -4103,10 +4222,12 @@ std::unique_ptr<Expression> Parser::parseCustomOp() {
 
     while (true) {
         const std::string opSym = tryMatchCustomOperator();
-        if (opSym.empty()) break;
+        if (opSym.empty())
+            break;
         // Consume the tokens that spell out this custom operator.
         const size_t tokCount = customOpTokenCount(opSym);
-        for (size_t i = 0; i < tokCount; ++i) advance();
+        for (size_t i = 0; i < tokCount; ++i)
+            advance();
         auto right = parseLogicalOr();
         left = std::make_unique<BinaryExpr>(opSym, std::move(left), std::move(right));
     }
@@ -4210,10 +4331,10 @@ std::unique_ptr<Expression> Parser::parseComparison() {
     // operator (e.g. `<=` is the prefix of registered `<=>`), yield to
     // parseCustomOp() instead of consuming the token here.
     auto isCompTok = [&]() {
-        return (check(TokenType::LT)  && !isStartOfLongerCustomOp(1)) ||
-               (check(TokenType::GT)  && !isStartOfLongerCustomOp(1)) ||
-               (check(TokenType::LE)  && !isStartOfLongerCustomOp(2)) ||
-               (check(TokenType::GE)  && !isStartOfLongerCustomOp(2));
+        return (check(TokenType::LT) && !isStartOfLongerCustomOp(1)) ||
+               (check(TokenType::GT) && !isStartOfLongerCustomOp(1)) ||
+               (check(TokenType::LE) && !isStartOfLongerCustomOp(2)) ||
+               (check(TokenType::GE) && !isStartOfLongerCustomOp(2));
     };
 
     if (isCompTok()) {
@@ -4336,8 +4457,8 @@ std::unique_ptr<Expression> Parser::parseShift() {
         if (right && right->type == ASTNodeType::LITERAL_EXPR) {
             const auto* lit = static_cast<const LiteralExpr*>(right.get());
             if (lit->literalType == LiteralExpr::LiteralType::INTEGER && lit->intValue > 63) {
-                warnings_.push_back("warning: shift count " + std::to_string(lit->intValue)
-                    + " exceeds 63 (line " + std::to_string(opLine) + ")");
+                warnings_.push_back("warning: shift count " + std::to_string(lit->intValue) + " exceeds 63 (line " +
+                                    std::to_string(opLine) + ")");
             }
         }
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
@@ -4370,8 +4491,7 @@ std::unique_ptr<Expression> Parser::parseMultiplication() {
         if ((op == "/" || op == "%") && right && right->type == ASTNodeType::LITERAL_EXPR) {
             const auto* lit = static_cast<const LiteralExpr*>(right.get());
             if (lit->literalType == LiteralExpr::LiteralType::INTEGER && lit->intValue == 0) {
-                warnings_.push_back("warning: " + op
-                    + " by zero literal (line " + std::to_string(opLine) + ")");
+                warnings_.push_back("warning: " + op + " by zero literal (line " + std::to_string(opLine) + ")");
             }
         }
         left = std::make_unique<BinaryExpr>(op, std::move(left), std::move(right));
@@ -4402,10 +4522,8 @@ std::unique_ptr<Expression> Parser::parseUnary() {
     //
     // The annotation binds tighter than any binary operator (it sits in
     // unary position), so `@range[0,9] x + 1` parses as `(@range[0,9] x) + 1`.
-    if (check(TokenType::AT) && current + 1 < tokens.size() &&
-        tokens[current + 1].type == TokenType::IDENTIFIER &&
-        tokens[current + 1].lexeme == "range" &&
-        current + 2 < tokens.size() &&
+    if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].type == TokenType::IDENTIFIER &&
+        tokens[current + 1].lexeme == "range" && current + 2 < tokens.size() &&
         tokens[current + 2].type == TokenType::LBRACKET) {
         const Token atTok = tokens[current];
         advance(); // '@'
@@ -4413,9 +4531,10 @@ std::unique_ptr<Expression> Parser::parseUnary() {
         advance(); // '['
         auto parseSignedInt = [this](const char* what) -> int64_t {
             bool neg = false;
-            if (match(TokenType::MINUS)) neg = true;
-            const Token lit = consume(TokenType::INTEGER,
-                std::string("Expected integer ") + what + " in @range[lo, hi]");
+            if (match(TokenType::MINUS))
+                neg = true;
+            const Token lit =
+                consume(TokenType::INTEGER, std::string("Expected integer ") + what + " in @range[lo, hi]");
             int64_t v = static_cast<int64_t>(lit.intValue);
             return neg ? -v : v;
         };
@@ -4424,8 +4543,8 @@ std::unique_ptr<Expression> Parser::parseUnary() {
         const int64_t hi = parseSignedInt("hi");
         consume(TokenType::RBRACKET, "Expected ']' to close @range[lo, hi]");
         if (lo > hi) {
-            error("@range[lo, hi] requires lo <= hi (got lo=" +
-                  std::to_string(lo) + ", hi=" + std::to_string(hi) + ")");
+            error("@range[lo, hi] requires lo <= hi (got lo=" + std::to_string(lo) + ", hi=" + std::to_string(hi) +
+                  ")");
         }
         auto inner = parseUnary();
         auto node = std::make_unique<RangeAnnotExpr>(lo, hi, std::move(inner));
@@ -4569,8 +4688,8 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
             // field/method name) after '.'.  This mirrors C/C++ where keywords are
             // valid struct member names when disambiguated by the '.' context.
             Token fieldToken = (check(TokenType::IDENTIFIER) || check(TokenType::SWAP))
-                ? advance()
-                : consume(TokenType::IDENTIFIER, "Expected field name after '.'");
+                                   ? advance()
+                                   : consume(TokenType::IDENTIFIER, "Expected field name after '.'");
             // Method call: obj.method(args...) desugars to method(obj, args...)
             if (check(TokenType::LPAREN)) {
                 advance(); // consume '('
@@ -4610,8 +4729,8 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
             const Token arrowToken = tokens[current - 1];
             // Same as DOT: accept IDENTIFIER or keyword tokens as field names.
             Token fieldToken = (check(TokenType::IDENTIFIER) || check(TokenType::SWAP))
-                ? advance()
-                : consume(TokenType::IDENTIFIER, "Expected field name after '->'");
+                                   ? advance()
+                                   : consume(TokenType::IDENTIFIER, "Expected field name after '->'");
             if (check(TokenType::LPAREN)) {
                 advance(); // consume '('
                 std::vector<std::unique_ptr<Expression>> arguments;
@@ -4803,8 +4922,8 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     // compile-time constant and fits within the stack threshold.
     // Returns a ptr<T> pointing to x contiguous elements of type T.
     // alloc<T>() with no argument allocates exactly one element (Ω spec §4.1).
-    if (check(TokenType::IDENTIFIER) && peek().lexeme == "alloc" &&
-        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LT) {
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "alloc" && current + 1 < tokens.size() &&
+        tokens[current + 1].type == TokenType::LT) {
         const Token kw = advance(); // consume 'alloc'
         advance();                  // consume '<'
         std::string elemTypeName = parseTypeAnnotation();
@@ -4820,7 +4939,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         // alloc<T>() — zero args means allocate 1 element (handled in codegen)
         consume(TokenType::RPAREN, "Expected ')' after alloc<T>(...) arguments");
         auto call = std::make_unique<CallExpr>("alloc<" + elemTypeName + ">", std::move(args));
-        call->line   = kw.line;
+        call->line = kw.line;
         call->column = kw.column;
         return call;
     }
@@ -4837,9 +4956,9 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     // new T { field: val, ... } — allocation + in-place construction.
     // Allocates one T (via alloc<T>(1)) and immediately initialises its
     // fields.  Distinguished from the zero-init form by the `{` lookahead.
-    if (check(TokenType::IDENTIFIER) && peek().lexeme == "new" &&
-        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::IDENTIFIER) {
-        const Token kw = advance(); // consume 'new'
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "new" && current + 1 < tokens.size() &&
+        tokens[current + 1].type == TokenType::IDENTIFIER) {
+        const Token kw = advance();                       // consume 'new'
         std::string elemTypeName = parseTypeAnnotation(); // e.g. "MyStruct", "i64"
 
         // ── new T { field: val, ... } ──────────────────────────────────────
@@ -4848,17 +4967,16 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             advance(); // consume '{'
             std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fields;
             while (!check(TokenType::RBRACE) && !isAtEnd()) {
-                const Token fname = consume(TokenType::IDENTIFIER,
-                    "Expected field name in new T { ... } initialiser");
-                consume(TokenType::COLON,
-                    "Expected ':' after field name in new T { ... } initialiser");
+                const Token fname = consume(TokenType::IDENTIFIER, "Expected field name in new T { ... } initialiser");
+                consume(TokenType::COLON, "Expected ':' after field name in new T { ... } initialiser");
                 auto val = parseExpression();
                 fields.emplace_back(fname.lexeme, std::move(val));
-                if (check(TokenType::COMMA)) advance(); // trailing comma OK
+                if (check(TokenType::COMMA))
+                    advance(); // trailing comma OK
             }
             consume(TokenType::RBRACE, "Expected '}' to close new T { ... } initialiser");
             auto expr = std::make_unique<NewConstructExpr>(elemTypeName, std::move(fields));
-            expr->line   = kw.line;
+            expr->line = kw.line;
             expr->column = kw.column;
             return expr;
         }
@@ -4879,35 +4997,35 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         }
         // No parens → new_zero<T>() → 1 zero-initialised element
         auto call = std::make_unique<CallExpr>("new_zero<" + elemTypeName + ">", std::move(args));
-        call->line   = kw.line;
+        call->line = kw.line;
         call->column = kw.column;
         return call;
     }
 
     // pslice_new<T>(ptr, len) — create a fat pointer slice over T elements.
     // The <T> type parameter is encoded into the callee name for codegen recovery.
-    if (check(TokenType::IDENTIFIER) && peek().lexeme == "pslice_new" &&
-        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LT) {
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "pslice_new" && current + 1 < tokens.size() &&
+        tokens[current + 1].type == TokenType::LT) {
         const Token kw = advance(); // consume 'pslice_new'
         advance();                  // consume '<'
         std::string elemTypeName = parseTypeAnnotation();
         consume(TokenType::GT, "Expected '>' after type in pslice_new<T>(...)");
         consume(TokenType::LPAREN, "Expected '(' after pslice_new<T>");
         std::vector<std::unique_ptr<Expression>> args;
-        args.push_back(parseExpression());   // ptr argument
+        args.push_back(parseExpression()); // ptr argument
         consume(TokenType::COMMA, "Expected ',' between pslice_new<T> arguments");
-        args.push_back(parseExpression());   // len argument
+        args.push_back(parseExpression()); // len argument
         consume(TokenType::RPAREN, "Expected ')' after pslice_new<T>(...) arguments");
         auto call = std::make_unique<CallExpr>("pslice_new<" + elemTypeName + ">", std::move(args));
-        call->line   = kw.line;
+        call->line = kw.line;
         call->column = kw.column;
         return call;
     }
 
     // The argument MUST be a type name (identifier), not an expression.
     // Produces an integer literal equal to the byte size of T.
-    if (check(TokenType::IDENTIFIER) && peek().lexeme == "sizeof" &&
-        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LPAREN) {
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "sizeof" && current + 1 < tokens.size() &&
+        tokens[current + 1].type == TokenType::LPAREN) {
         const Token kw = advance(); // consume 'sizeof'
         advance();                  // consume '('
         // Parse the type annotation inside the parens.
@@ -4921,11 +5039,9 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             byteSize = 2;
         else if (typeName == "i32" || typeName == "u32" || typeName == "f32" || typeName == "float32")
             byteSize = 4;
-        else if (typeName == "i64" || typeName == "u64" || typeName == "int" ||
-                 typeName == "uint" || typeName == "float" || typeName == "double" ||
-                 typeName == "f64" || typeName == "float64" ||
-                 typeName == "ptr" || typeName.rfind("ptr<", 0) == 0 ||
-                 typeName == "string" || typeName == "bigint")
+        else if (typeName == "i64" || typeName == "u64" || typeName == "int" || typeName == "uint" ||
+                 typeName == "float" || typeName == "double" || typeName == "f64" || typeName == "float64" ||
+                 typeName == "ptr" || typeName.rfind("ptr<", 0) == 0 || typeName == "string" || typeName == "bigint")
             byteSize = 8;
         else if (typeName == "i128" || typeName == "u128")
             byteSize = 16;
@@ -4962,13 +5078,11 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             // Collect the full scope chain into a segment vector.
             std::vector<std::string> segments;
             segments.push_back(token.lexeme);
-            segments.push_back(
-                consume(TokenType::IDENTIFIER, "Expected identifier after '::'").lexeme);
+            segments.push_back(consume(TokenType::IDENTIFIER, "Expected identifier after '::'").lexeme);
             int depth = 1;
             while (check(TokenType::SCOPE)) {
                 advance(); // consume '::'
-                segments.push_back(
-                    consume(TokenType::IDENTIFIER, "Expected identifier after '::'").lexeme);
+                segments.push_back(consume(TokenType::IDENTIFIER, "Expected identifier after '::'").lexeme);
                 ++depth;
             }
 
@@ -4978,26 +5092,22 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                 // and desugars to the appropriate BinaryExpr, UnaryExpr, or
                 // CallExpr — completely at parse time, zero extra codegen.
                 if (segments.size() == 2) {
-                    const std::string& tname  = segments[0];
-                    const std::string& mname  = segments[1];
+                    const std::string& tname = segments[0];
+                    const std::string& mname = segments[1];
 
                     // Canonical type groups
-                    static const std::unordered_set<std::string> kIntTypes{
-                        "int","i64","i32","i16","i8","u64","u32","u16","u8","uint"};
-                    static const std::unordered_set<std::string> kFloatTypes{
-                        "float","f64","f32","double"};
-                    static const std::unordered_set<std::string> kStrTypes{
-                        "string","str"};
-                    static const std::unordered_set<std::string> kArrTypes{
-                        "array","arr"};
-                    static const std::unordered_set<std::string> kBoolTypes{
-                        "bool"};
+                    static const std::unordered_set<std::string> kIntTypes{"int", "i64", "i32", "i16", "i8",
+                                                                           "u64", "u32", "u16", "u8",  "uint"};
+                    static const std::unordered_set<std::string> kFloatTypes{"float", "f64", "f32", "double"};
+                    static const std::unordered_set<std::string> kStrTypes{"string", "str"};
+                    static const std::unordered_set<std::string> kArrTypes{"array", "arr"};
+                    static const std::unordered_set<std::string> kBoolTypes{"bool"};
 
-                    const bool isInt   = kIntTypes.count(tname) != 0 || isIntWidthTypeName(tname);
-                    const bool isFloat = kFloatTypes.count(tname)  != 0;
-                    const bool isStr   = kStrTypes.count(tname)    != 0;
-                    const bool isArr   = kArrTypes.count(tname)    != 0;
-                    const bool isBool  = kBoolTypes.count(tname)   != 0;
+                    const bool isInt = kIntTypes.count(tname) != 0 || isIntWidthTypeName(tname);
+                    const bool isFloat = kFloatTypes.count(tname) != 0;
+                    const bool isStr = kStrTypes.count(tname) != 0;
+                    const bool isArr = kArrTypes.count(tname) != 0;
+                    const bool isBool = kBoolTypes.count(tname) != 0;
 
                     if (isInt || isFloat || isStr || isArr || isBool) {
                         // Determine the kind of this method BEFORE consuming args.
@@ -5010,33 +5120,58 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
 
                         // ── Shared int+float methods ─────────────────────────────
                         if (isInt || isFloat) {
-                            if      (mname=="add")       kind="B:+";
-                            else if (mname=="sub")       kind="B:-";
-                            else if (mname=="mul")       kind="B:*";
-                            else if (mname=="div")       kind="B:/";
-                            else if (mname=="neg")       kind="U:-";
-                            else if (mname=="abs")       kind="C:abs";
-                            else if (mname=="min")       kind="C:min";
-                            else if (mname=="max")       kind="C:max";
-                            else if (mname=="pow")       kind="C:pow";
-                            else if (mname=="clamp")     kind="C:clamp";
-                            else if (mname=="eq")        kind="B:==";
-                            else if (mname=="ne")        kind="B:!=";
-                            else if (mname=="lt")        kind="B:<";
-                            else if (mname=="le")        kind="B:<=";
-                            else if (mname=="gt")        kind="B:>";
-                            else if (mname=="ge")        kind="B:>=";
-                            else if (mname=="to_string") kind="C:to_string";
+                            if (mname == "add")
+                                kind = "B:+";
+                            else if (mname == "sub")
+                                kind = "B:-";
+                            else if (mname == "mul")
+                                kind = "B:*";
+                            else if (mname == "div")
+                                kind = "B:/";
+                            else if (mname == "neg")
+                                kind = "U:-";
+                            else if (mname == "abs")
+                                kind = "C:abs";
+                            else if (mname == "min")
+                                kind = "C:min";
+                            else if (mname == "max")
+                                kind = "C:max";
+                            else if (mname == "pow")
+                                kind = "C:pow";
+                            else if (mname == "clamp")
+                                kind = "C:clamp";
+                            else if (mname == "eq")
+                                kind = "B:==";
+                            else if (mname == "ne")
+                                kind = "B:!=";
+                            else if (mname == "lt")
+                                kind = "B:<";
+                            else if (mname == "le")
+                                kind = "B:<=";
+                            else if (mname == "gt")
+                                kind = "B:>";
+                            else if (mname == "ge")
+                                kind = "B:>=";
+                            else if (mname == "to_string")
+                                kind = "C:to_string";
                             // Fast-math arithmetic (float-biased, reassoc/nnan)
-                            else if (mname=="fast_add")  kind="C:fast_add";
-                            else if (mname=="fast_sub")  kind="C:fast_sub";
-                            else if (mname=="fast_mul")  kind="C:fast_mul";
-                            else if (mname=="fast_div")  kind="C:fast_div";
+                            else if (mname == "fast_add")
+                                kind = "C:fast_add";
+                            else if (mname == "fast_sub")
+                                kind = "C:fast_sub";
+                            else if (mname == "fast_mul")
+                                kind = "C:fast_mul";
+                            else if (mname == "fast_div")
+                                kind = "C:fast_div";
                             // Precise/strict IEEE arithmetic
-                            else if (mname=="precise_add") kind="C:precise_add";
-                            else if (mname=="precise_sub") kind="C:precise_sub";
-                            else if (mname=="precise_mul") kind="C:precise_mul";
-                            else if (mname=="precise_div") kind="C:precise_div";
+                            else if (mname == "precise_add")
+                                kind = "C:precise_add";
+                            else if (mname == "precise_sub")
+                                kind = "C:precise_sub";
+                            else if (mname == "precise_mul")
+                                kind = "C:precise_mul";
+                            else if (mname == "precise_div")
+                                kind = "C:precise_div";
                         }
                         // ── Int-only methods ─────────────────────────────────────
                         // For typed integers (i8/i16/i32/u8/u16/u32), width-specific
@@ -5047,13 +5182,18 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                             // Parse the declared bit-width from the type name (e.g. 32 from "i32").
                             // Width 0 means "use generic path".
                             int declaredWidth = 0;
-                            if (tname.size() >= 2 && (tname[0]=='i'||tname[0]=='u')) {
-                                int w = 0; bool ok = true;
+                            if (tname.size() >= 2 && (tname[0] == 'i' || tname[0] == 'u')) {
+                                int w = 0;
+                                bool ok = true;
                                 for (size_t j = 1; j < tname.size(); ++j) {
-                                    if (!std::isdigit(static_cast<unsigned char>(tname[j]))) { ok=false; break; }
-                                    w = w*10 + (tname[j]-'0');
+                                    if (!std::isdigit(static_cast<unsigned char>(tname[j]))) {
+                                        ok = false;
+                                        break;
+                                    }
+                                    w = w * 10 + (tname[j] - '0');
                                 }
-                                if (ok && w>=1 && w<=64 && w!=64) declaredWidth = w;
+                                if (ok && w >= 1 && w <= 64 && w != 64)
+                                    declaredWidth = w;
                             }
                             // Helpers: use width-specific path only when a sub-64-bit width is known.
                             auto widthKind = [&](const char* op) -> std::string {
@@ -5061,42 +5201,70 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                                     return std::string("W:") + op;
                                 return std::string("C:") + op;
                             };
-                            if      (mname=="mod")              kind="B:%";
-                            else if (mname=="sign")             kind="C:sign";
-                            else if (mname=="is_even")          kind="C:is_even";
-                            else if (mname=="is_odd")           kind="C:is_odd";
-                            else if (mname=="to_float")         kind="C:to_float";
-                            else if (mname=="bitand")           kind="B:&";
-                            else if (mname=="bitor")            kind="B:|";
-                            else if (mname=="bitxor")           kind="B:^";
-                            else if (mname=="bitnot")           kind="U:~";
-                            else if (mname=="shl")              kind="B:<<";
-                            else if (mname=="shr")              kind="B:>>";
+                            if (mname == "mod")
+                                kind = "B:%";
+                            else if (mname == "sign")
+                                kind = "C:sign";
+                            else if (mname == "is_even")
+                                kind = "C:is_even";
+                            else if (mname == "is_odd")
+                                kind = "C:is_odd";
+                            else if (mname == "to_float")
+                                kind = "C:to_float";
+                            else if (mname == "bitand")
+                                kind = "B:&";
+                            else if (mname == "bitor")
+                                kind = "B:|";
+                            else if (mname == "bitxor")
+                                kind = "B:^";
+                            else if (mname == "bitnot")
+                                kind = "U:~";
+                            else if (mname == "shl")
+                                kind = "B:<<";
+                            else if (mname == "shr")
+                                kind = "B:>>";
                             // Bit-counting: emit width-specific LLVM intrinsic for iN types
-                            else if (mname=="popcount")         kind=widthKind("popcount");
-                            else if (mname=="clz")              kind=widthKind("clz");
-                            else if (mname=="ctz")              kind=widthKind("ctz");
-                            else if (mname=="bitreverse")       kind=widthKind("bitreverse");
-                            else if (mname=="bswap")            kind=widthKind("bswap");
+                            else if (mname == "popcount")
+                                kind = widthKind("popcount");
+                            else if (mname == "clz")
+                                kind = widthKind("clz");
+                            else if (mname == "ctz")
+                                kind = widthKind("ctz");
+                            else if (mname == "bitreverse")
+                                kind = widthKind("bitreverse");
+                            else if (mname == "bswap")
+                                kind = widthKind("bswap");
                             // Bit rotation (width-specific avoids masking to 63)
-                            else if (mname=="rotl"  || mname=="rotate_left")  kind=widthKind("rotate_left");
-                            else if (mname=="rotr"  || mname=="rotate_right") kind=widthKind("rotate_right");
+                            else if (mname == "rotl" || mname == "rotate_left")
+                                kind = widthKind("rotate_left");
+                            else if (mname == "rotr" || mname == "rotate_right")
+                                kind = widthKind("rotate_right");
                             // Overflow-safe arithmetic (width-specific uses iN sat intrinsics)
-                            else if (mname=="saturating_add")   kind=widthKind("saturating_add");
-                            else if (mname=="saturating_sub")   kind=widthKind("saturating_sub");
+                            else if (mname == "saturating_add")
+                                kind = widthKind("saturating_add");
+                            else if (mname == "saturating_sub")
+                                kind = widthKind("saturating_sub");
                             // Number-theory helpers
-                            else if (mname=="is_power_of_2")    kind="C:is_power_of_2";
-                            else if (mname=="gcd")              kind="C:gcd";
-                            else if (mname=="lcm")              kind="C:lcm";
+                            else if (mname == "is_power_of_2")
+                                kind = "C:is_power_of_2";
+                            else if (mname == "gcd")
+                                kind = "C:gcd";
+                            else if (mname == "lcm")
+                                kind = "C:lcm";
                             // Conversions
-                            else if (mname=="to_char")          kind="C:to_char";
-                            else if (mname=="char_code")        kind="C:char_code";
+                            else if (mname == "to_char")
+                                kind = "C:to_char";
+                            else if (mname == "char_code")
+                                kind = "C:char_code";
                             // High-performance integer arithmetic
-                            else if (mname=="mulhi")            kind="C:mulhi";
-                            else if (mname=="mulhi_u")          kind="C:mulhi_u";
-                            else if (mname=="absdiff")          kind="C:absdiff";
+                            else if (mname == "mulhi")
+                                kind = "C:mulhi";
+                            else if (mname == "mulhi_u")
+                                kind = "C:mulhi_u";
+                            else if (mname == "absdiff")
+                                kind = "C:absdiff";
                             // Store width in kind for W: dispatch.
-                            if (kind.size()>=2 && kind[0]=='W' && declaredWidth>0)
+                            if (kind.size() >= 2 && kind[0] == 'W' && declaredWidth > 0)
                                 kind += ":" + std::to_string(declaredWidth);
                         }
                         // ── Float-only methods ───────────────────────────────────
@@ -5105,117 +5273,208 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                         if (isFloat && kind.empty()) {
                             const bool isF32 = (tname == "f32" || tname == "float32");
                             auto floatKind = [&](const char* op) -> std::string {
-                                return isF32
-                                    ? std::string("F:") + op
-                                    : std::string("C:") + op;
+                                return isF32 ? std::string("F:") + op : std::string("C:") + op;
                             };
-                            if      (mname=="sqrt")             kind=floatKind("sqrt");
-                            else if (mname=="floor")            kind="C:floor";
-                            else if (mname=="ceil")             kind="C:ceil";
-                            else if (mname=="round")            kind="C:round";
-                            else if (mname=="to_int")           kind="C:to_int";
+                            if (mname == "sqrt")
+                                kind = floatKind("sqrt");
+                            else if (mname == "floor")
+                                kind = "C:floor";
+                            else if (mname == "ceil")
+                                kind = "C:ceil";
+                            else if (mname == "round")
+                                kind = "C:round";
+                            else if (mname == "to_int")
+                                kind = "C:to_int";
                             // Trigonometry (f32 uses 32-bit LLVM intrinsics)
-                            else if (mname=="sin")              kind=floatKind("sin");
-                            else if (mname=="cos")              kind=floatKind("cos");
-                            else if (mname=="tan")              kind=floatKind("tan");
-                            else if (mname=="asin")             kind=floatKind("asin");
-                            else if (mname=="acos")             kind=floatKind("acos");
-                            else if (mname=="atan")             kind=floatKind("atan");
-                            else if (mname=="atan2")            kind=floatKind("atan2");
+                            else if (mname == "sin")
+                                kind = floatKind("sin");
+                            else if (mname == "cos")
+                                kind = floatKind("cos");
+                            else if (mname == "tan")
+                                kind = floatKind("tan");
+                            else if (mname == "asin")
+                                kind = floatKind("asin");
+                            else if (mname == "acos")
+                                kind = floatKind("acos");
+                            else if (mname == "atan")
+                                kind = floatKind("atan");
+                            else if (mname == "atan2")
+                                kind = floatKind("atan2");
                             // Transcendentals
-                            else if (mname=="log")              kind=floatKind("log");
-                            else if (mname=="log2")             kind=floatKind("log2");
-                            else if (mname=="log10")            kind=floatKind("log10");
-                            else if (mname=="exp")              kind=floatKind("exp");
-                            else if (mname=="exp2")             kind=floatKind("exp2");
-                            else if (mname=="cbrt")             kind=floatKind("cbrt");
+                            else if (mname == "log")
+                                kind = floatKind("log");
+                            else if (mname == "log2")
+                                kind = floatKind("log2");
+                            else if (mname == "log10")
+                                kind = floatKind("log10");
+                            else if (mname == "exp")
+                                kind = floatKind("exp");
+                            else if (mname == "exp2")
+                                kind = floatKind("exp2");
+                            else if (mname == "cbrt")
+                                kind = floatKind("cbrt");
                             // Multi-arg float ops
-                            else if (mname=="hypot")            kind=floatKind("hypot");
-                            else if (mname=="fma")              kind=floatKind("fma");
-                            else if (mname=="copysign")         kind=floatKind("copysign");
+                            else if (mname == "hypot")
+                                kind = floatKind("hypot");
+                            else if (mname == "fma")
+                                kind = floatKind("fma");
+                            else if (mname == "copysign")
+                                kind = floatKind("copysign");
                             // Fast/approximate float intrinsics
-                            else if (mname=="fast_sqrt")        kind=floatKind("fast_sqrt");
+                            else if (mname == "fast_sqrt")
+                                kind = floatKind("fast_sqrt");
                             // Predicates
-                            else if (mname=="is_nan")           kind="C:is_nan";
-                            else if (mname=="is_inf")           kind="C:is_inf";
-                            else if (mname=="min_float")        kind="C:min_float";
-                            else if (mname=="max_float")        kind="C:max_float";
+                            else if (mname == "is_nan")
+                                kind = "C:is_nan";
+                            else if (mname == "is_inf")
+                                kind = "C:is_inf";
+                            else if (mname == "min_float")
+                                kind = "C:min_float";
+                            else if (mname == "max_float")
+                                kind = "C:max_float";
                         }
                         // ── String methods ───────────────────────────────────────
                         if (isStr) {
-                            if      (mname=="len")              kind="C:len";
-                            else if (mname=="concat")           kind="B:+";
-                            else if (mname=="eq")               kind="C:str_eq";
-                            else if (mname=="contains")         kind="C:str_contains";
-                            else if (mname=="starts_with")      kind="C:str_starts_with";
-                            else if (mname=="ends_with")        kind="C:str_ends_with";
-                            else if (mname=="index_of")         kind="C:str_index_of";
-                            else if (mname=="replace")          kind="C:str_replace";
-                            else if (mname=="repeat")           kind="C:str_repeat";
-                            else if (mname=="char_at")          kind="C:char_at";
-                            else if (mname=="to_upper"||mname=="upper") kind="C:str_upper";
-                            else if (mname=="to_lower"||mname=="lower") kind="C:str_lower";
-                            else if (mname=="trim")             kind="C:str_trim";
-                            else if (mname=="lstrip")           kind="C:str_lstrip";
-                            else if (mname=="rstrip")           kind="C:str_rstrip";
-                            else if (mname=="split")            kind="C:str_split";
-                            else if (mname=="substr")           kind="C:str_substr";
-                            else if (mname=="reverse")          kind="C:str_reverse";
-                            else if (mname=="pad_left")         kind="C:str_pad_left";
-                            else if (mname=="pad_right")        kind="C:str_pad_right";
-                            else if (mname=="count")            kind="C:str_count";
-                            else if (mname=="find")             kind="C:str_find";
-                            else if (mname=="format")           kind="C:str_format";
-                            else if (mname=="chars")            kind="C:str_chars";
-                            else if (mname=="remove")           kind="C:str_remove";
-                            else if (mname=="join")             kind="C:str_join";
-                            else if (mname=="to_int")           kind="C:to_int";
-                            else if (mname=="to_float")         kind="C:to_float";
-                            else if (mname=="is_alpha")         kind="C:is_alpha";
-                            else if (mname=="is_digit")         kind="C:is_digit";
-                            else if (mname=="to_string")        kind="C:to_string";
-                            else if (mname=="filter")           kind="C:str_filter";
+                            if (mname == "len")
+                                kind = "C:len";
+                            else if (mname == "concat")
+                                kind = "B:+";
+                            else if (mname == "eq")
+                                kind = "C:str_eq";
+                            else if (mname == "contains")
+                                kind = "C:str_contains";
+                            else if (mname == "starts_with")
+                                kind = "C:str_starts_with";
+                            else if (mname == "ends_with")
+                                kind = "C:str_ends_with";
+                            else if (mname == "index_of")
+                                kind = "C:str_index_of";
+                            else if (mname == "replace")
+                                kind = "C:str_replace";
+                            else if (mname == "repeat")
+                                kind = "C:str_repeat";
+                            else if (mname == "char_at")
+                                kind = "C:char_at";
+                            else if (mname == "to_upper" || mname == "upper")
+                                kind = "C:str_upper";
+                            else if (mname == "to_lower" || mname == "lower")
+                                kind = "C:str_lower";
+                            else if (mname == "trim")
+                                kind = "C:str_trim";
+                            else if (mname == "lstrip")
+                                kind = "C:str_lstrip";
+                            else if (mname == "rstrip")
+                                kind = "C:str_rstrip";
+                            else if (mname == "split")
+                                kind = "C:str_split";
+                            else if (mname == "substr")
+                                kind = "C:str_substr";
+                            else if (mname == "reverse")
+                                kind = "C:str_reverse";
+                            else if (mname == "pad_left")
+                                kind = "C:str_pad_left";
+                            else if (mname == "pad_right")
+                                kind = "C:str_pad_right";
+                            else if (mname == "count")
+                                kind = "C:str_count";
+                            else if (mname == "find")
+                                kind = "C:str_find";
+                            else if (mname == "format")
+                                kind = "C:str_format";
+                            else if (mname == "chars")
+                                kind = "C:str_chars";
+                            else if (mname == "remove")
+                                kind = "C:str_remove";
+                            else if (mname == "join")
+                                kind = "C:str_join";
+                            else if (mname == "to_int")
+                                kind = "C:to_int";
+                            else if (mname == "to_float")
+                                kind = "C:to_float";
+                            else if (mname == "is_alpha")
+                                kind = "C:is_alpha";
+                            else if (mname == "is_digit")
+                                kind = "C:is_digit";
+                            else if (mname == "to_string")
+                                kind = "C:to_string";
+                            else if (mname == "filter")
+                                kind = "C:str_filter";
                         }
                         // ── Array methods ────────────────────────────────────────
                         if (isArr) {
-                            if      (mname=="len")              kind="C:len";
-                            else if (mname=="fill")             kind="C:array_fill";
-                            else if (mname=="contains")         kind="C:array_contains";
-                            else if (mname=="pop")              kind="C:pop";
-                            else if (mname=="push")             kind="C:push";
-                            else if (mname=="remove")           kind="C:array_remove";
-                            else if (mname=="sort")             kind="C:sort";
-                            else if (mname=="min")              kind="C:array_min";
-                            else if (mname=="max")              kind="C:array_max";
-                            else if (mname=="sum")              kind="C:sum";
-                            else if (mname=="product")          kind="C:array_product";
-                            else if (mname=="mean")             kind="C:array_mean";
-                            else if (mname=="reverse")          kind="C:reverse";
-                            else if (mname=="index_of")         kind="C:index_of";
-                            else if (mname=="last")             kind="C:array_last";
-                            else if (mname=="unique")           kind="C:array_unique";
-                            else if (mname=="zip")              kind="C:array_zip";
-                            else if (mname=="filter")           kind="C:array_filter";
-                            else if (mname=="map")              kind="C:array_map";
-                            else if (mname=="reduce")           kind="C:array_reduce";
-                            else if (mname=="any")              kind="C:array_any";
-                            else if (mname=="every")            kind="C:array_every";
-                            else if (mname=="count")            kind="C:array_count";
-                            else if (mname=="take")             kind="C:array_take";
-                            else if (mname=="drop")             kind="C:array_drop";
-                            else if (mname=="rotate")           kind="C:array_rotate";
-                            else if (mname=="insert")           kind="C:array_insert";
-                            else if (mname=="find")             kind="C:array_find";
-                            else if (mname=="concat")           kind="C:array_concat";
-                            else if (mname=="slice")            kind="C:array_slice";
-                            else if (mname=="copy")             kind="C:array_copy";
+                            if (mname == "len")
+                                kind = "C:len";
+                            else if (mname == "fill")
+                                kind = "C:array_fill";
+                            else if (mname == "contains")
+                                kind = "C:array_contains";
+                            else if (mname == "pop")
+                                kind = "C:pop";
+                            else if (mname == "push")
+                                kind = "C:push";
+                            else if (mname == "remove")
+                                kind = "C:array_remove";
+                            else if (mname == "sort")
+                                kind = "C:sort";
+                            else if (mname == "min")
+                                kind = "C:array_min";
+                            else if (mname == "max")
+                                kind = "C:array_max";
+                            else if (mname == "sum")
+                                kind = "C:sum";
+                            else if (mname == "product")
+                                kind = "C:array_product";
+                            else if (mname == "mean")
+                                kind = "C:array_mean";
+                            else if (mname == "reverse")
+                                kind = "C:reverse";
+                            else if (mname == "index_of")
+                                kind = "C:index_of";
+                            else if (mname == "last")
+                                kind = "C:array_last";
+                            else if (mname == "unique")
+                                kind = "C:array_unique";
+                            else if (mname == "zip")
+                                kind = "C:array_zip";
+                            else if (mname == "filter")
+                                kind = "C:array_filter";
+                            else if (mname == "map")
+                                kind = "C:array_map";
+                            else if (mname == "reduce")
+                                kind = "C:array_reduce";
+                            else if (mname == "any")
+                                kind = "C:array_any";
+                            else if (mname == "every")
+                                kind = "C:array_every";
+                            else if (mname == "count")
+                                kind = "C:array_count";
+                            else if (mname == "take")
+                                kind = "C:array_take";
+                            else if (mname == "drop")
+                                kind = "C:array_drop";
+                            else if (mname == "rotate")
+                                kind = "C:array_rotate";
+                            else if (mname == "insert")
+                                kind = "C:array_insert";
+                            else if (mname == "find")
+                                kind = "C:array_find";
+                            else if (mname == "concat")
+                                kind = "C:array_concat";
+                            else if (mname == "slice")
+                                kind = "C:array_slice";
+                            else if (mname == "copy")
+                                kind = "C:array_copy";
                         }
                         // ── Bool methods ─────────────────────────────────────────
                         if (isBool) {
-                            if      (mname=="and")          kind="B:&&";
-                            else if (mname=="or")           kind="B:||";
-                            else if (mname=="not")          kind="U:!";
-                            else if (mname=="to_string")    kind="C:to_string";
+                            if (mname == "and")
+                                kind = "B:&&";
+                            else if (mname == "or")
+                                kind = "B:||";
+                            else if (mname == "not")
+                                kind = "U:!";
+                            else if (mname == "to_string")
+                                kind = "C:to_string";
                         }
 
                         if (!kind.empty()) {
@@ -5227,43 +5486,38 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                                     args.push_back(parseExpression());
                                 } while (match(TokenType::COMMA));
                             }
-                            consume(TokenType::RPAREN,
-                                    "Expected ')' after '" + tname + "::" + mname + "' arguments");
+                            consume(TokenType::RPAREN, "Expected ')' after '" + tname + "::" + mname + "' arguments");
 
-                            const char   kp  = kind[0];       // 'B', 'U', 'C', 'W', or 'F'
-                            const std::string  val = kind.substr(2); // op / function name
+                            const char kp = kind[0];                // 'B', 'U', 'C', 'W', or 'F'
+                            const std::string val = kind.substr(2); // op / function name
 
                             if (kp == 'B') {
                                 if (args.size() != 2)
-                                    error("'" + tname + "::" + mname +
-                                          "' requires exactly 2 arguments");
-                                auto e = std::make_unique<BinaryExpr>(
-                                    val, std::move(args[0]), std::move(args[1]));
-                                e->line = token.line; e->column = token.column;
+                                    error("'" + tname + "::" + mname + "' requires exactly 2 arguments");
+                                auto e = std::make_unique<BinaryExpr>(val, std::move(args[0]), std::move(args[1]));
+                                e->line = token.line;
+                                e->column = token.column;
                                 return e;
                             }
                             if (kp == 'U') {
                                 if (args.size() != 1)
-                                    error("'" + tname + "::" + mname +
-                                          "' requires exactly 1 argument");
-                                auto e = std::make_unique<UnaryExpr>(
-                                    val, std::move(args[0]));
-                                e->line = token.line; e->column = token.column;
+                                    error("'" + tname + "::" + mname + "' requires exactly 1 argument");
+                                auto e = std::make_unique<UnaryExpr>(val, std::move(args[0]));
+                                e->line = token.line;
+                                e->column = token.column;
                                 return e;
                             }
                             // kp == 'W': width-typed integer intrinsic.
                             // val = "popcount:32"  →  callee "__tw_popcount_32"
                             if (kp == 'W') {
                                 const auto colon = val.find(':');
-                                const std::string opName = (colon != std::string::npos)
-                                    ? val.substr(0, colon) : val;
-                                const std::string widthStr = (colon != std::string::npos)
-                                    ? val.substr(colon + 1) : "";
-                                const std::string callee = "__tw_" + opName +
-                                    (widthStr.empty() ? "" : "_" + widthStr);
+                                const std::string opName = (colon != std::string::npos) ? val.substr(0, colon) : val;
+                                const std::string widthStr = (colon != std::string::npos) ? val.substr(colon + 1) : "";
+                                const std::string callee = "__tw_" + opName + (widthStr.empty() ? "" : "_" + widthStr);
                                 auto e = std::make_unique<CallExpr>(callee, std::move(args));
                                 e->fromStdNamespace = true; // type-method desugaring
-                                e->line = token.line; e->column = token.column;
+                                e->line = token.line;
+                                e->column = token.column;
                                 return e;
                             }
                             // kp == 'F': f32-typed float intrinsic.
@@ -5272,13 +5526,15 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                                 const std::string callee = "__tf_" + val;
                                 auto e = std::make_unique<CallExpr>(callee, std::move(args));
                                 e->fromStdNamespace = true; // type-method desugaring
-                                e->line = token.line; e->column = token.column;
+                                e->line = token.line;
+                                e->column = token.column;
                                 return e;
                             }
                             // kp == 'C': named builtin call
                             auto e = std::make_unique<CallExpr>(val, std::move(args));
                             e->fromStdNamespace = true; // type-method desugaring
-                            e->line = token.line; e->column = token.column;
+                            e->line = token.line;
+                            e->column = token.column;
                             return e;
                         }
                         // Unknown method for this type — fall through to other
@@ -5312,7 +5568,8 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                     if (!knownNS.empty()) {
                         msg += ". Known namespaces: ";
                         for (size_t ki = 0; ki < knownNS.size(); ++ki) {
-                            if (ki) msg += ", ";
+                            if (ki)
+                                msg += ", ";
                             msg += knownNS[ki];
                         }
                     } else {
@@ -5324,7 +5581,8 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                 }
             }
 
-            // Not a call: single-level → check for namespace struct literal, imported global, then classic enum member access.
+            // Not a call: single-level → check for namespace struct literal, imported global, then classic enum member
+            // access.
             if (depth == 1) {
                 // Check: is this a namespace-qualified struct literal? e.g. Math::Vec2 { x: 1, y: 2 }
                 {
@@ -5360,7 +5618,8 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                 // where "a::b" is a namespace and "c" is a global variable.
                 for (int cut = (int)segments.size() - 1; cut >= 1; --cut) {
                     std::string ns = segments[0];
-                    for (int i = 1; i < cut; ++i) ns += "::" + segments[i];
+                    for (int i = 1; i < cut; ++i)
+                        ns += "::" + segments[i];
                     std::string varName = segments[cut];
                     for (size_t i = (size_t)cut + 1; i < segments.size(); ++i)
                         varName += "::" + segments[i];
@@ -5377,8 +5636,10 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                 }
                 // No namespace resolved — emit a clear error.
                 std::string path = segments[0];
-                for (size_t i = 1; i < segments.size(); ++i) path += "::" + segments[i];
-                error("Cannot resolve '" + path + "': no matching namespace or global found. "
+                for (size_t i = 1; i < segments.size(); ++i)
+                    path += "::" + segments[i];
+                error("Cannot resolve '" + path +
+                      "': no matching namespace or global found. "
                       "Import the file with 'import \"file\" as alias' first.");
             }
         }
@@ -5402,7 +5663,8 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             std::vector<std::pair<std::unique_ptr<Expression>, std::unique_ptr<Expression>>> pairs;
             if (!check(TokenType::RBRACE)) {
                 do {
-                    if (check(TokenType::RBRACE)) break;
+                    if (check(TokenType::RBRACE))
+                        break;
                     auto key = parseExpression();
                     consume(TokenType::COLON, "Expected ':' after dict key");
                     auto val = parseExpression();
@@ -5423,8 +5685,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         // Only consume when the type name is a known type to avoid ambiguity
         // with ternary operator colons and other colon uses.
         if (check(TokenType::COLON) && current + 1 < tokens.size() &&
-            tokens[current + 1].type == TokenType::IDENTIFIER &&
-            isKnownScalarTypeName(tokens[current + 1].lexeme)) {
+            tokens[current + 1].type == TokenType::IDENTIFIER && isKnownScalarTypeName(tokens[current + 1].lexeme)) {
             advance(); // consume ':'
             advance(); // consume type name
         }
@@ -5465,8 +5726,11 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                 int depth = 1;
                 advance(); // consume '<'
                 while (depth > 0 && !isAtEnd()) {
-                    if (check(TokenType::LT)) ++depth;
-                    else if (check(TokenType::GT)) { --depth; }
+                    if (check(TokenType::LT))
+                        ++depth;
+                    else if (check(TokenType::GT)) {
+                        --depth;
+                    }
                     advance();
                 }
             }
@@ -5476,7 +5740,8 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                 auto arrayExpr = std::make_unique<ArrayExpr>(std::vector<std::unique_ptr<Expression>>{});
                 if (!check(TokenType::RBRACE)) {
                     do {
-                        if (check(TokenType::RBRACE)) break;
+                        if (check(TokenType::RBRACE))
+                            break;
                         arrayExpr->elements.push_back(parseExpression());
                     } while (match(TokenType::COMMA));
                 }
@@ -5511,7 +5776,8 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         if (!check(TokenType::RBRACE)) {
             do {
                 // Allow trailing comma before '}'
-                if (check(TokenType::RBRACE)) break;
+                if (check(TokenType::RBRACE))
+                    break;
                 auto key = parseExpression();
                 consume(TokenType::COLON, "Expected ':' after dict key");
                 auto val = parseExpression();
@@ -5545,7 +5811,8 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         auto block = std::make_unique<BlockStmt>(std::move(stmts));
         block->line = orToken.line;
         block->column = orToken.column;
-        auto fnDecl = std::make_unique<FunctionDecl>(lambdaName, std::vector<std::string>{}, std::move(fnParams), std::move(block));
+        auto fnDecl = std::make_unique<FunctionDecl>(lambdaName, std::vector<std::string>{}, std::move(fnParams),
+                                                     std::move(block));
         fnDecl->line = orToken.line;
         fnDecl->column = orToken.column;
         lambdaFunctions_.push_back(std::move(fnDecl));
@@ -5649,7 +5916,8 @@ std::unique_ptr<Expression> Parser::parseLambda() {
     auto block = std::make_unique<BlockStmt>(std::move(stmts));
     block->line = pipeToken.line;
     block->column = pipeToken.column;
-    auto fnDecl = std::make_unique<FunctionDecl>(lambdaName, std::vector<std::string>{}, std::move(fnParams), std::move(block));
+    auto fnDecl =
+        std::make_unique<FunctionDecl>(lambdaName, std::vector<std::string>{}, std::move(fnParams), std::move(block));
     fnDecl->line = pipeToken.line;
     fnDecl->column = pipeToken.column;
 
@@ -5674,9 +5942,12 @@ OptMaxConfig Parser::parseOptMaxConfig() {
             consume(TokenType::ASSIGN, "Expected '=' after key in @optmax config");
             if (key.lexeme == "safety") {
                 const Token val = advance();
-                if (val.lexeme == "off") cfg.safety = SafetyLevel::Off;
-                else if (val.lexeme == "relaxed") cfg.safety = SafetyLevel::Relaxed;
-                else cfg.safety = SafetyLevel::On;
+                if (val.lexeme == "off")
+                    cfg.safety = SafetyLevel::Off;
+                else if (val.lexeme == "relaxed")
+                    cfg.safety = SafetyLevel::Relaxed;
+                else
+                    cfg.safety = SafetyLevel::On;
             } else if (key.lexeme == "fast_math") {
                 const Token val = advance();
                 cfg.fastMath = (val.lexeme == "true" || val.type == TokenType::TRUE);
@@ -5694,18 +5965,21 @@ OptMaxConfig Parser::parseOptMaxConfig() {
                     consume(TokenType::ASSIGN, "Expected '=' in loop config");
                     if (lk.lexeme == "unroll") {
                         const Token v = advance();
-                        if (v.type == TokenType::INTEGER) cfg.loop.unrollCount = static_cast<int>(v.intValue);
+                        if (v.type == TokenType::INTEGER)
+                            cfg.loop.unrollCount = static_cast<int>(v.intValue);
                     } else if (lk.lexeme == "vectorize") {
                         const Token v = advance();
                         cfg.loop.vectorize = (v.lexeme == "true" || v.type == TokenType::TRUE);
                     } else if (lk.lexeme == "tile") {
                         const Token v = advance();
-                        if (v.type == TokenType::INTEGER) cfg.loop.tileSize = static_cast<int>(v.intValue);
+                        if (v.type == TokenType::INTEGER)
+                            cfg.loop.tileSize = static_cast<int>(v.intValue);
                     } else if (lk.lexeme == "parallel") {
                         const Token v = advance();
                         cfg.loop.parallel = (v.lexeme == "true" || v.type == TokenType::TRUE);
                     }
-                    if (!check(TokenType::RBRACE)) match(TokenType::COMMA);
+                    if (!check(TokenType::RBRACE))
+                        match(TokenType::COMMA);
                 }
                 consume(TokenType::RBRACE, "Expected '}' after loop config");
             } else if (key.lexeme == "memory") {
@@ -5714,10 +5988,14 @@ OptMaxConfig Parser::parseOptMaxConfig() {
                     const Token mk = advance();
                     consume(TokenType::ASSIGN, "Expected '=' in memory config");
                     const Token mv = advance();
-                    if (mk.lexeme == "prefetch") cfg.memory.prefetch = (mv.lexeme == "true" || mv.type == TokenType::TRUE);
-                    else if (mk.lexeme == "noalias") cfg.memory.noalias = (mv.lexeme == "true" || mv.type == TokenType::TRUE);
-                    else if (mk.lexeme == "stack") cfg.memory.preferStack = (mv.lexeme == "true" || mv.type == TokenType::TRUE);
-                    if (!check(TokenType::RBRACE)) match(TokenType::COMMA);
+                    if (mk.lexeme == "prefetch")
+                        cfg.memory.prefetch = (mv.lexeme == "true" || mv.type == TokenType::TRUE);
+                    else if (mk.lexeme == "noalias")
+                        cfg.memory.noalias = (mv.lexeme == "true" || mv.type == TokenType::TRUE);
+                    else if (mk.lexeme == "stack")
+                        cfg.memory.preferStack = (mv.lexeme == "true" || mv.type == TokenType::TRUE);
+                    if (!check(TokenType::RBRACE))
+                        match(TokenType::COMMA);
                 }
                 consume(TokenType::RBRACE, "Expected '}' after memory config");
             } else if (key.lexeme == "assume") {
@@ -5725,7 +6003,8 @@ OptMaxConfig Parser::parseOptMaxConfig() {
                 while (!check(TokenType::RBRACKET) && !isAtEnd()) {
                     const Token s = consume(TokenType::STRING, "Expected string in assume list");
                     cfg.assumes.push_back(s.lexeme);
-                    if (!check(TokenType::RBRACKET)) match(TokenType::COMMA);
+                    if (!check(TokenType::RBRACKET))
+                        match(TokenType::COMMA);
                 }
                 consume(TokenType::RBRACKET, "Expected ']' after assume list");
             } else if (key.lexeme == "specialize") {
@@ -5733,7 +6012,8 @@ OptMaxConfig Parser::parseOptMaxConfig() {
                 while (!check(TokenType::RBRACKET) && !isAtEnd()) {
                     const Token s = consume(TokenType::STRING, "Expected string in specialize list");
                     cfg.specialize.push_back(s.lexeme);
-                    if (!check(TokenType::RBRACKET)) match(TokenType::COMMA);
+                    if (!check(TokenType::RBRACKET))
+                        match(TokenType::COMMA);
                 }
                 consume(TokenType::RBRACKET, "Expected ']' after specialize list");
             }
@@ -5767,7 +6047,8 @@ LoopConfig Parser::parseLoopAnnotation() {
                 cfg.noVectorize = (v.lexeme == "false" || v.type == TokenType::FALSE);
             } else if (key.lexeme == "tile") {
                 const Token v = advance();
-                if (v.type == TokenType::INTEGER) cfg.tileSize = static_cast<int>(v.intValue);
+                if (v.type == TokenType::INTEGER)
+                    cfg.tileSize = static_cast<int>(v.intValue);
             } else if (key.lexeme == "parallel") {
                 const Token v = advance();
                 cfg.parallel = (v.lexeme == "true" || v.type == TokenType::TRUE);

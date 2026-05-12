@@ -35,20 +35,20 @@ namespace omscript {
 // PassPhase — the pipeline stage a pass belongs to
 // ─────────────────────────────────────────────────────────────────────────────
 enum class PassPhase : uint8_t {
-    Preprocessing,        ///< Source-level analysis before semantic checks
-    EvaluationAnalysis,   ///< Purity detection, effect inference, CF-CTRE
-    ASTTransform,         ///< AST rewrites (e-graph, OPTMAX folder, loop fusion)
-    IRPipeline,           ///< Reserved: LLVM pass-manager pipeline (O1/O2/O3 + OPTMAX)
-    BackendTuning,        ///< Reserved: Superoptimizer, HGOE, post-pipeline cleanup
+    Preprocessing,      ///< Source-level analysis before semantic checks
+    EvaluationAnalysis, ///< Purity detection, effect inference, CF-CTRE
+    ASTTransform,       ///< AST rewrites (e-graph, OPTMAX folder, loop fusion)
+    IRPipeline,         ///< Reserved: LLVM pass-manager pipeline (O1/O2/O3 + OPTMAX)
+    BackendTuning,      ///< Reserved: Superoptimizer, HGOE, post-pipeline cleanup
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PassKind — the semantic role of a pass
 // ─────────────────────────────────────────────────────────────────────────────
 enum class PassKind : uint8_t {
-    Analysis,            ///< Pure analysis — reads AST/IR but never modifies it
-    SemanticTransform,   ///< Semantics-preserving rewrite (must be always-correct)
-    CostTransform,       ///< Optional, cost-driven rewrite (may be skipped at O0)
+    Analysis,          ///< Pure analysis — reads AST/IR but never modifies it
+    SemanticTransform, ///< Semantics-preserving rewrite (must be always-correct)
+    CostTransform,     ///< Optional, cost-driven rewrite (may be skipped at O0)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -59,27 +59,27 @@ enum class PassKind : uint8_t {
 /// and which it invalidates when it modifies the program representation.
 /// These strings are cheap to compare (short, interned by the registry).
 namespace AnalysisFact {
-    inline constexpr const char* kPreflightCheck  = "preflight_check";
-    inline constexpr const char* kStringTypes     = "string_types";
-    inline constexpr const char* kArrayTypes      = "array_types";
-    inline constexpr const char* kConstantReturns = "constant_returns";
-    inline constexpr const char* kPurity          = "purity";
-    inline constexpr const char* kEffects         = "effects";
-    inline constexpr const char* kERSL            = "ersl";
-    inline constexpr const char* kSynthesis       = "synthesis";
-    inline constexpr const char* kCFCTRE          = "cfctre";
-    inline constexpr const char* kEGraph          = "egraph";
-    inline constexpr const char* kRangeAnalysis   = "range_analysis";
-    inline constexpr const char* kRLC             = "rlc";
-    inline constexpr const char* kDCE             = "dce";
-    inline constexpr const char* kCSE             = "cse";
-    inline constexpr const char* kAlgSimp         = "alg_simp";
-    inline constexpr const char* kCopyProp        = "copy_prop";
-    inline constexpr const char* kWidthLegalization = "width_legalization";
-    inline constexpr const char* kWidthOpt           = "width_opt";
-    inline constexpr const char* kUniqueness         = "uniqueness";
-    inline constexpr const char* kBorrowCheck        = "borrow_check";
-    inline constexpr const char* kHGOEEGraph         = "hgoe_egraph";
+inline constexpr const char* kPreflightCheck = "preflight_check";
+inline constexpr const char* kStringTypes = "string_types";
+inline constexpr const char* kArrayTypes = "array_types";
+inline constexpr const char* kConstantReturns = "constant_returns";
+inline constexpr const char* kPurity = "purity";
+inline constexpr const char* kEffects = "effects";
+inline constexpr const char* kERSL = "ersl";
+inline constexpr const char* kSynthesis = "synthesis";
+inline constexpr const char* kCFCTRE = "cfctre";
+inline constexpr const char* kEGraph = "egraph";
+inline constexpr const char* kRangeAnalysis = "range_analysis";
+inline constexpr const char* kRLC = "rlc";
+inline constexpr const char* kDCE = "dce";
+inline constexpr const char* kCSE = "cse";
+inline constexpr const char* kAlgSimp = "alg_simp";
+inline constexpr const char* kCopyProp = "copy_prop";
+inline constexpr const char* kWidthLegalization = "width_legalization";
+inline constexpr const char* kWidthOpt = "width_opt";
+inline constexpr const char* kUniqueness = "uniqueness";
+inline constexpr const char* kBorrowCheck = "borrow_check";
+inline constexpr const char* kHGOEEGraph = "hgoe_egraph";
 } // namespace AnalysisFact
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -94,8 +94,7 @@ namespace AnalysisFact {
 /// Used by CSE to normalise expression keys and by the e-graph's pattern
 /// matcher to try swapped operands.
 inline bool isCommutativeOp(const std::string& op) noexcept {
-    return op == "+"  || op == "*"  || op == "&"  ||
-           op == "|"  || op == "^"  || op == "==" || op == "!=";
+    return op == "+" || op == "*" || op == "&" || op == "|" || op == "^" || op == "==" || op == "!=";
 }
 
 /// True when applying OP to integer/bitwise operands has no observable side
@@ -108,10 +107,8 @@ inline bool isCommutativeOp(const std::string& op) noexcept {
 /// and AlgSimp passes conservatively refuse to hoist expressions involving
 /// float literals.
 inline bool isPureBinaryOp(const std::string& op) noexcept {
-    return op == "+"  || op == "-"  || op == "*"  || op == "/"  ||
-           op == "%"  || op == "&"  || op == "|"  || op == "^"  ||
-           op == "<<" || op == ">>" || op == "==" || op == "!=" ||
-           op == "<"  || op == "<=" || op == ">"  || op == ">=";
+    return op == "+" || op == "-" || op == "*" || op == "/" || op == "%" || op == "&" || op == "|" || op == "^" ||
+           op == "<<" || op == ">>" || op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -121,11 +118,11 @@ inline bool isPureBinaryOp(const std::string& op) noexcept {
 /// Instances are stored in the PassRegistry's internal vector.
 /// All strings are string-view style; they must outlive the registry.
 struct PassMetadata {
-    uint32_t     id;          ///< Unique, stable numeric identifier
-    const char*  name;        ///< Short human-readable identifier (e.g. "purity")
-    const char*  description; ///< One-line description for verbose output
-    PassPhase    phase;       ///< Which pipeline stage this pass belongs to
-    PassKind     kind;        ///< Role: analysis / semantic transform / cost transform
+    uint32_t id;             ///< Unique, stable numeric identifier
+    const char* name;        ///< Short human-readable identifier (e.g. "purity")
+    const char* description; ///< One-line description for verbose output
+    PassPhase phase;         ///< Which pipeline stage this pass belongs to
+    PassKind kind;           ///< Role: analysis / semantic transform / cost transform
 
     /// Analysis facts this pass REQUIRES to be valid before it runs.
     std::vector<const char*> requires_;
@@ -141,7 +138,7 @@ struct PassMetadata {
 // PassRegistry — compile-time catalog of all passes
 // ─────────────────────────────────────────────────────────────────────────────
 class PassRegistry {
-public:
+  public:
     /// Return the global singleton registry.
     static PassRegistry& instance();
 
@@ -156,19 +153,20 @@ public:
     const PassMetadata* find(const std::string& name) const noexcept;
 
     /// All registered passes in stable ID order.
-    const std::vector<PassMetadata>& all() const noexcept { return passes_; }
+    const std::vector<PassMetadata>& all() const noexcept {
+        return passes_;
+    }
 
     /// Compute a valid run order for @p subset of pass IDs, respecting
     /// requires→provides dependencies.  Throws std::logic_error on cycles.
     /// If @p subset is empty, returns an ordering for ALL passes.
-    std::vector<uint32_t> topologicalOrder(
-        const std::vector<uint32_t>& subset = {}) const;
+    std::vector<uint32_t> topologicalOrder(const std::vector<uint32_t>& subset = {}) const;
 
-private:
-    PassRegistry()  = default;
+  private:
+    PassRegistry() = default;
     ~PassRegistry() = default;
 
-    PassRegistry(const PassRegistry&)            = delete;
+    PassRegistry(const PassRegistry&) = delete;
     PassRegistry& operator=(const PassRegistry&) = delete;
 
     std::vector<PassMetadata> passes_;
@@ -187,27 +185,27 @@ private:
 /// without hard-coding their numeric values.  They are populated once by
 /// the registration macros at program startup; after that they are const.
 namespace PassId {
-    extern uint32_t kPreflightCheck;
-    extern uint32_t kStringTypes;
-    extern uint32_t kArrayTypes;
-    extern uint32_t kConstantReturns;
-    extern uint32_t kPurity;
-    extern uint32_t kEffects;
-    extern uint32_t kERSL;
-    extern uint32_t kSynthesis;
-    extern uint32_t kCFCTRE;
-    extern uint32_t kEGraph;
-    extern uint32_t kRangeAnalysis;
-    extern uint32_t kRLC;
-    extern uint32_t kDCE;
-    extern uint32_t kCSE;
-    extern uint32_t kAlgSimp;
-    extern uint32_t kCopyProp;
-    extern uint32_t kWidthLegalization;
-    extern uint32_t kWidthOpt;
-    extern uint32_t kUniqueness;
-    extern uint32_t kBorrowCheck;
-    extern uint32_t kHGOEEGraph;
+extern uint32_t kPreflightCheck;
+extern uint32_t kStringTypes;
+extern uint32_t kArrayTypes;
+extern uint32_t kConstantReturns;
+extern uint32_t kPurity;
+extern uint32_t kEffects;
+extern uint32_t kERSL;
+extern uint32_t kSynthesis;
+extern uint32_t kCFCTRE;
+extern uint32_t kEGraph;
+extern uint32_t kRangeAnalysis;
+extern uint32_t kRLC;
+extern uint32_t kDCE;
+extern uint32_t kCSE;
+extern uint32_t kAlgSimp;
+extern uint32_t kCopyProp;
+extern uint32_t kWidthLegalization;
+extern uint32_t kWidthOpt;
+extern uint32_t kUniqueness;
+extern uint32_t kBorrowCheck;
+extern uint32_t kHGOEEGraph;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -254,14 +252,13 @@ using AnalysisKey = std::string;
 /// built once (in a single-threaded static-init context) and thereafter used
 /// read-only from multiple threads.
 class AnalysisDependencyGraph {
-public:
+  public:
     AnalysisDependencyGraph() = default;
 
     /// Register that @p dependent requires @p dependency to be valid.
     /// When @p dependency is invalidated, @p dependent will also be
     /// invalidated via cascading.
-    void addDependency(const std::string& dependent,
-                       const std::string& dependency) {
+    void addDependency(const std::string& dependent, const std::string& dependency) {
         // dependents_[dependency] = {all facts that directly depend on it}
         dependents_[dependency].insert(dependent);
     }
@@ -276,20 +273,22 @@ public:
         while (!queue.empty()) {
             std::string cur = std::move(queue.back());
             queue.pop_back();
-            if (!visited.insert(cur).second) continue;
+            if (!visited.insert(cur).second)
+                continue;
             result.push_back(cur);
             auto it = dependents_.find(cur);
-            if (it == dependents_.end()) continue;
+            if (it == dependents_.end())
+                continue;
             for (const auto& dep : it->second) {
-                if (!visited.count(dep)) queue.push_back(dep);
+                if (!visited.count(dep))
+                    queue.push_back(dep);
             }
         }
         return result;
     }
 
     /// Return the direct dependents of @p key (not transitive).
-    const std::unordered_set<std::string>* directDependents(
-        const std::string& key) const noexcept {
+    const std::unordered_set<std::string>* directDependents(const std::string& key) const noexcept {
         auto it = dependents_.find(key);
         return (it != dependents_.end()) ? &it->second : nullptr;
     }
@@ -297,9 +296,11 @@ public:
     /// True if any dependency edge involves @p key (as a dependency or as a
     /// dependent).
     bool contains(const std::string& key) const noexcept {
-        if (dependents_.count(key)) return true;
+        if (dependents_.count(key))
+            return true;
         for (const auto& [k, deps] : dependents_) {
-            if (deps.count(key)) return true;
+            if (deps.count(key))
+                return true;
         }
         return false;
     }
@@ -308,7 +309,7 @@ public:
     /// Must be called after static initialisation of AnalysisFact constants.
     static AnalysisDependencyGraph createDefault();
 
-private:
+  private:
     /// Key   = analysis fact that was invalidated
     /// Value = set of analysis facts that directly depend on it (and must
     ///         therefore also be invalidated when the key is invalidated)

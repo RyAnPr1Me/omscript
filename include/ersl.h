@@ -46,7 +46,7 @@
 ///   Inliner  : if (es.hasIO)                  avoid aggressive inlining
 ///   Vectorizer: if (no conflicting writes)     mark loop.independent
 
-#include "ast.h"  // FunctionEffects
+#include "ast.h" // FunctionEffects
 
 #include <cstdint>
 #include <string>
@@ -57,22 +57,22 @@ namespace omscript {
 // EffectKind — the category of a memory / observable side-effect
 // ─────────────────────────────────────────────────────────────────────────────
 enum class EffectKind : uint8_t {
-    None  = 0, ///< No observable effect (e.g. pure arithmetic)
-    Read  = 1, ///< Reads from memory
+    None = 0,  ///< No observable effect (e.g. pure arithmetic)
+    Read = 1,  ///< Reads from memory
     Write = 2, ///< Writes to memory
-    IO    = 3, ///< Performs I/O (network, file, console, sleep …)
+    IO = 3,    ///< Performs I/O (network, file, console, sleep …)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Region — the memory region touched by a side-effect
 // ─────────────────────────────────────────────────────────────────────────────
 enum class Region : uint8_t {
-    None    = 0, ///< No memory is accessed (pure computation)
-    Local   = 1, ///< Stack-allocated / function-local storage
-    Arg     = 2, ///< Memory reachable through a function argument
-    Global  = 3, ///< Module-level global variable
-    Heap    = 4, ///< Heap-allocated memory with unknown aliasing
-    Net     = 5, ///< Network (HTTP, sockets)
+    None = 0,    ///< No memory is accessed (pure computation)
+    Local = 1,   ///< Stack-allocated / function-local storage
+    Arg = 2,     ///< Memory reachable through a function argument
+    Global = 3,  ///< Module-level global variable
+    Heap = 4,    ///< Heap-allocated memory with unknown aliasing
+    Net = 5,     ///< Network (HTTP, sockets)
     Unknown = 6, ///< Unknown / conservative worst-case
 };
 
@@ -80,22 +80,22 @@ enum class Region : uint8_t {
 // Stability — whether repeating an operation yields the same result
 // ─────────────────────────────────────────────────────────────────────────────
 enum class Stability : uint8_t {
-    Stable         = 0, ///< Same inputs always produce the same output (pure math,
+    Stable = 0,         ///< Same inputs always produce the same output (pure math,
                         ///  pure user functions).  Safe to CSE and hoist.
     InputDependent = 1, ///< Result depends on mutable memory visible to the caller
                         ///  (e.g. load from an array).  Safe within a single
                         ///  execution path if no interleaved write is present.
-    External       = 2, ///< Depends on the outside world (I/O, clocks, RNG).
+    External = 2,       ///< Depends on the outside world (I/O, clocks, RNG).
                         ///  Never safe to duplicate or hoist speculatively.
-    Unknown        = 3, ///< Cannot determine — conservative: treat as External.
+    Unknown = 3,        ///< Cannot determine — conservative: treat as External.
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EscapeClass — whether a computed value leaves the local scope
 // ─────────────────────────────────────────────────────────────────────────────
 enum class EscapeClass : uint8_t {
-    NoEscape    = 0, ///< Value stays within the function (local variable, temp).
-    ArgEscape   = 1, ///< Value may be observable via a call argument.
+    NoEscape = 0,     ///< Value stays within the function (local variable, temp).
+    ArgEscape = 1,    ///< Value may be observable via a call argument.
     GlobalEscape = 2, ///< Value may be observable globally (stored in global / returned).
 };
 
@@ -108,10 +108,10 @@ enum class EscapeClass : uint8_t {
 /// a local); callers typically work with the coarser EffectSummary which
 /// aggregates all effects into actionable Boolean flags.
 struct RefinedEffect {
-    EffectKind  kind      = EffectKind::None;          ///< What kind of effect
-    Region      region    = Region::None;              ///< Which memory region
-    Stability   stability = Stability::Stable;         ///< Repeatability
-    EscapeClass escape    = EscapeClass::NoEscape;     ///< Visibility outside fn
+    EffectKind kind = EffectKind::None;         ///< What kind of effect
+    Region region = Region::None;               ///< Which memory region
+    Stability stability = Stability::Stable;    ///< Repeatability
+    EscapeClass escape = EscapeClass::NoEscape; ///< Visibility outside fn
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -123,9 +123,9 @@ struct RefinedEffect {
 /// false means "does not have this property or unknown → assume worst case".
 struct EffectSummary {
     // ── Aggregate effect flags (mirrored from FunctionEffects) ───────────
-    bool hasIO        = false; ///< Performs I/O
+    bool hasIO = false;        ///< Performs I/O
     bool writesGlobal = false; ///< Writes to a global variable
-    bool writesArg    = false; ///< Writes to argument-reachable memory
+    bool writesArg = false;    ///< Writes to argument-reachable memory
 
     // ── ERSL-extended dimensions ─────────────────────────────────────────
     /// True when the function always returns the same value for the same

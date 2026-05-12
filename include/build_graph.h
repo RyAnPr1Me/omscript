@@ -68,7 +68,7 @@ struct BuildNode {
 /// Call load() to walk the import graph from the entry point, then call
 /// computeFingerprint() to obtain the reproducible build fingerprint.
 class BuildGraph {
-public:
+  public:
     /// Walk the import graph rooted at @p entryPath, scanning each file's
     /// `import "..."` statements to discover dependencies transitively.
     ///
@@ -86,8 +86,7 @@ public:
     ///     determinism regardless of discovery order).
     ///   • @p manifestHash — result of hashManifest().
     ///   • @p profileHash  — result of hashProfile().
-    std::string computeFingerprint(uint64_t manifestHash,
-                                   uint64_t profileHash) const;
+    std::string computeFingerprint(uint64_t manifestHash, uint64_t profileHash) const;
 
     /// Direct read access to the node map (path → BuildNode).
     const std::map<std::string, BuildNode>& nodes() const noexcept {
@@ -95,15 +94,17 @@ public:
     }
 
     /// True when no source files were discovered (e.g. entry not found).
-    bool empty() const noexcept { return nodes_.empty(); }
+    bool empty() const noexcept {
+        return nodes_.empty();
+    }
 
-private:
+  private:
     /// Recursively scan @p absPath, recording its content hash and imports.
     /// Already-visited paths are skipped to handle circular imports safely.
     void scanFile(const std::string& absPath, const std::string& projectDir);
 
     std::map<std::string, BuildNode> nodes_;
-    std::string                      entryPath_;
+    std::string entryPath_;
 };
 
 // ── BuildCache ───────────────────────────────────────────────────────────────
@@ -114,7 +115,7 @@ private:
 /// Currently caches only the build fingerprint.  Future versions may also
 /// cache serialised AST facts and CF-CTRE memoisation tables.
 class BuildCache {
-public:
+  public:
     explicit BuildCache(std::string cacheDir);
 
     /// Read and return the persisted fingerprint, or "" when absent.
@@ -127,9 +128,11 @@ public:
     bool ensureDir() const;
 
     /// Return the cache directory path.
-    const std::string& dir() const noexcept { return cacheDir_; }
+    const std::string& dir() const noexcept {
+        return cacheDir_;
+    }
 
-private:
+  private:
     std::string cacheDir_;
     std::string fingerprintFile_;
 };
