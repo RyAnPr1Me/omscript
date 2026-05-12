@@ -713,6 +713,11 @@ class CodeGenerator {
     /// Scratch: length value stashed by pslice_new<T> for VarDecl to store.
     llvm::Value* lastPsliceNewLen_ = nullptr;
 
+    /// Compile-time-constant length for array variables initialized from literal
+    /// arrays (or other statically-sized builtins).  Used to resolve spread
+    /// expressions `...arr` in function-call argument position.  -1 = dynamic.
+    llvm::StringMap<int64_t> arrayCompTimeLens_;
+
     /// Element type string for typed pointer variables (`ptr<T>`).
     /// Maps variable name → inner type annotation (e.g., "i64", "i32[]").
     /// Empty for untyped `ptr` variables.

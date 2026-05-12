@@ -1182,8 +1182,8 @@ var cell: int = matrix[0][1];  // 2
 
 **Operations**:
 - Creation: `map_new()` or literal `{ k1: v1, k2: v2, ... }`
-- Access: `map_get(d, key, default)`
-- Mutation: `map_set(d, key, value)` (returns new map)
+- Access: `map_get(d, key, default)` or subscript `d[key]` (returns `0` for missing keys)
+- Mutation: `map_set(d, key, value)` (returns new map) or `d[key] = value` (in-place)
 - Check: `map_has(d, key)` (returns 1 or 0)
 - Removal: `map_remove(d, key)` (returns new map)
 - Size: `map_size(d)`
@@ -1194,7 +1194,9 @@ var cell: int = matrix[0][1];  // 2
 ```omscript
 var ages: dict = { "Alice": 30, "Bob": 25 };
 var alice_age: int = map_get(ages, "Alice", 0);  // 30
-ages = map_set(ages, "Charlie", 35);
+var same: int = ages["Alice"];                   // 30 — subscript syntax
+ages = map_set(ages, "Charlie", 35);             // functional style
+ages["Dave"] = 28;                               // subscript assignment
 var has_bob: int = map_has(ages, "Bob");         // 1
 ```
 
@@ -3579,7 +3581,22 @@ var a: int[] = [1, 2, 3];
 var b: int[] = [0, ...a, 4];  // [0, 1, 2, 3, 4]
 ```
 
-**Spread in function calls**: The `...arr` spread syntax in function-call argument position is not currently implemented. Pass array elements individually or use `array_concat` to merge arrays.
+**Spread in function calls**: `...arr` can be used in function call argument position to expand a fixed-size array into individual positional arguments:
+
+```omscript
+fn add3(a, b, c) { return a + b + c; }
+
+var args = [10, 20, 30];
+var r = add3(...args);      // → add3(10, 20, 30) → 60
+
+var pair = [5, 7];
+var r2 = add3(1, ...pair);  // → add3(1, 5, 7)   → 13
+
+// Inline literal spread:
+var r3 = add3(...[100, 200, 300]);  // → 600
+```
+
+The spread array's length must be statically known at compile time (the callee has fixed arity). Arrays initialized from literal expressions qualify; dynamically-grown arrays (e.g. the result of `push()`) do not.
 
 ### 9.9 Increment / Decrement (`++` / `--`)
 
@@ -3947,16 +3964,18 @@ var empty_map: dict = {};
 
 **Type annotation**: `dict` or `dict[K, V]` (the type parameters are informational; all keys and values are stored as `i64` internally).
 
-**Access**: Use `map_get(d, key, default)` (see Part 2 for dict functions).
+**Access**: Use `map_get(d, key, default)` (see Part 2 for dict functions), or the subscript operator `d[key]` (missing keys return `0`).
 
 ```omscript
 var age: int = map_get(d, "age", 0);  // 30
+var same:int = d["age"];              // 30
 ```
 
-**Mutation**: Dicts are **immutable** from the user perspective; operations like `map_set` return a new dict.
+**Mutation**: Dicts support both `map_set(d, key, val)` (returns a new dict) and the in-place subscript assignment `d[key] = val` (updates the dict in-place and writes back the potentially-reallocated pointer):
 
 ```omscript
-d = map_set(d, "city", "NYC");
+d = map_set(d, "city", "NYC");  // functional style
+d["zip"] = 10001;               // subscript assignment — equivalent
 ```
 
 ### 10.5 Struct Literals

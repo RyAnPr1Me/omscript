@@ -598,6 +598,22 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             arrayVars_.erase(stmt->name);
     }
 
+    // Track compile-time-constant array lengths for spread-in-function-call support.
+    // When the initializer is a literal array, record its static element count.
+    if (stmt->initializer && stmt->initializer->type == ASTNodeType::ARRAY_EXPR) {
+        auto* ae = static_cast<ArrayExpr*>(stmt->initializer.get());
+        // Only track if no spread elements (spread makes static size ambiguous here).
+        bool hasSpreadElem = false;
+        for (auto& e : ae->elements)
+            if (e->type == ASTNodeType::SPREAD_EXPR) { hasSpreadElem = true; break; }
+        if (!hasSpreadElem)
+            arrayCompTimeLens_[stmt->name] = static_cast<int64_t>(ae->elements.size());
+        else
+            arrayCompTimeLens_.erase(stmt->name);
+    } else {
+        arrayCompTimeLens_.erase(stmt->name);
+    }
+
     bindVariableAnnotated(stmt->name, alloca, stmt->typeName, stmt->isConst);
 
     // If the initializer was a borrow expression, register the alias mapping

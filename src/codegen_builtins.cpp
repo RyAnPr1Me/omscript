@@ -6016,7 +6016,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         keyArg = toDefaultType(keyArg);
         valArg = toDefaultType(valArg);
 
-        auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* mapPtr = mapArg->getType()->isPointerTy()
             ? mapArg : getArrayPtr(mapArg);
         llvm::Value* result = builder->CreateCall(getOrEmitHashMapSet(), {mapPtr, keyArg, valArg}, "mapset.result");
@@ -9894,79 +9893,77 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     // Expand spread arguments: `fn(a, ...arr, b)` → individual positional args.
-    // A spread expression `...arrExpr` emits a runtime loop that loads each
-    // element from the array and appends it to the flattened argument list.
-    // For constant-count spreads we unroll at codegen time; for dynamic spreads
-    // we fall back to a runtime loop (only valid when the callee is variadic,
-    // which user-defined functions are not — so we require constant spread length).
-    std::vector<std::unique_ptr<Expression>> flatArgs;
+    // Each spread `...arrExpr` is flattened at codegen time:
+    //  - If the array length is a compile-time constant, emit that many element
+    //    loads and insert them inline.
+    //  - Otherwise emit a compile-time error (user-defined functions are
+    //    fixed-arity, so the spread length must be statically known).
+    //
+    // Mixed entries: ArgEntry.expr != nullptr  → evaluate from AST at call time
+    //                ArgEntry.val  != nullptr  → already-evaluated llvm::Value*
+    struct ArgEntry {
+        Expression*   expr = nullptr; // raw AST pointer (non-owning)
+        llvm::Value*  val  = nullptr; // pre-evaluated value (spread element)
+    };
+    std::vector<ArgEntry> flatArgEntries;
+
     bool hasSpread = false;
     for (auto& arg : expr->arguments) {
-        if (arg->type == ASTNodeType::SPREAD_EXPR)
-            hasSpread = true;
+        if (arg->type == ASTNodeType::SPREAD_EXPR) { hasSpread = true; break; }
     }
-    // Build a flattened argument pointer list (using raw pointers so we don't
-    // move out of expr->arguments — we need them to stay alive).
-    std::vector<Expression*> flatArgPtrs;
+
     if (!hasSpread) {
         for (auto& arg : expr->arguments)
-            flatArgPtrs.push_back(arg.get());
+            flatArgEntries.push_back({arg.get(), nullptr});
     } else {
-        // Pre-evaluate every spread source to get its length, then build the
-        // flat list by injecting synthetic index expressions.
-        // We store (array_value, index) pairs for spread args.
-        // For now: require that spread arrays have a statically-known length OR
-        // we unroll via runtime index loop. We use a two-pass approach:
-        // first collect all non-spread args + note spread positions, then
-        // emit index loads into temporary alloca and add those to flatArgPtrs.
-        struct SpreadInfo {
-            llvm::Value* arrPtr;   // evaluated array pointer
-            llvm::Value* arrLen;   // array length value
-        };
-        std::vector<SpreadInfo> spreads;
-        // Evaluate all args in order; for spread args compute ptr+len.
-        std::vector<std::pair<bool, size_t>> plan; // (isSpread, spreadIndex or 0)
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        auto* i64Ty = getDefaultType();
         for (auto& arg : expr->arguments) {
-            if (arg->type == ASTNodeType::SPREAD_EXPR) {
-                auto* se = static_cast<SpreadExpr*>(arg.get());
-                llvm::Value* av = generateExpression(se->operand.get());
-                auto* ptrTy = llvm::PointerType::getUnqual(*context);
-                llvm::Value* ap = av->getType()->isPointerTy()
-                    ? av
-                    : builder->CreateIntToPtr(av, ptrTy, "spread.call.arrptr");
-                llvm::Value* al = emitLoadArrayLen(ap, "spread.call.len");
-                spreads.push_back({ap, al});
-                plan.push_back({true, spreads.size() - 1});
-            } else {
-                plan.push_back({false, 0});
+            if (arg->type != ASTNodeType::SPREAD_EXPR) {
+                flatArgEntries.push_back({arg.get(), nullptr});
+                continue;
             }
-        }
-        // For each spread, check if length is a compile-time constant.
-        // If so, emit that many index loads; otherwise error (non-variadic callee).
-        size_t regularArgIdx = 0;
-        for (size_t planIdx = 0; planIdx < plan.size(); ++planIdx) {
-            if (!plan[planIdx].first) {
-                // Non-spread: use the raw expression pointer (still owned by expr)
-                flatArgPtrs.push_back(expr->arguments[regularArgIdx++].get());
+            // Spread element: evaluate the source array, load each element.
+            auto* se = static_cast<SpreadExpr*>(arg.get());
+            llvm::Value* av = generateExpression(se->operand.get());
+            llvm::Value* ap = av->getType()->isPointerTy()
+                ? av : builder->CreateIntToPtr(av, ptrTy, "spread.call.arrptr");
+            llvm::Value* al = emitLoadArrayLen(ap, "spread.call.len");
+            auto* ci = llvm::dyn_cast<llvm::ConstantInt>(al);
+            // Fallback: look up compile-time length from variable tracking.
+            int64_t ctLen = -1;
+            if (!ci && se->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
+                const auto& varName = static_cast<IdentifierExpr*>(se->operand.get())->name;
+                auto lit = arrayCompTimeLens_.find(varName);
+                if (lit != arrayCompTimeLens_.end())
+                    ctLen = lit->second;
+            } else if (se->operand->type == ASTNodeType::ARRAY_EXPR) {
+                // Inline literal: count elements directly.
+                auto* ae = static_cast<ArrayExpr*>(se->operand.get());
+                bool hasNested = false;
+                for (auto& el : ae->elements)
+                    if (el->type == ASTNodeType::SPREAD_EXPR) { hasNested = true; break; }
+                if (!hasNested)
+                    ctLen = static_cast<int64_t>(ae->elements.size());
+            }
+            uint64_t cnt = 0;
+            if (ci) {
+                cnt = ci->getZExtValue();
+            } else if (ctLen >= 0) {
+                cnt = static_cast<uint64_t>(ctLen);
             } else {
-                ++regularArgIdx; // skip this slot (it was the SpreadExpr)
-                auto& si = spreads[plan[planIdx].second];
-                auto* ci = llvm::dyn_cast<llvm::ConstantInt>(si.arrLen);
-                if (!ci) {
-                    codegenError("Spread '...' in function call requires a compile-time-constant array length "
-                                 "when calling a non-variadic function. Use a fixed-size array.", expr);
-                }
-                const uint64_t cnt = ci->getZExtValue();
-                // Emit one index load per element and store in a temporary Value*.
-                // We need to add these Values directly to a separate "value args" list.
-                // Since flatArgPtrs holds Expression*, we need a mixed approach.
-                // Solution: materialise each element into a temporary i64 alloca
-                // and push a synthetic IdentifierExpr... but that's complex.
-                // Simpler: collect Values directly in a parallel list.
-                // We'll use a flag + a side-channel for spread values.
-                (void)cnt;
-                codegenError("Spread '...' in function call: use a constant-sized array and pass elements directly. "
-                             "Alternatively, use alloc<T>(n) + index. Dynamic spread not yet supported in calls.", expr);
+                codegenError("Spread '...' in a function call requires a compile-time-constant "
+                             "array length (the callee has fixed arity). "
+                             "Use a fixed-size array literal, e.g. [a, b, c].", expr);
+            }
+            // Emit one element load per slot and stash as a pre-evaluated Value*.
+            for (uint64_t k = 0; k < cnt; ++k) {
+                llvm::Value* idx     = llvm::ConstantInt::get(i64Ty, k + 1); // slot = k+1
+                llvm::Value* elemPtr = builder->CreateInBoundsGEP(
+                    i64Ty, ap, idx, "spread.call.elemptr");
+                llvm::Value* elem = builder->CreateAlignedLoad(
+                    i64Ty, elemPtr, llvm::MaybeAlign(8), "spread.call.elem");
+                flatArgEntries.push_back({nullptr, elem});
             }
         }
     }
@@ -9975,12 +9972,12 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (declIt != functionDecls_.end()) {
         requiredArgs = declIt->second->requiredParameters();
     }
-    if (flatArgPtrs.size() < requiredArgs || flatArgPtrs.size() > callee->arg_size()) {
+    if (flatArgEntries.size() < requiredArgs || flatArgEntries.size() > callee->arg_size()) {
         codegenError("Function '" + expr->callee + "' expects " +
                          (requiredArgs < callee->arg_size()
                               ? std::to_string(requiredArgs) + " to " + std::to_string(callee->arg_size())
                               : std::to_string(callee->arg_size())) +
-                         " argument(s), but " + std::to_string(flatArgPtrs.size()) + " provided",
+                         " argument(s), but " + std::to_string(flatArgEntries.size()) + " provided",
                      expr);
     }
 
@@ -9988,8 +9985,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     args.reserve(callee->arg_size());
     for (size_t i = 0; i < callee->arg_size(); ++i) {
         llvm::Type* expectedTy = callee->getFunctionType()->getParamType(i);
-        if (i < flatArgPtrs.size()) {
-            llvm::Value* argVal = generateExpression(flatArgPtrs[i]);
+        if (i < flatArgEntries.size()) {
+            llvm::Value* argVal = flatArgEntries[i].val
+                ? flatArgEntries[i].val
+                : generateExpression(flatArgEntries[i].expr);
             // Convert argument to the callee's declared parameter type.
             argVal = convertTo(argVal, expectedTy);
             args.push_back(argVal);

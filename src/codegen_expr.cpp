@@ -6504,6 +6504,32 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         }
     }
 
+    // ── Dict indexed store: dict["key"] = val → __omsc_hmap_set ─────────────
+    // The hash-map may reallocate on insert, so we must write the new pointer
+    // back into the variable's alloca after each set operation.
+    if (isDictExpr(expr->array.get()) &&
+        expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+        auto* id = static_cast<IdentifierExpr*>(expr->array.get());
+        auto it  = namedValues.find(id->name);
+        if (it != namedValues.end()) {
+            auto* ptrTy  = llvm::PointerType::getUnqual(*context);
+            // Load current map pointer from the variable's alloca.
+            llvm::Value* mapPtr = builder->CreateAlignedLoad(
+                ptrTy, it->second, llvm::MaybeAlign(8), "didxs.mapptr");
+            // Evaluate key and value.
+            llvm::Value* keyVal2 = toDefaultType(generateExpression(expr->index.get()));
+            llvm::Value* newVal2 = toDefaultType(generateExpression(expr->value.get()));
+            // Call map_set — returns (possibly reallocated) map pointer.
+            llvm::Value* newMapPtr = builder->CreateCall(
+                getOrEmitHashMapSet(), {mapPtr, keyVal2, newVal2}, "didxs.result");
+            // Write new pointer back into the alloca so future reads use it.
+            auto* st = builder->CreateAlignedStore(newMapPtr, it->second, llvm::MaybeAlign(8));
+            if (tbaaScalar_)
+                st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+            return newVal2;
+        }
+    }
+
     // Track array writes for backward array reference dependency analysis.
     if (loopNestDepth_ > 0 && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
         auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());

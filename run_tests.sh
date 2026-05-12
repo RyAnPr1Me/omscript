@@ -483,6 +483,7 @@ ptest_program "examples/array_fill_negative_test.om" 3
 ptest_program "examples/struct_test.om" 0
 ptest_program "examples/import_test.om" 0
 ptest_program "examples/generic_test.om" 0
+ptest_program "examples/spread_call_test.om" 0
 ptest_program "examples/thread_test.om" 0
 ptest_program "examples/string_fold_test.om" 0
 ptest_program "examples/circular_import_test.om" 0
@@ -811,6 +812,7 @@ echo "--------------------------------------------"
 ptest_program "examples/runtime_div_opt_test.om" 5
 ptest_program "examples/loop_ucmp_test.om" 5
 ptest_program "examples/dict_literal_test.om" 18
+ptest_program "examples/dict_assign_test.om" 0
 ptest_program "examples/preprocessor_test.om" 12
 ptest_program "examples/preprocessor_modern_test.om" 13
 ptest_program "examples/preprocessor_typed_test.om" 6

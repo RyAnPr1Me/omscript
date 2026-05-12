@@ -4578,7 +4578,16 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
                 arguments.push_back(std::move(expr)); // receiver becomes first argument
                 if (!check(TokenType::RPAREN)) {
                     do {
-                        arguments.push_back(parseExpression());
+                        if (match(TokenType::RANGE)) {
+                            const Token spreadToken = tokens[current - 1];
+                            auto operand = parseExpression();
+                            auto node = std::make_unique<SpreadExpr>(std::move(operand));
+                            node->line = spreadToken.line;
+                            node->column = spreadToken.column;
+                            arguments.push_back(std::move(node));
+                        } else {
+                            arguments.push_back(parseExpression());
+                        }
                     } while (match(TokenType::COMMA));
                 }
                 consume(TokenType::RPAREN, "Expected ')' after method call arguments");
@@ -4609,7 +4618,16 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
                 arguments.push_back(std::move(expr)); // receiver as first arg
                 if (!check(TokenType::RPAREN)) {
                     do {
-                        arguments.push_back(parseExpression());
+                        if (match(TokenType::RANGE)) {
+                            const Token spreadToken = tokens[current - 1];
+                            auto operand = parseExpression();
+                            auto node = std::make_unique<SpreadExpr>(std::move(operand));
+                            node->line = spreadToken.line;
+                            node->column = spreadToken.column;
+                            arguments.push_back(std::move(node));
+                        } else {
+                            arguments.push_back(parseExpression());
+                        }
                     } while (match(TokenType::COMMA));
                 }
                 consume(TokenType::RPAREN, "Expected ')' after method call arguments");
@@ -4643,7 +4661,17 @@ std::unique_ptr<Expression> Parser::parseCall() {
 
             if (!check(TokenType::RPAREN)) {
                 do {
-                    arguments.push_back(parseExpression());
+                    // Spread argument: ...expr
+                    if (match(TokenType::RANGE)) {
+                        const Token spreadToken = tokens[current - 1];
+                        auto operand = parseExpression();
+                        auto node = std::make_unique<SpreadExpr>(std::move(operand));
+                        node->line = spreadToken.line;
+                        node->column = spreadToken.column;
+                        arguments.push_back(std::move(node));
+                    } else {
+                        arguments.push_back(parseExpression());
+                    }
                 } while (match(TokenType::COMMA));
             }
 
