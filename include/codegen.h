@@ -390,11 +390,22 @@ class CodeGenerator {
 
     /// Deferred-free queue: heap pointers queued by `invalidate` statements.
     /// The actual free() call is emitted in a batch at the function's exit point
-    /// (generateReturn / generateThrow), rather than at the invalidate site.
-    /// Variables are logically dead immediately at the invalidate call; any
-    /// subsequent use is a compile-time error.  The deferred physical free lets
-    /// LLVM move or coalesce the free() calls to an optimal CFG point.
-    std::vector<llvm::Value*> deferredFreeQueue_;
+    /// Each entry captures the data needed to emit free() at function-exit
+    /// time: the alloca that holds the heap pointer, and the LLVM type stored
+    /// in that alloca.  Storing the alloca (which is created at function entry
+    /// and therefore dominates every basic block) rather than a loaded IR value
+    /// is critical for correctness: a loaded value only dominates the basic
+    /// block where it was emitted, so deferring the load to emitDeferredFrees()
+    /// — which runs just before each return/throw edge — avoids IR domination
+    /// violations when invalidate() is called inside a loop body.
+    ///
+    /// The queue is a flat vector of (alloca, type) pairs: no per-invalidation
+    /// heap allocations, no pointer chasing, O(1) push, O(n) drain at exit.
+    struct DeferredFreeEntry {
+        llvm::AllocaInst* alloca;   ///< alloca that holds the heap pointer
+        llvm::Type*       elemType; ///< type stored in the alloca slot
+    };
+    std::vector<DeferredFreeEntry> deferredFreeQueue_;
 
     struct LoopContext {
         llvm::BasicBlock* breakTarget;

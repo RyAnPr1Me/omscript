@@ -3255,8 +3255,19 @@ void CodeGenerator::emitDeferredFrees() {
         return;
     }
     llvm::Function* freeFn = getOrDeclareFree();
-    for (llvm::Value* ptr : deferredFreeQueue_) {
-        builder->CreateCall(freeFn, {ptr});
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    for (const DeferredFreeEntry& entry : deferredFreeQueue_) {
+        // Load the heap pointer from the alloca at this (exit) point.
+        // The alloca is created at function entry and dominates every block,
+        // so this load is always valid regardless of where invalidate() was
+        // called (e.g. inside a loop body).
+        llvm::Value* heapPtr = builder->CreateLoad(
+            entry.elemType, entry.alloca, entry.alloca->getName() + ".dfree");
+        if (!heapPtr->getType()->isPointerTy()) {
+            heapPtr = builder->CreateIntToPtr(heapPtr, ptrTy,
+                                              entry.alloca->getName() + ".dfreeptr");
+        }
+        builder->CreateCall(freeFn, {heapPtr});
     }
     deferredFreeQueue_.clear();
 }
@@ -3304,25 +3315,19 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
         // Arena-backed pointers must NOT be individually freed; the entire
         // slab is freed once at every function return.
         if (!isArenaPtr) {
-            // Load the heap pointer from the alloca (i64 stored as int, ptr cast needed).
             auto* allocaInst2 = llvm::dyn_cast<llvm::AllocaInst>(alloca);
             if (allocaInst2) {
-                auto* ptrTy = llvm::PointerType::getUnqual(*context);
-                llvm::Value* heapPtr = builder->CreateLoad(
-                    allocaInst2->getAllocatedType(), allocaInst2, name + ".ptr");
-                // Cast i64 → ptr if necessary (OmScript stores heap pointers as i64)
-                if (!heapPtr->getType()->isPointerTy()) {
-                    heapPtr = builder->CreateIntToPtr(heapPtr, ptrTy, name + ".heapptr");
-                }
-                // Emit free() immediately at the invalidate point.
-                // Deferring to function exit is incorrect when the variable
-                // is declared inside a loop body: the loaded IR value only
-                // dominates the loop's basic block, not the function exit
-                // block, which causes an LLVM verifier domination violation.
-                // Immediate emission is semantically correct because the
-                // variable is marked dead in deadVars_ right after this
-                // point, so any subsequent use is already a compile error.
-                builder->CreateCall(getOrDeclareFree(), {heapPtr});
+                // Capture (alloca, elemType) for deferred emission.
+                // The alloca dominates every basic block in this function, so
+                // loading from it in emitDeferredFrees() — just before each
+                // return/throw edge — is always valid, even when this
+                // invalidate() call is inside a loop body.  Storing the alloca
+                // here (not the loaded value) avoids IR domination violations
+                // that would arise if we pushed the loaded i64/ptr value and
+                // later used it outside its defining basic block.
+                deferredFreeQueue_.push_back(
+                    {allocaInst2,
+                     allocaInst2->getAllocatedType()});
             }
         }
     }
