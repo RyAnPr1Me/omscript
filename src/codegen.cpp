@@ -4048,6 +4048,29 @@ void CodeGenerator::generate(Program* program) {
     irInstructionCount_ = 0;
     fileNoAlias_ = program->fileNoAlias;
 
+    // Initialize the module's target triple and data layout before any IR is
+    // generated so that all DataLayout queries (alignment, type sizes) during
+    // codegen use the correct platform-specific values.  Without this, the
+    // module has no data layout and LLVM's DataLayout returns default values
+    // (e.g. 4-byte ABI alignment for i64), which causes LLVM verifier failures
+    // on platforms with stricter alignment requirements (e.g. macOS ARM64).
+    {
+        // These calls are idempotent and must come before createTargetMachine().
+        llvm::InitializeNativeTarget();
+        llvm::InitializeNativeTargetAsmPrinter();
+        llvm::InitializeNativeTargetAsmParser();
+        const std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
+#if LLVM_VERSION_MAJOR >= 19
+        llvm::Triple targetTriple(targetTripleStr);
+        module->setTargetTriple(targetTriple);
+#else
+        module->setTargetTriple(targetTripleStr);
+#endif
+        auto tm = createTargetMachine();
+        if (tm)
+            module->setDataLayout(tm->createDataLayout());
+    }
+
     // --- DWARF debug info initialization ---
     if (debugMode_) {
         debugBuilder_ = std::make_unique<llvm::DIBuilder>(*module);
