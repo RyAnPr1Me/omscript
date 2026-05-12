@@ -1,3 +1,4 @@
+import std;
 import "circular_a";
 
 fn from_b() {

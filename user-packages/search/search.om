@@ -1,3 +1,4 @@
+import std;
 // search package - search algorithms for sorted and unsorted arrays
 
 fn search_linear(arr, target) {

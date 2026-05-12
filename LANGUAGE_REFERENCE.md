@@ -1174,7 +1174,7 @@ var cell: int = matrix[0][1];  // 2
 
 **Syntax**:
 - `dict` (untyped dictionary)
-- `dict[K, V]` (typed dictionary with key type `K` and value type `V`) — **not yet fully implemented**; use `dict`
+- `dict[K, V]` (typed dictionary annotation — parsed but keys and values are stored as `i64`; the type parameters are informational only)
 
 **Representation**: Hash map (heap-allocated, reference-counted).
 
@@ -3579,7 +3579,7 @@ var a: int[] = [1, 2, 3];
 var b: int[] = [0, ...a, 4];  // [0, 1, 2, 3, 4]
 ```
 
-**Example (function call)**: **Not currently implemented** (future feature).
+**Spread in function calls**: The `...arr` spread syntax in function-call argument position is not currently implemented. Pass array elements individually or use `array_concat` to merge arrays.
 
 ### 9.9 Increment / Decrement (`++` / `--`)
 
@@ -3945,7 +3945,7 @@ var scores: dict = { 1: 100, 2: 200, 3: 300 };
 var empty_map: dict = {};
 ```
 
-**Type annotation**: `dict` (untyped); typed variants (`dict[K, V]`) not yet fully implemented.
+**Type annotation**: `dict` or `dict[K, V]` (the type parameters are informational; all keys and values are stored as `i64` internally).
 
 **Access**: Use `map_get(d, key, default)` (see Part 2 for dict functions).
 
@@ -7678,11 +7678,12 @@ Right shift (divide by 2^n, floor).
 
 ### 19.13 The `std::` namespace
 
-**Built-in namespace:** Every standard library function is accessible as `std::name` without any import statement.
+**Built-in namespace:** Every standard library function is accessible as `std::name`. To call functions by bare name (without the `std::` prefix), add `import std;` at the top of the file.
 
 **Dispatch rules:**
-- `std::abs(x)` resolves to the same function as `abs(x)`.
-- No difference in semantics; purely a namespace prefix for clarity.
+- `std::abs(x)` resolves to the same function as `abs(x)` (when `import std;` is present).
+- Bare calls without `import std;` are a compile error.
+- No difference in semantics between `std::name` and bare `name`; purely a namespace prefix.
 
 **List of std:: symbols:**
 
@@ -8349,25 +8350,72 @@ std::array_map(a, f);
 
 **Alias-free:** `std::name` always resolves to the same function as `name` (no aliasing or shadowing).
 
-**`import std;` — explicit namespace import:**
+**`import std;` — mandatory namespace import:**
 
-Use `import std;` (identifier form, no quotes) to explicitly declare that standard library functions are used without qualification. This is a no-op at the compiler level (stdlib functions are always available without `std::`) but documents intent and is good practice in larger programs.
+Use `import std;` (identifier form, no quotes) at the top of any file that calls standard library functions by their bare names (without `std::`).  
+**Without `import std;`, bare stdlib calls are a compile error.**
 
 ```omscript
-import std;           // explicitly opt in to unqualified stdlib access
+import std;           // required to call stdlib functions without std::
 
 fn main() {
-    println("hello"); // std::println — no qualifier needed
-    var x = abs(-5);  // std::abs — no qualifier needed
+    println("hello"); // ok — import std; is present
+    var x = abs(-5);  // ok — import std; is present
     return 0;
 }
 ```
 
-Both forms are equivalent and correct:
+Alternatively, fully qualify every call with `std::` (no import required):
+
 ```omscript
-std::println("explicit");   // always works
-println("bare");            // also works (with or without import std)
+// No import std; needed when using std:: prefix
+fn main() {
+    std::println("hello");   // always works
+    var x = std::abs(-5);    // always works
+    return 0;
+}
 ```
+
+Both forms are equivalent in semantics; the choice is stylistic.
+
+---
+
+### 23.8 User-defined namespaces
+
+OmScript supports user-defined namespace blocks that group functions, structs, and enums under a named scope.
+
+**Syntax:**
+```omscript
+namespace Math {
+    fn add(a, b) { return a + b; }
+    fn mul(a, b) { return a * b; }
+
+    struct Vec2 { x, y }
+}
+```
+
+Declarations inside a `namespace` block are registered with their fully qualified names (`Math::add`, `Math::Vec2`) and must be called that way unless the namespace is imported.
+
+**Qualified access (no import required):**
+```omscript
+var r = Math::add(3, 4);           // qualified function call
+var v = Math::Vec2 { x: 1, y: 2 }; // qualified struct literal
+```
+
+**Bare access after `import NSName;`:**
+```omscript
+import Math;      // import namespace — enables bare access
+
+var r = add(3, 4);           // equivalent to Math::add(3, 4)
+var v = Vec2 { x: 1, y: 2 }; // equivalent to Math::Vec2 { x: 1, y: 2 }
+```
+
+**Allowed declarations inside a namespace block:**
+- `fn` — function definitions
+- `struct` — struct type definitions
+- `enum` — enum definitions
+
+Namespaces cannot be nested. Each namespace block contributes to a flat per-name registry; multiple `namespace Math { ... }` blocks in the same file are additive.
 
 ---
 

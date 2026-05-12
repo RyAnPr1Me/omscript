@@ -1,3 +1,4 @@
+import std;
 // hash package - simple integer hashing utilities
 
 fn hash_int(n) {

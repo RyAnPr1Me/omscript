@@ -1,3 +1,4 @@
+import std;
 // matrix package - 2D matrix operations using flat arrays
 // Matrices are stored as flat arrays with dimensions passed separately.
 // Index (row, col) in a matrix with 'cols' columns = row * cols + col.

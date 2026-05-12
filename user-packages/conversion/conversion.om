@@ -1,3 +1,4 @@
+import std;
 // conversion package - number and character conversion utilities
 
 fn conv_is_prime(n) {

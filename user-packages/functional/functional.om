@@ -1,3 +1,4 @@
+import std;
 // functional package - functional-style array operations
 
 fn func_reduce_sum(arr) {
