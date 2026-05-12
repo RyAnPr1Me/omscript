@@ -676,9 +676,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Type* elemTy = resolveAnnotatedType(elemTypeName);
         // Same struct-size fix as alloc<T>: use the actual struct LLVM type so that
         // sizeof(T) is computed correctly for struct element types.
-        llvm::StructType* isStructTy = getOrCreateStructLLVMType(elemTypeName);
-        if (isStructTy)
-            elemTy = isStructTy;
+        llvm::StructType* structTy = getOrCreateStructLLVMType(elemTypeName);
+        if (structTy)
+            elemTy = structTy;
         const llvm::DataLayout& DL = module->getDataLayout();
         const uint64_t elemSize  = DL.getTypeAllocSize(elemTy);
         const llvm::Align elemAlign = DL.getABITypeAlign(elemTy);
@@ -733,20 +733,20 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 // For struct types: auto-construct each element with typed per-field
                 // zero stores (with TBAA metadata) instead of a flat memset.  This
                 // lets the optimizer see explicit field writes and respects field types.
-                if (isStructTy) {
-                    const unsigned numFields = isStructTy->getNumElements();
+                if (structTy) {
+                    const unsigned numFields = structTy->getNumElements();
                     for (uint64_t elem = 0; elem < count; ++elem) {
                         llvm::Value* elemBase = (count == 1)
                             ? ptr
                             : builder->CreateInBoundsGEP(
-                                  isStructTy, ptr,
+                                  structTy, ptr,
                                   llvm::ConstantInt::get(getDefaultType(),
                                                          static_cast<int64_t>(elem)),
                                   "newz.elem." + std::to_string(elem));
                         for (unsigned fi = 0; fi < numFields; ++fi) {
-                            llvm::Type* fty = isStructTy->getElementType(fi);
+                            llvm::Type* fty = structTy->getElementType(fi);
                             llvm::Value* fptr = builder->CreateStructGEP(
-                                isStructTy, elemBase, fi, "newz.field." + std::to_string(fi));
+                                structTy, elemBase, fi, "newz.field." + std::to_string(fi));
                             llvm::StoreInst* st = builder->CreateAlignedStore(
                                 llvm::Constant::getNullValue(fty), fptr,
                                 DL.getABITypeAlign(fty));
@@ -803,20 +803,20 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                     : slotPtr;
                 // For struct types: auto-construct each element with typed per-field
                 // zero stores (with TBAA metadata) instead of a flat memset.
-                if (isStructTy) {
-                    const unsigned numFields = isStructTy->getNumElements();
+                if (structTy) {
+                    const unsigned numFields = structTy->getNumElements();
                     for (uint64_t elem = 0; elem < count; ++elem) {
                         llvm::Value* elemBase = (count == 1)
                             ? typedPtr
                             : builder->CreateInBoundsGEP(
-                                  isStructTy, typedPtr,
+                                  structTy, typedPtr,
                                   llvm::ConstantInt::get(getDefaultType(),
                                                          static_cast<int64_t>(elem)),
                                   "newz.arena.elem." + std::to_string(elem));
                         for (unsigned fi = 0; fi < numFields; ++fi) {
-                            llvm::Type* fty = isStructTy->getElementType(fi);
+                            llvm::Type* fty = structTy->getElementType(fi);
                             llvm::Value* fptr = builder->CreateStructGEP(
-                                isStructTy, elemBase, fi,
+                                structTy, elemBase, fi,
                                 "newz.arena.field." + std::to_string(fi));
                             llvm::StoreInst* st = builder->CreateAlignedStore(
                                 llvm::Constant::getNullValue(fty), fptr,

@@ -9397,11 +9397,11 @@ llvm-profdata merge *.profraw -o merged.profdata
 - **T2 (Arena)**: compile-time constant allocations that fit the 64 KiB per-function slab are GEP'd into a shared entry-block alloca. Zero heap involvement; the slab is lifetime-scoped.
 - **T3 (Heap)**: dynamic counts or oversized allocations fall through to `malloc` / `calloc`.
 
-Additionally, the LLVM mid-end's own escape analysis (`-O1`+) can promote surviving T3 heap allocations to stack once it proves the pointer does not escape the function (i.e. is not returned, stored into a global, or passed to an escaping callee). The `4096-byte threshold` mentioned below applies only to OmScript's compile-time promotion; LLVM's analysis has no hard threshold.
+Additionally, the LLVM mid-end's own escape analysis (`-O1`+) can promote surviving T3 heap allocations to stack once it proves the pointer does not escape the function (i.e. is not returned, stored into a global, or passed to an escaping callee). LLVM's analysis has no hard byte threshold.
 
-**Compile-time array escape heuristic** (§11.5): arrays declared with literal-sized `array_fill` / `[...]` and proven not to escape are stack-promoted by the AST-level analysis in `codegen.cpp` (`optStats_.escapeStackAllocs` counter).
+**Compile-time array escape heuristic** (§11.5): arrays declared with literal-sized `array_fill` / `[...]` and proven not to escape are stack-promoted by the AST-level analysis in `codegen.cpp` (`optStats_.escapeStackAllocs` counter). The 4,096-byte threshold in §11.5 is specific to that array heuristic and is separate from `alloc<T>` / `new T`.
 
-**`kStackAllocThreshold` = 8 192 bytes** (`include/codegen.h`). Allocations larger than this threshold remain on the heap even when the count is constant, to prevent stack overflow.
+**`kStackAllocThreshold` = 8,192 bytes** (`include/codegen.h`). Allocations larger than this threshold remain on the heap even when the count is constant, to prevent stack overflow.
 
 ### 26.7 Bounds-Check Hoisting
 
