@@ -304,6 +304,15 @@ std::unique_ptr<Program> Parser::parse() {
             }
             continue;
         }
+        if (match(TokenType::NAMESPACE)) {
+            try {
+                parseNamespace(functions, enums, structs);
+            } catch (const std::exception& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
         if (check(TokenType::GLOBAL)) {
             try {
                 auto gv = parseGlobalDecl();
@@ -1415,6 +1424,18 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
         auto nsIt = importNamespaces_.find(nsTok.lexeme);
         if (nsIt != importNamespaces_.end()) {
             globallyImportedNamespaces_.insert(nsTok.lexeme);
+            // For user-defined namespaces, inject bare function/struct aliases so
+            // that `add(x)` resolves to `Math::add` after `import Math;`.
+            // For stdlib ("std"), builtins are already accessible bare; skip.
+            if (nsTok.lexeme != "std") {
+                for (const auto& [shortName, qualName] : nsIt->second) {
+                    bareImportedFunctions_[shortName] = qualName;
+                    // If the qualified name is also a struct name, expose bare name too.
+                    if (structNames_.count(qualName)) {
+                        structNames_.insert(shortName);
+                    }
+                }
+            }
         }
         // No further action needed — stdlib functions work bare by default.
         return;
@@ -1542,6 +1563,48 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
         gv->globalNamespace = globalAlias;
         pendingGlobals_.push_back(std::move(gv));
     }
+}
+
+void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& functions,
+                             std::vector<std::unique_ptr<EnumDecl>>& enums,
+                             std::vector<std::unique_ptr<StructDecl>>& structs) {
+    const Token nsNameTok = consume(TokenType::IDENTIFIER, "Expected namespace name");
+    const std::string nsName = nsNameTok.lexeme;
+    consume(TokenType::LBRACE, "Expected '{' after namespace name");
+
+    auto& nsMap = importNamespaces_[nsName];
+
+    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        if (check(TokenType::FN)) {
+            auto func = parseFunction(false);
+            // Prefix the function name with the namespace.
+            const std::string shortName = func->name;
+            const std::string qualName  = nsName + "::" + shortName;
+            func->name = qualName;
+            nsMap[shortName] = qualName;
+            functions.push_back(std::move(func));
+        } else if (match(TokenType::STRUCT)) {
+            auto st = parseStructDecl();
+            // Rename struct to qualified name and register in all tables.
+            const std::string shortName = st->name;
+            const std::string qualName  = nsName + "::" + shortName;
+            // structNames_ already has shortName from parseStructDecl; add qualified name.
+            structNames_.insert(qualName);
+            st->name = qualName;
+            nsMap[shortName] = qualName;
+            structs.push_back(std::move(st));
+        } else if (match(TokenType::ENUM)) {
+            auto en = parseEnumDecl();
+            const std::string shortName = en->name;
+            const std::string qualName  = nsName + "::" + shortName;
+            en->name = qualName;
+            nsMap[shortName] = qualName;
+            enums.push_back(std::move(en));
+        } else {
+            error("Only 'fn', 'struct', and 'enum' declarations are allowed inside a namespace block");
+        }
+    }
+    consume(TokenType::RBRACE, "Expected '}' to close namespace block");
 }
 
 std::string Parser::resolveNamespacedPath(const std::vector<std::string>& segments) {
@@ -4583,7 +4646,15 @@ std::unique_ptr<Expression> Parser::parseCall() {
 
             consume(TokenType::RPAREN, "Expected ')' after arguments");
 
-            auto callExpr = std::make_unique<CallExpr>(idExpr->name, std::move(arguments));
+            // Resolve bare function calls from globally-imported user namespaces.
+            // e.g. after `import Math;`, `add(x)` maps to `Math::add(x)`.
+            std::string calleeName = idExpr->name;
+            {
+                auto bif = bareImportedFunctions_.find(calleeName);
+                if (bif != bareImportedFunctions_.end())
+                    calleeName = bif->second;
+            }
+            auto callExpr = std::make_unique<CallExpr>(calleeName, std::move(arguments));
             callExpr->line = expr->line;
             callExpr->column = expr->column;
             // Consume and apply the namespace-resolution flag set by parsePrimary.
@@ -5222,8 +5293,16 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                 }
             }
 
-            // Not a call: single-level → check for imported global, then classic enum member access.
+            // Not a call: single-level → check for namespace struct literal, imported global, then classic enum member access.
             if (depth == 1) {
+                // Check: is this a namespace-qualified struct literal? e.g. Math::Vec2 { x: 1, y: 2 }
+                {
+                    const std::string qualName = segments[0] + "::" + segments[1];
+                    if (structNames_.count(qualName) && check(TokenType::LBRACE)) {
+                        advance(); // consume '{'
+                        return parseStructLiteral(qualName, token.line, token.column);
+                    }
+                }
                 // Priority: cross-file global variable access (e.g. math::PI)
                 {
                     auto gvNsIt = importedGlobalVars_.find(segments[0]);
@@ -5275,7 +5354,14 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         // Check if this is a struct literal: StructName { field: value, ... }
         if (structNames_.count(token.lexeme) && check(TokenType::LBRACE)) {
             advance(); // consume '{'
-            return parseStructLiteral(token.lexeme, token.line, token.column);
+            // Resolve bare name through bare-import map (e.g. Vec2 → Math::Vec2 after import Math;)
+            std::string structName = token.lexeme;
+            {
+                auto bif = bareImportedFunctions_.find(structName);
+                if (bif != bareImportedFunctions_.end())
+                    structName = bif->second;
+            }
+            return parseStructLiteral(structName, token.line, token.column);
         }
         // `dict { key: val, ... }` — keyword-prefixed dict literal.
         // Equivalent to `{ key: val, ... }` but more explicit.

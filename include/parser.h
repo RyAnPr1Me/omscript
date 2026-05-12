@@ -93,6 +93,11 @@ class Parser {
                      std::vector<std::unique_ptr<StructDecl>>& structs,
                      std::vector<std::unique_ptr<VarDecl>>& globals);
 
+    /// Parse a user-defined namespace block: namespace Name { fn/struct/enum ... }
+    void parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& functions,
+                        std::vector<std::unique_ptr<EnumDecl>>& enums,
+                        std::vector<std::unique_ptr<StructDecl>>& structs);
+
     const Token& peek(int offset = 0) const noexcept;
     Token advance() noexcept;
     [[nodiscard]] bool check(TokenType type) const noexcept;
@@ -205,6 +210,11 @@ class Parser {
     /// Namespaces that have been globally imported via `import std;` (identifier form).
     /// Members of these namespaces are accessible without the `namespace::` qualifier.
     std::unordered_set<std::string> globallyImportedNamespaces_;
+
+    /// Bare-import map: populated when `import NSName;` is processed for user-defined
+    /// namespaces.  Maps unqualified name → fully-qualified name so that `add(x)` after
+    /// `import Math;` resolves to the LLVM function `Math::add`.
+    std::unordered_map<std::string, std::string> bareImportedFunctions_;
 
     /// Resolve a scope chain (segments separated by ::) to an actual function
     /// name using the importNamespaces_ registry.

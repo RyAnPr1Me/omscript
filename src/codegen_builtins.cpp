@@ -424,7 +424,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     //  - the call was NOT written as std::foo() (fromStdNamespace == false)
     //  - the source file has NOT done `import std;` (stdImported_ == false)
     //  - there is NO user-defined function with the same bare name
-    if (!expr->fromStdNamespace && !stdImported_ && bid != BuiltinId::UNKNOWN) {
+    if (!expr->fromStdNamespace && !stdImported_ && bid != BuiltinId::NONE) {
         // Only block if there is no user-defined override with the same name.
         bool hasUserDef = functions.count(expr->callee) &&
                           functions.find(expr->callee)->second != nullptr;

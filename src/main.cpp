@@ -1772,6 +1772,8 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "OWN";
     case omscript::TokenType::CONSTRUCT:
         return "CONSTRUCT";
+    case omscript::TokenType::NAMESPACE:
+        return "NAMESPACE";
     }
     return "UNKNOWN";
 }

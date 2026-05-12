@@ -70,7 +70,8 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"nullptr",  TokenType::NULL_LITERAL},  // Ω spec §2.2: nullptr == null
     {"shared",   TokenType::SHARED},        // Ω spec §3.1: read-only aliasable ownership
     {"own",      TokenType::OWN},
-    {"construct",TokenType::CONSTRUCT}};   // in-place field initialisation
+    {"construct",TokenType::CONSTRUCT},    // in-place field initialisation
+    {"namespace",TokenType::NAMESPACE}};   // user-defined namespace block
 
 /// Throw a DiagnosticError with the given message and source location.
 [[noreturn]] [[gnu::cold]] static void lexError(const std::string& msg, int ln, int col) {
