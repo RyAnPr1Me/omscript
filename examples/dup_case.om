@@ -1,3 +1,4 @@
+import std;
 // This should fail compilation: duplicate case value in switch
 fn main() {
     var x = 1;

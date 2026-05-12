@@ -1,3 +1,4 @@
+import std;
 // New SIMD vector types from the modernised registry.
 // Exercises i16x8 (16-bit lanes — new) and f32x8 (was already present),
 // plus u32x4 (new unsigned alias) and i64x8 (new AVX-512-class wide).

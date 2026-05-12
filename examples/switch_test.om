@@ -1,3 +1,4 @@
+import std;
 // Test switch/case statement
 fn classify(x) {
     switch (x) {

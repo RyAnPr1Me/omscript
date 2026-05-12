@@ -1,3 +1,4 @@
+import std;
 // Test multi-value case in switch statements and string interpolation
 fn classify(x) {
     switch (x) {

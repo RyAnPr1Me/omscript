@@ -1,3 +1,4 @@
+import std;
 // Test: pipeline keyword
 // pipeline N { stage name { ... } ... }
 //

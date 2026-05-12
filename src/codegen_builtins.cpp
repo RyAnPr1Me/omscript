@@ -415,8 +415,27 @@ void CodeGenerator::validateArgCount(const CallExpr* expr, const std::string& fu
 llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // O(1) hash map lookup replaces the previous linear chain of ~80
     const BuiltinId bid = lookupBuiltin(expr->callee);
-    // Builtins are accepted whether they were parsed as std::foo() or bare
-    // foo() to preserve compatibility with existing programs and tests.
+
+    // ── Mandatory namespace enforcement ──────────────────────────────────────
+    // Unless the source file has `import std;`, stdlib functions must be called
+    // as `std::funcname(...)`.  Bare calls like `println(x)` are rejected.
+    // This only applies when:
+    //  - the call is to a known stdlib function name (isStdlibFunction)
+    //  - the call was NOT written as std::foo() (fromStdNamespace == false)
+    //  - the source file has NOT done `import std;` (stdImported_ == false)
+    //  - there is NO user-defined function with the same bare name
+    if (!expr->fromStdNamespace && !stdImported_ && bid != BuiltinId::UNKNOWN) {
+        // Only block if there is no user-defined override with the same name.
+        bool hasUserDef = functions.count(expr->callee) &&
+                          functions.find(expr->callee)->second != nullptr;
+        if (!hasUserDef && isStdlibFunction(expr->callee)) {
+            codegenError(
+                "Function '" + expr->callee + "' requires namespace qualification.\n"
+                "  Use 'std::" + expr->callee + "(...)' or add 'import std;' "
+                "at the top of the file.", expr);
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     // ── pslice_new<T>(ptr, len) — create a fat pointer slice ─────────────────
     // Bundles a raw pointer with a length for compile-time bounds checking.

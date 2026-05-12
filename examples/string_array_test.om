@@ -1,3 +1,4 @@
+import std;
 // string_array_test.om
 //
 // Regression test: string array elements lost their type information in three

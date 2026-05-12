@@ -1,3 +1,4 @@
+import std;
 @optmax(
     safety = off,
     fast_math = true,

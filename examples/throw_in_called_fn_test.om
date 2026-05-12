@@ -1,3 +1,4 @@
+import std;
 // throw_in_called_fn_test.om
 //
 // Tests that throw terminates normal control flow (code after throw never

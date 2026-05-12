@@ -1,3 +1,4 @@
+import std;
 // Test elvis operator (?:)
 fn main() {
     var total = 0;

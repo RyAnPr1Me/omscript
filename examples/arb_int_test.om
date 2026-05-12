@@ -1,3 +1,4 @@
+import std;
 // arb_int_test.om — Tests for arbitrary-width integer types
 // Demonstrates i3, u7, i128, u128, u256 type annotations and casts.
 

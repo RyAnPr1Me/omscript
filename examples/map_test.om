@@ -1,3 +1,4 @@
+import std;
 // Test map/dictionary built-in functions
 fn main() {
     var total = 0;

@@ -1,3 +1,4 @@
+import std;
 // Test str_join and str_count builtins
 fn main() {
     var total = 0;

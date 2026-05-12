@@ -1,3 +1,4 @@
+import std;
 // Test @loop(independent=true) hint — marks the loop as having no
 // cross-iteration memory dependencies, enabling aggressive vectorization.
 fn main() {

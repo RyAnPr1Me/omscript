@@ -1,3 +1,4 @@
+import std;
 // Test the 'repeat' keyword (counted loop)
 fn main() {
     var result = 0;

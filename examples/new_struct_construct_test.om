@@ -1,3 +1,4 @@
+import std;
 // new_struct_construct_test.om — verify that new T(n) / alloc<T>(n) correctly
 // sizes and auto-constructs struct memory.
 //

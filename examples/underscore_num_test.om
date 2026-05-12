@@ -1,3 +1,4 @@
+import std;
 // Test underscore separators in numeric literals
 fn main() {
     var result = 0;

@@ -1,3 +1,4 @@
+import std;
 // Test default function parameters
 fn add(a, b = 10) {
     return a + b;

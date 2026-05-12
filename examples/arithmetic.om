@@ -1,3 +1,4 @@
+import std;
 // Simple arithmetic and variables
 fn main() {
     var x = 10;

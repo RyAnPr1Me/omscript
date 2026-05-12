@@ -1,3 +1,4 @@
+import std;
 // nullptr_test.om — verify `nullptr` keyword is equivalent to `null` (Ω spec §2.2)
 // Expected exit code: 42
 

@@ -1,3 +1,4 @@
+import std;
 // Test enum declarations
 enum Color {
     RED,

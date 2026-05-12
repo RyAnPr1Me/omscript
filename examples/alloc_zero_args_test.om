@@ -1,3 +1,4 @@
+import std;
 // alloc_zero_args_test.om — verify alloc<T>() with no args allocates 1 element (Ω spec §4.1)
 // Expected exit code: 99
 

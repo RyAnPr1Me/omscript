@@ -1,3 +1,4 @@
+import std;
 // Test string values passed as function parameters and returned from functions.
 
 fn print_msg(msg) {

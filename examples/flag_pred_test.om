@@ -1,3 +1,4 @@
+import std;
 // Test: flag predicate scheduling pass
 //
 // Exercises the three phases of FlagPredicateSchedulingPass:

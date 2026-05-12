@@ -12,6 +12,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace omscript {
@@ -709,12 +710,18 @@ class Program : public ASTNode {
     std::vector<std::unique_ptr<StructDecl>> structs;
     bool fileNoAlias = false;  ///< @noalias file directive: all pointers are noalias
     std::vector<std::unique_ptr<VarDecl>> globals; ///< Top-level global variable declarations
+    /// Namespaces that were explicitly imported via `import std;` (identifier
+    /// form).  The codegen uses this to enforce that stdlib functions are called
+    /// via `std::` qualification unless the `std` namespace is in this set.
+    std::unordered_set<std::string> importedNamespaces;
 
     Program(std::vector<std::unique_ptr<FunctionDecl>> funcs, std::vector<std::unique_ptr<EnumDecl>> enms = {},
             std::vector<std::unique_ptr<StructDecl>> strcts = {}, bool noAlias = false,
-            std::vector<std::unique_ptr<VarDecl>> globs = {})
+            std::vector<std::unique_ptr<VarDecl>> globs = {},
+            std::unordered_set<std::string> importedNs = {})
         : ASTNode(ASTNodeType::PROGRAM), functions(std::move(funcs)), enums(std::move(enms)),
-          structs(std::move(strcts)), fileNoAlias(noAlias), globals(std::move(globs)) {}
+          structs(std::move(strcts)), fileNoAlias(noAlias), globals(std::move(globs)),
+          importedNamespaces(std::move(importedNs)) {}
 };
 
 // ---------------------------------------------------------------------------

@@ -1,3 +1,4 @@
+import std;
 // Stress test for O3 and OPTMAX optimizations
 
 // Tests algebraic identity optimizations and loop optimizations

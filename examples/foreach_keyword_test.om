@@ -1,3 +1,4 @@
+import std;
 // Test: foreach keyword
 // foreach item in collection { ... } — alternative to for (item in collection) { ... }
 

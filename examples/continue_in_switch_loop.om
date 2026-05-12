@@ -1,3 +1,4 @@
+import std;
 // Test that continue inside a switch inside a for loop correctly
 // continues the for loop (not an error, not a crash)
 fn main() {

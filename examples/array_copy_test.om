@@ -1,3 +1,4 @@
+import std;
 // Test array_copy and array_remove built-in functions
 fn main() {
     var total = 0;

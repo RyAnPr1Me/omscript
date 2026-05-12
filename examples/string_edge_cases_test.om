@@ -1,3 +1,4 @@
+import std;
 // String builtins edge cases: empty string length, concatenation with
 // an empty string, indexing via char_at, equality.  Returns the count
 // of passing assertions.

@@ -1,3 +1,4 @@
+import std;
 // Test stdlib functions with float arguments
 // Previously sign/clamp/pow/sqrt/is_even/is_odd crashed with float inputs
 fn main() {

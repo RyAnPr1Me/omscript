@@ -1,3 +1,4 @@
+import std;
 // Recursion exercises: direct recursion, tail recursion (which may be
 // optimised into a loop by codegen), and mutual recursion expressed as
 // is_even via an intermediate.  Exits with the count of assertions.

@@ -1,3 +1,4 @@
+import std;
 fn main() {
     print("hello world");
     print("omscript strings work");

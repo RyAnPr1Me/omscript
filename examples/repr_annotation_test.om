@@ -1,3 +1,4 @@
+import std;
 // Test @repr(...) struct layout annotations.
 // @repr(C)        — stable ABI-compatible layout
 // @repr(packed)   — minimal memory, no padding

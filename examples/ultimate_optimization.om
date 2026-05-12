@@ -1,3 +1,4 @@
+import std;
 // Ultimate optimization showcase
 // This program demonstrates all OmScript optimization features
 

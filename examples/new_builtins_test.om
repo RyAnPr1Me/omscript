@@ -1,3 +1,4 @@
+import std;
 // Test new built-in functions: log2, gcd, to_string, str_find
 fn main() {
     var total = 0;

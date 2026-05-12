@@ -1,3 +1,4 @@
+import std;
 // Test LCM builtin function
 fn main() {
     // Basic LCM tests

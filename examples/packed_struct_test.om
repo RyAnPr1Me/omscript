@@ -1,3 +1,4 @@
+import std;
 // packed_struct_test.om — verify `@packed` struct attribute (Round-52).
 //
 // Previously "Attributes: @packed is parsed but not yet implemented."

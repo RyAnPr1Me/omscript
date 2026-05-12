@@ -1,3 +1,4 @@
+import std;
 // Test returning arrays from functions (heap-allocated, not stack)
 fn makeArray() {
     return [10, 20, 30];

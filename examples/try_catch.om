@@ -1,3 +1,4 @@
+import std;
 // try_catch.om — error handling with catch/throw
 //
 // Tests: basic throw-to-catch jump table, multiple error codes,

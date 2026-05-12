@@ -1,3 +1,4 @@
+import std;
 // Test: times keyword
 // times (N) { ... } or times N { ... } — execute block N times
 

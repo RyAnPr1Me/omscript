@@ -1,3 +1,4 @@
+import std;
 // Test continue inside switch: should continue the enclosing loop
 fn main() {
     var count = 0;

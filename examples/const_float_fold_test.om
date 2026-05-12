@@ -1,3 +1,4 @@
+import std;
 // Test const float variable propagation optimization.
 // Const float variables are folded at compile time, enabling
 // chain evaluation: const PI = 3.14; var x = PI * 2.0 → 6.28.

@@ -1,3 +1,4 @@
+import std;
 // Test: with statement
 // with (var x = expr) { body } — scoped variable binding
 

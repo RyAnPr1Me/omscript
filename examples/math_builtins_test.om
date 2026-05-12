@@ -1,3 +1,4 @@
+import std;
 // Test new math built-in functions: floor, ceil, round, to_int, to_float
 fn main() {
     var total = 0;

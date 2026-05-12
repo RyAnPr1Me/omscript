@@ -1,3 +1,4 @@
+import std;
 // Test: assume, unreachable, expect — optimizer-hint builtins
 //
 //   assume(cond)          → llvm.assume: zero-cost hint that cond is always true

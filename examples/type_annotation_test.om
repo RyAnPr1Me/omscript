@@ -1,3 +1,4 @@
+import std;
 // type_annotation_test.om — type annotation tests
 //
 // Tests: parameter type annotations, return type annotations,

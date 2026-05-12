@@ -1,3 +1,4 @@
+import std;
 // Test that duplicate function definitions produce a clear error
 fn add(a, b) { return a + b; }
 fn add(x, y) { return x + y; }

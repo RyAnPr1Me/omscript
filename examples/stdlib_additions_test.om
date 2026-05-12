@@ -1,3 +1,4 @@
+import std;
 // Tests for stdlib additions: str_lstrip, str_rstrip, str_remove,
 // array_take, array_drop, array_unique, array_rotate, array_mean,
 // map_merge, map_invert

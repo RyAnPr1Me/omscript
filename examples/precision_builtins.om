@@ -1,3 +1,4 @@
+import std;
 fn main() {
     print(fast_add(10, 20));
     print(fast_mul(5, 6));

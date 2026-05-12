@@ -1,3 +1,4 @@
+import std;
 // Test compound assignment operators: +=, -=, *=, /=, %=
 fn main() {
     var a = 10;

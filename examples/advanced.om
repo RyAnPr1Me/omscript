@@ -1,3 +1,4 @@
+import std;
 // Advanced example demonstrating multiple features
 // Computing greatest common divisor (GCD) using Euclidean algorithm
 

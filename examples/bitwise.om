@@ -1,3 +1,4 @@
+import std;
 // Test bitwise operators: &, |, ^, ~, <<, >>
 fn main() {
     // Bitwise AND

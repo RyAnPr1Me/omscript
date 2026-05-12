@@ -1,3 +1,4 @@
+import std;
 // Tests shift / unshift array builtins.
 // Expected exit code: 19 (number of passing assertions).
 fn main() {

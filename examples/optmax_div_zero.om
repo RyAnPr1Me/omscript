@@ -1,3 +1,4 @@
+import std;
 // Test that 0/0 produces a runtime division-by-zero error even in OPTMAX mode.
 // Before the fix, the OPTMAX optimizer folded `0 / x → 0`, which incorrectly
 // suppressed the division-by-zero runtime error when x was also 0.

@@ -1,3 +1,4 @@
+import std;
 // string_foreach_test.om
 //
 // Regression test: for (c in s) previously treated the string as an array

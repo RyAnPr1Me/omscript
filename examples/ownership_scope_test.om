@@ -1,3 +1,4 @@
+import std;
 // ownership_scope_test.om — test borrow scope release and multiple borrows
 // Expected exit code: 55
 

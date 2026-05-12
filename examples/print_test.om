@@ -1,3 +1,4 @@
+import std;
 // Test the built-in print function
 fn main() {
     var x = 42;

@@ -1384,7 +1384,7 @@ std::unique_ptr<Program> Parser::parse() {
     }
     pendingGlobals_.clear();
 
-    return std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs), fileNoAlias, std::move(globals));
+    return std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs), fileNoAlias, std::move(globals), globallyImportedNamespaces_);
 }
 
 void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
@@ -4499,7 +4499,12 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
         // Handle field access (dot notation) or method call (obj.method(args))
         else if (match(TokenType::DOT)) {
             const Token dotToken = tokens[current - 1];
-            const Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name after '.'");
+            // Accept IDENTIFIER or SWAP (and any future keyword that doubles as a
+            // field/method name) after '.'.  This mirrors C/C++ where keywords are
+            // valid struct member names when disambiguated by the '.' context.
+            Token fieldToken = (check(TokenType::IDENTIFIER) || check(TokenType::SWAP))
+                ? advance()
+                : consume(TokenType::IDENTIFIER, "Expected field name after '.'");
             // Method call: obj.method(args...) desugars to method(obj, args...)
             if (check(TokenType::LPAREN)) {
                 advance(); // consume '('
@@ -4528,7 +4533,10 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
         // field access already auto-dereferences pointer-typed variables.
         else if (match(TokenType::ARROW)) {
             const Token arrowToken = tokens[current - 1];
-            const Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name after '->'");
+            // Same as DOT: accept IDENTIFIER or keyword tokens as field names.
+            Token fieldToken = (check(TokenType::IDENTIFIER) || check(TokenType::SWAP))
+                ? advance()
+                : consume(TokenType::IDENTIFIER, "Expected field name after '->'");
             if (check(TokenType::LPAREN)) {
                 advance(); // consume '('
                 std::vector<std::unique_ptr<Expression>> arguments;

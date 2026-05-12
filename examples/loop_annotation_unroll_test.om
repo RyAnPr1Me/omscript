@@ -1,3 +1,4 @@
+import std;
 // Test @loop(unroll=4) annotation
 fn main() {
     var sum = 0;

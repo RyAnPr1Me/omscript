@@ -1,3 +1,4 @@
+import std;
 // lambda_test.om — lambda expression tests
 //
 // Tests: lambda syntax with array_map, array_filter, array_reduce,

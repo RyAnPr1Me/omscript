@@ -1,3 +1,4 @@
+import std;
 // Test comptime {} blocks: compile-time evaluated expressions
 fn main() {
     // Basic arithmetic at compile time

@@ -1,3 +1,4 @@
+import std;
 // Test preprocessor directives
 #define ANSWER 42
 #define DOUBLE(x) x * 2

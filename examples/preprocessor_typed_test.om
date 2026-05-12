@@ -1,3 +1,4 @@
+import std;
 // Type-aware preprocessor: typed function-like macro parameters with
 // optional `: <type>` annotation and optional `-> <returnType>`.
 // Each correct expansion contributes 1 to `total`; expected total = 6.

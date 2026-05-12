@@ -1,3 +1,4 @@
+import std;
 // Comprehensive memory management stress test
 // Tests reference counting, string operations, and cleanup
 

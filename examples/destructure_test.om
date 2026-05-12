@@ -1,3 +1,4 @@
+import std;
 // Test: array destructuring
 // var [a, b, c] = expr; — desugars to individual indexed assignments
 

@@ -1,3 +1,4 @@
+import std;
 // Test range, char_code, number_to_string, string_to_number
 fn main() {
     var total = 0;

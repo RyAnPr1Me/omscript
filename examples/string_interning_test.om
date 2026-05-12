@@ -1,3 +1,4 @@
+import std;
 // Test string interning: identical string literals share the same pointer
 // and compile-time string builtin folding.
 fn main() {

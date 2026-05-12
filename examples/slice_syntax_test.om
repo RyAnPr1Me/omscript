@@ -1,3 +1,4 @@
+import std;
 // Test array slice syntax arr[start:end]
 fn main() {
     var total = 0;

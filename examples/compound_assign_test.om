@@ -1,3 +1,4 @@
+import std;
 // Test compound assignment operators: **= and ??=
 // Also tests struct field compound assignment (s.x += 1)
 struct Point {

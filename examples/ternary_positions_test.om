@@ -1,3 +1,4 @@
+import std;
 // Ternary expression in varied positions: basic selection, nesting,
 // use inside arithmetic.  Result is a single total stays within an
 // 8-bit exit-code window.

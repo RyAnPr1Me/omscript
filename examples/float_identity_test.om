@@ -1,3 +1,4 @@
+import std;
 // Floating-point semantics: correct rounding for small magnitudes,
 // identity operations, comparison at zero, integer conversion behaviour.
 // Returns an integer count of successful assertions so the test can be

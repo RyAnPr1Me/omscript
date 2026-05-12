@@ -1,3 +1,4 @@
+import std;
 // Test boolean literals (true, false) and null keyword
 fn main() {
     var result = 0;

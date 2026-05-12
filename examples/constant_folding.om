@@ -1,3 +1,4 @@
+import std;
 // Demonstrates compile-time constant folding optimization
 fn compute_constants() {
     // These will be computed at compile time!

@@ -1,3 +1,4 @@
+import std;
 // Invalid octal literal (no digits after 0o)
 fn main() {
     var x = 0o;

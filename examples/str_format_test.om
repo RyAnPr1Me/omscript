@@ -1,3 +1,4 @@
+import std;
 // Test str_format builtin — format values into a string via snprintf.
 // Verify: compile-time folding (all-const args), runtime formatting,
 // and mixed int/float/string argument combinations.

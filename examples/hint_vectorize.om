@@ -1,3 +1,4 @@
+import std;
 @vectorize
 fn sum_vectorized(n: int) -> int {
     var total: int = 0;

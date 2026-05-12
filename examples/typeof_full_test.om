@@ -1,3 +1,4 @@
+import std;
 // typeof_full_test.om
 //
 // Regression test: typeof() now returns accurate type tags using static

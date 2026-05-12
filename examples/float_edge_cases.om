@@ -1,3 +1,4 @@
+import std;
 // Test stdlib char functions and for-loops with float arguments
 // Previously is_alpha/is_digit crashed with float inputs,
 // and for-loops crashed with float end/step values

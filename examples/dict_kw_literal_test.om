@@ -1,3 +1,4 @@
+import std;
 // dict_kw_literal_test.om — verify `dict { ... }` keyword form (Round-53).
 //
 // `dict { key: val, ... }` is identical to `{ key: val, ... }`.

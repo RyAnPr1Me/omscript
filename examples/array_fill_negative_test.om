@@ -1,3 +1,4 @@
+import std;
 // Regression test: array_fill with negative size should produce empty array,
 // not crash via huge malloc (negative size reinterpreted as unsigned).
 fn main() {

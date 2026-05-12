@@ -1,3 +1,4 @@
+import std;
 // Test compound logical assignment operators &&= and ||=
 fn main() {
     var total = 0;

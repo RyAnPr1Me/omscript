@@ -1,3 +1,4 @@
+import std;
 // constfold_builtins_test.om
 // Tests compile-time constant folding for various builtins.
 // All inputs are literals so everything folds at compile time.

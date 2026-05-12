@@ -1,3 +1,4 @@
+import std;
 // Test 'in' operator for containment testing
 fn main() {
     var total = 0;

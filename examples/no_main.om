@@ -1,3 +1,4 @@
+import std;
 // Test that programs without a main function produce a clear error
 fn foo() {
     return 42;

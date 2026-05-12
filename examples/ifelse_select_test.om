@@ -1,3 +1,4 @@
+import std;
 // Test if-else to select conversion optimization.
 // When both branches are simple assignments to the same variable,
 // the compiler converts them to a branchless select instruction.

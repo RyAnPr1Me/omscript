@@ -1,3 +1,4 @@
+import std;
 // Test typeof and assert stdlib functions
 fn main() {
     var x = 42;

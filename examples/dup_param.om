@@ -1,3 +1,4 @@
+import std;
 // Test that duplicate parameter names produce a clear error
 fn add(a, a) { return a + a; }
 fn main() { return add(1, 2); }

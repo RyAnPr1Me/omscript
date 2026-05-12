@@ -1,3 +1,4 @@
+import std;
 // shared_ownership_test.om — verify `shared` ownership state (Ω spec §3.1)
 // Expected exit code: 55
 

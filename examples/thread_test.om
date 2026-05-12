@@ -1,3 +1,4 @@
+import std;
 // Test concurrency primitives: thread_create, thread_join, mutex
 fn worker() {
     println(42);

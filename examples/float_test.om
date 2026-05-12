@@ -1,3 +1,4 @@
+import std;
 // Test float literal support and arithmetic
 fn main() {
     // Float variable declaration and printing

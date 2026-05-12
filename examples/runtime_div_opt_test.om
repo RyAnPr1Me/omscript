@@ -1,3 +1,4 @@
+import std;
 // runtime_div_opt_test.om
 // Correctness test for srem→urem and sdiv→udiv conversion with
 // runtime (non-constant) divisors proven to be non-negative.

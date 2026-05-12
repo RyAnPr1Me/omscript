@@ -1,3 +1,4 @@
+import std;
 // Test that signed division by powers of 2 rounds toward zero,
 // not toward negative infinity (which is what arithmetic shift does).
 // -7 / 2 should be -3 (truncation toward zero), not -4 (floor).

@@ -1,3 +1,4 @@
+import std;
 // Test that print_char returns the character code it printed
 fn main() {
     var r1 = print_char(65);   // prints 'A', should return 65

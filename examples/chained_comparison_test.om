@@ -1,3 +1,4 @@
+import std;
 // Test chained comparisons: a < b < c desugars to (a < b) && (b < c)
 fn main() {
     var total = 0;

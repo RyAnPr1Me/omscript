@@ -1,3 +1,4 @@
+import std;
 // Test scientific notation for float literals
 fn main() {
     var total = 0;

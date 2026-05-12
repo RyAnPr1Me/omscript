@@ -1,3 +1,4 @@
+import std;
 // loop_ucmp_test.om
 // Correctness test for ICmpULT ascending loop optimization.
 //

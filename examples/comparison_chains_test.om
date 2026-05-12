@@ -1,3 +1,4 @@
+import std;
 // Comparison chaining + combined comparison operators.  Validates that
 // lexing/parsing of multi-operator chains (a < b < c etc.) behave as
 // documented, and that boolean results from comparisons compose safely

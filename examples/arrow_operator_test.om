@@ -1,3 +1,4 @@
+import std;
 // arrow_operator_test.om — verify `->` pointer member access (Round-53).
 //
 // `p->field` is syntactic sugar for `p.field`.

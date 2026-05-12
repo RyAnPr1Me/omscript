@@ -1,3 +1,4 @@
+import std;
 // typed_array_literal_test.om — verify `[]T{...}` typed array literal (Round-53).
 //
 // `[]T{elem1, elem2, ...}` is syntactic sugar for `[elem1, elem2, ...]`.

@@ -1,3 +1,4 @@
+import std;
 // freeze_test.om — test the `freeze x;` keyword
 // Expected exit code: 42
 

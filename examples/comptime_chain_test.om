@@ -1,3 +1,4 @@
+import std;
 // Test comptime {} chain: result participates in further constant folding
 fn main() {
     const A = comptime { return 3 * 4; };       // 12

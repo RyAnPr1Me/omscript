@@ -1,3 +1,4 @@
+import std;
 // qualified_method_test.om — verify `fn StructName::method(self, ...)` syntax
 // and obj.method() desugaring to `StructName::method(obj, args)` (Round-52).
 //

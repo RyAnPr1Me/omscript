@@ -1,3 +1,4 @@
+import std;
 // Test: loop N — counted loop variant
 // loop N { ... } — runs body N times (zero-cost sugar for for __i in 0...N)
 

@@ -1,3 +1,4 @@
+import std;
 // Test filter, str_filter, and command built-in functions
 
 fn is_even(x:int) -> int {

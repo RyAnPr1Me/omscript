@@ -1,3 +1,4 @@
+import std;
 // pow_float_test.om
 //
 // Regression test: pow(base, float_exp) previously converted both arguments

@@ -1,3 +1,4 @@
+import std;
 // Matrix multiplication benchmark - demonstrates optimization power
 // Computes C = A * B where matrices are represented as nested loops
 

@@ -1,3 +1,4 @@
+import std;
 // Short-circuit evaluation correctness.  The RHS of `&&` must NOT be
 // evaluated when the LHS is false; the RHS of `||` must NOT be evaluated
 // when the LHS is true.  We verify this by passing a counter through

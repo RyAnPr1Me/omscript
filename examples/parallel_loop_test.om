@@ -1,3 +1,4 @@
+import std;
 // Test parallel keyword on loops
 fn main() {
     // parallel for

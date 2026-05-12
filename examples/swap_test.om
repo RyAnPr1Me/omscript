@@ -1,3 +1,4 @@
+import std;
 // Test: swap statement
 // swap a, b; — swaps values of two variables
 

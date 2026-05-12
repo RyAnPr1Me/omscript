@@ -1,3 +1,4 @@
+import std;
 // Test that out-of-range integer literal produces a clear error
 fn main() {
     var x = 99999999999999999999;

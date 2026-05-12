@@ -1,3 +1,4 @@
+import std;
 // Test array creation, indexing, and len()
 fn main() {
     var arr = [10, 20, 30, 40, 50];

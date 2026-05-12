@@ -566,6 +566,11 @@ class CodeGenerator {
     /// File-level @noalias: all pointer parameters are marked noalias.
     bool fileNoAlias_ = false;
 
+    /// True when the source file contains `import std;` (identifier form).
+    /// When false, bare calls to stdlib functions (e.g. `println(x)`) are a
+    /// compile error — use `std::println(x)` or add `import std;` at the top.
+    bool stdImported_ = false;
+
     /// TBAA metadata: length (slot 0) and elements (slots 1+) don't alias,
     /// enabling LLVM to hoist length loads out of element-mutating loops.
     llvm::MDNode* tbaaRoot_ = nullptr;       ///< Root of TBAA type hierarchy

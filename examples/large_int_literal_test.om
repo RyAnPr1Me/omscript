@@ -1,3 +1,4 @@
+import std;
 // Test that large hex/octal/binary integer literals (> INT64_MAX as unsigned)
 // are accepted and their bit patterns are preserved.
 fn main() {

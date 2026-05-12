@@ -1,3 +1,4 @@
+import std;
 // Test: expression-body functions and multi-variable swap
 // fn name(params) = expr; — shorthand for fn name(params) { return expr; }
 // swap a, b, c; — circular rotation

@@ -1,3 +1,4 @@
+import std;
 // Test forward function references and mutual recursion
 fn main() {
     // Call functions defined later in the file

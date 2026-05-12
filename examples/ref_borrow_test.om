@@ -1,3 +1,4 @@
+import std;
 // Real `&T` reference borrow — auto-deref on read, write-through on assign.
 //
 // `borrow [mut] var r:&T = &x;` makes `r` a true pointer-backed alias for

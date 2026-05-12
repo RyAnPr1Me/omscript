@@ -1,3 +1,4 @@
+import std;
 // Invalid hex literal (no digits after 0x)
 fn main() {
     var x = 0x;

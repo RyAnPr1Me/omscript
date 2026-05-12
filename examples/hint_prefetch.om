@@ -1,3 +1,4 @@
+import std;
 fn process(@prefetch data: int, n: int) -> int {
     return data + n;
 }

@@ -1,3 +1,4 @@
+import std;
 // Test the 'loop' keyword (syntactic sugar for 'while (true)')
 fn main() {
     var result = 0;

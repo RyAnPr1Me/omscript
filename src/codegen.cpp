@@ -4047,6 +4047,7 @@ void CodeGenerator::generate(Program* program) {
     optMaxFunctionConfigs_.clear();
     irInstructionCount_ = 0;
     fileNoAlias_ = program->fileNoAlias;
+    stdImported_ = program->importedNamespaces.count("std") > 0;
 
     // Initialize the module's target triple and data layout before any IR is
     // generated so that all DataLayout queries (alignment, type sizes) during

@@ -1,3 +1,4 @@
+import std;
 // pipeline_cancel_test.om — pipeline stage execution semantics
 //
 // Verifies that stages run in declaration order, __pipeline_i is correct,

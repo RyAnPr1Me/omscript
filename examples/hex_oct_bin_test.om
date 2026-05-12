@@ -1,3 +1,4 @@
+import std;
 // Test hex, octal, and binary integer literals
 fn main() {
     // Hex literals

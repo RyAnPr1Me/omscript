@@ -1,3 +1,4 @@
+import std;
 // typed_ints_test.om — Tests for arbitrary-width integer types (iN / uN).
 // Verifies correct truncation, sign/zero extension, arithmetic, and print
 // semantics for narrow integer annotations and explicit casts.

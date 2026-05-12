@@ -1,3 +1,4 @@
+import std;
 // Test string variable support
 fn main() {
     // String variable declaration and printing

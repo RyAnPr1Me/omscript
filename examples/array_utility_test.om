@@ -1,3 +1,4 @@
+import std;
 // Test array utility built-in functions: array_min, array_max, array_find,
 // array_any, array_every, array_count
 fn is_positive(x) { return x > 0; }

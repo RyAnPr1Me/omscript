@@ -1,3 +1,4 @@
+import std;
 // Test for-each loop over arrays
 fn main() {
     var arr = [10, 20, 30, 40, 50];
