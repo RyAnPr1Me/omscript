@@ -4095,6 +4095,109 @@ void CodeGenerator::generateOwn(OwnStmt* stmt) {
     }
 }
 
+// ── generateConstructFields (shared helper) ──────────────────────────────────
+// Emit one typed GEP + aligned store per field entry for a construct statement
+// or new-construct expression.  basePtr is the already-loaded pointer value;
+// structHint is a (possibly empty) struct-type name used by resolveField.
+void CodeGenerator::emitConstructFieldsInto(
+    llvm::Value* basePtr,
+    const std::string& structHint,
+    const std::vector<std::pair<std::string,
+                                std::unique_ptr<Expression>>>& fields,
+    const ASTNode* errorNode)
+{
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    if (!basePtr->getType()->isPointerTy())
+        basePtr = builder->CreateIntToPtr(basePtr, ptrTy, "construct.baseptr");
+
+    for (const auto& [fieldName, valueExpr] : fields) {
+        const ResolvedField rf = resolveField(structHint, fieldName, errorNode);
+
+        llvm::Value* val = generateExpression(valueExpr.get());
+        llvm::Type*  elemTy = rf.fieldType ? rf.fieldType : getDefaultType();
+        val = convertTo(val, elemTy);
+
+        llvm::Value* elemPtr;
+        if (rf.structType) {
+            elemPtr = builder->CreateStructGEP(
+                rf.structType, basePtr,
+                static_cast<unsigned>(rf.index), "construct.field.ptr");
+        } else {
+            elemPtr = builder->CreateInBoundsGEP(
+                getDefaultType(), basePtr,
+                llvm::ConstantInt::get(getDefaultType(), rf.index),
+                "construct.field.ptr");
+        }
+
+        // Choose alignment from field attributes (respects @align annotation)
+        // or fall back to the ABI alignment of the element type.
+        const auto declIt = structFieldDecls_.find(rf.structName);
+        llvm::Align fieldAlign;
+        if (declIt != structFieldDecls_.end() &&
+            rf.index < declIt->second.size() &&
+            declIt->second[rf.index].attrs.align > 0) {
+            fieldAlign = llvm::Align(
+                static_cast<unsigned>(declIt->second[rf.index].attrs.align));
+        } else {
+            fieldAlign = module->getDataLayout().getABITypeAlign(elemTy);
+        }
+
+        llvm::StoreInst* store =
+            builder->CreateAlignedStore(val, elemPtr, fieldAlign);
+
+        // Per-field TBAA metadata (matches generateFieldAssign's convention).
+        store->setMetadata(llvm::LLVMContext::MD_tbaa,
+                           getOrCreateFieldTBAA(rf.structName, rf.index));
+
+        // !nontemporal hint for cold fields.
+        if (declIt != structFieldDecls_.end() &&
+            rf.index < declIt->second.size() &&
+            declIt->second[rf.index].attrs.cold) {
+            llvm::Metadata* one[] = {
+                llvm::ConstantAsMetadata::get(
+                    llvm::ConstantInt::get(
+                        llvm::Type::getInt32Ty(*context), 1))
+            };
+            store->setMetadata(llvm::LLVMContext::MD_nontemporal,
+                               llvm::MDNode::get(*context, one));
+        }
+    }
+}
+
+// ── generateConstruct ─────────────────────────────────────────────────────────
+// `construct ptr { field: val, ... };`
+// In-place field initialisation of already-allocated memory.  Lowers to a
+// sequence of CreateStructGEP + CreateAlignedStore pairs with per-field TBAA
+// metadata — identical to writing `ptr->x = v; ptr->y = v; …` by hand.
+void CodeGenerator::generateConstruct(ConstructStmt* stmt) {
+    llvm::Value* ptr = generateExpression(stmt->target.get());
+
+    // Determine the struct-type hint from the target expression.
+    const std::string hint = stmt->typeName.empty()
+        ? resolveStructType(stmt->target.get())
+        : stmt->typeName;
+
+    emitConstructFieldsInto(ptr, hint, stmt->fields, stmt);
+}
+
+// ── generateNewConstruct ──────────────────────────────────────────────────────
+// `new T { field: val, ... }` expression.
+// 1. Allocate one T via the existing alloc<T>(1) builtin path.
+// 2. Initialise each listed field via emitConstructFieldsInto.
+// 3. Return the pointer (same type as alloc<T>(1)).
+llvm::Value* CodeGenerator::generateNewConstruct(NewConstructExpr* expr) {
+    // Build a temporary CallExpr("alloc<T>", {}) so we go through the
+    // existing smart-allocator path (T1 stack / T2 arena / T3 heap tiers).
+    std::vector<std::unique_ptr<Expression>> allocArgs; // empty → alloc<T>(1)
+    CallExpr allocCall("alloc<" + expr->typeName + ">", std::move(allocArgs));
+    allocCall.line   = expr->line;
+    allocCall.column = expr->column;
+    llvm::Value* ptr = generateExpression(&allocCall);
+
+    emitConstructFieldsInto(ptr, expr->typeName, expr->fields, expr);
+    return ptr;
+}
+
 // ── collectArrayBases ─────────────────────────────────────────────────────────
 // Helper used by generatePipeline to know which arrays to auto-prefetch.
 // Walks statement/expression trees and collects all base array names accessed
@@ -4221,6 +4324,13 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
             const auto* as = static_cast<const AssumeStmt*>(s);
             if (as->condition) scanExpr(as->condition.get());
             if (as->deoptBody) scanStmt(as->deoptBody.get());
+            break;
+        }
+        case ASTNodeType::CONSTRUCT_STMT: {
+            const auto* cs = static_cast<const ConstructStmt*>(s);
+            scanExpr(cs->target.get());
+            for (const auto& [fn, fv] : cs->fields)
+                scanExpr(fv.get());
             break;
         }
         default: break;

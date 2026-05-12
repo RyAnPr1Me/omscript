@@ -914,6 +914,16 @@ class CodeGenerator {
     void generateFreeze(FreezeStmt* stmt);
     void generateShared(SharedStmt* stmt);  ///< shared x; — Ω spec §3.1
     void generateOwn(OwnStmt* stmt);        ///< own x;    — Ω spec §3.1
+    void generateConstruct(ConstructStmt* stmt);  ///< construct ptr { field: val, ... };
+    llvm::Value* generateNewConstruct(NewConstructExpr* expr); ///< new T { field: val, ... }
+    /// Shared back-end: emit one GEP+store per field into @p basePtr.
+    /// Reused by both generateConstruct (statement) and generateNewConstruct (expression).
+    void emitConstructFieldsInto(
+        llvm::Value* basePtr,
+        const std::string& structHint,
+        const std::vector<std::pair<std::string,
+                                    std::unique_ptr<Expression>>>& fields,
+        const ASTNode* errorNode);
     void generatePrefetch(PrefetchStmt* stmt);
     void generateAssume(AssumeStmt* stmt);
     void generatePipeline(PipelineStmt* stmt);

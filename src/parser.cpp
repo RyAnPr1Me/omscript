@@ -2392,6 +2392,36 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         return stmt;
     }
 
+    // ── construct EXPR { field: val, ... }; ──────────────────────────────────
+    // In-place field initialisation of already-allocated memory.
+    // The target is any expression that yields a ptr<T>.
+    // Lowers to a sequence of GEP + store pairs — zero extra abstraction cost.
+    if (match(TokenType::CONSTRUCT)) {
+        const Token kw = tokens[current - 1];
+        // Parse the target expression.  Intentionally stop before `{` so
+        // that `construct arr + 1 { x: 5 }` is parsed as `(arr + 1)`.
+        // Use parseUnary as the precedence ceiling (no comma or assignment).
+        auto target = parseUnary();
+        consume(TokenType::LBRACE, "Expected '{' after construct target expression");
+        std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fields;
+        while (!check(TokenType::RBRACE) && !isAtEnd()) {
+            const Token fname = consume(TokenType::IDENTIFIER,
+                "Expected field name in construct block");
+            consume(TokenType::COLON, "Expected ':' after field name in construct block");
+            auto val = parseExpression();
+            fields.emplace_back(fname.lexeme, std::move(val));
+            // Allow trailing comma
+            if (check(TokenType::COMMA)) advance();
+        }
+        consume(TokenType::RBRACE, "Expected '}' to close construct block");
+        consume(TokenType::SEMICOLON, "Expected ';' after construct statement");
+        auto stmt = std::make_unique<ConstructStmt>(std::move(target), /*typeName=*/"",
+                                                    std::move(fields));
+        stmt->line   = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+
     return parseExprStmt();
 }
 
@@ -4603,10 +4633,37 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     // new T(count) — C++-style alias for alloc<T>(count).
     // Syntax: new <TypeAnnotation>(n)  or  new <TypeAnnotation>  (no parens = 1 element)
     // Examples: new i64(5)   new ptr<i32>   new byte(256)
+    //
+    // new T { field: val, ... } — allocation + in-place construction.
+    // Allocates one T (via alloc<T>(1)) and immediately initialises its
+    // fields.  Distinguished from the plain alloc form by the `{` lookahead.
     if (check(TokenType::IDENTIFIER) && peek().lexeme == "new" &&
         current + 1 < tokens.size() && tokens[current + 1].type == TokenType::IDENTIFIER) {
         const Token kw = advance(); // consume 'new'
-        std::string elemTypeName = parseTypeAnnotation(); // consume the type (e.g. "i64", "ptr<i32>")
+        std::string elemTypeName = parseTypeAnnotation(); // e.g. "MyStruct", "i64"
+
+        // ── new T { field: val, ... } ──────────────────────────────────────
+        // Detect brace-initialised form: new TypeName { ... }
+        if (check(TokenType::LBRACE)) {
+            advance(); // consume '{'
+            std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fields;
+            while (!check(TokenType::RBRACE) && !isAtEnd()) {
+                const Token fname = consume(TokenType::IDENTIFIER,
+                    "Expected field name in new T { ... } initialiser");
+                consume(TokenType::COLON,
+                    "Expected ':' after field name in new T { ... } initialiser");
+                auto val = parseExpression();
+                fields.emplace_back(fname.lexeme, std::move(val));
+                if (check(TokenType::COMMA)) advance(); // trailing comma OK
+            }
+            consume(TokenType::RBRACE, "Expected '}' to close new T { ... } initialiser");
+            auto expr = std::make_unique<NewConstructExpr>(elemTypeName, std::move(fields));
+            expr->line   = kw.line;
+            expr->column = kw.column;
+            return expr;
+        }
+
+        // ── new T(count) / new T  — raw allocation alias for alloc<T>(count) ──
         std::vector<std::unique_ptr<Expression>> args;
         if (check(TokenType::LPAREN)) {
             advance(); // consume '('

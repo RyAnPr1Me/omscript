@@ -70,7 +70,9 @@ enum class ASTNodeType {
     RANGE_ANNOT_EXPR, // @range[lo, hi] expr — compiler-level integer range hint
     SHARED_STMT,    // shared x; — mark variable as shared ownership (Ω spec §3.1)
     OWN_STMT,       // own x;   — explicitly assert unique ownership (Ω spec §3.1)
-    DEREF_ASSIGN_EXPR  // *p = v — write through pointer (Ω spec §4.2)
+    DEREF_ASSIGN_EXPR,  // *p = v — write through pointer (Ω spec §4.2)
+    CONSTRUCT_STMT,     // construct ptr { field: val, ... }; — in-place field init
+    NEW_CONSTRUCT_EXPR  // new T { field: val, ... } — alloc<T>(1) + field init
 };
 
 class ASTNode {
@@ -1074,6 +1076,85 @@ class PipelineStmt : public Statement {
     PipelineStmt(std::unique_ptr<Expression> cnt, std::vector<StageDecl> stgs)
         : Statement(ASTNodeType::PIPELINE_STMT),
           count(std::move(cnt)), stages(std::move(stgs)) {}
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// § construct  —  in-place field initialisation of already-allocated memory
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `construct ptr { field: val, ... };`
+///
+/// Initialises the fields of an already-allocated struct pointer in place.
+/// Lowers with zero abstraction cost to a sequence of typed GEP + store
+/// pairs — exactly what writing `ptr->x = val; ptr->y = val; …` by hand
+/// would produce, but expressed more compactly and with TBAA / alignment
+/// metadata matching the struct definition:
+///
+///   var p: ptr<MyStruct> = alloc<MyStruct>(1);
+///   construct p {
+///       x: 5,
+///       y: 10,
+///   };
+///
+/// Lowers to:
+///   p->x = 5;   // CreateStructGEP(MyStruct, p, 0) + AlignedStore
+///   p->y = 10;  // CreateStructGEP(MyStruct, p, 1) + AlignedStore
+///
+/// Any field not listed is left uninitialised (use alloc<T> semantics;
+/// zero-init via `new T { ... }` if that is required).
+class ConstructStmt : public Statement {
+  public:
+    /// The target pointer expression (usually an IdentifierExpr for a
+    /// `ptr<T>` variable, but any expression returning a pointer is legal).
+    std::unique_ptr<Expression> target;
+
+    /// Optional struct-type hint stored at parse time (the `typeName` of
+    /// the matching `var p: ptr<MyStruct>` declaration).  May be empty; the
+    /// code generator falls back to `resolveField` search when it is.
+    std::string typeName;
+
+    /// Field name → initialiser expression pairs, in source order.
+    std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fields;
+
+    ConstructStmt(std::unique_ptr<Expression> tgt,
+                  std::string                  tn,
+                  std::vector<std::pair<std::string, std::unique_ptr<Expression>>> flds)
+        : Statement(ASTNodeType::CONSTRUCT_STMT),
+          target(std::move(tgt)),
+          typeName(std::move(tn)),
+          fields(std::move(flds)) {}
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// § new T { ... }  —  allocation + in-place initialisation (expression form)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `new T { field: val, ... }` — expression that allocates one `T` via
+/// `alloc<T>(1)` (T2/T3 smart allocator tier) and immediately initialises its
+/// fields.  Returns a `ptr<T>` (like `alloc<T>(1)`).
+///
+/// This is distinct from the bare `new T(n)` form (which is a raw alias for
+/// `alloc<T>(n)` with no construction): the brace-initialiser form combines
+/// allocation and construction in a single zero-overhead expression.
+///
+///   var p: ptr<Point> = new Point { x: 3, y: 4 };
+///
+/// Lowers to:
+///   ptr = alloc<Point>(1);          // T2/T3 allocation
+///   ptr->x = 3;                     // GEP(Point, ptr, 0) + store
+///   ptr->y = 4;                     // GEP(Point, ptr, 1) + store
+///   // result = ptr
+class NewConstructExpr : public Expression {
+  public:
+    std::string typeName;  ///< Struct type to allocate and initialise
+    std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fields;
+
+    NewConstructExpr(std::string tn,
+                     std::vector<std::pair<std::string,
+                                           std::unique_ptr<Expression>>> flds)
+        : Expression(ASTNodeType::NEW_CONSTRUCT_EXPR),
+          typeName(std::move(tn)),
+          fields(std::move(flds)) {}
 };
 
 } // namespace omscript

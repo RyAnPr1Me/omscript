@@ -757,6 +757,9 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         return evalExpr(frame, static_cast<const BorrowExpr*>(e)->source.get());
     case ASTNodeType::REBORROW_EXPR:
         return evalExpr(frame, static_cast<const ReborrowExpr*>(e)->source.get());
+    case ASTNodeType::NEW_CONSTRUCT_EXPR:
+        // new T { ... } has heap side-effects; treat as opaque in CT.
+        return CTValue::uninit();
 
     default:
         return CTValue::uninit();
@@ -3044,6 +3047,7 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
     case ASTNodeType::OWN_STMT:
     case ASTNodeType::PREFETCH_STMT:
     case ASTNodeType::DEFER_STMT:
+    case ASTNodeType::CONSTRUCT_STMT:   // side-effecting field stores — not CT-foldable
         return true;  // no-op in CT evaluation
 
     // ── MoveDecl: treat like VarDecl ──────────────────────────────────────

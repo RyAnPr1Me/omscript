@@ -1478,6 +1478,10 @@ void printUsage(const char* progName) {
                  "  -fsuperopt       Superoptimizer pass (default: on at O2+)\n"
                  "  -fsuperopt-level=N  Superoptimizer aggressiveness 0-3 (default: 2)\n"
                  "  -fhgoe           Hardware graph optimization (default: on)\n"
+                 "  -fsdr            Speculative Devectorization & Revectorization (default: on at O2+)\n"
+                 "  -fipof           Implicit Phase Ordering Fixer (default: on at O2+)\n"
+                 "  -fpgo-gen=<path> Instrument for PGO; writes profile to <path> on exit\n"
+                 "  -fpgo-use=<path> Use PGO profile from <path> for guided optimization\n"
                  "\n"
                  "Ownership & Memory (Ω spec):\n"
                  "  --no-ownership-checks  Disable borrow/ownership checks (unsafe mode)\n"
@@ -1766,6 +1770,8 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "SHARED";
     case omscript::TokenType::OWN:
         return "OWN";
+    case omscript::TokenType::CONSTRUCT:
+        return "CONSTRUCT";
     }
     return "UNKNOWN";
 }

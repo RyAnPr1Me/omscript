@@ -540,6 +540,18 @@ static unsigned propagateInBlock(BlockStmt* block, CopyMap map,
         case ASTNodeType::FREEZE_STMT:
             break;
 
+        case ASTNodeType::CONSTRUCT_STMT: {
+            // `construct ptr { field: val, ... }` writes through a pointer.
+            // Propagate constants into each field-value expression; the
+            // target pointer itself is read (not written), so no map entries
+            // need to be killed here.
+            auto* cs = static_cast<ConstructStmt*>(stmt.get());
+            count += propagateInExpr(cs->target, map, opaque);
+            for (auto& [fn, fv] : cs->fields)
+                count += propagateInExpr(fv, map, opaque);
+            break;
+        }
+
         case ASTNodeType::ASSUME_STMT: {
             auto* as = static_cast<AssumeStmt*>(stmt.get());
             count += propagateInExpr(as->condition, map, opaque);

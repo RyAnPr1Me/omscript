@@ -83,6 +83,7 @@ enum class TokenType {
     TYPE,      // type     — top-level type alias declaration
     SHARED,    // shared   — read-only aliasable ownership state (Ω spec §3.1)
     OWN,       // own      — explicit unique-ownership declaration (Ω spec §3.1)
+    CONSTRUCT, // construct — in-place field initialization of allocated memory
 
     // Operators
     PLUS,

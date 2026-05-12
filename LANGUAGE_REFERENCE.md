@@ -197,6 +197,7 @@ The following identifiers are reserved as keywords. They are grouped by category
 | `freeze` | Mark variable permanently read-only |
 | `shared` | Transition variable to shared (read-only aliasable) ownership (Ω spec §3.1) |
 | `own` | Restore unique ownership from shared state (Ω spec §3.1) |
+| `construct` | In-place field initialisation of a `ptr<T>` (see §17.9.2a) |
 
 **Literals:**
 | Keyword | Purpose |
@@ -1803,13 +1804,106 @@ fn setup() {
 
 ### 5.9 `comptime { ... }` Blocks — Compile-Time Evaluation
 
-**Syntax**: `comptime { statements return expr; }`
+OmScript's `comptime` keyword has two distinct but related forms:
+
+1. **Top-level `comptime {}` block** — defines compile-time constants, provides conditional compilation, and replaces preprocessor patterns.
+2. **Expression-context `comptime { ... }` block** — evaluates code at compile time via CF-CTRE and replaces the block with the resulting value.
+
+---
+
+#### 5.9.1 Top-level `comptime {}` — Constant Definitions and Conditional Compilation
+
+Placed at the top level of a source file (not inside a function), a `comptime {}` block is processed entirely at parse time. Its primary use is to define compile-time constants and to select platform-specific code paths — the same role that `#define` and `#if` play in C.
+
+**Supported statements inside a top-level comptime block:**
+
+| Statement | Description |
+|---|---|
+| `const NAME [: TYPE] = VALUE;` | Define a compile-time constant |
+| `if (COND) { ... } [else if (...) { ... }]* [else { ... }]` | Conditional inclusion |
+| `error("message");` | Abort compilation with a diagnostic |
+| `warning("message");` | Emit a diagnostic and continue |
+
+**Supported value types** for `const`:
+
+| Form | Example | Stored as |
+|---|---|---|
+| Integer literal | `const MAX: int = 1024;` | `int` |
+| Float literal | `const PI: float = 3.14159;` | `float` |
+| String literal | `const GREETING: string = "hello";` | `string` |
+| Boolean literal | `const DEBUG: bool = true;` | `bool` (stored as `int` 0/1) |
+| Reference to comptime const | `const ALIAS = MAX;` | same type as source |
+
+**Built-in comptime identifiers** (read-only, string-valued):
+
+| Name | Example value | Equivalent preprocessor macro |
+|---|---|---|
+| `OS` | `"linux"` / `"windows"` / `"macos"` | `__OS__` |
+| `ARCH` | `"x86_64"` / `"aarch64"` / `"arm"` | `__ARCH__` |
+| `VERSION` | `"4.4.0"` | `__VERSION__` |
+
+**Condition expression syntax** for `if (COND)`:
+- Comparison: `NAME == "value"`, `COUNT >= 100`, `FLAG != 0`
+- Logical: `COND1 && COND2`, `COND1 || COND2`, `!COND`
+- Existence test: `defined(NAME)` — true if `NAME` is a defined comptime constant
+- Parenthesised: `(COND1 && COND2) || COND3`
+
+Every `const` that survives an active branch is also injected as a **global `const` variable** accessible inside function bodies — no extra annotation required.
+
+**Example — platform constants and conditional selection:**
+```omscript
+comptime {
+    const VERSION_MAJOR: int = 4;
+    const VERSION_MINOR: int = 4;
+    const GREETING: string = "Hello";
+
+    if (OS == "linux") {
+        const PLATFORM_NAME: string = "Linux";
+        const USE_EPOLL: int = 1;
+    } else if (OS == "windows") {
+        const PLATFORM_NAME: string = "Windows";
+        const USE_EPOLL: int = 0;
+    } else {
+        const PLATFORM_NAME: string = "Other";
+        const USE_EPOLL: int = 0;
+    }
+
+    if (defined(DEBUG) && DEBUG) {
+        warning("building in debug mode");
+    }
+}
+
+fn main() -> int {
+    println(PLATFORM_NAME);   // "Linux" / "Windows" / "Other"
+    println(USE_EPOLL);       // 1 or 0
+    return 0;
+}
+```
+
+**Preprocessor migration guide:**
+
+| C preprocessor | OmScript `comptime {}` equivalent |
+|---|---|
+| `#define MAX 1024` | `comptime { const MAX: int = 1024; }` |
+| `#define NAME "hello"` | `comptime { const NAME: string = "hello"; }` |
+| `#ifdef DEBUG` / `#endif` | `comptime { if (defined(DEBUG)) { ... } }` |
+| `#if defined(__linux__)` | `comptime { if (OS == "linux") { ... } }` |
+| `#if MAJOR >= 4` | `comptime { if (VERSION_MAJOR >= 4) { ... } }` |
+| `#error "message"` | `comptime { error("message"); }` |
+| `#warning "message"` | `comptime { warning("message"); }` |
+
+---
+
+#### 5.9.2 Expression-context `comptime { ... }` — Compile-Time Value Computation
+
+Used as an **expression** (inside a function or initialiser), a `comptime { ... }` block is evaluated at compile time by the CF-CTRE engine and replaced with the resulting constant value.
+
+**Syntax**: `comptime { statements; return expr; }`
 
 **Semantics**:
 - Executes code at **compile time** and replaces the block with the resulting value
-- Useful for computing constants, configuration, or metaprogramming
 - The block must end with `return expr;` where `expr` is the compile-time value
-- Only constant expressions and control flow (no I/O, no heap allocation, no function calls to runtime functions) are allowed
+- Only constant expressions and control flow (no I/O, no heap allocation, no calls to runtime-only functions) are allowed
 
 **Example**:
 ```omscript
@@ -1827,7 +1921,7 @@ var factorial_5: int = comptime {
 - No calls to runtime-only functions (e.g., `println`, `file_read`)
 - No mutable global state (each `comptime` block is isolated)
 - No recursion (evaluation is iterative within the block)
-- If evaluation fails (e.g., infinite loop, runtime-only operation), compilation error occurs
+- If evaluation fails (e.g., infinite loop, runtime-only operation), the expression remains dynamic
 
 **Use cases**:
 - Precompute lookup tables
@@ -6045,11 +6139,13 @@ println(r2);  // 42
 | Address-of | `&x` | Take address of `x`; produces `ptr<T>` |
 | Allocate | `alloc<T>(n)` / `new T(n)` | Allocate `n` elements of type `T` |
 | Allocate 1 | `alloc<T>()` / `new T` | Allocate exactly 1 element (Ω spec §4.1) |
+| Allocate + init | `new T { field: val, ... }` | Allocate one `T` and initialise its fields |
 | Dereference read | `*p` | Load value through pointer |
 | Dereference write | `*p = v` | Store value through pointer (Ω spec §4.2) |
 | Arithmetic | `p + n`, `p - n` | Advance by `n * sizeof(T)` (Ω spec §4.4) |
 | Null | `null`, `nullptr` | Zero-address pointer (Ω spec §2.2) |
 | Free | `invalidate p` | Deferred `free()` at CFG exit |
+| In-place init | `construct p { field: val, ... };` | Initialise fields of already-allocated `ptr<T>` |
 
 #### 17.9.2 `alloc<T>` / `new T` — Compile-Time Smart Allocator
 
@@ -6077,6 +6173,78 @@ fn dyn(n: int) -> ptr<i64> {
 }
 var one: ptr<i64> = new i64;        // 1 element, no parens (Ω spec §4.1)
 var one2: ptr<i64> = alloc<i64>();  // identical to new i64
+```
+
+#### 17.9.2a `construct` Statement — In-Place Field Initialisation
+
+`construct ptr { field: val, ... };` initialises the fields of an already-allocated struct pointer in place. It lowers with **zero abstraction cost** to a sequence of typed `GEP` + `store` pairs — exactly what writing `ptr->x = val; ptr->y = val;` by hand would produce, but with automatic per-field TBAA metadata and alignment from the struct definition.
+
+**Syntax:**
+```
+construct TARGET { FIELD: EXPR [, FIELD: EXPR]* [,] };
+```
+
+Where `TARGET` is any expression returning a `ptr<T>` and `FIELD: EXPR` pairs provide field initialisers.  Trailing commas are allowed.  Fields not listed are **left uninitialised**.
+
+**Example:**
+```omscript
+struct Point { x: int; y: int; }
+
+fn make_point(x: int, y: int) -> ptr<Point> {
+    var p: ptr<Point> = alloc<Point>(1);
+    construct p {
+        x: x,
+        y: y,
+    };
+    return p;
+}
+```
+
+**Lowering** (no extra IR):
+```
+%construct.field.ptr = getelementptr inbounds %Point, ptr %p, i32 0, i32 0
+store i64 %x, ptr %construct.field.ptr, align 8, !tbaa !...
+%construct.field.ptr1 = getelementptr inbounds %Point, ptr %p, i32 0, i32 1
+store i64 %y, ptr %construct.field.ptr1, align 8, !tbaa !...
+```
+
+#### 17.9.2b `new T { ... }` Expression — Allocation + Construction
+
+`new T { field: val, ... }` is an **expression** that combines `alloc<T>(1)` with a `construct` statement in a single zero-overhead form.  It returns a `ptr<T>` just like `alloc<T>(1)`.
+
+**Distinction from bare `new T(n)`:**
+
+| Form | Allocates | Initialises fields | Count |
+|---|---|---|---|
+| `alloc<T>(n)` / `new T(n)` | ✓ | ✗ (raw memory) | `n` elements |
+| `new T { ... }` | ✓ | ✓ (listed fields) | always 1 |
+| `construct p { ... };` | ✗ | ✓ (listed fields) | (already allocated) |
+
+**Example:**
+```omscript
+struct Point { x: int; y: int; }
+
+fn make_point(x: int, y: int) -> ptr<Point> {
+    return new Point { x: x, y: y };
+}
+
+fn main() -> int {
+    var p: ptr<Point> = new Point { x: 3, y: 4 };
+    println(p->x);   // 3
+    println(p->y);   // 4
+    invalidate p;
+    return 0;
+}
+```
+
+**Lowering** (identical to `alloc<Point>(1)` + `construct`):
+```
+%ptr = call nonnull ptr @malloc(i64 16)
+%construct.field.ptr = getelementptr inbounds %Point, ptr %ptr, i32 0, i32 0
+store i64 3, ptr %construct.field.ptr, align 8, !tbaa !...
+%construct.field.ptr1 = getelementptr inbounds %Point, ptr %ptr, i32 0, i32 1
+store i64 4, ptr %construct.field.ptr1, align 8, !tbaa !...
+; %ptr is the result
 ```
 
 #### 17.9.3 Pointer Arithmetic
@@ -8129,6 +8297,8 @@ Flags are organized by category. Most boolean flags support negation via `-fno-<
 | `-funroll-loops`       | —     | `true`          | Loop unrolling hints                                    |
 | `-floop-optimize`      | —     | `true`          | Polyhedral loop transformations (tiling, interchange)   |
 | `-fparallelize`        | —     | `true`          | Auto-parallelization of independent loops               |
+| `-fsdr`                | —     | `true` (O2+)    | Speculative Devectorization & Revectorization (SDR)     |
+| `-fipof`               | —     | `true` (O2+)    | Implicit Phase Ordering Fixer (IPOF)                    |
 
 #### Target
 
@@ -8257,25 +8427,24 @@ The `pkg` subcommand manages dependencies:
 omsc pkg <action> [args]
 ```
 
-| Action    | Description                                                        |
-|-----------|--------------------------------------------------------------------|
-| `init`    | Create `oms.toml` in current directory (same as `omsc init`)       |
-| `add <name>` | Add dependency to `[dependencies]` section of `oms.toml`        |
-| `install` | Fetch and install all dependencies listed in `oms.toml`            |
-| `remove <name>` | Remove dependency from `oms.toml`                            |
-| `list`    | List installed packages in `om_packages/`                          |
-| `build`   | Build the current project (same as `omsc build`)                   |
-| `run`     | Build and run (same as `omsc run`)                                 |
+| Action                           | Aliases               | Description                                                        |
+|----------------------------------|-----------------------|--------------------------------------------------------------------|
+| `install <name>`                 | `add <name>`          | Install a package from the registry into `om_packages/`            |
+| `remove <name>`                  | `uninstall`, `rm`     | Remove an installed package from `om_packages/` and `oms.toml`     |
+| `list`                           | `ls`                  | List all currently installed packages                              |
+| `search [query]`                 | `find [query]`        | Search the registry for packages matching the query                |
+| `info <name>`                    | `show <name>`         | Show metadata and description for a package                        |
 
 **Dependency resolution**:
 Dependencies are fetched from the default registry URL (GitHub `user-packages/` directory) or a custom registry set via `OMSC_REGISTRY_URL` environment variable.
 
 **Example workflow**:
 ```bash
-omsc pkg init                  # creates oms.toml
-omsc pkg add http              # adds http library
-omsc pkg install               # downloads to om_packages/http/
-omsc pkg build                 # compiles with dependency
+omsc pkg install http           # downloads http library to om_packages/http/
+omsc pkg list                   # shows installed packages
+omsc pkg info http              # shows metadata for http package
+omsc pkg remove http            # uninstalls and removes from oms.toml
+omsc pkg search json            # search registry for JSON-related packages
 ```
 
 ### 24.8 Project file format (oms.toml)
@@ -10514,6 +10683,31 @@ var r: int = newRegion();       // create region
 var data: ptr = alloc(r, 1024); // allocate in region
 // ... use data ...
 invalidate(r);                  // free region
+```
+
+### Pointers and Construction
+```omscript
+struct Point { x: int; y: int; }
+
+// Raw allocation (fields uninitialised)
+var p: ptr<Point> = alloc<Point>(1);
+
+// In-place field initialisation on already-allocated memory
+construct p {
+    x: 10,
+    y: 20,
+};
+
+// Allocate + initialise in one expression
+var q: ptr<Point> = new Point { x: 3, y: 4 };
+println(q->x);  // 3
+
+// Raw allocation alias (no construction)
+var r2: ptr<i64> = new i64(8);   // alloc<i64>(8)
+
+invalidate p;
+invalidate q;
+invalidate r2;
 ```
 
 ### Comptime

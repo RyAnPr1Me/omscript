@@ -5590,6 +5590,9 @@ void CodeGenerator::generateStatement(Statement* stmt) {
     case ASTNodeType::OWN_STMT:
         generateOwn(static_cast<OwnStmt*>(stmt));
         break;
+    case ASTNodeType::CONSTRUCT_STMT:
+        generateConstruct(static_cast<ConstructStmt*>(stmt));
+        break;
     case ASTNodeType::PREFETCH_STMT:
         generatePrefetch(static_cast<PrefetchStmt*>(stmt));
         break;
@@ -5674,6 +5677,8 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateScopeResolution(static_cast<ScopeResolutionExpr*>(expr));
     case ASTNodeType::RANGE_ANNOT_EXPR:
         return generateRangeAnnot(static_cast<RangeAnnotExpr*>(expr));
+    case ASTNodeType::NEW_CONSTRUCT_EXPR:
+        return generateNewConstruct(static_cast<NewConstructExpr*>(expr));
     case ASTNodeType::COMPTIME_EXPR: {
         // comptime { ... } — evaluate the block at compile time via CF-CTRE.
         auto* ct = static_cast<ComptimeExpr*>(expr);
