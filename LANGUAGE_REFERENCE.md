@@ -5460,7 +5460,7 @@ fn local_point() {
 
 ### 14.9 `invalidate` on struct
 
-**Semantics:** `invalidate s;` frees the heap allocation immediately.  
+**Semantics:** `invalidate s;` schedules a deferred free for the struct's heap allocation; the physical `free()` is emitted just before each function return.  
 **Effect:** Struct pointer becomes invalid; subsequent access is undefined behavior.
 
 **Example:**
@@ -5957,6 +5957,15 @@ invalidate x;
 - Any subsequent use of `x` is a compile-time error (E015).
 - **Double-invalidate** is a compile-time error (E019).
 - **Invalidate while borrowed** is a compile-time error (E022) — freeing memory with active aliases would dangle the borrow.
+
+**Loop safety:** `invalidate` is safe to call inside a loop body. The compiler captures the variable's *alloca* (which dominates the entire function) in the deferred-free queue rather than a loaded IR value. The physical `load` + `free()` pair is emitted at the function-exit block, where the alloca is always in scope. This avoids the LLVM IR domination violation that would occur if a loaded pointer defined in a loop body were used outside that body.
+
+**Implementation note (deferred-free queue design):**
+The queue is a flat `vector<{AllocaInst*, Type*}>` — a contiguous array of 16-byte pairs. At function exit, each entry is drained with a single `load`/`inttoptr`/`free` sequence. This gives:
+- No per-invalidation heap allocations.
+- No pointer chasing.
+- Deterministic cleanup: all `free()` calls for a function are emitted together, giving the allocator a dense batch it can coalesce.
+- Performance ≈ immediate free, with the added benefit of batched allocator coalescing.
 
 **Which types are freed:**
 | Type | Action |

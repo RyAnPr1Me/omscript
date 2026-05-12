@@ -9,8 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Round-48: `invalidate` IR domination fix** (`src/codegen_stmt.cpp`):
-  - **`invalidate` of loop-local string/array/ptr variables caused LLVM IR domination violation**: When `invalidate s;` was used inside a loop body to free a heap-allocated variable (e.g. a `string` created by `str_format`), the heap pointer was loaded in the loop's body block (`forbody`) but the deferred `free()` call was emitted at the function exit block (`forend`). Since `forend` can be reached directly from `forcond` without passing through `forbody` (e.g. when `n == 0`), `%s.ptr` would not dominate its use in `free(%s.ptr)`, causing an LLVM verifier error: "Instruction does not dominate all uses!". Fixed by emitting `free()` immediately at the `invalidate` point rather than deferring it to function exit. This is semantically equivalent — the variable is dead from the `invalidate` point — and avoids the SSA domination constraint entirely.
+- **Round-49: Deferred-free queue redesign — `DeferredFreeEntry` struct** (`src/codegen_stmt.cpp`, `include/codegen.h`):
+  - **Root cause of the domination violation**: The original queue stored loaded `llvm::Value*` pointers (i.e. the result of a `load i64` from the alloca inside the invalidate site's basic block). LLVM SSA requires every use of a value to be dominated by its definition. When `invalidate` appeared inside a loop body (`forbody`), the loaded `%s.ptr` was defined there, but `emitDeferredFrees()` emitted the `free(%s.ptr)` in the function-exit block (`forend`). Because `forend` is reachable from `forcond` without passing through `forbody` (e.g. when `n == 0`), `%s.ptr` did not dominate all its uses, triggering the LLVM verifier error "Instruction does not dominate all uses!".
+  - **Fix**: `deferredFreeQueue_` now stores `DeferredFreeEntry{AllocaInst*, Type*}` pairs instead of loaded `Value*` values. The `alloca` is created in the function's entry block and therefore dominates every basic block in the function — including every possible exit. At `emitDeferredFrees()` time (just before each `ret`/`throw` edge), the load is emitted *there*, in the exit block, where it trivially dominates its own use in the subsequent `free()` call. The `invalidate` site no longer emits any IR; it only captures `(alloca, elemType)`.
+  - **Properties of the redesigned queue**:
+    - **Flat vector, no per-invalidation heap allocations**: the `std::vector<DeferredFreeEntry>` is a contiguous array — O(1) push, single cache-line scan at drain time.
+    - **No pointer chasing**: each entry is a plain `{AllocaInst*, Type*}` pair (16 bytes on 64-bit); the load and cast are emitted inline at drain time.
+    - **Deterministic cleanup**: all `free()` calls for a given function are emitted in a single burst just before each `ret` edge — the allocator sees a dense sequence and can merge adjacent free-list operations.
+    - **Performance ≈ immediate free**: one `load` + optional `inttoptr` + one `call free` per entry, indistinguishable from emitting at the invalidate site, but grouped for better allocator coalescing.
+
+- **Round-48: `invalidate` IR domination fix (superseded by Round-49)**:
+  - An intermediate fix had emitted `free()` immediately at the `invalidate` site to avoid the domination violation. While semantically correct, this prevented the allocator from seeing a batched sequence of frees and tied cleanup to the exact invalidation point rather than the function exit. Superseded by the Round-49 queue redesign above.
 
 - **Round-47: String builtin correctness fixes** (`src/codegen_builtins.cpp`, `run_tests.sh`):
   - **`char_code` loaded from fat-pointer header instead of char data** (`src/codegen_builtins.cpp`): The non-literal (runtime) path for `char_code(s)` was performing `load i8` directly from `strPtr` (offset 0 = the `len` field) instead of from `emitStringData(strPtr)` (offset 16 = first character byte). For example, `char_code("A")` would return `1` (the low byte of len=1) instead of `65`. The compile-time fold for string literals was unaffected. Fixed by routing through `emitStringData` before the load.
@@ -167,7 +176,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`invalidate` deferred-free semantics** (`src/codegen_stmt.cpp`, `include/codegen.h`):
   - Logical invalidation is still instantaneous: any use of an invalidated variable after the `invalidate` statement is a compile-time error (borrow checker + `deadVars_` detection unchanged).
   - Physical `free()` is now **deferred** to the function's exit point instead of being emitted at the `invalidate` site.  Every heap pointer queued by `invalidate` statements is freed in a single **batch** just before `ret` (or `throw` dispatch), giving the allocator a dense sequence of `free()` calls that it can merge and LLVM's optimizer a wider window to reorder, hoist, or sink them.
-  - Implemented via `deferredFreeQueue_` (a per-function `vector<Value*>` in `CodeGenerator`) and a new `emitDeferredFrees()` helper called from `generateReturn()` and `generateThrow()`.
+  - Implemented via `deferredFreeQueue_` (a per-function `vector<DeferredFreeEntry>` in `CodeGenerator`, where each `DeferredFreeEntry` holds the `AllocaInst*` and element `Type*` — storing the alloca rather than a loaded value ensures IR domination is always satisfied, even when `invalidate` appears inside a loop body) and a new `emitDeferredFrees()` helper called from `generateReturn()` and `generateThrow()`.
   - Arena-backed and stack-backed pointers continue to be handled exactly as before (no `free()` for arena, `lifetime.end` only for stack).
 
 ### Fixed
