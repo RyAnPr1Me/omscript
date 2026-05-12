@@ -5487,7 +5487,7 @@ struct Person { name, age }
 
 **Field types:** All fields are i64 (integers, floats-as-bits, or pointers).
 
-**Attributes:** `@packed` is parsed but not yet implemented. Future feature for controlling memory layout.
+**Attributes:** `@packed` is a supported shorthand for `@repr(packed)` — it emits a C-compatible packed LLVM struct type with no padding between fields.
 
 **Alignment:** Fields are 8-byte aligned (standard i64 alignment).
 
@@ -5547,7 +5547,34 @@ fn StructName::method(self, args...) {
 }
 ```
 
-**Status:** Parsed but method-call syntax (`obj.method()`) is NOT yet implemented. Workaround: call as `StructName::method(obj, args)`.
+**Status**: Methods are fully supported. Define with `fn StructName::method(self, args...)` and call with `obj.method(args)`.
+
+Method calls (`obj.method(args)`) are **automatically desugared** to `StructName::method(obj, args)` — the receiver is inserted as the first argument.
+
+```omscript
+struct Counter { count }
+
+fn Counter::increment(self) {
+    self.count = self.count + 1;
+}
+
+fn Counter::add(self, n) {
+    self.count = self.count + n;
+}
+
+fn Counter::get(self) {
+    return self.count;
+}
+
+var c: ptr<Counter> = new Counter { count: 0 };
+c.increment();   // desugars to Counter::increment(c)
+c.add(5);        // desugars to Counter::add(c, 5)
+println(c.get()); // desugars to Counter::get(c) → 6
+```
+
+Both call styles are accepted:
+- `obj.method(args)` — dot-call syntax (recommended)
+- `StructName::method(obj, args)` — explicit qualified call
 
 ---
 

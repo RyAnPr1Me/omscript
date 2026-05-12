@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Round-52: `fn StructName::method(self, ...)` + `obj.method()` + `@packed`** (`src/parser.cpp`, `src/codegen_builtins.cpp`):
+  - **`fn StructName::method(self, ...)` syntax** (`src/parser.cpp`): `parseFunction` now consumes an optional `:: IDENTIFIER` suffix after the initial function name token, building a qualified name such as `Counter::increment`. Both bare `fn method(self)` and qualified `fn Struct::method(self)` forms are accepted.
+  - **`obj.method(args)` call desugaring** (`src/codegen_builtins.cpp`): when a callee name is not found in the function map, the codegen now scans all registered functions for a `StructName::callee` match where `StructName` is a known struct. This resolves `c.increment()` → `Counter::increment(c)` without a type-inference pass.
+  - **`@packed` struct attribute** (`src/parser.cpp`): `@packed` is now a first-class struct attribute and a supported shorthand for `@repr(packed)`. It emits an LLVM packed struct type with no inter-field padding.
+  - **Documentation** (`LANGUAGE_REFERENCE.md`): §14.5 rewritten from "not yet implemented" to full reference with syntax, semantics, and examples. §14.2 `@packed` note updated from "parsed but not yet implemented" to implemented.
+  - **New tests**: `examples/qualified_method_test.om` (exit 12), `examples/packed_struct_test.om` (exit 0). All 437 tests pass.
+
 ### Fixed
 
 - **Round-51: `alloc<T>` / `new T(n)` — correct struct element size + auto-construct** (`src/codegen_builtins.cpp`):

@@ -1,0 +1,18 @@
+// packed_struct_test.om — verify `@packed` struct attribute (Round-52).
+//
+// Previously "Attributes: @packed is parsed but not yet implemented."
+// Now @packed is a supported shorthand for @repr(packed).
+//
+// Expected exit code: 0
+
+@packed
+struct RGB { r: u8, g: u8, b: u8 }
+
+fn main() -> int {
+    var px: ptr<RGB> = new RGB { r: 10, g: 20, b: 30 };
+    if (px.r != 10) { return 1; }
+    if (px.g != 20) { return 2; }
+    if (px.b != 30) { return 3; }
+    invalidate px;
+    return 0;
+}

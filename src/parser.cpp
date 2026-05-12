@@ -921,6 +921,21 @@ std::unique_ptr<Program> Parser::parse() {
             }
             continue;
         }
+        // @packed — shorthand for @repr(packed), must appear immediately before 'struct'
+        if (check(TokenType::AT) && current + 1 < tokens.size() &&
+            tokens[current + 1].type == TokenType::IDENTIFIER &&
+            tokens[current + 1].lexeme == "packed") {
+            try {
+                advance(); // consume '@'
+                advance(); // consume 'packed'
+                consume(TokenType::STRUCT, "Expected 'struct' after @packed");
+                structs.push_back(parseStructDecl(StructRepr::Packed, 0));
+            } catch (const std::exception& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
         try {
             // Check for file-level @noalias directive (appears before any function
             // keyword and is not followed by 'fn').
@@ -1615,7 +1630,19 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
     const bool savedOptMaxState = inOptMaxFunction;
     inOptMaxFunction = isOptMax;
     consume(TokenType::FN, "Expected 'fn'");
-    const Token name = consume(TokenType::IDENTIFIER, "Expected function name");
+    Token name = consume(TokenType::IDENTIFIER, "Expected function name");
+    // Support `fn StructName::method(...)` — build the qualified name by consuming
+    // any `:: IDENTIFIER` suffix segments, joining them with '::'.
+    std::string qualifiedName = name.lexeme;
+    while (check(TokenType::SCOPE)) {
+        advance(); // consume '::'
+        const Token seg = consume(TokenType::IDENTIFIER, "Expected method name after '::'");
+        qualifiedName += "::" + seg.lexeme;
+        name = seg; // keep line/column at the method segment for error reporting
+    }
+    // Override the token lexeme with the fully-qualified name so all downstream
+    // code that reads name.lexeme gets e.g. "Counter::increment".
+    const_cast<std::string&>(name.lexeme) = qualifiedName;
 
     // Parse optional type parameters: <T, R, ...>
     std::vector<std::string> typeParams;

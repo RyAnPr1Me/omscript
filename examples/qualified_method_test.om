@@ -1,0 +1,33 @@
+// qualified_method_test.om — verify `fn StructName::method(self, ...)` syntax
+// and obj.method() desugaring to `StructName::method(obj, args)` (Round-52).
+//
+// Previously "Status: Parsed but method-call syntax (obj.method()) is NOT yet
+// implemented. Workaround: call as StructName::method(obj, args)."
+// Now fully implemented.
+//
+// Expected exit code: 12
+
+struct Counter { count }
+
+fn Counter::increment(self) {
+    self.count = self.count + 1;
+}
+
+fn Counter::add(self, n) {
+    self.count = self.count + n;
+}
+
+fn Counter::get(self) {
+    return self.count;
+}
+
+fn main() -> int {
+    var c: ptr<Counter> = new Counter { count: 0 };
+    // obj.method() call syntax desugars to Counter::increment(c) etc.
+    c.increment();
+    c.increment();
+    c.add(10);
+    var v = c.get();   // 12
+    invalidate c;
+    return v;   // 12
+}

@@ -849,6 +849,8 @@ ptest_program "examples/expr_fn_swap_test.om" 529
 ptest_program "examples/assume_unreachable_expect_test.om" 125
 ptest_program "examples/array_string_builtins_test.om" 178
 ptest_program "examples/method_call_test.om" 129
+ptest_program "examples/qualified_method_test.om" 12
+ptest_program "examples/packed_struct_test.om" 0
 
 # New syntax and optimization features
 ptest_program "examples/scientific_notation_test.om" 7
