@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <llvm/Support/ErrorHandling.h>
+#include <optional>
 #include <stdexcept>
 
 namespace omscript {
