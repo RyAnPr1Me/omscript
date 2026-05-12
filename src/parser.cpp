@@ -1391,6 +1391,35 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                          std::vector<std::unique_ptr<EnumDecl>>& enums,
                          std::vector<std::unique_ptr<StructDecl>>& structs,
                          std::vector<std::unique_ptr<VarDecl>>& /*globals*/) {
+    // `import std;` (identifier form) — explicitly import a built-in namespace so
+    // its functions are accessible without the `std::` qualifier.  The `std`
+    // namespace is always registered; this directive marks it as globally imported
+    // so the caller knows the import was intentional.  Any other identifier is
+    // treated as an error since only the built-in `std` namespace is supported.
+    if (check(TokenType::IDENTIFIER)) {
+        const Token nsTok = advance();
+        // Support  import std;  and  import std as alias;
+        std::string alias = nsTok.lexeme;
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "as") {
+            advance(); // consume 'as'
+            const Token aliasTok = consume(TokenType::IDENTIFIER, "Expected alias name after 'as'");
+            alias = aliasTok.lexeme;
+        }
+        consume(TokenType::SEMICOLON, "Expected ';' after namespace import");
+        // All std functions are already in importNamespaces_["std"] from
+        // registerStdNamespace().  Marking as globally imported means we also
+        // inject them into the *direct* (no-qualifier) function namespace so that
+        // e.g. `println(x)` resolves even without `std::`.  Since stdlib builtins
+        // are always in the builtin lookup table, this is a no-op for them, but
+        // for any namespace defined by user code it would expose all members.
+        auto nsIt = importNamespaces_.find(nsTok.lexeme);
+        if (nsIt != importNamespaces_.end()) {
+            globallyImportedNamespaces_.insert(nsTok.lexeme);
+        }
+        // No further action needed — stdlib functions work bare by default.
+        return;
+    }
+
     const Token fileToken = consume(TokenType::STRING, "Expected filename string after 'import'");
 
     // Optional alias: import "file" as alias
@@ -4493,6 +4522,34 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
                 fieldExpr->column = dotToken.column;
                 expr = std::move(fieldExpr);
             }
+        }
+        // Handle C-style arrow operator: ptr->field / ptr->method(args)
+        // Identical semantics to ptr.field / ptr.method(args) — OmScript's
+        // field access already auto-dereferences pointer-typed variables.
+        else if (match(TokenType::ARROW)) {
+            const Token arrowToken = tokens[current - 1];
+            const Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name after '->'");
+            if (check(TokenType::LPAREN)) {
+                advance(); // consume '('
+                std::vector<std::unique_ptr<Expression>> arguments;
+                arguments.push_back(std::move(expr)); // receiver as first arg
+                if (!check(TokenType::RPAREN)) {
+                    do {
+                        arguments.push_back(parseExpression());
+                    } while (match(TokenType::COMMA));
+                }
+                consume(TokenType::RPAREN, "Expected ')' after method call arguments");
+                auto callExpr = std::make_unique<CallExpr>(fieldToken.lexeme, std::move(arguments));
+                callExpr->fromStdNamespace = true; // method-call via arrow
+                callExpr->line = arrowToken.line;
+                callExpr->column = arrowToken.column;
+                expr = std::move(callExpr);
+            } else {
+                auto fieldExpr = std::make_unique<FieldAccessExpr>(std::move(expr), fieldToken.lexeme);
+                fieldExpr->line = arrowToken.line;
+                fieldExpr->column = arrowToken.column;
+                expr = std::move(fieldExpr);
+            }
         } else {
             break;
         }
@@ -5212,6 +5269,27 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             advance(); // consume '{'
             return parseStructLiteral(token.lexeme, token.line, token.column);
         }
+        // `dict { key: val, ... }` — keyword-prefixed dict literal.
+        // Equivalent to `{ key: val, ... }` but more explicit.
+        if (token.lexeme == "dict" && check(TokenType::LBRACE)) {
+            advance(); // consume '{'
+            const Token braceToken = tokens[current - 1];
+            std::vector<std::pair<std::unique_ptr<Expression>, std::unique_ptr<Expression>>> pairs;
+            if (!check(TokenType::RBRACE)) {
+                do {
+                    if (check(TokenType::RBRACE)) break;
+                    auto key = parseExpression();
+                    consume(TokenType::COLON, "Expected ':' after dict key");
+                    auto val = parseExpression();
+                    pairs.emplace_back(std::move(key), std::move(val));
+                } while (match(TokenType::COMMA));
+            }
+            consume(TokenType::RBRACE, "Expected '}' after dict literal");
+            auto node = std::make_unique<DictExpr>(std::move(pairs));
+            node->line = token.line;
+            node->column = token.column;
+            return node;
+        }
         auto expr = std::make_unique<IdentifierExpr>(token.lexeme);
         expr->line = token.line;
         expr->column = token.column;
@@ -5246,6 +5324,46 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
 
     if (match(TokenType::LBRACKET)) {
         const Token bracketToken = tokens[current - 1];
+        // `[]T{...}` typed array literal — `[` `]` type-name `{` elems `}`
+        // The type annotation is informational only; the array is homogeneous
+        // i64 at runtime (same as untyped array literals).  This desugars
+        // to a plain ArrayExpr at parse time.
+        if (check(TokenType::RBRACKET) && current + 1 < tokens.size() &&
+            tokens[current + 1].type == TokenType::IDENTIFIER) {
+            // Peek ahead: []TypeName{ — typed array literal
+            const size_t saved = current;
+            advance(); // consume ']'
+            // Parse the type name (may include <T> generics, but we just skip it)
+            advance(); // consume type name identifier
+            // Skip optional type parameters: e.g. []ptr<Foo>{...}
+            if (check(TokenType::LT)) {
+                int depth = 1;
+                advance(); // consume '<'
+                while (depth > 0 && !isAtEnd()) {
+                    if (check(TokenType::LT)) ++depth;
+                    else if (check(TokenType::GT)) { --depth; }
+                    advance();
+                }
+            }
+            if (check(TokenType::LBRACE)) {
+                // Confirmed: []TypeName{...} form — parse elements inside {}
+                advance(); // consume '{'
+                auto arrayExpr = std::make_unique<ArrayExpr>(std::vector<std::unique_ptr<Expression>>{});
+                if (!check(TokenType::RBRACE)) {
+                    do {
+                        if (check(TokenType::RBRACE)) break;
+                        arrayExpr->elements.push_back(parseExpression());
+                    } while (match(TokenType::COMMA));
+                }
+                consume(TokenType::RBRACE, "Expected '}' after typed array literal elements");
+                arrayExpr->line = bracketToken.line;
+                arrayExpr->column = bracketToken.column;
+                return arrayExpr;
+            }
+            // Not a typed array literal — restore position and fall through to
+            // the regular array literal / slice-syntax parsing.
+            current = saved;
+        }
         auto arrayExpr = parseArrayLiteral();
         arrayExpr->line = bracketToken.line;
         arrayExpr->column = bracketToken.column;

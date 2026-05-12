@@ -4092,9 +4092,14 @@ println(len(a));                // 100
 println(a[0]);                  // 42
 ```
 
-#### Type-annotated literals (planned feature)
+#### Type-annotated literals
 
-Syntax `[]T{...}` is parsed but not yet implemented in code generation.
+`[]T{elem1, elem2, ...}` — typed array literal syntax. The type annotation (`T`) is informational and does not affect code generation (all array elements are i64 at runtime). Elements are parsed identically to an untyped `[elem1, elem2, ...]` array literal.
+
+```omscript
+var nums = []int{10, 20, 30};  // same as [10, 20, 30]
+var ptrs = []ptr<Node>{a, b};  // same as [a, b]
+```
 
 ### 11.3 Indexing, slicing, negative indices
 
@@ -5277,10 +5282,15 @@ var g: float = str_to_float("1e5");    // 100000.0
 var m = map_new();
 ```
 
-#### Literal syntax (planned feature)
+#### Literal syntax — `dict { ... }`
 
-**Syntax:** `dict { key1: val1, key2: val2 }`  
-**Status:** Parsed but not yet implemented in code generation.
+**Syntax:** `dict { key1: val1, key2: val2, ... }`  
+**Status:** Fully implemented. The `dict { ... }` form is a keyword-prefixed dict literal equivalent to `{ key1: val1, key2: val2, ... }`. Both forms produce the same map value.
+
+```omscript
+var d = dict { "x": 10, "y": 20 };
+println(map_get(d, "x", 0));  // 10
+```
 
 ---
 
@@ -5513,27 +5523,54 @@ var p = Point { x: 10, y: 20 };
 
 ### 14.4 Field access & mutation
 
-#### Access: `s.field`
+#### Access: `s.field` or `p->field`
 
-**Semantics:** Return the value of `field` in struct `s`.  
+**Semantics:** Return the value of `field` in struct `s` (or via pointer `p`).  
 **Implementation:** Load via `GEP` (GetElementPtr) with offset calculated from field index.
+
+`p->field` is the C-style pointer member access operator, identical to `p.field` — OmScript automatically dereferences struct pointer variables in both cases.
 
 **Example:**
 ```omscript
 struct Point { x, y }
 var p = Point { x: 10, y: 20 };
-println(p.x);  // 10
+println(p.x);   // 10
+
+var q: ptr<Point> = new Point { x: 3, y: 4 };
+println(q->x);  // 3  (identical to q.x)
+println(q->y);  // 4
+invalidate q;
 ```
 
-#### Mutation: `s.field = value`
+#### Mutation: `s.field = value` or `p->field = value`
 
-**Semantics:** Store `value` into `field` of struct `s`.  
-**Implementation:** Store via `GEP`.
+**Semantics:** Store `value` into `field` of struct `s` (or via pointer `p`).  
+**Implementation:** Store via `GEP`. Compound assignment (`p->x += n`) is also supported.
 
 **Example:**
 ```omscript
 p.x = 30;
-println(p.x);  // 30
+println(p.x);   // 30
+
+var r: ptr<Point> = new Point { x: 1, y: 2 };
+r->x = 10;      // same as r.x = 10
+r->y += 5;      // compound assignment through arrow
+println(r->x);  // 10
+println(r->y);  // 7
+invalidate r;
+```
+
+#### Arrow method calls: `p->method(args)`
+
+`p->method(args)` is identical to `p.method(args)` — both desugar to `method(p, args)`.
+
+```omscript
+fn Counter::increment(self) { self.count = self.count + 1; }
+
+var c: ptr<Counter> = new Counter { count: 0 };
+c->increment();     // same as c.increment()
+println(c->count);  // 1
+invalidate c;
 ```
 
 ---
@@ -8311,6 +8348,26 @@ std::array_map(a, f);
 ```
 
 **Alias-free:** `std::name` always resolves to the same function as `name` (no aliasing or shadowing).
+
+**`import std;` — explicit namespace import:**
+
+Use `import std;` (identifier form, no quotes) to explicitly declare that standard library functions are used without qualification. This is a no-op at the compiler level (stdlib functions are always available without `std::`) but documents intent and is good practice in larger programs.
+
+```omscript
+import std;           // explicitly opt in to unqualified stdlib access
+
+fn main() {
+    println("hello"); // std::println — no qualifier needed
+    var x = abs(-5);  // std::abs — no qualifier needed
+    return 0;
+}
+```
+
+Both forms are equivalent and correct:
+```omscript
+std::println("explicit");   // always works
+println("bare");            // also works (with or without import std)
+```
 
 ---
 

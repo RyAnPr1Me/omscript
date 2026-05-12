@@ -1,0 +1,23 @@
+// dict_kw_literal_test.om — verify `dict { ... }` keyword form (Round-53).
+//
+// `dict { key: val, ... }` is identical to `{ key: val, ... }`.
+//
+// Expected exit code: 0
+
+fn main() -> int {
+    // keyword-prefixed dict literal
+    var d = dict { "a": 10, "b": 20, "c": 30 };
+    if (map_get(d, "a", 0) != 10) { return 1; }
+    if (map_get(d, "b", 0) != 20) { return 2; }
+    if (map_get(d, "c", 0) != 30) { return 3; }
+
+    // brace-only form works too
+    var e = { "x": 100, "y": 200 };
+    if (map_get(e, "x", 0) != 100) { return 4; }
+
+    // map_has / map_size
+    if (!map_has(d, "b"))   { return 5; }
+    if (map_size(d) != 3)   { return 6; }
+
+    return 0;
+}

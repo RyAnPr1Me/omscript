@@ -1,0 +1,17 @@
+// import_std_test.om — verify `import std;` identifier form (Round-53).
+//
+// `import std;` is a valid (no-op) directive that explicitly marks a file as
+// importing the built-in standard library namespace.
+//
+// Expected exit code: 42
+
+import std;
+
+fn main() -> int {
+    // stdlib functions work both with and without std:: after import std;
+    var x = abs(-42);        // std::abs — bare form
+    var y = std::abs(-99);   // std::abs — qualified form
+    if (x != 42)  { return 1; }
+    if (y != 99)  { return 2; }
+    return x;  // 42
+}

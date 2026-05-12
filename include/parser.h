@@ -202,6 +202,10 @@ class Parser {
     /// try "a__b" → c, then "a" → b__c, and use the first hit.
     std::unordered_map<std::string, std::unordered_map<std::string, std::string>> importNamespaces_;
 
+    /// Namespaces that have been globally imported via `import std;` (identifier form).
+    /// Members of these namespaces are accessible without the `namespace::` qualifier.
+    std::unordered_set<std::string> globallyImportedNamespaces_;
+
     /// Resolve a scope chain (segments separated by ::) to an actual function
     /// name using the importNamespaces_ registry.
     ///

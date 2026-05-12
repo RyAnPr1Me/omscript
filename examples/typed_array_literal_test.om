@@ -1,0 +1,26 @@
+// typed_array_literal_test.om — verify `[]T{...}` typed array literal (Round-53).
+//
+// `[]T{elem1, elem2, ...}` is syntactic sugar for `[elem1, elem2, ...]`.
+// The type annotation is informational only.
+//
+// Expected exit code: 0
+
+fn main() -> int {
+    var nums = []int{10, 20, 30, 40, 50};
+    if (nums[0] != 10) { return 1; }
+    if (nums[2] != 30) { return 2; }
+    if (nums.len() != 5) { return 3; }
+    if (nums.sum() != 150) { return 4; }
+
+    // Works with any type annotation (annotation is ignored at runtime)
+    var bools = []bool{1, 0, 1};
+    if (bools[0] != 1) { return 5; }
+    if (bools[1] != 0) { return 6; }
+    if (bools.len() != 3) { return 7; }
+
+    // Empty typed array
+    var empty = []int{};
+    if (empty.len() != 0) { return 8; }
+
+    return 0;
+}

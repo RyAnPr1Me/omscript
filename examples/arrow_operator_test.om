@@ -1,0 +1,48 @@
+// arrow_operator_test.om — verify `->` pointer member access (Round-53).
+//
+// `p->field` is syntactic sugar for `p.field`.
+// `p->method(args)` is syntactic sugar for `p.method(args)`.
+//
+// Expected exit code: 0
+
+struct Pair { first, second }
+
+fn Pair::swap(self) {
+    var tmp = self.first;
+    self.first = self.second;
+    self.second = tmp;
+}
+
+fn Pair::sum(self) {
+    return self.first + self.second;
+}
+
+fn main() -> int {
+    var p: ptr<Pair> = new Pair { first: 10, second: 20 };
+
+    // Arrow field read
+    if (p->first  != 10) { return 1; }
+    if (p->second != 20) { return 2; }
+
+    // Arrow field write
+    p->first = 99;
+    if (p->first != 99) { return 3; }
+
+    // Compound assignment through arrow
+    p->second += 5;
+    if (p->second != 25) { return 4; }
+
+    // Arrow method call (desugars to Pair::swap(p))
+    p->first = 3;
+    p->second = 7;
+    p->swap();
+    if (p->first  != 7) { return 5; }
+    if (p->second != 3) { return 6; }
+
+    // Arrow method returning value
+    var s = p->sum();  // 7 + 3 = 10
+    if (s != 10) { return 7; }
+
+    invalidate p;
+    return 0;
+}
