@@ -32,13 +32,30 @@ class Parser {
         baseDir_ = dir;
     }
 
+    /// Set the source file name, making it available as the built-in `FILE` comptime string.
+    void setSourceFile(const std::string& file) {
+        currentFile_ = file;
+    }
+
+    /// Inject an integer comptime constant before parsing begins.
+    /// Equivalent to prepending `comptime { const name: int = val; }` to the source.
+    /// Used to pass -D NAME[=VALUE] CLI flags.
+    void setComptimeInt(const std::string& name, long long val) {
+        comptimeConstants_[name] = val;
+    }
+
+    /// Inject a string comptime constant before parsing begins.
+    void setComptimeString(const std::string& name, const std::string& val) {
+        comptimeStrings_[name] = val;
+    }
+
     /// Returns collected parse errors (populated when multi-error mode is active).
     [[nodiscard]] const std::vector<std::string>& errors() const noexcept {
         return errors_;
     }
 
-    /// Returns non-fatal parse warnings (e.g. conflicting annotations, preprocessor
-    /// warnings from imported files).  Populated alongside errors() during parse().
+    /// Returns non-fatal parse warnings (e.g. conflicting annotations).
+    /// Populated alongside errors() during parse().
     [[nodiscard]] const std::vector<std::string>& warnings() const noexcept {
         return warnings_;
     }
@@ -85,6 +102,9 @@ class Parser {
 
     /// Base directory for resolving import paths.
     std::string baseDir_;
+
+    /// Source file name — exposed as the built-in `FILE` comptime string constant.
+    std::string currentFile_;
 
     /// Set of already-imported file paths (prevents circular imports).
     std::shared_ptr<std::unordered_set<std::string>> importedFiles_;

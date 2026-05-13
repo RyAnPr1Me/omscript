@@ -1,7 +1,6 @@
 #include "parser.h"
 #include "diagnostic.h"
 #include "pass_utils.h" // isIntWidthTypeName, isKnownScalarTypeName
-#include "preprocessor.h"
 #include <filesystem>
 #include <fstream>
 #include <llvm/Support/ErrorHandling.h>
@@ -447,7 +446,15 @@ std::unique_ptr<Program> Parser::parse() {
         if (check(TokenType::COMPTIME)) {
             try {
                 advance(); // consume 'comptime'
-                consume(TokenType::LBRACE, "Expected '{' after 'comptime'");
+
+                // ── Detect `comptime if COND { ... }` shorthand ──────────────
+                // This is syntactic sugar for `comptime { if (COND) { ... } }`.
+                // The condition is evaluated without surrounding parentheses so
+                // bare boolean flags work: `comptime if BUILD_DEBUG { ... }`.
+                const bool isComptimeIf = check(TokenType::IF);
+                if (!isComptimeIf) {
+                    consume(TokenType::LBRACE, "Expected '{' after 'comptime'");
+                }
 
                 // ── comptime condition-value helper ──────────────────────────
                 // A value in a condition expression — either a signed integer or
@@ -462,7 +469,7 @@ std::unique_ptr<Program> Parser::parse() {
                 };
 
                 // Retrieve a comptime value by name.  Checks the built-in
-                // OS/ARCH/VERSION symbols first, then the int constant map,
+                // OS/ARCH/VERSION/FILE symbols first, then the int constant map,
                 // then the string constant map.  Returns an empty optional if
                 // the name is not defined.
                 auto getComptimeVar = [&](const std::string& name) -> std::optional<CVal> {
@@ -488,6 +495,8 @@ std::unique_ptr<Program> Parser::parse() {
                         return CVal{true, 0, kArch};
                     if (name == "VERSION")
                         return CVal{true, 0, OMSC_VERSION};
+                    if (name == "FILE")
+                        return CVal{true, 0, currentFile_};
                     {
                         auto it = comptimeConstants_.find(name);
                         if (it != comptimeConstants_.end())
@@ -556,8 +565,9 @@ std::unique_ptr<Program> Parser::parse() {
                     // Identifier — comptime var ref or defined(name) predicate
                     if (check(TokenType::IDENTIFIER)) {
                         const std::string name = advance().lexeme;
-                        // defined(NAME) — tests whether the name exists in
-                        // either the int or the string comptime constant maps.
+                        // defined(NAME) — tests whether the name is recognised by
+                        // getComptimeVar (covers built-ins, user constants, and
+                        // CLI-injected -D defines).
                         if (name == "defined" && check(TokenType::LPAREN)) {
                             advance(); // consume '('
                             std::string dname;
@@ -565,7 +575,7 @@ std::unique_ptr<Program> Parser::parse() {
                                 dname = advance().lexeme;
                             if (check(TokenType::RPAREN))
                                 advance(); // consume ')'
-                            const bool isDef = comptimeConstants_.count(dname) > 0 || comptimeStrings_.count(dname) > 0;
+                            const bool isDef = getComptimeVar(dname).has_value();
                             return CVal{false, isDef ? 1LL : 0LL, ""};
                         }
                         auto v = getComptimeVar(name);
@@ -868,8 +878,38 @@ std::unique_ptr<Program> Parser::parse() {
                     }
                 };
 
-                parseBody(/*active=*/true);
-                consume(TokenType::RBRACE, "Expected '}' to close comptime block");
+                if (isComptimeIf) {
+                    // ── `comptime if COND { ... } [else if COND { ... }]* [else { ... }]` ──
+                    // Condition is evaluated without parentheses; body is the same as
+                    // the `if (COND) { ... }` form inside a regular comptime block.
+                    advance(); // consume 'if'
+                    const bool cond = evalOr();
+                    consume(TokenType::LBRACE, "Expected '{' after comptime if condition");
+                    parseBody(cond);
+                    consume(TokenType::RBRACE, "Expected '}' to close comptime if block");
+                    bool handled = cond;
+                    while (check(TokenType::ELSE)) {
+                        advance(); // consume 'else'
+                        if (match(TokenType::IF)) {
+                            // else if COND { ... } — no parens required
+                            const bool elseIfCond = evalOr();
+                            consume(TokenType::LBRACE, "Expected '{' after comptime else if condition");
+                            parseBody(!handled && elseIfCond);
+                            consume(TokenType::RBRACE, "Expected '}' to close comptime else if block");
+                            if (elseIfCond)
+                                handled = true;
+                        } else {
+                            // plain else { ... }
+                            consume(TokenType::LBRACE, "Expected '{' after 'else' in comptime if");
+                            parseBody(!handled);
+                            consume(TokenType::RBRACE, "Expected '}' to close comptime else block");
+                            break;
+                        }
+                    }
+                } else {
+                    parseBody(/*active=*/true);
+                    consume(TokenType::RBRACE, "Expected '}' to close comptime block");
+                }
             } catch (const std::exception& e) {
                 errors_.push_back(e.what());
                 synchronize();
@@ -877,7 +917,6 @@ std::unique_ptr<Program> Parser::parse() {
             continue;
         }
         // Top-level `type Alias = TypeExpr` — defines a type alias.
-        // Supports `u64x{N}` where N is a comptime constant.
         if (check(TokenType::TYPE)) {
             try {
                 advance(); // consume 'type'
@@ -1560,14 +1599,7 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     }
     std::string source((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 
-    // Preprocess then lex the imported file
-    {
-        Preprocessor importPP(fullPath);
-        source = importPP.process(source);
-        for (const auto& w : importPP.warnings()) {
-            warnings_.push_back(w);
-        }
-    }
+    // Lex the imported file
     Lexer importLexer(std::move(source));
     std::vector<Token> importTokens = importLexer.tokenize();
 

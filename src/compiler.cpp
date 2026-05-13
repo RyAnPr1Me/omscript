@@ -3,7 +3,6 @@
 #include "diagnostic.h"
 #include "lexer.h"
 #include "parser.h"
-#include "preprocessor.h"
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -82,18 +81,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     // Read source code
     std::string source = readFile(sourceFile);
 
-    // Preprocessor pass
-    const auto ppStart = Clock::now();
-    Preprocessor pp(sourceFile);
-    source = pp.process(source);
-    for (const auto& w : pp.warnings()) {
-        std::cerr << w << "\n";
-    }
-
     // Lexical analysis
     if (verbose_) {
-        std::cout << "  Preprocessing done [+" << elapsedMs(compileStart) << "ms]: " << pp.macroMap().size()
-                  << " macros defined\n";
         std::cout << "  Lexing...\n";
     }
     Lexer lexer(std::move(source));
@@ -110,7 +99,6 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         std::cout << "  Lex done [+" << elapsedMs(compileStart) << "ms, " << elapsedMs(lexStart)
                   << "ms]: " << tokens.size() << " tokens\n";
     }
-    (void)ppStart; // reserved for future per-pp timing
 
     // Syntax analysis
     if (verbose_) {
@@ -119,6 +107,12 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     const auto parseStart = Clock::now();
     Parser parser(std::move(tokens));
     parser.setBaseDir(std::filesystem::path(sourceFile).parent_path().string());
+    parser.setSourceFile(sourceFile);
+    // Inject -D defines as comptime constants visible to the entire file.
+    for (const auto& kv : defines_)
+        parser.setComptimeInt(kv.first, kv.second);
+    for (const auto& kv : stringDefines_)
+        parser.setComptimeString(kv.first, kv.second);
     std::unique_ptr<Program> program;
     try {
         program = parser.parse();
@@ -127,8 +121,7 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     } catch (const std::exception& e) {
         throw FileError(sourceFile + ": " + e.what());
     }
-    // Emit parser warnings (annotation conflicts, import preprocessor messages)
-    // to stderr so they are visible to the user at compile time.
+    // Emit parser warnings to stderr so they are visible to the user at compile time.
     for (const auto& w : parser.warnings()) {
         std::cerr << w << "\n";
     }

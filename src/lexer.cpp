@@ -782,6 +782,19 @@ Token Lexer::scanMultiLineString() {
             tokens.push_back(makeToken(TokenType::AT, "@"));
             break;
 
+        case '#':
+            // The OmScript preprocessor has been removed.  Preprocessor
+            // directives (#define, #ifdef, #if, etc.) are no longer supported.
+            // Migrate to comptime {} blocks — see §5.9 of the Language Reference.
+            lexError(
+                "Unexpected '#': the OmScript preprocessor has been removed. "
+                "Replace #define with 'comptime { const NAME = value; }', "
+                "#ifdef with 'comptime { if (defined(NAME)) { ... } }', "
+                "and function-like macros with typed functions. "
+                "See §5.9 of the Language Reference for a migration guide.",
+                tokenLine, tokenColumn);
+            break;
+
         case '`': {
             // Backtick-quoted infix operator name: `op`
             // Scans all characters up to the closing backtick.

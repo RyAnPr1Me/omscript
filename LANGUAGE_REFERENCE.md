@@ -63,19 +63,18 @@ This reference is derived exclusively from the OmScript compiler implementation 
 
 OmScript source code undergoes the following compilation stages:
 
-1. **Preprocessor** — Expands macros (`#define`), processes conditional compilation directives (`#if`, `#ifdef`), and handles file inclusion (`import`)
-2. **Lexer** — Tokenizes source text into a stream of lexical tokens (keywords, identifiers, literals, operators, punctuation)
-3. **Parser** — Constructs an Abstract Syntax Tree (AST) from the token stream, enforcing syntactic rules
-4. **Semantic Analysis** — Validates type consistency, resolves identifiers, enforces mandatory type annotations, and checks control-flow constraints
-5. **Code Generation** — Traverses the AST to emit LLVM IR, applying function annotations and optimization hints
-6. **Optimization Passes** — LLVM's optimization pipeline transforms the IR (inlining, vectorization, constant folding, dead-code elimination, loop transformations)
-7. **Object Code Emission** — LLVM backend generates native machine code for the target architecture
-8. **Linking** — Links object files with the OmScript runtime library to produce the final executable
+1. **Lexer** — Tokenizes source text into a stream of lexical tokens (keywords, identifiers, literals, operators, punctuation)
+2. **Parser** — Constructs an Abstract Syntax Tree (AST) from the token stream, enforcing syntactic rules; evaluates `comptime {}` blocks for conditional compilation and constant injection
+3. **Semantic Analysis** — Validates type consistency, resolves identifiers, enforces mandatory type annotations, and checks control-flow constraints
+4. **Code Generation** — Traverses the AST to emit LLVM IR, applying function annotations and optimization hints
+5. **Optimization Passes** — LLVM's optimization pipeline transforms the IR (inlining, vectorization, constant folding, dead-code elimination, loop transformations)
+6. **Object Code Emission** — LLVM backend generates native machine code for the target architecture
+7. **Linking** — Links object files with the OmScript runtime library to produce the final executable
 
 ### High-Level Feature Map
 
 - **Lexical structure**: Keywords, identifiers, literals (integer, float, string, bytes, interpolated), operators, comments (§2)
-- **Preprocessor**: Macros, conditional compilation, predefined macros (§3)
+- **Conditional compilation**: `comptime {}` blocks, `comptime if COND {}` shorthand, built-in constants `OS`/`ARCH`/`VERSION`/`FILE`, `-D NAME[=VALUE]` CLI flags, `defined(NAME)` predicate (§3, §5.9)
 - **Type system**: Scalar types (signed/unsigned integers, floats, bool, string), composite types (arrays, dicts, structs, enums, pointers, SIMD vectors, bigint), mandatory type annotations (§4)
 - **Variables and constants**: `var`, `const`, `register var`, `atomic var`, `volatile var`, `global`, `comptime`, compound assignment, destructuring (§5)
 - **Functions**: Declaration syntax, parameters, return types, default parameters, expression-body functions, generics, annotations (`@opt(hot)`, `@semantics(pure)`, `@memory(allocator)`, etc.), tail calls, lambdas (§6)
@@ -563,402 +562,31 @@ These do not appear in the keyword table in §2.4 and you may shadow them, but d
 
 ---
 
-## 3. Preprocessor
+## 3. Preprocessor (Removed — Migrate to `comptime {}`)
 
-The **preprocessor** runs before lexical analysis, transforming source text by expanding macros, resolving conditional compilation directives, and handling file inclusion. Preprocessor directives begin with `#` at the start of a line (leading whitespace is allowed).
+The OmScript preprocessor has been **removed**. Preprocessor directives (`#define`, `#ifdef`, `#if`, `#include`, etc.) are no longer supported and will produce a compile-time error if present in source code.
 
-> **Recommendation for new code**: Prefer `comptime {}` blocks over preprocessor macros for constant definitions and conditional compilation. `comptime {}` is fully type-checked, IDE-friendly, scope-aware, and integrates with the language's constant folding and CF-CTRE engine. See §5.9 for the `comptime {}` reference and a preprocessor migration guide.
->
-> Use the preprocessor for:
-> - Cross-language compatibility (bridging with C headers or build systems that emit `#define`)
-> - Textual macro expansion not expressible in the type system
-> - Legacy codebases
+**Migration:** Replace all preprocessor usage with `comptime {}` blocks (§5.9). A complete migration table is provided in §5.9.1.
 
-### 3.1 Directive List
-
-#### 3.1.1 `#define` — Define Macro
-
-**Object-like macro** (constant substitution):
-```omscript
-#define PI 3.14159
-#define MAX_SIZE 1024
-```
-
-**Function-like macro** (parameterized):
-```omscript
-#define SQUARE(x) x * x
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
-```
-
-**Typed function-like macro** (optional `: <type>` per parameter, optional
-`-> <returnType>` after the parameter list):
-```omscript
-#define SQUARE(x: int) -> int          ((x) * (x))
-#define SCALE(x: float, k: int) -> float ((x) * (k))
-#define GREET(s: string) -> string     (s)
-```
-
-Recognised parameter types: `int`, `uint`, `float`, `double`, `string`,
-`bool`, `any`. Untyped parameters (and the catch-all `any`) accept any
-argument shape. The return-type annotation is informational only.
-
-When the preprocessor expands a typed macro it classifies the *syntactic
-shape* of each argument (a string literal, a numeric literal, a bare
-identifier, a parenthesised expression, …) and rejects an obvious
-mismatch — for example calling `SQUARE("hi")` is reported at preprocess
-time instead of producing a downstream parse error. Identifiers and
-general expressions are accepted for any declared type, since they may
-expand or evaluate to the right shape.
-
-**Syntax**:
-- Object-like: `#define NAME body`
-- Function-like: `#define NAME(param1, param2, ...) body`
-- Typed function-like: `#define NAME(p1: T1, p2: T2, ...) -> R body`
-- No space allowed between `NAME` and `(` in function-like macros
-- Macro body extends to end of line (or use `\` for continuation)
-- Macros are substituted in subsequent source text
-- Recursive expansion is supported up to a hard limit of 256 nested
-  expansions; true *cyclic* macro definitions (e.g. `#define A B` and
-  `#define B A`) are detected and reported as a deterministic error
-  instead of silently truncating
-
-**Stringification (`#param`)** and **token pasting (`a ## b`)** are
-supported in function-like macro bodies — see §3.2.
-
-**Diagnostics emitted by `#define` and friends**:
-| Condition | Severity |
+| C/C++ preprocessor | OmScript `comptime {}` equivalent |
 |---|---|
-| `#define` / `#undef` of a reserved predefined macro (`__FILE__`, `__LINE__`, `__VERSION__`, `__DATE__`, `__TIME__`, `__BASE_FILE__`, `__OS__`, `__ARCH__`, `__COUNTER__`, `__VECTOR_WIDTH__`, the `__SIMD_*__` family) | **error** |
-| Function-like macro called with the wrong number of arguments | **error** |
-| Typed function-like macro argument shape clearly incompatible with declared type | **error** |
-| Cyclic macro expansion or > 256 levels of nesting | **error** |
-| Macro redefined with a body that differs from the previous definition | warning |
-| `#undef` of a macro that was never defined | warning |
-| Function-like macro uses a parameter more than once and the matching argument looks like a function call (multi-evaluation footgun) | warning |
-
-#### 3.1.2 `#undef` — Undefine Macro
-
-Removes a macro definition:
-```omscript
-#define TEMP 42
-#undef TEMP
-// TEMP is no longer defined
-```
-
-`#undef` of a name that was never defined emits a warning, and `#undef`
-of a reserved predefined macro is a hard error.
-
-#### 3.1.3 `#if` / `#elif` / `#else` / `#endif` — Conditional Compilation
-
-Conditionally include source text based on compile-time expressions:
-```omscript
-#define DEBUG 1
-#if DEBUG
-    println("Debug mode enabled");
-#elif RELEASE
-    println("Release mode");
-#else
-    println("Unknown mode");
-#endif
-```
-
-**Evaluation**:
-- `#if` and `#elif` conditions are integer expressions evaluated at preprocessing time
-- Macros in conditions are expanded before evaluation
-- Supported operators (in C-style precedence): unary `! - + ~`, `* / %`, `+ -`, `<< >>`, `< <= > >=`, `== !=`, `&`, `^`, `|`, `&&`, `||`, ternary `? :`, parentheses
-- Hex integer literals (`0xFF`, `0X1A`) are supported alongside decimal
-- `defined(NAME)` (or `defined NAME`) checks if macro `NAME` is defined (returns 1 or 0)
-- Undefined identifiers evaluate to 0
-
-**Example with `defined`**:
-```omscript
-#if defined(WINDOWS) && !defined(DEBUG)
-    #define LOG_FILE "release.log"
-#endif
-```
-
-**Example using bitwise / shift / ternary**:
-```omscript
-#define FLAGS 0x0F
-#if (FLAGS & 0x08) != 0
-    #define HAS_BIT3 1
-#endif
-#if (1 << 4) == 16 ? 1 : 0
-    #define POW2_OK 1
-#endif
-```
-
-#### 3.1.4 `#ifdef` / `#ifndef` / `#elifdef` / `#elifndef` — Test Macro Definition
-
-Shorthand for testing macro presence:
-```omscript
-#ifdef DEBUG
-    println("Debugging");
-#endif
-
-#ifndef NDEBUG
-    println("Assertions enabled");
-#endif
-```
-
-Equivalent to:
-- `#ifdef X` → `#if defined(X)`
-- `#ifndef X` → `#if !defined(X)`
-
-The C23-style shorthands `#elifdef X` and `#elifndef X` chain the same test in an `#if` ladder:
-
-```omscript
-#ifdef USE_NEON
-    // ...
-#elifdef USE_AVX2
-    // ...
-#elifndef USE_SCALAR
-    // ...
-#else
-    // ...
-#endif
-```
-
-#### 3.1.5 `#error` — Emit Compilation Error
-
-Causes compilation to fail with a message:
-```omscript
-#ifndef VERSION
-    #error "VERSION macro must be defined"
-#endif
-```
-
-#### 3.1.6 `#warning` — Emit Compilation Warning
-
-Emits a warning message (compilation continues):
-```omscript
-#warning "This feature is experimental"
-```
-
-#### 3.1.7 `#line` — Set Line Number (RESERVED — NOT IMPLEMENTED)
-
-**Status:** Reserved syntactically. The current preprocessor (`src/preprocessor.cpp`) does **not** recognize `#line` as a known directive — it falls through to the generic "unknown preprocessor directive" warning. Generated-code line attribution must be done via host-side rewriting until this directive is wired up.
-
-#### 3.1.8 `#info` — Emit Informational Message
-
-Like `#warning` but tagged as `info:` instead of `warning:`. Compilation continues. Use for benign build-time annotations (which optimization tier was selected, which feature flags are on, etc.):
-```omscript
-#info "fast-path build enabled"
-```
-Implementation: appended to the preprocessor's accumulated warnings list and surfaced through the same diagnostic channel as `#warning`.
-
-#### 3.1.9 `#assert` — Compile-Time Assertion
-
-**Syntax:**
-```ebnf
-assert_directive ::= '#assert' const_expression [ '"' message '"' ]
-```
-
-Evaluates `const_expression` using the same `#if` expression evaluator (§3.5). If the result is `0`, the build fails with a diagnostic of the form `#assert failed: <message>` (or `#assert failed: compile-time assertion failed: <expression>` if no message is given).
-
-```omscript
-#assert __VERSION__ >= 2 "OmScript ≥ 2 required"
-#assert defined(TARGET_X86_64) "this module is x86-64-only"
-```
-
-Use for build-time invariants (feature-flag combinations, ABI assumptions) that should fail loudly rather than silently mis-compile.
-
-#### 3.1.10 `#require` — Minimum Compiler Version
-
-**Syntax:**
-```ebnf
-require_directive ::= '#require' '"' version_string '"'
-```
-
-Fails the build if the running compiler's `__VERSION__` is older than `version_string` (string-comparison via the compiler's internal `cmpVersion`). Emits an error of the form `#require: compiler version <current> is older than required <X.Y.Z>`.
-
-```omscript
-#require "1.2.0"
-```
-
-#### 3.1.11 `#counter` — Define an Auto-Incrementing Macro
-
-**Syntax:**
-```ebnf
-counter_directive ::= '#counter' identifier
-```
-
-Creates a macro that yields a fresh, monotonically increasing integer on every textual expansion (starts at `0`). Useful for generating unique IDs in macro-heavy code:
-```omscript
-#counter UNIQ
-const int id1 = UNIQ;   // 0
-const int id2 = UNIQ;   // 1
-const int id3 = UNIQ;   // 2
-```
-Distinct from the predefined `__COUNTER__` macro (§3.3) — `__COUNTER__` is a single global counter shared across the whole translation unit, while `#counter` lets you declare *named* counters with independent state.
-
-#### 3.1.12 `#pragma` — Vendor-Specific Hints (Currently a No-Op)
-
-`#pragma` lines are accepted by the preprocessor and silently consumed. No pragma names are currently recognized — the directive is reserved for forward-compatible insertion of compiler-specific hints without breaking older builds.
-
-```omscript
-#pragma optimize_for_size   // accepted but ignored today
-```
-
-#### 3.1.13 `import` — File Inclusion
-
-Includes another OmScript source file (processed by the parser, not the preprocessor directly, but conceptually similar to `#include`):
-```omscript
-import "utilities.om"
-import "math_helpers.om" as math
-```
-
-**Syntax**:
-- `import "path"` — Include file at `path` (relative to current file)
-- `import "path" as alias` — Include file and namespace it under `alias`
-- Circular imports are detected and rejected
-- Imported files are preprocessed and parsed recursively
-
-**Note**: `import` is technically a parser-level keyword, not a preprocessor directive, but it is conceptually similar to `#include` in C.
-
-### 3.2 Macro Expansion Rules
-
-**Textual substitution**: Macro bodies are substituted verbatim at the point of invocation.
-
-**Function-like macros**: Arguments are collected by matching parentheses, separated by commas. Nested parentheses and string literals are handled correctly.
-
-**Recursion**: Macros may expand recursively up to a depth of 64. Circular macros cause infinite recursion and trigger an error at the depth limit.
-
-**Example**:
-```omscript
-#define ADD(a, b) a + b
-#define DOUBLE(x) ADD(x, x)
-
-var result = DOUBLE(5);  // Expands to: 5 + 5
-```
-
-**Stringification (`#`) and token pasting (`##`)**: Implemented for
-function-like macros.
-
-* `#param` in the macro body is replaced by a string literal whose contents
-  are the textual argument with leading/trailing whitespace trimmed and
-  embedded `"` / `\` escaped:
-
-  ```omscript
-  #define STR(x) #x
-  var s:string = STR(world);   // expands to: var s:string = "world";
-  ```
-
-* `a ## b` collapses two tokens into one by removing the `##` and any
-  surrounding whitespace.  Multiple consecutive pastes are supported:
-
-  ```omscript
-  #define CONCAT(a, b) a ## b
-  var CONCAT(my, Var):i64 = 42;   // expands to: var myVar:i64 = 42;
-  ```
-
-### 3.3 Predefined Macros
-
-The preprocessor defines the following macros automatically:
-
-| Macro | Value | Description |
-|-------|-------|-------------|
-| `__FILE__` | `"filename"` | Current source file name (string) |
-| `__LINE__` | `123` | Current line number (integer) |
-| `__BASE_FILE__` | `"main.om"` | Top-level source as passed on the command line — preserved across `#line` (string) |
-| `__DATE__` | `"Jan 23 2026"` | Compilation date in C-style `Mmm dd yyyy` form (string) |
-| `__TIME__` | `"14:05:09"` | Compilation time in `HH:MM:SS` form (string) |
-| `__VERSION__` | `"4.4.0"` | OmScript compiler version (string) |
-| `__OS__` | `"linux"` / `"windows"` / `"macos"` | Target operating system (string) |
-| `__ARCH__` | `"x86_64"` / `"aarch64"` / `"arm"` | Target architecture (string) |
-| `__COUNTER__` | `0`, `1`, ... | Global counter, increments on each use (integer) |
-| `__VECTOR_WIDTH__` | `4` / `8` / `16` | Natural i32-lane SIMD width on the **host CPU at compile time** (detected via `llvm::sys::getHostCPUFeatures()` — reflects the machine running the compiler, not the C build ISA) |
-| `__SIMD_SSE2__` … `__SIMD_AVX512F__` | `1` (defined only if available) | Defined when the corresponding x86 SIMD feature is present on the **host CPU at compile time** (runtime LLVM query, not C compile-time `#ifdef`) |
-| `__SIMD_NEON__` | `1` (defined only on ARM) | Defined when ARM NEON is available on the host CPU at compile time |
-
-The SIMD-feature macros let portable user code conditionally pick a vector width:
-
-```omscript
-#if defined(__SIMD_AVX512F__)
-    var v: i32x16 = ...;
-#elifdef __SIMD_AVX2__
-    var v: i32x8  = ...;
-#else
-    var v: i32x4  = ...;
-#endif
-```
-
-**Example**:
-```omscript
-#define LOG(msg) println(__FILE__, ":", __LINE__, " - ", msg)
-
-fn main() {
-    LOG("Starting program");  // Outputs: "example.om:5 - Starting program"
-}
-```
-
-**`__COUNTER__` macro**: Special predefined macro that increments globally each time it is referenced:
-```omscript
-var id1 = __COUNTER__;  // 0
-var id2 = __COUNTER__;  // 1
-var id3 = __COUNTER__;  // 2
-```
-
-**Custom counter macros**: Use `#counter NAME` to define a named counter:
-```omscript
-#counter MY_ID
-var a = MY_ID;  // 0
-var b = MY_ID;  // 1
-var c = MY_ID;  // 2
-```
-
-### 3.4 Line Continuation
-
-A backslash `\` immediately followed by a newline (LF or CRLF) performs a **zero-character splice**: both characters are removed and the two physical lines are joined into a single logical line with no separator inserted. The lexer sees the joined line as a single logical line.
-
-```omscript
-#define LONG_MACRO \
-    some_function(arg1, \
-                  arg2, \
-                  arg3)
-```
-
-**Important**: The splice inserts **nothing** — not even a space. This means macro names and identifiers can be split across lines:
-```omscript
-#define MY_\
-MACRO 42       // defines MY_MACRO (not "MY_ MACRO")
-```
-
-**Splice precedence**: Line continuation is processed before tokenisation, so a `\<newline>` inside a string literal is also spliced (removing both the backslash and the newline from the literal). To include a literal backslash at the end of a line, use `\\`.
-
-### 3.5 Conditional Expressions Allowed in `#if`
-
-The preprocessor supports a subset of C-like expression syntax in `#if` and `#elif` conditions:
-
-**Operators** (in precedence order, high to low):
-1. Grouping: `(` `)`
-2. Unary: `!`, `-`, `+`
-3. Multiplicative: `*`, `/`, `%`
-4. Additive: `+`, `-`
-5. Relational: `<`, `<=`, `>`, `>=`
-6. Equality: `==`, `!=`
-7. Logical AND: `&&`
-8. Logical OR: `||`
-
-**`defined(NAME)` operator**: Returns 1 if macro `NAME` is defined, 0 otherwise. Can be used with or without parentheses:
-```omscript
-#if defined(DEBUG)
-#if defined DEBUG
-```
-
-**Integer literals**: Decimal, hex (`0x...`), octal (`0o...`), binary (`0b...`) literals are supported.
-
-**Undefined identifiers**: Expand to `0`.
-
-**Example**:
-```omscript
-#define VERSION 2
-#if VERSION >= 2 && defined(FEATURE_X)
-    // Code for version 2+ with FEATURE_X
-#endif
-```
-
----
+| `#define MAX 1024` | `comptime { const MAX: int = 1024; }` |
+| `#define PI 3.14` | `comptime { const PI: float = 3.14; }` |
+| `#define NAME "hi"` | n/a — use a local `var` or string literal directly |
+| `#define DEBUG` | `comptime { const DEBUG: bool = true; }` |
+| `#ifdef DEBUG` / `#endif` | `comptime { if (defined(DEBUG)) { ... } }` |
+| `#ifndef NDEBUG` | `comptime { if (!defined(NDEBUG)) { ... } }` |
+| `#if OS == "linux"` | `comptime { if (OS == "linux") { ... } }` |
+| `#if X == 0 && Y != 0` | `comptime { if (X == 0 && Y != 0) { ... } }` |
+| `#error "message"` | `comptime { error("message"); }` |
+| `#warning "message"` | `comptime { warning("message"); }` |
+| `__OS__` | built-in `OS` comptime string: `"linux"` / `"windows"` / `"macos"` |
+| `__ARCH__` | built-in `ARCH` comptime string: `"x86_64"` / `"aarch64"` |
+| `__VERSION__` | built-in `VERSION` comptime string |
+| `__FILE__` | built-in `FILE` comptime string (source file path) |
+| `#define MAX(a,b) ...` | `fn max(a: int, b: int) -> int { ... }` — typed function |
+
+For a full migration guide and examples, see **§5.9.1** (`comptime {}` blocks).
 
 ## 4. Type System Overview
 
@@ -1843,21 +1471,54 @@ Placed at the top level of a source file (not inside a function), a `comptime {}
 | Boolean literal | `const DEBUG: bool = true;` | `bool` (stored as `int` 0/1) |
 | Reference to comptime const | `const ALIAS = MAX;` | same type as source |
 
-**Built-in comptime identifiers** (read-only, string-valued):
+**Built-in comptime identifiers** (read-only):
 
-| Name | Example value | Equivalent preprocessor macro |
-|---|---|---|
-| `OS` | `"linux"` / `"windows"` / `"macos"` | `__OS__` |
-| `ARCH` | `"x86_64"` / `"aarch64"` / `"arm"` | `__ARCH__` |
-| `VERSION` | `"4.4.0"` | `__VERSION__` |
+| Name | Type | Example value | Equivalent preprocessor macro |
+|---|---|---|---|
+| `OS` | string | `"linux"` / `"windows"` / `"macos"` | `__OS__` |
+| `ARCH` | string | `"x86_64"` / `"aarch64"` / `"arm"` | `__ARCH__` |
+| `VERSION` | string | `"5.0.0"` | `__VERSION__` |
+| `FILE` | string | `"src/main.om"` | `__FILE__` |
+
+> **Note:** Built-in string comptime constants (`OS`, `ARCH`, `VERSION`, `FILE`) are only available inside `comptime {}` condition expressions. They are not emitted as runtime string globals.
 
 **Condition expression syntax** for `if (COND)`:
 - Comparison: `NAME == "value"`, `COUNT >= 100`, `FLAG != 0`
 - Logical: `COND1 && COND2`, `COND1 || COND2`, `!COND`
-- Existence test: `defined(NAME)` — true if `NAME` is a defined comptime constant
+- Existence test: `defined(NAME)` — true if `NAME` is a defined comptime constant (including CLI `-D` flags and built-in identifiers)
 - Parenthesised: `(COND1 && COND2) || COND3`
 
-Every `const` that survives an active branch is also injected as a **global `const` variable** accessible inside function bodies — no extra annotation required.
+Every integer or bool `const` that survives an active branch is also injected as a **global `const` variable** accessible inside function bodies — no extra annotation required.
+
+**`comptime if COND { ... }` shorthand** (Phase 2):
+
+For simple single-condition cases, the outer `comptime { }` braces may be omitted. The condition does not need parentheses, allowing bare boolean constants:
+
+```omscript
+comptime if BUILD_DEBUG {
+    const LOG_LEVEL: int = 2;
+}
+
+comptime if OS == "linux" {
+    const USE_EPOLL: int = 1;
+} else {
+    const USE_EPOLL: int = 0;
+}
+```
+
+This is exactly equivalent to `comptime { if (COND) { ... } }` — a syntactic convenience.
+
+**`-D NAME[=VALUE]` CLI flags** (Phase 2):
+
+Comptime constants can be injected from the command line without modifying source code:
+
+```sh
+omsc compile main.om -DBUILD_DEBUG         # injects  comptime const BUILD_DEBUG: int = 1
+omsc compile main.om -DLOG_LEVEL=3         # injects  comptime const LOG_LEVEL: int = 3
+omsc compile main.om -DPLATFORM=embedded   # injects  comptime const PLATFORM: string = "embedded"
+```
+
+CLI-injected constants behave identically to constants defined with `comptime { const ... }` and are visible to `defined()`, `if (COND)`, and function bodies throughout the file.
 
 **Example — platform constants and conditional selection:**
 ```omscript

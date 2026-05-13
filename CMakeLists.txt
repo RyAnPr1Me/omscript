@@ -107,7 +107,6 @@ set(SRC
     src/hgoe_egraph.cpp
 
     # Driver
-    src/preprocessor.cpp
     src/compiler.cpp
     src/main.cpp
 
