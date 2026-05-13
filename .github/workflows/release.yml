@@ -77,10 +77,10 @@ jobs:
           path: |
             /usr/local/Homebrew/Library/Taps
             ~/Library/Caches/Homebrew
-            /usr/local/Cellar/llvm
+            /usr/local/Cellar/llvm@18
             /usr/local/Cellar/cmake
             /usr/local/Cellar/ccache
-            /opt/homebrew/Cellar/llvm
+            /opt/homebrew/Cellar/llvm@18
             /opt/homebrew/Cellar/cmake
             /opt/homebrew/Cellar/ccache
           key: brew-${{ runner.arch }}-llvm-${{ hashFiles('.github/workflows/release.yml') }}
@@ -110,10 +110,11 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           # Install packages; skip already-installed ones (from cache).
-          for pkg in cmake llvm ccache; do
+          # Pin to llvm@18 to match the Linux build and avoid LLVM 22 incompatibilities.
+          for pkg in cmake llvm@18 ccache; do
             brew list "$pkg" &>/dev/null || brew install "$pkg"
           done
-          echo "LLVM_DIR=$(brew --prefix llvm)/lib/cmake/llvm" >> "$GITHUB_ENV"
+          echo "LLVM_DIR=$(brew --prefix llvm@18)/lib/cmake/llvm" >> "$GITHUB_ENV"
           # Remove stale ccache config (ccache 3.x used 'compress', ccache 4.x uses 'compression')
           rm -f ~/.ccache/ccache.conf ~/.config/ccache/ccache.conf
           ccache --set-config=max_size=600M
@@ -431,7 +432,7 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          LLVM_PREFIX="$(brew --prefix llvm)"
+          LLVM_PREFIX="$(brew --prefix llvm@18)"
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER="${LLVM_PREFIX}/bin/clang" \
@@ -478,7 +479,7 @@ jobs:
           if [ "$PROFRAW_COUNT" -gt 0 ]; then
             # Clang instrumentation-based profiling (-fprofile-instr-generate)
             PROFDATA="$PWD/pgo-profiles/default.profdata"
-            LLVM_PROFDATA="$(brew --prefix llvm)/bin/llvm-profdata"
+            LLVM_PROFDATA="$(brew --prefix llvm@18)/bin/llvm-profdata"
             if [ -x "$LLVM_PROFDATA" ]; then
               "$LLVM_PROFDATA" merge -output="$PROFDATA" pgo-profiles/*.profraw
             elif command -v llvm-profdata &>/dev/null; then
@@ -500,7 +501,7 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          LLVM_PREFIX="$(brew --prefix llvm)"
+          LLVM_PREFIX="$(brew --prefix llvm@18)"
           pgo_args=()
           if [ -n "${PGO_PROFILE_PATH:-}" ] && [ -e "${PGO_PROFILE_PATH:-}" ]; then
             pgo_args+=("-DPGO_USE=$PGO_PROFILE_PATH")
