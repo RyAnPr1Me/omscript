@@ -469,9 +469,12 @@ std::unique_ptr<Program> Parser::parse() {
                 };
 
                 // Retrieve a comptime value by name.  Checks the built-in
-                // OS/ARCH/VERSION/FILE symbols first, then the int constant map,
-                // then the string constant map.  Returns an empty optional if
-                // the name is not defined.
+                // constants in priority order:
+                //   OS, ARCH, VERSION  → string constants (platform-detected)
+                //   FILE               → string constant (current source file path)
+                //   comptimeConstants_ → user-defined / CLI-injected integer constants
+                //   comptimeStrings_   → user-defined / CLI-injected string constants
+                // Returns an empty optional if the name is not defined.
                 auto getComptimeVar = [&](const std::string& name) -> std::optional<CVal> {
 #if defined(_WIN32) || defined(_WIN64)
                     static constexpr const char* kOS = "windows";
