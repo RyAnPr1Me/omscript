@@ -1737,9 +1737,10 @@ llvm::Function* CodeGenerator::getOrDeclareRand() {
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::WillReturn);
     fn->addFnAttr(llvm::Attribute::NoFree);
-    fn->addFnAttr(llvm::Attribute::NoSync);
-    // rand() only accesses global PRNG state (inaccessible to the caller);
-    // this lets LLVM reorder it past pure memory operations.
+    // rand() only accesses global PRNG state (inaccessible to the caller).
+    // NoSync is intentionally omitted: on some platforms (e.g. macOS arm64)
+    // rand() uses an internal mutex, and marking it NoSync can cause the LTO
+    // optimizer to produce incorrect code or crash on those targets.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::inaccessibleMemOnly()));
     return fn;
 }

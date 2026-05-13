@@ -99,8 +99,11 @@ ptest_program() {
     local exe="$TMPTEST/exe_${idx}"
     local rf="$TMPTEST/r_${idx}"
     (
-        ./build/omsc "$source" -o "$exe" >/dev/null 2>&1 \
-            || { echo "FAIL compile-failed" > "$rf"; exit 0; }
+        local compile_err; compile_err=$(./build/omsc "$source" -o "$exe" 2>&1 >/dev/null)
+        if [ $? -ne 0 ]; then
+            { echo "FAIL compile-failed"; echo "  compiler output: $compile_err"; } > "$rf"
+            exit 0
+        fi
         _timeout 60 "$exe" 2>/dev/null
         local rc=$?
         rm -f "$exe"
