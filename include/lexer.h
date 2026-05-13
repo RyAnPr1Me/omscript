@@ -85,6 +85,8 @@ enum class TokenType {
     OWN,       // own      — explicit unique-ownership declaration (Ω spec §3.1)
     CONSTRUCT, // construct — in-place field initialization of allocated memory
     NAMESPACE, // namespace — user-defined namespace block
+    JMP,       // jmp       — unconditional jump to a named label (deprecated)
+    LABEL,     // label     — declares a named jump target
 
     // Operators
     PLUS,

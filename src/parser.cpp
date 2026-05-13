@@ -1974,6 +1974,113 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 
     inOptMaxFunction = savedOptMaxState;
 
+    // ── Post-parse jmp/label validation ──────────────────────────────────────
+    // Collect all labels defined in this function (recursively) and all jmp
+    // targets; then:
+    //   1. Error on any jmp target that has no matching label.
+    //   2. Error on any forward jmp that skips over a var declaration at the
+    //      top level of the function body (skipped initializer = uninitialized
+    //      variable).
+    if (body) {
+        // Flatten the top-level statement list for linear-order analysis.
+        const auto& stmts = body->statements;
+
+        // --- Collect all label names (recursive) ----------------------------
+        std::unordered_map<std::string, int /*line*/> definedLabels;
+        std::function<void(const Statement*)> collectLabels = [&](const Statement* s) {
+            if (!s) return;
+            if (s->type == ASTNodeType::LABEL_STMT) {
+                const auto* ls = static_cast<const LabelStmt*>(s);
+                definedLabels[ls->labelName] = ls->line;
+                return;
+            }
+            // Recurse into blocks/branches/loops.
+            auto recurseBlock = [&](const BlockStmt* blk) {
+                if (!blk) return;
+                for (const auto& sub : blk->statements) collectLabels(sub.get());
+            };
+            switch (s->type) {
+            case ASTNodeType::BLOCK: recurseBlock(static_cast<const BlockStmt*>(s)); break;
+            case ASTNodeType::IF_STMT: {
+                const auto* is = static_cast<const IfStmt*>(s);
+                collectLabels(is->thenBranch.get());
+                collectLabels(is->elseBranch.get());
+                break;
+            }
+            case ASTNodeType::WHILE_STMT: collectLabels(static_cast<const WhileStmt*>(s)->body.get()); break;
+            case ASTNodeType::DO_WHILE_STMT: collectLabels(static_cast<const DoWhileStmt*>(s)->body.get()); break;
+            case ASTNodeType::FOR_STMT: collectLabels(static_cast<const ForStmt*>(s)->body.get()); break;
+            case ASTNodeType::FOR_EACH_STMT: collectLabels(static_cast<const ForEachStmt*>(s)->body.get()); break;
+            default: break;
+            }
+        };
+        for (const auto& s : stmts) collectLabels(s.get());
+
+        // --- Validate each jmp (recursive) ----------------------------------
+        std::function<void(const Statement*)> validateJmps = [&](const Statement* s) {
+            if (!s) return;
+            if (s->type == ASTNodeType::JMP_STMT) {
+                const auto* js = static_cast<const JmpStmt*>(s);
+                if (!definedLabels.count(js->targetLabel)) {
+                    error("'jmp " + js->targetLabel + "': label '" + js->targetLabel +
+                          "' is not defined in this function");
+                }
+                return;
+            }
+            // Recurse same as collectLabels.
+            switch (s->type) {
+            case ASTNodeType::BLOCK:
+                for (const auto& sub : static_cast<const BlockStmt*>(s)->statements)
+                    validateJmps(sub.get());
+                break;
+            case ASTNodeType::IF_STMT: {
+                const auto* is = static_cast<const IfStmt*>(s);
+                validateJmps(is->thenBranch.get());
+                validateJmps(is->elseBranch.get());
+                break;
+            }
+            case ASTNodeType::WHILE_STMT: validateJmps(static_cast<const WhileStmt*>(s)->body.get()); break;
+            case ASTNodeType::DO_WHILE_STMT: validateJmps(static_cast<const DoWhileStmt*>(s)->body.get()); break;
+            case ASTNodeType::FOR_STMT: validateJmps(static_cast<const ForStmt*>(s)->body.get()); break;
+            case ASTNodeType::FOR_EACH_STMT: validateJmps(static_cast<const ForEachStmt*>(s)->body.get()); break;
+            default: break;
+            }
+        };
+        for (const auto& s : stmts) validateJmps(s.get());
+
+        // --- Forward-jump-over-var-decl check (top-level linear scan) --------
+        // For each `jmp` at the top level of the function body, find the matching
+        // `label` that appears later in the same linear statement list.  Any
+        // `var` declaration between them is an error (initializer would be skipped).
+        for (size_t i = 0; i < stmts.size(); ++i) {
+            if (stmts[i]->type != ASTNodeType::JMP_STMT) continue;
+            const auto* js = static_cast<const JmpStmt*>(stmts[i].get());
+            // Find the label in the top-level list (forward only).
+            for (size_t j = i + 1; j < stmts.size(); ++j) {
+                if (stmts[j]->type == ASTNodeType::LABEL_STMT) {
+                    const auto* ls = static_cast<const LabelStmt*>(stmts[j].get());
+                    if (ls->labelName == js->targetLabel) {
+                        // Found a forward jump. Scan statements between i and j for var decls.
+                        for (size_t k = i + 1; k < j; ++k) {
+                            if (stmts[k]->type == ASTNodeType::VAR_DECL) {
+                                const auto* vd = static_cast<const VarDecl*>(stmts[k].get());
+                                error("'jmp " + js->targetLabel + "' at line " +
+                                      std::to_string(js->line) +
+                                      " jumps forward over declaration of variable '" +
+                                      vd->name + "' at line " +
+                                      std::to_string(vd->line) +
+                                      "; the initializer would be skipped. "
+                                      "Move the declaration before the 'jmp' or after the label.");
+                            }
+                        }
+                        break; // Only check the first matching label.
+                    }
+                }
+            }
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     auto funcDecl = std::make_unique<FunctionDecl>(name.lexeme, std::move(typeParams), std::move(parameters),
                                                    std::move(body), isOptMax, returnType);
     funcDecl->line = name.line;
@@ -2105,6 +2212,13 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
+    }
+    if (match(TokenType::JMP)) {
+        // parseJmpStmt reads tokens[current-1] for the warning location.
+        return parseJmpStmt();
+    }
+    if (match(TokenType::LABEL)) {
+        return parseLabelStmt();
     }
     if (match(TokenType::SWITCH)) {
         const Token kw = tokens[current - 1];
@@ -3071,6 +3185,33 @@ std::unique_ptr<Statement> Parser::parseBreakStmt() {
 std::unique_ptr<Statement> Parser::parseContinueStmt() {
     consume(TokenType::SEMICOLON, "Expected ';' after 'continue'");
     return std::make_unique<ContinueStmt>();
+}
+
+std::unique_ptr<Statement> Parser::parseJmpStmt() {
+    // `jmp` keyword was already consumed by the caller.
+    // Emit a deprecation warning at the use site.
+    const Token jmpTok = tokens[current - 1];
+    warnings_.push_back("line " + std::to_string(jmpTok.line) + ":" +
+                        std::to_string(jmpTok.column) +
+                        ": warning: `jmp` is deprecated; prefer structured control flow "
+                        "(if / while / for / break / continue). "
+                        "`jmp` will be removed in a future version of OmScript.");
+    const Token labelTok = consume(TokenType::IDENTIFIER, "Expected label name after 'jmp'");
+    consume(TokenType::SEMICOLON, "Expected ';' after 'jmp <label>'");
+    auto stmt = std::make_unique<JmpStmt>(labelTok.lexeme);
+    stmt->line = jmpTok.line;
+    stmt->column = jmpTok.column;
+    return stmt;
+}
+
+std::unique_ptr<Statement> Parser::parseLabelStmt() {
+    // `label` keyword was already consumed by the caller.
+    const Token labelTok = consume(TokenType::IDENTIFIER, "Expected label name after 'label'");
+    consume(TokenType::COLON, "Expected ':' after label name (syntax: 'label name:')");
+    auto stmt = std::make_unique<LabelStmt>(labelTok.lexeme);
+    stmt->line = labelTok.line;
+    stmt->column = labelTok.column;
+    return stmt;
 }
 
 std::unique_ptr<Statement> Parser::parseSwitchStmt() {

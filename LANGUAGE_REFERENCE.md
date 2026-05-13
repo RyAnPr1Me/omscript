@@ -197,6 +197,8 @@ The following identifiers are reserved as keywords. They are grouped by category
 | `shared` | Transition variable to shared (read-only aliasable) ownership (Ω spec §3.1) |
 | `own` | Restore unique ownership from shared state (Ω spec §3.1) |
 | `construct` | In-place field initialisation of a `ptr<T>` (see §17.9.2a) |
+| `jmp` | ⚠ **Deprecated** — unconditional jump to a named label (see §7.11) |
+| `label` | Named jump target declaration for `jmp` (see §7.11) |
 
 **Literals:**
 | Keyword | Purpose |
@@ -2660,6 +2662,82 @@ fn handle_case(x: int) {
 ```
 
 **Warning:** Misuse of `assume` or `unreachable` produces silent miscompilation, not a crash. Reserve them for invariants you can prove. Prefer `assert` when in doubt.
+
+---
+
+### 7.11 `jmp` / `label` — Deprecated Unconditional Jump
+
+> **⚠ Deprecated.** `jmp` emits a compile-time deprecation warning every time it is used. It will be removed in a future version. Always prefer structured control flow (`if`, `while`, `for`, `break`, `continue`).
+
+`jmp` performs an unconditional branch to a named **label** in the **same function**. Labels are declared with the `label` keyword.
+
+**Syntax:**
+```
+jmp label_name;
+...
+label label_name:
+```
+
+**Semantics:**
+- Execution transfers immediately to the statement following `label name:`.
+- Code between a `jmp` and its target label is unreachable (skipped entirely).
+- A `label` declaration does not end the current block; control falls through from the preceding statement unless there is a `jmp` or other terminator above it.
+- Labels are function-scoped. You cannot jump to a label in a different function.
+- Both forward jumps (label appears later in source) and backward jumps (label appears earlier — manual loop) are supported.
+
+**Example — forward jump (skip a block):**
+```omscript
+fn main() -> int {
+    jmp done;          // ⚠ deprecated warning emitted here
+    var x: int = 42;   // error — 'jmp done' jumps forward over 'x'
+    label done:
+    return 0;
+}
+```
+
+> The compiler **errors** if a forward `jmp` skips over a `var` declaration at the same block level, because the initializer would be bypassed. Move all declarations before the `jmp`, or declare them after the label.
+
+**Correct pattern — declarations before the jump:**
+```omscript
+fn main() -> int {
+    var x: int = 0;
+    jmp done;       // ⚠ deprecated
+    x = 42;         // skipped; x remains 0
+    label done:
+    return x;       // returns 0
+}
+```
+
+**Example — backward jump (manual counted loop):**
+```omscript
+fn sum_to_four() -> int {
+    var i: int = 1;
+    var total: int = 0;
+    label loop_top:        // ← loop entry
+    total = total + i;
+    i = i + 1;
+    if (i <= 4) {
+        jmp loop_top;      // ⚠ deprecated — prefer `for i in 1..=4 { total += i; }`
+    }
+    return total;  // 10
+}
+```
+
+**Compile-time safety checks:**
+
+| Violation | Severity | Message |
+|-----------|----------|---------|
+| Label not defined in current function | **Error** | `'jmp foo': label 'foo' is not defined in this function` |
+| Forward jump over `var` declaration | **Error** | `'jmp after' at line N jumps forward over declaration of variable 'x'...` |
+| Any use of `jmp` | **Warning** | `'jmp' is deprecated; prefer structured control flow (if / while / for / break / continue)` |
+
+**Migration guide:**
+| `jmp` pattern | Preferred replacement |
+|---------------|-----------------------|
+| Skip optional block | `if (!condition) { ... }` |
+| Retry / retry loop | `while (condition) { ... }` |
+| Counted loop | `for i in start..end { ... }` |
+| Early exit from nested loops | `break` with labelled loops (planned) |
 
 ---
 

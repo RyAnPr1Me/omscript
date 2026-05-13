@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-56: `jmp` keyword — deprecated unconditional jump** (`include/lexer.h`, `src/lexer.cpp`, `include/ast.h`, `include/parser.h`, `src/parser.cpp`, `include/codegen.h`, `src/codegen_stmt.cpp`, `src/codegen.cpp`, `LANGUAGE_REFERENCE.md`):
+  - **`jmp label_name;`** — unconditional branch to a named `label` target within the current function. Emits a compile-time deprecation warning every time it is used, reminding developers to prefer structured control flow (`if`/`while`/`for`/`break`/`continue`). Jumps are intra-function only; cross-function jumps are impossible by design.
+  - **`label name:`** — declares a named jump target. Labels are function-scoped and pre-created before function body generation so forward references resolve correctly.
+  - **Safety checks (parse-time)**:
+    - *Undefined label* → **error**: `'jmp foo': label 'foo' is not defined in this function`.
+    - *Forward jump over `var` declaration* → **error**: `'jmp after' at line N jumps forward over declaration of variable 'x' at line M; the initializer would be skipped.` Move the variable before the `jmp` or after the label.
+  - **LLVM codegen**: `prescanLabels()` pre-creates a BasicBlock for every `label` before the function body is generated. `generateJmp()` emits an unconditional `br` to the target block and creates a dead follow-up block for any subsequent unreachable code. `generateLabel()` emits a fall-through branch to the label block (if the current block has no terminator) and moves the insert point into that block.
+  - **Keywords added**: `jmp` and `label` are now reserved keywords and cannot be used as identifiers.
+  - **Test**: `examples/jmp_test.om` (exit 7) — covers forward jump, backward jump (counted loop), and chained forward jumps. All 440 tests pass.
+
 - **Round-55: Phase 1 — Preprocessor Removal + Phase 2 — Comptime Enhancements** (`src/compiler.cpp`, `src/parser.cpp`, `src/lexer.cpp`, `src/main.cpp`, `include/compiler.h`, `include/parser.h`, `CMakeLists.txt`, `LANGUAGE_REFERENCE.md`):
   - **Preprocessor removed** (`src/preprocessor.cpp` + `include/preprocessor.h` deleted): The OmScript preprocessor and all `#`-directive support has been removed. Any `#` character that reaches the lexer now emits a clear compile-time error message with a migration guide pointing users to `comptime {}` blocks. The preprocessor call has been removed from all code paths in `compiler.cpp` and `main.cpp` (lex/parse/dry-run/emit-obj). The import parser no longer preprocesses imported files. `CMakeLists.txt` updated to exclude `preprocessor.cpp`.
   - **`comptime if COND { ... }` top-level shorthand** (`src/parser.cpp`): A new syntactic form `comptime if COND { body }` is now accepted at the top level of any source file as sugar for `comptime { if (COND) { body } }`. The condition is evaluated without surrounding parentheses, enabling bare boolean flag checks: `comptime if BUILD_DEBUG { const LOG_LEVEL: int = 2; }`. Full `else if` and `else` chains are supported.

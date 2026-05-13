@@ -85,7 +85,10 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"shared", TokenType::SHARED},        // Ω spec §3.1: read-only aliasable ownership
     {"own", TokenType::OWN},
     {"construct", TokenType::CONSTRUCT},  // in-place field initialisation
-    {"namespace", TokenType::NAMESPACE}}; // user-defined namespace block
+    {"namespace", TokenType::NAMESPACE},  // user-defined namespace block
+    {"jmp",       TokenType::JMP},        // unconditional label jump (deprecated)
+    {"label",     TokenType::LABEL},      // named jump target declaration
+};
 
 /// Throw a DiagnosticError with the given message and source location.
 [[noreturn]] [[gnu::cold]] static void lexError(const std::string& msg, int ln, int col) {

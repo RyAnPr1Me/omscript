@@ -5221,6 +5221,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     funcArenaUsedBytes_ = 0u;
     arenaPtrVarNames_.clear();
     lastAllocWasArena_ = false;
+    // Reset per-function jmp/label state.
+    labelBlocks_.clear();
 
     // Expose all global variables inside this function so that reads,
     // writes, and assignments resolve through the normal namedValues path.
@@ -5393,6 +5395,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
 
     // Generate function body
+    // Pre-scan for label statements so that forward jumps resolve correctly.
+    prescanLabels(func->body.get(), function);
     generateBlock(func->body.get());
 
     // Add default return if needed
@@ -5550,6 +5554,12 @@ void CodeGenerator::generateStatement(Statement* stmt) {
         break;
     case ASTNodeType::PIPELINE_STMT:
         generatePipeline(static_cast<PipelineStmt*>(stmt));
+        break;
+    case ASTNodeType::JMP_STMT:
+        generateJmp(static_cast<JmpStmt*>(stmt));
+        break;
+    case ASTNodeType::LABEL_STMT:
+        generateLabel(static_cast<LabelStmt*>(stmt));
         break;
     default:
         codegenError("Unknown statement type", stmt);

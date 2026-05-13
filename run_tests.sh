@@ -910,6 +910,7 @@ ptest_program "examples/http_test.om" 0
 ptest_program "examples/predefined_constants_test.om" 23
 ptest_program "examples/addr_of_test.om" 5
 ptest_program "examples/as_operator_test.om" 10
+ptest_program "examples/jmp_test.om" 7
 flush_ptests
 
 echo ""

@@ -73,7 +73,9 @@ enum class ASTNodeType {
     OWN_STMT,          // own x;   — explicitly assert unique ownership (Ω spec §3.1)
     DEREF_ASSIGN_EXPR, // *p = v — write through pointer (Ω spec §4.2)
     CONSTRUCT_STMT,    // construct ptr { field: val, ... }; — in-place field init
-    NEW_CONSTRUCT_EXPR // new T { field: val, ... } — alloc<T>(1) + field init
+    NEW_CONSTRUCT_EXPR, // new T { field: val, ... } — alloc<T>(1) + field init
+    JMP_STMT,          // jmp label; — unconditional jump to a named label (deprecated)
+    LABEL_STMT,        // label name: — declares a named jump target in the current function
 };
 
 class ASTNode {
@@ -900,6 +902,31 @@ class OwnStmt : public Statement {
     std::string varName;
 
     explicit OwnStmt(const std::string& name) : Statement(ASTNodeType::OWN_STMT), varName(name) {}
+};
+
+/// `jmp label_name;` — unconditional branch to a named `label` in the same
+/// function.
+///
+/// **Deprecated:** `jmp` always emits a compile-time deprecation warning.
+/// Prefer structured control flow (`if`, `while`, `for`, `break`, `continue`).
+/// The compiler rejects obviously unsafe jumps:
+///   - jumping to an undefined label
+///   - jumping forward over a `var` declaration (skipped initialization)
+class JmpStmt : public Statement {
+  public:
+    std::string targetLabel; ///< Name of the `label` to jump to.
+
+    explicit JmpStmt(const std::string& target) : Statement(ASTNodeType::JMP_STMT), targetLabel(target) {}
+};
+
+/// `label name:` — declares a named jump target reachable by `jmp`.
+/// Labels are scoped to the enclosing function; they cannot be jumped to from
+/// a different function.
+class LabelStmt : public Statement {
+  public:
+    std::string labelName; ///< The unique label identifier within this function.
+
+    explicit LabelStmt(const std::string& name) : Statement(ASTNodeType::LABEL_STMT), labelName(name) {}
 };
 
 /// `comptime { statements... }` — compile-time evaluated block expression.

@@ -4529,4 +4529,85 @@ std::unordered_map<std::string, bool> CodeGenerator::preScanLoopArrayAccesses(co
     return goodArrays;
 }
 
+// ── jmp / label codegen ──────────────────────────────────────────────────────
+
+void CodeGenerator::prescanLabels(Statement* body, llvm::Function* fn) {
+    if (!body) return;
+    if (body->type == ASTNodeType::LABEL_STMT) {
+        const auto* ls = static_cast<const LabelStmt*>(body);
+        const std::string bbName = "label." + ls->labelName;
+        if (!labelBlocks_.count(ls->labelName)) {
+            auto* bb = llvm::BasicBlock::Create(*context, bbName, fn);
+            labelBlocks_[ls->labelName] = bb;
+        }
+        return;
+    }
+    // Recurse into compound statements.
+    switch (body->type) {
+    case ASTNodeType::BLOCK:
+        for (const auto& s : static_cast<const BlockStmt*>(body)->statements)
+            prescanLabels(s.get(), fn);
+        break;
+    case ASTNodeType::IF_STMT: {
+        const auto* is = static_cast<const IfStmt*>(body);
+        prescanLabels(is->thenBranch.get(), fn);
+        prescanLabels(is->elseBranch.get(), fn);
+        break;
+    }
+    case ASTNodeType::WHILE_STMT:
+        prescanLabels(static_cast<const WhileStmt*>(body)->body.get(), fn);
+        break;
+    case ASTNodeType::DO_WHILE_STMT:
+        prescanLabels(static_cast<const DoWhileStmt*>(body)->body.get(), fn);
+        break;
+    case ASTNodeType::FOR_STMT:
+        prescanLabels(static_cast<const ForStmt*>(body)->body.get(), fn);
+        break;
+    case ASTNodeType::FOR_EACH_STMT:
+        prescanLabels(static_cast<const ForEachStmt*>(body)->body.get(), fn);
+        break;
+    default:
+        break;
+    }
+}
+
+void CodeGenerator::generateJmp(JmpStmt* stmt) {
+    // Look up the pre-created target BasicBlock.
+    auto it = labelBlocks_.find(stmt->targetLabel);
+    if (it == labelBlocks_.end()) {
+        // This should have been caught by the parser, but guard defensively.
+        codegenError("'jmp " + stmt->targetLabel + "': label '" + stmt->targetLabel +
+                         "' not found in current function (parser validation failed)",
+                     stmt);
+    }
+    llvm::BasicBlock* target = it->second;
+
+    // Terminate the current block with an unconditional branch.
+    if (!builder->GetInsertBlock()->getTerminator())
+        builder->CreateBr(target);
+
+    // Any statements after an unconditional jmp in the same block are
+    // unreachable.  Create a new dead block so that subsequent generateStatement
+    // calls have a valid insert point (LLVM requires a current BB).
+    llvm::Function* fn = builder->GetInsertBlock()->getParent();
+    auto* deadBB = llvm::BasicBlock::Create(*context, "jmp.dead", fn);
+    builder->SetInsertPoint(deadBB);
+}
+
+void CodeGenerator::generateLabel(LabelStmt* stmt) {
+    auto it = labelBlocks_.find(stmt->labelName);
+    if (it == labelBlocks_.end()) {
+        codegenError("label '" + stmt->labelName + "' was not pre-scanned (internal compiler error)", stmt);
+    }
+    llvm::BasicBlock* labelBB = it->second;
+
+    // If the current block has no terminator, fall through into the label block
+    // with an unconditional branch (makes the CFG well-formed).
+    if (!builder->GetInsertBlock()->getTerminator())
+        builder->CreateBr(labelBB);
+
+    // Continue code generation in the label's block.
+    builder->SetInsertPoint(labelBB);
+}
+
 } // namespace omscript

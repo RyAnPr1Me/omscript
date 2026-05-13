@@ -448,6 +448,11 @@ class CodeGenerator {
     // Maps string error codes to their assigned integer IDs for this module.
     std::unordered_map<std::string, int64_t> catchStringIds_;
     int64_t nextCatchStringId_ = 1; // start at 1; 0 reserved for "no error"
+
+    /// Per-function `label` BasicBlock map: label name → pre-created BB.
+    /// Populated by prescanLabels() before the function body is generated.
+    /// Cleared at the start of each function.
+    llvm::StringMap<llvm::BasicBlock*> labelBlocks_;
     // Default (unmatched-throw) block used by the jump table's default arm.
     llvm::BasicBlock* catchDefaultBB_ = nullptr;
     bool inOptMaxFunction;
@@ -967,6 +972,14 @@ class CodeGenerator {
     void generateOwn(OwnStmt* stmt);                           ///< own x;    — Ω spec §3.1
     void generateConstruct(ConstructStmt* stmt);               ///< construct ptr { field: val, ... };
     llvm::Value* generateNewConstruct(NewConstructExpr* expr); ///< new T { field: val, ... }
+
+    // ── jmp / label ──────────────────────────────────────────────────────────
+    /// Pre-scan @p body (recursively) for LabelStmt nodes and create one LLVM
+    /// BasicBlock per label in the current function.  Must be called before
+    /// generating any statement in the function so that forward jumps resolve.
+    void prescanLabels(Statement* body, llvm::Function* fn);
+    void generateJmp(JmpStmt* stmt);     ///< jmp label; → br label %BB
+    void generateLabel(LabelStmt* stmt); ///< label name: → set insert point to pre-created BB
     /// Shared back-end: emit one GEP+store per field into @p basePtr.
     /// Reused by both generateConstruct (statement) and generateNewConstruct (expression).
     void emitConstructFieldsInto(llvm::Value* basePtr, const std::string& structHint,
