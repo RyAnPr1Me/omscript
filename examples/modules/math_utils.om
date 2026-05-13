@@ -1,3 +1,4 @@
+import std;
 fn square(x) {
     return x * x;
 }

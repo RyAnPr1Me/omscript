@@ -75,8 +75,7 @@ struct StringEqual {
     /// Required for heterogeneous lookup.
     using is_transparent = void;
 
-    template<class A, class B>
-    [[nodiscard]] bool operator()(const A& a, const B& b) const noexcept {
+    template <class A, class B> [[nodiscard]] bool operator()(const A& a, const B& b) const noexcept {
         return std::string_view(a) == std::string_view(b);
     }
 };
@@ -95,7 +94,7 @@ struct StringEqual {
 /// The arena grows by doubling slab size (starting from kInitialSlabSize up
 /// to kMaxSlabSize) to amortise large-object allocation cost.
 class BumpAllocator {
-public:
+  public:
     /// Default slab size (64 KiB).  Adjust per use-case.
     static constexpr size_t kInitialSlabSize = 64u * 1024u;
     /// Maximum slab size cap (4 MiB) to avoid over-committing virtual memory.
@@ -104,16 +103,13 @@ public:
     BumpAllocator() = default;
 
     // Non-copyable (slabs are owned, raw-pointer content would alias).
-    BumpAllocator(const BumpAllocator&)            = delete;
+    BumpAllocator(const BumpAllocator&) = delete;
     BumpAllocator& operator=(const BumpAllocator&) = delete;
 
     // Movable.
     BumpAllocator(BumpAllocator&& o) noexcept
-        : slabs_(std::move(o.slabs_)), slabSizes_(std::move(o.slabSizes_)),
-          dtors_(std::move(o.dtors_)),
-          cur_(o.cur_), end_(o.end_),
-          bytesAllocated_(o.bytesAllocated_), bytesUsed_(o.bytesUsed_),
-          nextSlabSize_(o.nextSlabSize_) {
+        : slabs_(std::move(o.slabs_)), slabSizes_(std::move(o.slabSizes_)), dtors_(std::move(o.dtors_)), cur_(o.cur_),
+          end_(o.end_), bytesAllocated_(o.bytesAllocated_), bytesUsed_(o.bytesUsed_), nextSlabSize_(o.nextSlabSize_) {
         o.cur_ = o.end_ = nullptr;
         o.bytesAllocated_ = o.bytesUsed_ = 0;
         o.nextSlabSize_ = kInitialSlabSize;
@@ -121,13 +117,15 @@ public:
     BumpAllocator& operator=(BumpAllocator&& o) noexcept {
         if (this != &o) {
             reset();
-            for (char* s : slabs_) ::free(s);
+            for (char* s : slabs_)
+                ::free(s);
             slabs_.clear();
             slabSizes_.clear();
             slabs_ = std::move(o.slabs_);
             slabSizes_ = std::move(o.slabSizes_);
             dtors_ = std::move(o.dtors_);
-            cur_ = o.cur_; end_ = o.end_;
+            cur_ = o.cur_;
+            end_ = o.end_;
             bytesAllocated_ = o.bytesAllocated_;
             bytesUsed_ = o.bytesUsed_;
             nextSlabSize_ = o.nextSlabSize_;
@@ -206,10 +204,9 @@ public:
     /// or when the arena is destroyed.
     ///
     /// Returns a raw non-owning pointer.  The arena owns the object's lifetime.
-    template<class T, class... Args>
-    [[nodiscard]] T* make(Args&&... args) {
+    template <class T, class... Args> [[nodiscard]] T* make(Args&&... args) {
         void* mem = alloc(sizeof(T), alignof(T));
-        T* obj = ::new(mem) T(std::forward<Args>(args)...);
+        T* obj = ::new (mem) T(std::forward<Args>(args)...);
         // Only register destructor if the type is non-trivially destructible.
         if constexpr (!std::is_trivially_destructible_v<T>) {
             dtors_.push_back([obj]() noexcept { obj->~T(); });
@@ -250,23 +247,29 @@ public:
     // ── Statistics ────────────────────────────────────────────────────────
 
     /// Total bytes allocated from the OS (across all slabs).
-    [[nodiscard]] size_t bytesAllocated() const noexcept { return bytesAllocated_; }
+    [[nodiscard]] size_t bytesAllocated() const noexcept {
+        return bytesAllocated_;
+    }
 
     /// Bytes currently in-use (sum of all live alloc() calls since last reset).
-    [[nodiscard]] size_t bytesUsed() const noexcept { return bytesUsed_; }
+    [[nodiscard]] size_t bytesUsed() const noexcept {
+        return bytesUsed_;
+    }
 
     /// Number of slabs currently held.
-    [[nodiscard]] size_t slabCount() const noexcept { return slabs_.size(); }
+    [[nodiscard]] size_t slabCount() const noexcept {
+        return slabs_.size();
+    }
 
-private:
-    std::vector<char*>              slabs_;
-    std::vector<size_t>             slabSizes_;  // actual allocated size of each slab
-    std::vector<void(*)() noexcept> dtors_;  // registered object destructors (type-erased)
-    char*  cur_              = nullptr;
-    char*  end_              = nullptr;
-    size_t bytesAllocated_   = 0;
-    size_t bytesUsed_        = 0;
-    size_t nextSlabSize_     = kInitialSlabSize;
+  private:
+    std::vector<char*> slabs_;
+    std::vector<size_t> slabSizes_;          // actual allocated size of each slab
+    std::vector<void (*)() noexcept> dtors_; // registered object destructors (type-erased)
+    char* cur_ = nullptr;
+    char* end_ = nullptr;
+    size_t bytesAllocated_ = 0;
+    size_t bytesUsed_ = 0;
+    size_t nextSlabSize_ = kInitialSlabSize;
 
     /// Allocate a new slab large enough for at least @p minSize bytes.
     void allocSlab(size_t minSize) {

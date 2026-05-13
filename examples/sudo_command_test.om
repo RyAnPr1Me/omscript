@@ -1,3 +1,4 @@
+import std;
 // Tests for sudo_command(cmd, password)
 // The function executes a shell command with sudo -S (password via stdin).
 // Since sudo is not available with a known password in the test environment,

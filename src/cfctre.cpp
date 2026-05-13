@@ -9,8 +9,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cctype>
-#include <cmath>
 #include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -53,56 +53,78 @@ CTValue CTValue::fromBool(bool v) noexcept {
 CTValue CTValue::fromString(std::string s) {
     CTValue r;
     r.kind = CTValueKind::CONCRETE_STRING;
-    r.str  = std::move(s);
+    r.str = std::move(s);
     return r;
 }
 
 CTValue CTValue::fromArray(CTArrayHandle h) noexcept {
     CTValue r;
     r.kind = CTValueKind::CONCRETE_ARRAY;
-    r.arr  = h;
+    r.arr = h;
     return r;
 }
 
 int64_t CTValue::asI64() const noexcept {
     switch (kind) {
-    case CTValueKind::CONCRETE_I64:  return scalar.i64;
-    case CTValueKind::CONCRETE_U64:  return static_cast<int64_t>(scalar.u64);
-    case CTValueKind::CONCRETE_BOOL: return scalar.b ? 1 : 0;
-    case CTValueKind::CONCRETE_F64:  return static_cast<int64_t>(scalar.f64);
-    default: return 0;
+    case CTValueKind::CONCRETE_I64:
+        return scalar.i64;
+    case CTValueKind::CONCRETE_U64:
+        return static_cast<int64_t>(scalar.u64);
+    case CTValueKind::CONCRETE_BOOL:
+        return scalar.b ? 1 : 0;
+    case CTValueKind::CONCRETE_F64:
+        return static_cast<int64_t>(scalar.f64);
+    default:
+        return 0;
     }
 }
 
 uint64_t CTValue::asU64() const noexcept {
     switch (kind) {
-    case CTValueKind::CONCRETE_U64:  return scalar.u64;
-    case CTValueKind::CONCRETE_I64:  return static_cast<uint64_t>(scalar.i64);
-    case CTValueKind::CONCRETE_BOOL: return scalar.b ? 1 : 0;
-    case CTValueKind::CONCRETE_F64:  return static_cast<uint64_t>(scalar.f64);
-    default: return 0;
+    case CTValueKind::CONCRETE_U64:
+        return scalar.u64;
+    case CTValueKind::CONCRETE_I64:
+        return static_cast<uint64_t>(scalar.i64);
+    case CTValueKind::CONCRETE_BOOL:
+        return scalar.b ? 1 : 0;
+    case CTValueKind::CONCRETE_F64:
+        return static_cast<uint64_t>(scalar.f64);
+    default:
+        return 0;
     }
 }
 
 double CTValue::asF64() const noexcept {
     switch (kind) {
-    case CTValueKind::CONCRETE_F64:  return scalar.f64;
-    case CTValueKind::CONCRETE_I64:  return static_cast<double>(scalar.i64);
-    case CTValueKind::CONCRETE_U64:  return static_cast<double>(scalar.u64);
-    case CTValueKind::CONCRETE_BOOL: return scalar.b ? 1.0 : 0.0;
-    default: return 0.0;
+    case CTValueKind::CONCRETE_F64:
+        return scalar.f64;
+    case CTValueKind::CONCRETE_I64:
+        return static_cast<double>(scalar.i64);
+    case CTValueKind::CONCRETE_U64:
+        return static_cast<double>(scalar.u64);
+    case CTValueKind::CONCRETE_BOOL:
+        return scalar.b ? 1.0 : 0.0;
+    default:
+        return 0.0;
     }
 }
 
 bool CTValue::asBool() const noexcept {
     switch (kind) {
-    case CTValueKind::CONCRETE_BOOL: return scalar.b;
-    case CTValueKind::CONCRETE_I64:  return scalar.i64 != 0;
-    case CTValueKind::CONCRETE_U64:  return scalar.u64 != 0;
-    case CTValueKind::CONCRETE_F64:  return scalar.f64 != 0.0;
-    case CTValueKind::CONCRETE_STRING: return !str.empty();
-    case CTValueKind::CONCRETE_ARRAY:  return arr != CT_NULL_HANDLE;
-    default: return false;
+    case CTValueKind::CONCRETE_BOOL:
+        return scalar.b;
+    case CTValueKind::CONCRETE_I64:
+        return scalar.i64 != 0;
+    case CTValueKind::CONCRETE_U64:
+        return scalar.u64 != 0;
+    case CTValueKind::CONCRETE_F64:
+        return scalar.f64 != 0.0;
+    case CTValueKind::CONCRETE_STRING:
+        return !str.empty();
+    case CTValueKind::CONCRETE_ARRAY:
+        return arr != CT_NULL_HANDLE;
+    default:
+        return false;
     }
 }
 
@@ -120,17 +142,15 @@ bool CTValue::isTruthy() const noexcept {
 
 // Append a compact, deterministic representation to `out` for memoisation.
 void CTValue::appendMemoHash(std::string& out) const {
-    char buf[32];                           // enough for "X:" + 20-digit int64
+    char buf[32]; // enough for "X:" + 20-digit int64
     switch (kind) {
     case CTValueKind::CONCRETE_I64: {
-        const int n = std::snprintf(buf, sizeof(buf), "I:%lld",
-                              static_cast<long long>(scalar.i64));
+        const int n = std::snprintf(buf, sizeof(buf), "I:%lld", static_cast<long long>(scalar.i64));
         out.append(buf, static_cast<size_t>(n));
         return;
     }
     case CTValueKind::CONCRETE_U64: {
-        const int n = std::snprintf(buf, sizeof(buf), "U:%llu",
-                              static_cast<unsigned long long>(scalar.u64));
+        const int n = std::snprintf(buf, sizeof(buf), "U:%llu", static_cast<unsigned long long>(scalar.u64));
         out.append(buf, static_cast<size_t>(n));
         return;
     }
@@ -147,8 +167,7 @@ void CTValue::appendMemoHash(std::string& out) const {
         out.append(str);
         return;
     case CTValueKind::CONCRETE_ARRAY: {
-        const int n = std::snprintf(buf, sizeof(buf), "A:%llu",
-                              static_cast<unsigned long long>(arr));
+        const int n = std::snprintf(buf, sizeof(buf), "A:%llu", static_cast<unsigned long long>(arr));
         out.append(buf, static_cast<size_t>(n));
         return;
     }
@@ -169,7 +188,7 @@ void CTValue::appendMemoHash(std::string& out) const {
 
 std::string CTValue::memoHash() const {
     std::string result;
-    result.reserve(24);                     // typical: "I:-1234567890" fits in SSO
+    result.reserve(24); // typical: "I:-1234567890" fits in SSO
     appendMemoHash(result);
     return result;
 }
@@ -179,21 +198,29 @@ static thread_local uint32_t g_symIdCounter{0};
 
 CTValue CTValue::symbolic() noexcept {
     CTValue r;
-    r.kind  = CTValueKind::SYMBOLIC;
+    r.kind = CTValueKind::SYMBOLIC;
     r.symId = ++g_symIdCounter;
     return r;
 }
 
 bool CTValue::operator==(const CTValue& o) const noexcept {
-    if (kind != o.kind) return false;
+    if (kind != o.kind)
+        return false;
     switch (kind) {
-    case CTValueKind::CONCRETE_I64:    return scalar.i64 == o.scalar.i64;
-    case CTValueKind::CONCRETE_U64:    return scalar.u64 == o.scalar.u64;
-    case CTValueKind::CONCRETE_F64:    return scalar.f64 == o.scalar.f64;
-    case CTValueKind::CONCRETE_BOOL:   return scalar.b   == o.scalar.b;
-    case CTValueKind::CONCRETE_STRING: return str == o.str;
-    case CTValueKind::CONCRETE_ARRAY:  return arr == o.arr;
-    case CTValueKind::UNINITIALIZED:   return true;
+    case CTValueKind::CONCRETE_I64:
+        return scalar.i64 == o.scalar.i64;
+    case CTValueKind::CONCRETE_U64:
+        return scalar.u64 == o.scalar.u64;
+    case CTValueKind::CONCRETE_F64:
+        return scalar.f64 == o.scalar.f64;
+    case CTValueKind::CONCRETE_BOOL:
+        return scalar.b == o.scalar.b;
+    case CTValueKind::CONCRETE_STRING:
+        return str == o.str;
+    case CTValueKind::CONCRETE_ARRAY:
+        return arr == o.arr;
+    case CTValueKind::UNINITIALIZED:
+        return true;
     case CTValueKind::SYMBOLIC:
         // Two symbolic values are "equal" iff they refer to the same symbolic
         return symId != 0 && symId == o.symId;
@@ -203,8 +230,7 @@ bool CTValue::operator==(const CTValue& o) const noexcept {
 
 // ═══════════════════════════════════════════════════════════════════════════
 
-CTArray::CTArray(uint64_t n, const CTValue& fill)
-    : len(n), data(static_cast<size_t>(n), fill) {}
+CTArray::CTArray(uint64_t n, const CTValue& fill) : len(n), data(static_cast<size_t>(n), fill) {}
 
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -216,28 +242,33 @@ CTArrayHandle CTHeap::alloc(uint64_t n, const CTValue& fill) {
 
 CTValue CTHeap::load(CTArrayHandle h, int64_t idx) const {
     auto it = arrays_.find(h);
-    if (it == arrays_.end()) return CTValue::uninit();
+    if (it == arrays_.end())
+        return CTValue::uninit();
     const CTArray& arr = it->second;
-    if (idx < 0 || static_cast<uint64_t>(idx) >= arr.len) return CTValue::uninit();
+    if (idx < 0 || static_cast<uint64_t>(idx) >= arr.len)
+        return CTValue::uninit();
     return arr.data[static_cast<size_t>(idx)];
 }
 
 void CTHeap::store(CTArrayHandle h, int64_t idx, CTValue val) {
     auto it = arrays_.find(h);
-    if (it == arrays_.end()) return;
+    if (it == arrays_.end())
+        return;
     CTArray& arr = it->second;
-    if (idx < 0 || static_cast<uint64_t>(idx) >= arr.len) return;
+    if (idx < 0 || static_cast<uint64_t>(idx) >= arr.len)
+        return;
     arr.data[static_cast<size_t>(idx)] = std::move(val);
-    mutableHandles_.insert(h);   // Phase E: mark written
+    mutableHandles_.insert(h); // Phase E: mark written
 }
 
 bool CTHeap::push(CTArrayHandle h, CTValue val) {
     auto it = arrays_.find(h);
-    if (it == arrays_.end()) return false;
+    if (it == arrays_.end())
+        return false;
     CTArray& arr = it->second;
     arr.data.push_back(std::move(val));
     ++arr.len;
-    mutableHandles_.insert(h);   // Phase E: mark written
+    mutableHandles_.insert(h); // Phase E: mark written
     return true;
 }
 
@@ -252,7 +283,7 @@ bool CTHeap::exists(CTArrayHandle h) const {
 
 void CTHeap::freeArray(CTArrayHandle h) {
     arrays_.erase(h);
-    mutableHandles_.erase(h);   // Phase E: clean up mutability record
+    mutableHandles_.erase(h); // Phase E: clean up mutability record
 }
 
 bool CTHeap::isImmutable(CTArrayHandle h) const noexcept {
@@ -301,7 +332,8 @@ bool CTEngine::isPure(const std::string& name) const {
 
 std::vector<CTValue> CTEngine::extractArray(CTArrayHandle h) const {
     const CTArray* arr = heap_.get(h);
-    if (!arr) return {};
+    if (!arr)
+        return {};
     return arr->data;
 }
 
@@ -311,9 +343,11 @@ uint64_t CTEngine::arrayLength(CTArrayHandle h) const {
 
 CTArrayHandle CTEngine::snapshotArray(CTArrayHandle src) {
     const CTArray* orig = heap_.get(src);
-    if (!orig) return CT_NULL_HANDLE;
+    if (!orig)
+        return CT_NULL_HANDLE;
     // Phase E: immutable arrays can be aliased directly — no copy needed.
-    if (heap_.isImmutable(src)) return src;
+    if (heap_.isImmutable(src))
+        return src;
     const CTArrayHandle dst = heap_.alloc(orig->len);
     CTArray* copy = heap_.getMut(dst);
     copy->data = orig->data;
@@ -322,8 +356,7 @@ CTArrayHandle CTEngine::snapshotArray(CTArrayHandle src) {
 
 // ── Specialisation key ─────────────────────────────────────────────────────
 
-std::string CTEngine::specializationKey(const std::string& fnName,
-                                         const std::vector<CTValue>& args) const {
+std::string CTEngine::specializationKey(const std::string& fnName, const std::vector<CTValue>& args) const {
     std::string key = fnName + "|";
     for (const auto& a : args) {
         key += a.memoHash();
@@ -334,23 +367,24 @@ std::string CTEngine::specializationKey(const std::string& fnName,
 
 // ── Main executeFunction entry points ─────────────────────────────────────
 
-std::optional<CTValue> CTEngine::executeFunction(const std::string&          fnName,
-                                                  const std::vector<CTValue>& args) {
+std::optional<CTValue> CTEngine::executeFunction(const std::string& fnName, const std::vector<CTValue>& args) {
     auto it = functions_.find(fnName);
-    if (it == functions_.end()) return std::nullopt;
+    if (it == functions_.end())
+        return std::nullopt;
     return executeFunction(it->second, args);
 }
 
-std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
-                                                  const std::vector<CTValue>& args) {
-    if (!fn || !fn->body) return std::nullopt;
-    if (currentDepth_ >= kMaxDepth)  return std::nullopt;
+std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl* fn, const std::vector<CTValue>& args) {
+    if (!fn || !fn->body)
+        return std::nullopt;
+    if (currentDepth_ >= kMaxDepth)
+        return std::nullopt;
 
     // Build memoisation key.
     // Use appendMemoHash to avoid per-argument temporary strings.
     CTMemoKey key;
     key.fnName = fn->name;
-    key.argsHash.reserve(args.size() * 24);   // typical arg hash ≤ ~22 chars
+    key.argsHash.reserve(args.size() * 24); // typical arg hash ≤ ~22 chars
     for (const auto& a : args) {
         a.appendMemoHash(key.argsHash);
         key.argsHash.push_back('|');
@@ -371,25 +405,30 @@ std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
 
     // Build frame.
     CTFrame frame;
-    frame.fn   = fn;
+    frame.fn = fn;
     frame.heap = &heap_;
-    if (fn->parameters.size() != args.size()) return std::nullopt;
+    if (fn->parameters.size() != args.size())
+        return std::nullopt;
     bool hasSymbolic = false;
     for (size_t i = 0; i < args.size(); ++i) {
         frame.locals[fn->parameters[i].name] = args[i];
-        if (args[i].isSymbolic()) hasSymbolic = true;
+        if (args[i].isSymbolic())
+            hasSymbolic = true;
     }
 
     // Execute.
     ++currentDepth_;
-    if (currentDepth_ == 1) fuel_ = 0;  // reset only for the outermost call
+    if (currentDepth_ == 1)
+        fuel_ = 0; // reset only for the outermost call
     const bool ok = executeBody(frame, fn->body.get());
     --currentDepth_;
 
-    if (!ok && !frame.hasReturned && !frame.hasLastBare) return std::nullopt;
+    if (!ok && !frame.hasReturned && !frame.hasLastBare)
+        return std::nullopt;
 
     CTValue result;
-    if (frame.hasReturned)  result = frame.returnValue;
+    if (frame.hasReturned)
+        result = frame.returnValue;
     else if (frame.hasLastBare) {
         // IMPORTANT: only fall back to lastBareExpr if the function genuinely
         // has no return statement (i.e. the body ran to completion without a
@@ -398,13 +437,15 @@ std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
         // fully evaluate the return expression.  In that case we MUST NOT use
         // lastBareExpr (which is a side-effecting expression's old/pre value,
         // e.g. the old value of arr[i] before arr[i]++).
-        if (!ok) return std::nullopt;   // body failed → don't use stale lastBare
+        if (!ok)
+            return std::nullopt; // body failed → don't use stale lastBare
         result = frame.lastBareExpr;
-    }
-    else                    return std::nullopt;
+    } else
+        return std::nullopt;
 
     // SYMBOLIC result means we couldn't fully evaluate — don't fold to constant.
-    if (result.isSymbolic()) return std::nullopt;
+    if (result.isSymbolic())
+        return std::nullopt;
 
     // Don't cache results produced with symbolic args: the result is only
     if (!hasSymbolic) {
@@ -430,26 +471,31 @@ std::optional<CTValue> CTEngine::executeFunction(const FunctionDecl*         fn,
 
 // ── evalComptimeBlock ──────────────────────────────────────────────────────
 
-std::optional<CTValue> CTEngine::evalComptimeBlock(
-    const BlockStmt* body,
-    const std::unordered_map<std::string, CTValue>& env)
-{
-    if (!body) return std::nullopt;
-    if (currentDepth_ >= kMaxDepth) return std::nullopt;
+std::optional<CTValue> CTEngine::evalComptimeBlock(const BlockStmt* body,
+                                                   const std::unordered_map<std::string, CTValue>& env) {
+    if (!body)
+        return std::nullopt;
+    if (currentDepth_ >= kMaxDepth)
+        return std::nullopt;
 
     CTFrame frame;
-    frame.fn   = nullptr;
+    frame.fn = nullptr;
     frame.heap = &heap_;
-    for (auto& [k, v] : env) frame.locals[k] = v;
+    for (auto& [k, v] : env)
+        frame.locals[k] = v;
 
     ++currentDepth_;
-    if (currentDepth_ == 1) fuel_ = 0;  // reset only for the outermost call
+    if (currentDepth_ == 1)
+        fuel_ = 0; // reset only for the outermost call
     const bool ok = executeBody(frame, body);
     --currentDepth_;
 
-    if (frame.hasReturned)  return frame.returnValue;
-    if (frame.hasLastBare)  return frame.lastBareExpr;
-    if (!ok) return std::nullopt;
+    if (frame.hasReturned)
+        return frame.returnValue;
+    if (frame.hasLastBare)
+        return frame.lastBareExpr;
+    if (!ok)
+        return std::nullopt;
     return std::nullopt;
 }
 
@@ -458,15 +504,14 @@ std::optional<CTValue> CTEngine::evalComptimeBlock(
 // Side effects (array writes, local mutations) stay inside the temporary frame
 // and are never propagated back to the caller.
 
-CTValue CTEngine::evalSingleExpr(
-    const std::unordered_map<std::string, CTValue>& env,
-    const Expression* e)
-{
-    if (!e) return CTValue::uninit();
+CTValue CTEngine::evalSingleExpr(const std::unordered_map<std::string, CTValue>& env, const Expression* e) {
+    if (!e)
+        return CTValue::uninit();
     CTFrame frame;
-    frame.fn   = nullptr;
+    frame.fn = nullptr;
     frame.heap = &heap_;
-    for (auto& [k, v] : env) frame.locals[k] = v;
+    for (auto& [k, v] : env)
+        frame.locals[k] = v;
     fuel_ = 0;
     return evalExpr(frame, e);
 }
@@ -474,10 +519,13 @@ CTValue CTEngine::evalSingleExpr(
 // ── executeBody ────────────────────────────────────────────────────────────
 
 bool CTEngine::executeBody(CTFrame& frame, const BlockStmt* body) {
-    if (!body) return true;
+    if (!body)
+        return true;
     for (auto& stmt : body->statements) {
-        if (!evalStmt(frame, stmt.get())) return false;
-        if (frame.hasReturned || frame.didBreak || frame.didContinue) return true;
+        if (!evalStmt(frame, stmt.get()))
+            return false;
+        if (frame.hasReturned || frame.didBreak || frame.didContinue)
+            return true;
     }
     return true;
 }
@@ -485,9 +533,11 @@ bool CTEngine::executeBody(CTFrame& frame, const BlockStmt* body) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
-    if (!e) return CTValue::uninit();
+    if (!e)
+        return CTValue::uninit();
     ++stats_.instructionsExecuted;
-    if (++fuel_ > kMaxInstructions) return CTValue::uninit();
+    if (++fuel_ > kMaxInstructions)
+        return CTValue::uninit();
 
     switch (e->type) {
 
@@ -519,10 +569,12 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         }
         // 2. Enum constant.
         auto eit = enumConsts_.find(id->name);
-        if (eit != enumConsts_.end()) return CTValue::fromI64(eit->second);
+        if (eit != enumConsts_.end())
+            return CTValue::fromI64(eit->second);
         // 3. Global compile-time constant.
         auto git = globalConsts_.find(id->name);
-        if (git != globalConsts_.end()) return git->second;
+        if (git != globalConsts_.end())
+            return git->second;
         return CTValue::uninit();
     }
 
@@ -535,14 +587,19 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
             if (lv.isSymbolic()) {
                 // SYMBOLIC && x: can only short-circuit if right is known false.
                 const CTValue rv = evalExpr(frame, bin->right.get());
-                if (rv.isConcrete() && !rv.isTruthy()) return CTValue::fromI64(0); // false && anything = false
+                if (rv.isConcrete() && !rv.isTruthy())
+                    return CTValue::fromI64(0); // false && anything = false
                 return CTValue::symbolic();
             }
-            if (!lv.isKnown()) return CTValue::uninit();
-            if (!lv.isTruthy()) return CTValue::fromI64(0);
+            if (!lv.isKnown())
+                return CTValue::uninit();
+            if (!lv.isTruthy())
+                return CTValue::fromI64(0);
             const CTValue rv = evalExpr(frame, bin->right.get());
-            if (!rv.isKnown()) return CTValue::uninit();
-            if (rv.isSymbolic()) return CTValue::symbolic();
+            if (!rv.isKnown())
+                return CTValue::uninit();
+            if (rv.isSymbolic())
+                return CTValue::symbolic();
             return CTValue::fromI64(rv.isTruthy() ? 1 : 0);
         }
         if (bin->op == "||") {
@@ -550,20 +607,26 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
             if (lv.isSymbolic()) {
                 // SYMBOLIC || x: can only short-circuit if right is known true.
                 const CTValue rv = evalExpr(frame, bin->right.get());
-                if (rv.isConcrete() && rv.isTruthy()) return CTValue::fromI64(1); // true || anything = true
+                if (rv.isConcrete() && rv.isTruthy())
+                    return CTValue::fromI64(1); // true || anything = true
                 return CTValue::symbolic();
             }
-            if (!lv.isKnown()) return CTValue::uninit();
-            if (lv.isTruthy()) return CTValue::fromI64(1);
+            if (!lv.isKnown())
+                return CTValue::uninit();
+            if (lv.isTruthy())
+                return CTValue::fromI64(1);
             const CTValue rv = evalExpr(frame, bin->right.get());
-            if (!rv.isKnown()) return CTValue::uninit();
-            if (rv.isSymbolic()) return CTValue::symbolic();
+            if (!rv.isKnown())
+                return CTValue::uninit();
+            if (rv.isSymbolic())
+                return CTValue::symbolic();
             return CTValue::fromI64(rv.isTruthy() ? 1 : 0);
         }
         // Null-coalescing (??)
         if (bin->op == "??") {
             const CTValue lv = evalExpr(frame, bin->left.get());
-            if (lv.isKnown() && lv.isTruthy()) return lv;
+            if (lv.isKnown() && lv.isTruthy())
+                return lv;
             return evalExpr(frame, bin->right.get());
         }
         CTValue lv = evalExpr(frame, bin->left.get());
@@ -584,74 +647,80 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         const int64_t delta = (pfx->op == "++") ? 1 : -1;
         // arr[i]++ / arr[i]-- — array element postfix
         if (pfx->operand->type == ASTNodeType::INDEX_EXPR) {
-            auto* idx    = static_cast<const IndexExpr*>(pfx->operand.get());
+            auto* idx = static_cast<const IndexExpr*>(pfx->operand.get());
             const CTValue arrVal = evalExpr(frame, idx->array.get());
             const CTValue idxVal = evalExpr(frame, idx->index.get());
-            if (!arrVal.isKnown() || !idxVal.isKnown() ||
-                !arrVal.isArray() || !idxVal.isInt()) return CTValue::uninit();
+            if (!arrVal.isKnown() || !idxVal.isKnown() || !arrVal.isArray() || !idxVal.isInt())
+                return CTValue::uninit();
             const int64_t i = idxVal.asI64();
             CTValue current = heap_.load(arrVal.asArr(), i);
-            if (!current.isKnown() || !current.isInt()) return CTValue::uninit();
+            if (!current.isKnown() || !current.isInt())
+                return CTValue::uninit();
             heap_.store(arrVal.asArr(), i, CTValue::fromI64(current.asI64() + delta));
-            return current;  // postfix: return old value
+            return current; // postfix: return old value
         }
         // x++ / x-- — simple variable postfix
-        if (pfx->operand->type != ASTNodeType::IDENTIFIER_EXPR) return CTValue::uninit();
+        if (pfx->operand->type != ASTNodeType::IDENTIFIER_EXPR)
+            return CTValue::uninit();
         auto* id = static_cast<const IdentifierExpr*>(pfx->operand.get());
-        auto  it = frame.locals.find(id->name);
-        if (it == frame.locals.end() || !it->second.isInt()) return CTValue::uninit();
+        auto it = frame.locals.find(id->name);
+        if (it == frame.locals.end() || !it->second.isInt())
+            return CTValue::uninit();
         CTValue old = it->second;
         it->second = CTValue::fromI64(it->second.asI64() + delta);
-        return old;  // postfix returns old value
+        return old; // postfix returns old value
     }
 
     // ── Prefix ++ / -- ────────────────────────────────────────────────────
     case ASTNodeType::PREFIX_EXPR: {
         auto* pfx = static_cast<const PrefixExpr*>(e);
-        if (pfx->op != "++" && pfx->op != "--") return CTValue::uninit();
+        if (pfx->op != "++" && pfx->op != "--")
+            return CTValue::uninit();
         const int64_t delta = (pfx->op == "++") ? 1 : -1;
         // ++arr[i] / --arr[i] — array element prefix
         if (pfx->operand->type == ASTNodeType::INDEX_EXPR) {
-            auto* idx    = static_cast<const IndexExpr*>(pfx->operand.get());
+            auto* idx = static_cast<const IndexExpr*>(pfx->operand.get());
             const CTValue arrVal = evalExpr(frame, idx->array.get());
             const CTValue idxVal = evalExpr(frame, idx->index.get());
-            if (!arrVal.isKnown() || !idxVal.isKnown() ||
-                !arrVal.isArray() || !idxVal.isInt()) return CTValue::uninit();
+            if (!arrVal.isKnown() || !idxVal.isKnown() || !arrVal.isArray() || !idxVal.isInt())
+                return CTValue::uninit();
             const int64_t i = idxVal.asI64();
             CTValue current = heap_.load(arrVal.asArr(), i);
-            if (!current.isKnown() || !current.isInt()) return CTValue::uninit();
+            if (!current.isKnown() || !current.isInt())
+                return CTValue::uninit();
             CTValue updated = CTValue::fromI64(current.asI64() + delta);
             heap_.store(arrVal.asArr(), i, updated);
-            return updated;  // prefix: return new value
+            return updated; // prefix: return new value
         }
         // ++x / --x — simple variable prefix
-        if (pfx->operand->type != ASTNodeType::IDENTIFIER_EXPR) return CTValue::uninit();
+        if (pfx->operand->type != ASTNodeType::IDENTIFIER_EXPR)
+            return CTValue::uninit();
         auto* id = static_cast<const IdentifierExpr*>(pfx->operand.get());
-        auto  it = frame.locals.find(id->name);
-        if (it == frame.locals.end() || !it->second.isInt()) return CTValue::uninit();
+        auto it = frame.locals.find(id->name);
+        if (it == frame.locals.end() || !it->second.isInt())
+            return CTValue::uninit();
         it->second = CTValue::fromI64(it->second.asI64() + delta);
-        return it->second;  // prefix returns new value
+        return it->second; // prefix returns new value
     }
 
     // ── Ternary ──────────────────────────────────────────────────────────
     case ASTNodeType::TERNARY_EXPR: {
         auto* tern = static_cast<const TernaryExpr*>(e);
         const CTValue cond = evalExpr(frame, tern->condition.get());
-        if (!cond.isKnown()) return CTValue::uninit();
+        if (!cond.isKnown())
+            return CTValue::uninit();
         if (cond.isSymbolic()) {
             // Path-sensitive: evaluate both arms.  If they agree on a concrete
             // non-array value the condition cannot affect the result — fold.
             const CTValue tv = evalExpr(frame, tern->thenExpr.get());
             const CTValue ev = evalExpr(frame, tern->elseExpr.get());
-            if (tv.isConcrete() && !tv.isArray() &&
-                ev.isConcrete() && !ev.isArray() && tv == ev) {
+            if (tv.isConcrete() && !tv.isArray() && ev.isConcrete() && !ev.isArray() && tv == ev) {
                 ++stats_.ternaryMerges;
                 return tv;
             }
             return CTValue::symbolic();
         }
-        return cond.isTruthy() ? evalExpr(frame, tern->thenExpr.get())
-                                : evalExpr(frame, tern->elseExpr.get());
+        return cond.isTruthy() ? evalExpr(frame, tern->thenExpr.get()) : evalExpr(frame, tern->elseExpr.get());
     }
 
     // ── Array literal → allocate on CTHeap ──────────────────────────────
@@ -662,7 +731,10 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         ++stats_.arraysAllocated;
         for (size_t i = 0; i < ae->elements.size(); ++i) {
             CTValue v = evalExpr(frame, ae->elements[i].get());
-            if (!v.isKnown()) { heap_.freeArray(h); return CTValue::uninit(); }
+            if (!v.isKnown()) {
+                heap_.freeArray(h);
+                return CTValue::uninit();
+            }
             heap_.store(h, static_cast<int64_t>(i), std::move(v));
         }
         return CTValue::fromArray(h);
@@ -670,17 +742,19 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
 
     // ── Array / string subscript (read) ──────────────────────────────────
     case ASTNodeType::INDEX_EXPR: {
-        auto* idx  = static_cast<const IndexExpr*>(e);
+        auto* idx = static_cast<const IndexExpr*>(e);
         const CTValue arr = evalExpr(frame, idx->array.get());
-        const CTValue idxv= evalExpr(frame, idx->index.get());
-        if (!arr.isKnown() || !idxv.isKnown() || !idxv.isInt()) return CTValue::uninit();
+        const CTValue idxv = evalExpr(frame, idx->index.get());
+        if (!arr.isKnown() || !idxv.isKnown() || !idxv.isInt())
+            return CTValue::uninit();
         const int64_t i = idxv.asI64();
         if (arr.isArray()) {
             return heap_.load(arr.asArr(), i);
         }
         if (arr.isString()) {
             const std::string& s = arr.asStr();
-            if (i < 0 || static_cast<size_t>(i) >= s.size()) return CTValue::uninit();
+            if (i < 0 || static_cast<size_t>(i) >= s.size())
+                return CTValue::uninit();
             return CTValue::fromI64(static_cast<unsigned char>(s[static_cast<size_t>(i)]));
         }
         return CTValue::uninit();
@@ -688,10 +762,11 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
 
     // ── Enum / scope resolution ───────────────────────────────────────────
     case ASTNodeType::SCOPE_RESOLUTION_EXPR: {
-        auto* sr  = static_cast<const ScopeResolutionExpr*>(e);
+        auto* sr = static_cast<const ScopeResolutionExpr*>(e);
         const std::string flat = sr->scopeName + "_" + sr->memberName;
         auto eit = enumConsts_.find(flat);
-        if (eit != enumConsts_.end()) return CTValue::fromI64(eit->second);
+        if (eit != enumConsts_.end())
+            return CTValue::fromI64(eit->second);
         return CTValue::uninit();
     }
 
@@ -706,7 +781,8 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
     case ASTNodeType::ASSIGN_EXPR: {
         auto* assign = static_cast<const AssignExpr*>(e);
         CTValue v = evalExpr(frame, assign->value.get());
-        if (!v.isKnown()) return CTValue::uninit();
+        if (!v.isKnown())
+            return CTValue::uninit();
         frame.locals[assign->name] = v;
         return v;
     }
@@ -717,8 +793,10 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         const CTValue arrVal = evalExpr(frame, ia->array.get());
         const CTValue idxVal = evalExpr(frame, ia->index.get());
         CTValue newVal = evalExpr(frame, ia->value.get());
-        if (!arrVal.isKnown() || !idxVal.isKnown() || !newVal.isKnown()) return CTValue::uninit();
-        if (!arrVal.isArray() || !idxVal.isInt()) return CTValue::uninit();
+        if (!arrVal.isKnown() || !idxVal.isKnown() || !newVal.isKnown())
+            return CTValue::uninit();
+        if (!arrVal.isArray() || !idxVal.isInt())
+            return CTValue::uninit();
         heap_.store(arrVal.asArr(), idxVal.asI64(), newVal);
         return newVal;
     }
@@ -730,7 +808,8 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         foldedArgs.reserve(call->arguments.size());
         for (auto& arg : call->arguments) {
             CTValue v = evalExpr(frame, arg.get());
-            if (!v.isKnown()) return CTValue::uninit();
+            if (!v.isKnown())
+                return CTValue::uninit();
             foldedArgs.push_back(std::move(v));
         }
         return evalCall(frame, call->callee, foldedArgs);
@@ -740,7 +819,8 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
     case ASTNodeType::PIPE_EXPR: {
         auto* pipe = static_cast<const PipeExpr*>(e);
         const CTValue lv = evalExpr(frame, pipe->left.get());
-        if (!lv.isKnown()) return CTValue::uninit();
+        if (!lv.isKnown())
+            return CTValue::uninit();
         return evalCall(frame, pipe->functionName, {lv});
     }
 
@@ -769,7 +849,8 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const CTValue& rhs) {
-    if (!lhs.isKnown() || !rhs.isKnown()) return CTValue::uninit();
+    if (!lhs.isKnown() || !rhs.isKnown())
+        return CTValue::uninit();
 
     // ── Algebraic identities (Phase B) ───────────────────────────────────────
     if (lhs.isSymbolic() || rhs.isSymbolic()) {
@@ -783,96 +864,177 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const 
 
         // ── Additive identity: x + 0 = x, 0 + x = x ─────────────────────
         if (op == "+") {
-            if (lSym && rInt(0)) { ++stats_.algebraicFolds; return lhs; }
-            if (rSym && lInt(0)) { ++stats_.algebraicFolds; return rhs; }
+            if (lSym && rInt(0)) {
+                ++stats_.algebraicFolds;
+                return lhs;
+            }
+            if (rSym && lInt(0)) {
+                ++stats_.algebraicFolds;
+                return rhs;
+            }
         }
         // ── Subtractive: x - 0 = x, x - x = 0 ───────────────────────────
         if (op == "-") {
-            if (lSym && rInt(0))  { ++stats_.algebraicFolds; return lhs; }
-            if (sameVar)          { ++stats_.algebraicFolds; return CTValue::fromI64(0); }
+            if (lSym && rInt(0)) {
+                ++stats_.algebraicFolds;
+                return lhs;
+            }
+            if (sameVar) {
+                ++stats_.algebraicFolds;
+                return CTValue::fromI64(0);
+            }
         }
         // ── Multiplicative identity: x * 1 = x, 1 * x = x ───────────────
         if (op == "*") {
-            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(0);
-            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0) return CTValue::fromI64(0);
-            if (lSym && rInt(1))  { ++stats_.algebraicFolds; return lhs; }
-            if (rSym && lInt(1))  { ++stats_.algebraicFolds; return rhs; }
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0)
+                return CTValue::fromI64(0);
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0)
+                return CTValue::fromI64(0);
+            if (lSym && rInt(1)) {
+                ++stats_.algebraicFolds;
+                return lhs;
+            }
+            if (rSym && lInt(1)) {
+                ++stats_.algebraicFolds;
+                return rhs;
+            }
         }
         // ── Division identity: x / 1 = x ─────────────────────────────────
         if (op == "/" || op == "/=") {
-            if (lSym && rInt(1))  { ++stats_.algebraicFolds; return lhs; }
+            if (lSym && rInt(1)) {
+                ++stats_.algebraicFolds;
+                return lhs;
+            }
         }
         // ── Power: x ** 0 = 1, x ** 1 = x, 1 ** x = 1 ──────────────────
         if (op == "**") {
-            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(1);
-            if (lSym && rInt(1))  { ++stats_.algebraicFolds; return lhs; }
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0)
+                return CTValue::fromI64(1);
+            if (lSym && rInt(1)) {
+                ++stats_.algebraicFolds;
+                return lhs;
+            }
             // 1 raised to any integer power is always 1.
-            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 1)
-                { ++stats_.algebraicFolds; return CTValue::fromI64(1); }
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 1) {
+                ++stats_.algebraicFolds;
+                return CTValue::fromI64(1);
+            }
         }
         // ── Bitwise AND: x & 0 = 0, x & -1 = x, x & x = x ──────────────
         if (op == "&" || op == "&=") {
-            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(0);
-            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0) return CTValue::fromI64(0);
-            if (lSym && rInt(-1)) { ++stats_.algebraicFolds; return lhs; }
-            if (rSym && lInt(-1)) { ++stats_.algebraicFolds; return rhs; }
-            if (sameVar)          { ++stats_.algebraicFolds; return lhs; }
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0)
+                return CTValue::fromI64(0);
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0)
+                return CTValue::fromI64(0);
+            if (lSym && rInt(-1)) {
+                ++stats_.algebraicFolds;
+                return lhs;
+            }
+            if (rSym && lInt(-1)) {
+                ++stats_.algebraicFolds;
+                return rhs;
+            }
+            if (sameVar) {
+                ++stats_.algebraicFolds;
+                return lhs;
+            }
         }
         // ── Bitwise OR: x | 0 = x, x | -1 = -1, x | x = x ──────────────
         if (op == "|" || op == "|=") {
-            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == -1) return CTValue::fromI64(-1);
-            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == -1) return CTValue::fromI64(-1);
-            if (lSym && rInt(0))  { ++stats_.algebraicFolds; return lhs; }
-            if (rSym && lInt(0))  { ++stats_.algebraicFolds; return rhs; }
-            if (sameVar)          { ++stats_.algebraicFolds; return lhs; }
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == -1)
+                return CTValue::fromI64(-1);
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == -1)
+                return CTValue::fromI64(-1);
+            if (lSym && rInt(0)) {
+                ++stats_.algebraicFolds;
+                return lhs;
+            }
+            if (rSym && lInt(0)) {
+                ++stats_.algebraicFolds;
+                return rhs;
+            }
+            if (sameVar) {
+                ++stats_.algebraicFolds;
+                return lhs;
+            }
         }
         // ── Bitwise XOR: x ^ 0 = x, 0 ^ x = x, x ^ x = 0 ───────────────
         if (op == "^" || op == "^=") {
-            if (lSym && rInt(0))  { ++stats_.algebraicFolds; return lhs; }
-            if (rSym && lInt(0))  { ++stats_.algebraicFolds; return rhs; }
-            if (sameVar)          { ++stats_.algebraicFolds; return CTValue::fromI64(0); }
+            if (lSym && rInt(0)) {
+                ++stats_.algebraicFolds;
+                return lhs;
+            }
+            if (rSym && lInt(0)) {
+                ++stats_.algebraicFolds;
+                return rhs;
+            }
+            if (sameVar) {
+                ++stats_.algebraicFolds;
+                return CTValue::fromI64(0);
+            }
         }
         // ── Shifts: x >> 0 = x, x << 0 = x, x >>> 0 = x ─────────────────
         if (op == ">>" || op == ">>=" || op == "<<" || op == "<<=" || op == ">>>") {
-            if (lSym && rInt(0))  { ++stats_.algebraicFolds; return lhs; }
+            if (lSym && rInt(0)) {
+                ++stats_.algebraicFolds;
+                return lhs;
+            }
         }
         // ── Modulo: x % ±1 = 0, x % x = 0 ──────────────────────────────
         if (op == "%" || op == "mod" || op == "%=") {
-            if (rhs.isConcrete() && rhs.isInt() &&
-                (rhs.asI64() == 1 || rhs.asI64() == -1))
+            if (rhs.isConcrete() && rhs.isInt() && (rhs.asI64() == 1 || rhs.asI64() == -1))
                 return CTValue::fromI64(0);
-            if (sameVar) { ++stats_.algebraicFolds; return CTValue::fromI64(0); }
+            if (sameVar) {
+                ++stats_.algebraicFolds;
+                return CTValue::fromI64(0);
+            }
         }
         // ── Logical AND short-circuits and identities ─────────────────────
         // x && 0 = 0, 0 && x = 0 (short-circuit regardless of x)
         // x && 1 = x, 1 && x = x (identity when the concrete side is true)
         if (op == "&&") {
-            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0) return CTValue::fromI64(0);
-            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) return CTValue::fromI64(0);
-            if (lSym && rhs.isConcrete() && rhs.isInt() && rhs.asI64() != 0)
-                { ++stats_.algebraicFolds; return lhs; }
-            if (rSym && lhs.isConcrete() && lhs.isInt() && lhs.asI64() != 0)
-                { ++stats_.algebraicFolds; return rhs; }
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0)
+                return CTValue::fromI64(0);
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0)
+                return CTValue::fromI64(0);
+            if (lSym && rhs.isConcrete() && rhs.isInt() && rhs.asI64() != 0) {
+                ++stats_.algebraicFolds;
+                return lhs;
+            }
+            if (rSym && lhs.isConcrete() && lhs.isInt() && lhs.asI64() != 0) {
+                ++stats_.algebraicFolds;
+                return rhs;
+            }
         }
         // ── Logical OR short-circuits and identities ──────────────────────
         // x || 1 = 1, 1 || x = 1 (short-circuit when concrete side is true)
         // x || 0 = x, 0 || x = x (identity when the concrete side is false)
         if (op == "||") {
-            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() != 0) return lhs;
-            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() != 0) return rhs;
-            if (lSym && rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0)
-                { ++stats_.algebraicFolds; return lhs; }
-            if (rSym && lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0)
-                { ++stats_.algebraicFolds; return rhs; }
+            if (lhs.isConcrete() && lhs.isInt() && lhs.asI64() != 0)
+                return lhs;
+            if (rhs.isConcrete() && rhs.isInt() && rhs.asI64() != 0)
+                return rhs;
+            if (lSym && rhs.isConcrete() && rhs.isInt() && rhs.asI64() == 0) {
+                ++stats_.algebraicFolds;
+                return lhs;
+            }
+            if (rSym && lhs.isConcrete() && lhs.isInt() && lhs.asI64() == 0) {
+                ++stats_.algebraicFolds;
+                return rhs;
+            }
         }
         // ── Same-variable comparisons ──────────────────────────────────────
         // x == x → 1, x != x → 0, x < x → 0, x <= x → 1, x > x → 0, x >= x → 1.
         // These arise naturally in induction-variable guard patterns.
         if (sameVar) {
-            if (op == "==" || op == "<=" || op == ">=")
-                { ++stats_.algebraicFolds; return CTValue::fromI64(1); }
-            if (op == "!=" || op == "<"  || op == ">")
-                { ++stats_.algebraicFolds; return CTValue::fromI64(0); }
+            if (op == "==" || op == "<=" || op == ">=") {
+                ++stats_.algebraicFolds;
+                return CTValue::fromI64(1);
+            }
+            if (op == "!=" || op == "<" || op == ">") {
+                ++stats_.algebraicFolds;
+                return CTValue::fromI64(0);
+            }
         }
 
         return CTValue::symbolic();
@@ -892,91 +1054,138 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const 
         CTArrayHandle out = heap_.alloc(outLen, CTValue::uninit());
         ++stats_.arraysAllocated;
         uint64_t i = 0;
-        for (const auto& v : l) heap_.store(out, static_cast<int64_t>(i++), v);
-        for (const auto& v : r) heap_.store(out, static_cast<int64_t>(i++), v);
+        for (const auto& v : l)
+            heap_.store(out, static_cast<int64_t>(i++), v);
+        for (const auto& v : r)
+            heap_.store(out, static_cast<int64_t>(i++), v);
         return CTValue::fromArray(out);
     }
 
     // String equality / inequality.
     if (lhs.isString() && rhs.isString()) {
-        if (op == "==") return CTValue::fromI64(lhs.asStr() == rhs.asStr() ? 1 : 0);
-        if (op == "!=") return CTValue::fromI64(lhs.asStr() != rhs.asStr() ? 1 : 0);
+        if (op == "==")
+            return CTValue::fromI64(lhs.asStr() == rhs.asStr() ? 1 : 0);
+        if (op == "!=")
+            return CTValue::fromI64(lhs.asStr() != rhs.asStr() ? 1 : 0);
         return CTValue::uninit();
     }
 
     // Float arithmetic.
     if (lhs.isFloat() || rhs.isFloat()) {
         const double a = lhs.asF64(), b = rhs.asF64();
-        if (op == "+")  return CTValue::fromF64(a + b);
-        if (op == "-")  return CTValue::fromF64(a - b);
-        if (op == "*")  return CTValue::fromF64(a * b);
-        if (op == "/" && b != 0.0)  return CTValue::fromF64(a / b);
-        if (op == "==") return CTValue::fromI64(a == b ? 1 : 0);
-        if (op == "!=") return CTValue::fromI64(a != b ? 1 : 0);
-        if (op == "<")  return CTValue::fromI64(a < b  ? 1 : 0);
-        if (op == "<=") return CTValue::fromI64(a <= b ? 1 : 0);
-        if (op == ">")  return CTValue::fromI64(a > b  ? 1 : 0);
-        if (op == ">=") return CTValue::fromI64(a >= b ? 1 : 0);
+        if (op == "+")
+            return CTValue::fromF64(a + b);
+        if (op == "-")
+            return CTValue::fromF64(a - b);
+        if (op == "*")
+            return CTValue::fromF64(a * b);
+        if (op == "/" && b != 0.0)
+            return CTValue::fromF64(a / b);
+        if (op == "==")
+            return CTValue::fromI64(a == b ? 1 : 0);
+        if (op == "!=")
+            return CTValue::fromI64(a != b ? 1 : 0);
+        if (op == "<")
+            return CTValue::fromI64(a < b ? 1 : 0);
+        if (op == "<=")
+            return CTValue::fromI64(a <= b ? 1 : 0);
+        if (op == ">")
+            return CTValue::fromI64(a > b ? 1 : 0);
+        if (op == ">=")
+            return CTValue::fromI64(a >= b ? 1 : 0);
         return CTValue::uninit();
     }
 
     // Integer arithmetic.
-    if (!lhs.isInt() || !rhs.isInt()) return CTValue::uninit();
-    const int64_t  a = lhs.asI64(), b = rhs.asI64();
+    if (!lhs.isInt() || !rhs.isInt())
+        return CTValue::uninit();
+    const int64_t a = lhs.asI64(), b = rhs.asI64();
     const uint64_t ua = lhs.asU64();
 
-    if (op == "+")  return CTValue::fromI64(a + b);
-    if (op == "-")  return CTValue::fromI64(a - b);
-    if (op == "*")  return CTValue::fromI64(a * b);
+    if (op == "+")
+        return CTValue::fromI64(a + b);
+    if (op == "-")
+        return CTValue::fromI64(a - b);
+    if (op == "*")
+        return CTValue::fromI64(a * b);
     if (op == "/" && b != 0) {
         // Guard against INT64_MIN / -1 which overflows (UB / SIGFPE on x86-64).
-        if (a == INT64_MIN && b == -1) return CTValue::fromI64(INT64_MIN);
+        if (a == INT64_MIN && b == -1)
+            return CTValue::fromI64(INT64_MIN);
         return CTValue::fromI64(a / b);
     }
     if (op == "%" && b != 0) {
         // Guard against INT64_MIN % -1 which is UB / SIGFPE on x86-64.
-        if (a == INT64_MIN && b == -1) return CTValue::fromI64(0);
+        if (a == INT64_MIN && b == -1)
+            return CTValue::fromI64(0);
         return CTValue::fromI64(a % b);
     }
-    if (op == "&")  return CTValue::fromI64(a & b);
-    if (op == "|")  return CTValue::fromI64(a | b);
-    if (op == "^")  return CTValue::fromI64(a ^ b);
-    if (op == "<<" && b >= 0 && b < 64) return CTValue::fromU64(ua << static_cast<unsigned>(b));
-    if (op == ">>" && b >= 0 && b < 64) return CTValue::fromU64(ua >> static_cast<unsigned>(b));
+    if (op == "&")
+        return CTValue::fromI64(a & b);
+    if (op == "|")
+        return CTValue::fromI64(a | b);
+    if (op == "^")
+        return CTValue::fromI64(a ^ b);
+    if (op == "<<" && b >= 0 && b < 64)
+        return CTValue::fromU64(ua << static_cast<unsigned>(b));
+    if (op == ">>" && b >= 0 && b < 64)
+        return CTValue::fromU64(ua >> static_cast<unsigned>(b));
     if (op == ">>>") {
         const int sh = static_cast<int>(b & 63);
         return CTValue::fromU64(ua >> sh);
     }
     if (op == "**") {
-        if (b < 0) return (a == 1) ? CTValue::fromI64(1) : CTValue::uninit();
+        if (b < 0)
+            return (a == 1) ? CTValue::fromI64(1) : CTValue::uninit();
         int64_t r = 1, base = a, rem = b;
-        while (rem > 0) { if (rem & 1) r *= base; base *= base; rem >>= 1; }
+        while (rem > 0) {
+            if (rem & 1)
+                r *= base;
+            base *= base;
+            rem >>= 1;
+        }
         return CTValue::fromI64(r);
     }
-    if (op == "==") return CTValue::fromI64(a == b ? 1 : 0);
-    if (op == "!=") return CTValue::fromI64(a != b ? 1 : 0);
-    if (op == "<")  return CTValue::fromI64(a < b  ? 1 : 0);
-    if (op == "<=") return CTValue::fromI64(a <= b ? 1 : 0);
-    if (op == ">")  return CTValue::fromI64(a > b  ? 1 : 0);
-    if (op == ">=") return CTValue::fromI64(a >= b ? 1 : 0);
+    if (op == "==")
+        return CTValue::fromI64(a == b ? 1 : 0);
+    if (op == "!=")
+        return CTValue::fromI64(a != b ? 1 : 0);
+    if (op == "<")
+        return CTValue::fromI64(a < b ? 1 : 0);
+    if (op == "<=")
+        return CTValue::fromI64(a <= b ? 1 : 0);
+    if (op == ">")
+        return CTValue::fromI64(a > b ? 1 : 0);
+    if (op == ">=")
+        return CTValue::fromI64(a >= b ? 1 : 0);
 
     // Compound-assignment operators (desugared by parser into BinaryExpr in some paths).
-    if (op == "+=") return CTValue::fromI64(a + b);
-    if (op == "-=") return CTValue::fromI64(a - b);
-    if (op == "*=") return CTValue::fromI64(a * b);
+    if (op == "+=")
+        return CTValue::fromI64(a + b);
+    if (op == "-=")
+        return CTValue::fromI64(a - b);
+    if (op == "*=")
+        return CTValue::fromI64(a * b);
     if (op == "/=" && b != 0) {
-        if (a == INT64_MIN && b == -1) return CTValue::fromI64(INT64_MIN);
+        if (a == INT64_MIN && b == -1)
+            return CTValue::fromI64(INT64_MIN);
         return CTValue::fromI64(a / b);
     }
     if (op == "%=" && b != 0) {
-        if (a == INT64_MIN && b == -1) return CTValue::fromI64(0);
+        if (a == INT64_MIN && b == -1)
+            return CTValue::fromI64(0);
         return CTValue::fromI64(a % b);
     }
-    if (op == "&=") return CTValue::fromI64(a & b);
-    if (op == "|=") return CTValue::fromI64(a | b);
-    if (op == "^=") return CTValue::fromI64(a ^ b);
-    if (op == "<<=" && b >= 0 && b < 64) return CTValue::fromU64(ua << static_cast<unsigned>(b));
-    if (op == ">>=" && b >= 0 && b < 64) return CTValue::fromU64(ua >> static_cast<unsigned>(b));
+    if (op == "&=")
+        return CTValue::fromI64(a & b);
+    if (op == "|=")
+        return CTValue::fromI64(a | b);
+    if (op == "^=")
+        return CTValue::fromI64(a ^ b);
+    if (op == "<<=" && b >= 0 && b < 64)
+        return CTValue::fromU64(ua << static_cast<unsigned>(b));
+    if (op == ">>=" && b >= 0 && b < 64)
+        return CTValue::fromU64(ua >> static_cast<unsigned>(b));
     if (op == ">>>=") {
         const int sh = static_cast<int>(b & 63);
         return CTValue::fromU64(ua >> sh);
@@ -988,18 +1197,26 @@ CTValue CTEngine::evalBinaryOp(const std::string& op, const CTValue& lhs, const 
 // ═══════════════════════════════════════════════════════════════════════════
 
 CTValue CTEngine::evalUnaryOp(const std::string& op, const CTValue& val) {
-    if (!val.isKnown()) return CTValue::uninit();
-    if (val.isSymbolic()) return CTValue::symbolic(); // propagate symbolic
+    if (!val.isKnown())
+        return CTValue::uninit();
+    if (val.isSymbolic())
+        return CTValue::symbolic(); // propagate symbolic
     if (val.isFloat()) {
-        if (op == "-")  return CTValue::fromF64(-val.asF64());
-        if (op == "+")  return val;
+        if (op == "-")
+            return CTValue::fromF64(-val.asF64());
+        if (op == "+")
+            return val;
         return CTValue::uninit();
     }
     if (val.isInt()) {
-        if (op == "-")  return CTValue::fromI64(static_cast<int64_t>(-static_cast<uint64_t>(val.asI64())));
-        if (op == "~")  return CTValue::fromI64(~val.asI64());
-        if (op == "!")  return CTValue::fromI64(val.asI64() == 0 ? 1 : 0);
-        if (op == "+")  return val;
+        if (op == "-")
+            return CTValue::fromI64(static_cast<int64_t>(-static_cast<uint64_t>(val.asI64())));
+        if (op == "~")
+            return CTValue::fromI64(~val.asI64());
+        if (op == "!")
+            return CTValue::fromI64(val.asI64() == 0 ? 1 : 0);
+        if (op == "+")
+            return val;
         return CTValue::uninit();
     }
     if (val.isString() && op == "!")
@@ -1010,31 +1227,55 @@ CTValue CTEngine::evalUnaryOp(const std::string& op, const CTValue& val) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 CTValue CTEngine::evalTypeCast(const std::string& name, const CTValue& val) {
-    if (!val.isKnown()) return CTValue::uninit();
-    if (val.isSymbolic()) return CTValue::symbolic(); // propagate symbolic
+    if (!val.isKnown())
+        return CTValue::uninit();
+    if (val.isSymbolic())
+        return CTValue::symbolic(); // propagate symbolic
     if (val.isInt()) {
         const int64_t v = val.asI64();
         // General iN/uN handler for N in [1..256]
-        unsigned castBits = 0; bool castUnsigned = false;
-        if (name == "int")  { castBits = 64; castUnsigned = false; }
-        else if (name == "uint") { castBits = 64; castUnsigned = true; }
-        else if (name == "bool") { castBits = 1;  castUnsigned = true; }
-        else if (name.size() >= 2 && (name[0] == 'i' || name[0] == 'u')) {
-            bool allDigits = true; int bw = 0;
+        unsigned castBits = 0;
+        bool castUnsigned = false;
+        if (name == "int") {
+            castBits = 64;
+            castUnsigned = false;
+        } else if (name == "uint") {
+            castBits = 64;
+            castUnsigned = true;
+        } else if (name == "bool") {
+            castBits = 1;
+            castUnsigned = true;
+        } else if (name.size() >= 2 && (name[0] == 'i' || name[0] == 'u')) {
+            bool allDigits = true;
+            int bw = 0;
             for (size_t j = 1; j < name.size(); ++j) {
-                if (!std::isdigit(static_cast<unsigned char>(name[j]))) { allDigits = false; break; }
-                bw = bw * 10 + (name[j] - '0'); if (bw > 256) { allDigits = false; break; }
+                if (!std::isdigit(static_cast<unsigned char>(name[j]))) {
+                    allDigits = false;
+                    break;
+                }
+                bw = bw * 10 + (name[j] - '0');
+                if (bw > 256) {
+                    allDigits = false;
+                    break;
+                }
             }
-            if (allDigits && bw >= 1 && bw <= 256) { castBits = static_cast<unsigned>(bw); castUnsigned = (name[0] == 'u'); }
+            if (allDigits && bw >= 1 && bw <= 256) {
+                castBits = static_cast<unsigned>(bw);
+                castUnsigned = (name[0] == 'u');
+            }
         }
         if (castBits >= 1) {
-            if (castBits == 1) return CTValue::fromI64(v != 0 ? 1 : 0);
-            if (castBits >= 64) return CTValue::fromI64(v);
+            if (castBits == 1)
+                return CTValue::fromI64(v != 0 ? 1 : 0);
+            if (castBits >= 64)
+                return CTValue::fromI64(v);
             const uint64_t mask = (UINT64_C(1) << castBits) - 1u;
-            if (castUnsigned) return CTValue::fromI64(static_cast<int64_t>(static_cast<uint64_t>(v) & mask));
+            if (castUnsigned)
+                return CTValue::fromI64(static_cast<int64_t>(static_cast<uint64_t>(v) & mask));
             uint64_t uv = static_cast<uint64_t>(v) & mask;
             const uint64_t signBit = UINT64_C(1) << (castBits - 1);
-            if (uv & signBit) uv |= ~mask;
+            if (uv & signBit)
+                uv |= ~mask;
             return CTValue::fromI64(static_cast<int64_t>(uv));
         }
     }
@@ -1043,18 +1284,20 @@ CTValue CTEngine::evalTypeCast(const std::string& name, const CTValue& val) {
 
 // ═══════════════════════════════════════════════════════════════════════════
 
-CTValue CTEngine::evalCall(CTFrame& /*callerFrame*/,
-                            const std::string& fnName,
-                            const std::vector<CTValue>& args) {
+CTValue CTEngine::evalCall(CTFrame& /*callerFrame*/, const std::string& fnName, const std::vector<CTValue>& args) {
     // 1. Type-cast builtins — iN/uN for N in [1..256], plus int/uint/bool.
     auto isTypeCastName = [](const std::string& nm) -> bool {
-        if (nm == "int" || nm == "uint" || nm == "bool") return true;
-        if (nm.size() < 2 || (nm[0] != 'i' && nm[0] != 'u')) return false;
+        if (nm == "int" || nm == "uint" || nm == "bool")
+            return true;
+        if (nm.size() < 2 || (nm[0] != 'i' && nm[0] != 'u'))
+            return false;
         int bw = 0;
         for (size_t j = 1; j < nm.size(); ++j) {
-            if (!std::isdigit(static_cast<unsigned char>(nm[j]))) return false;
+            if (!std::isdigit(static_cast<unsigned char>(nm[j])))
+                return false;
             bw = bw * 10 + (nm[j] - '0');
-            if (bw > 256) return false;
+            if (bw > 256)
+                return false;
         }
         return bw >= 1 && bw <= 256;
     };
@@ -1063,12 +1306,12 @@ CTValue CTEngine::evalCall(CTFrame& /*callerFrame*/,
 
     // 2. Pure built-in functions.
     auto bv = evalBuiltin(fnName, args);
-    if (bv) return *bv;
+    if (bv)
+        return *bv;
 
     // 3. User-defined function (requires all args to be CT-known).
     auto it = functions_.find(fnName);
-    if (it != functions_.end() && it->second &&
-        it->second->body && args.size() == it->second->parameters.size()) {
+    if (it != functions_.end() && it->second && it->second->body && args.size() == it->second->parameters.size()) {
 
         // ── Phase D: partial-specialisation cache lookup ──────────────────
         const std::string specKey = partialSpecKey(fnName, args);
@@ -1088,8 +1331,8 @@ CTValue CTEngine::evalCall(CTFrame& /*callerFrame*/,
         // If the result is concrete and at least one arg was symbolic,
         // cache in specCache_ so future partial-eval calls hit immediately.
         if (result && result->isConcrete()) {
-            const bool hasSymbolic = std::any_of(args.begin(), args.end(),
-                                                 [](const CTValue& a){ return a.isSymbolic(); });
+            const bool hasSymbolic =
+                std::any_of(args.begin(), args.end(), [](const CTValue& a) { return a.isSymbolic(); });
             if (hasSymbolic) {
                 CTValue toCache = *result;
                 if (toCache.isArray() && toCache.arr != CT_NULL_HANDLE)
@@ -1106,8 +1349,7 @@ CTValue CTEngine::evalCall(CTFrame& /*callerFrame*/,
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Helper lambdas (defined at function scope to access args cleanly).
-std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
-                                               const std::vector<CTValue>& args) {
+std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name, const std::vector<CTValue>& args) {
     // ── Fast reject: skip the entire if-chain for unknown names ──────────
     // BuiltinEffectTable::contains() is the authoritative registry of all
     // known OmScript builtins.  BuiltinEffectTable::isWidthCastName() covers
@@ -1120,29 +1362,37 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
 
     // Helpers.
     auto intArg = [&](size_t i) -> std::optional<int64_t> {
-        if (i >= n) return std::nullopt;
-        if (args[i].isInt()) return args[i].asI64();
+        if (i >= n)
+            return std::nullopt;
+        if (args[i].isInt())
+            return args[i].asI64();
         // Accept float args that are exactly representable as integers.
         if (args[i].isFloat()) {
             const double fv = args[i].asF64();
             const int64_t iv = static_cast<int64_t>(fv);
-            if (static_cast<double>(iv) == fv) return iv;
+            if (static_cast<double>(iv) == fv)
+                return iv;
         }
         return std::nullopt;
     };
     auto dArg = [&](size_t i) -> std::optional<double> {
-        if (i >= n) return std::nullopt;
-        if (args[i].isFloat()) return args[i].asF64();
-        if (args[i].isInt())   return static_cast<double>(args[i].asI64());
+        if (i >= n)
+            return std::nullopt;
+        if (args[i].isFloat())
+            return args[i].asF64();
+        if (args[i].isInt())
+            return static_cast<double>(args[i].asI64());
         return std::nullopt;
     };
     // strArg returns a pointer to the arg's string, avoiding a copy.
     auto strArg = [&](size_t i) -> const std::string* {
-        if (i < n && args[i].isString()) return &args[i].asStr();
+        if (i < n && args[i].isString())
+            return &args[i].asStr();
         return nullptr;
     };
     auto arrArg = [&](size_t i) -> CTArrayHandle {
-        if (i < n && args[i].isArray()) return args[i].asArr();
+        if (i < n && args[i].isArray())
+            return args[i].asArr();
         return CT_NULL_HANDLE;
     };
     // arrData returns a direct const pointer to the heap array's element
@@ -1153,20 +1403,20 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     };
     // arrCopy returns a mutable copy — only use when elements will be mutated
     // (sort, reverse, insert, remove).
-    auto arrCopy = [&](CTArrayHandle h) -> std::vector<CTValue> {
-        return extractArray(h);
-    };
+    auto arrCopy = [&](CTArrayHandle h) -> std::vector<CTValue> { return extractArray(h); };
 
     // ── len ──────────────────────────────────────────────────────────────
     if (name == "len" && n == 1) {
-        if (auto s = strArg(0)) return CTValue::fromI64(static_cast<int64_t>(s->size()));
+        if (auto s = strArg(0))
+            return CTValue::fromI64(static_cast<int64_t>(s->size()));
         const CTArrayHandle h = arrArg(0);
         if (h != CT_NULL_HANDLE)
             return CTValue::fromI64(static_cast<int64_t>(heap_.length(h)));
         return std::nullopt;
     }
     if (name == "str_len" && n == 1) {
-        if (auto s = strArg(0)) return CTValue::fromI64(static_cast<int64_t>(s->size()));
+        if (auto s = strArg(0))
+            return CTValue::fromI64(static_cast<int64_t>(s->size()));
         return std::nullopt;
     }
 
@@ -1174,7 +1424,8 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "abs" && n == 1) {
         if (auto v = intArg(0)) {
             // Guard: -INT64_MIN overflows; return INT64_MIN to match wrap-around semantics.
-            if (*v == INT64_MIN) return CTValue::fromI64(INT64_MIN);
+            if (*v == INT64_MIN)
+                return CTValue::fromI64(INT64_MIN);
             return CTValue::fromI64(*v < 0 ? -*v : *v);
         }
         return std::nullopt;
@@ -1195,7 +1446,8 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         const CTArrayHandle h = arrArg(0);
         if (h != CT_NULL_HANDLE) {
             const uint64_t len = heap_.length(h);
-            if (len == 0) return std::nullopt;
+            if (len == 0)
+                return std::nullopt;
             CTValue last = heap_.load(h, static_cast<int64_t>(len - 1));
             CTArray* arr = heap_.getMut(h);
             if (arr && arr->len > 0) {
@@ -1209,19 +1461,25 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
 
     // ── min / max ────────────────────────────────────────────────────────
     if (name == "min" && n == 2) {
-        if (args[0] == args[1]) return args[0];  // min(x, x) → x
+        if (args[0] == args[1])
+            return args[0]; // min(x, x) → x
         auto a = intArg(0), b = intArg(1);
-        if (a && b) return CTValue::fromI64(std::min(*a, *b));
+        if (a && b)
+            return CTValue::fromI64(std::min(*a, *b));
         auto da = dArg(0), db = dArg(1);
-        if (da && db) return CTValue::fromF64(std::min(*da, *db));
+        if (da && db)
+            return CTValue::fromF64(std::min(*da, *db));
         return std::nullopt;
     }
     if (name == "max" && n == 2) {
-        if (args[0] == args[1]) return args[0];  // max(x, x) → x
+        if (args[0] == args[1])
+            return args[0]; // max(x, x) → x
         auto a = intArg(0), b = intArg(1);
-        if (a && b) return CTValue::fromI64(std::max(*a, *b));
+        if (a && b)
+            return CTValue::fromI64(std::max(*a, *b));
         auto da = dArg(0), db = dArg(1);
-        if (da && db) return CTValue::fromF64(std::max(*da, *db));
+        if (da && db)
+            return CTValue::fromF64(std::max(*da, *db));
         return std::nullopt;
     }
 
@@ -1238,8 +1496,11 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         auto dv = dArg(0), dlo = dArg(1), dhi = dArg(2);
         if (dv && dlo && dhi) {
             const double res = std::max(*dlo, std::min(*dv, *dhi));
-            auto iv = intArg(0); auto ilo = intArg(1); auto ihi = intArg(2);
-            if (iv && ilo && ihi) return CTValue::fromI64(std::max(*ilo, std::min(*iv, *ihi)));
+            auto iv = intArg(0);
+            auto ilo = intArg(1);
+            auto ihi = intArg(2);
+            if (iv && ilo && ihi)
+                return CTValue::fromI64(std::max(*ilo, std::min(*iv, *ihi)));
             return CTValue::fromF64(res);
         }
         return std::nullopt;
@@ -1249,15 +1510,22 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "pow" && n == 2) {
         // pow(x, 0) = 1 for any x (even symbolic).
         auto ie0 = intArg(1);
-        if (ie0 && *ie0 == 0) return CTValue::fromI64(1);
+        if (ie0 && *ie0 == 0)
+            return CTValue::fromI64(1);
         auto db = dArg(0), de = dArg(1);
         if (db && de) {
             // If both are exact integers, keep integer semantics.
             auto ib = intArg(0), ie = intArg(1);
             if (ib && ie) {
-                if (*ie < 0) return (*ib == 1) ? std::optional<CTValue>(CTValue::fromI64(1)) : std::nullopt;
+                if (*ie < 0)
+                    return (*ib == 1) ? std::optional<CTValue>(CTValue::fromI64(1)) : std::nullopt;
                 int64_t r = 1, base = *ib, e = *ie;
-                while (e > 0) { if (e & 1) r *= base; base *= base; e >>= 1; }
+                while (e > 0) {
+                    if (e & 1)
+                        r *= base;
+                    base *= base;
+                    e >>= 1;
+                }
                 return CTValue::fromI64(r);
             }
             // Float pow.
@@ -1269,46 +1537,57 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     // ── sqrt / floor / ceil / round ───────────────────────────────────────
     if (name == "sqrt" && n == 1) {
         if (auto v = dArg(0)) {
-            if (*v >= 0.0) return CTValue::fromF64(std::sqrt(*v));
+            if (*v >= 0.0)
+                return CTValue::fromF64(std::sqrt(*v));
         }
         return std::nullopt;
     }
     if (name == "floor" && n == 1) {
-        if (auto v = dArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::floor(*v)));
+        if (auto v = dArg(0))
+            return CTValue::fromI64(static_cast<int64_t>(std::floor(*v)));
         return std::nullopt;
     }
-    if (name == "ceil"  && n == 1) {
-        if (auto v = dArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::ceil(*v)));
+    if (name == "ceil" && n == 1) {
+        if (auto v = dArg(0))
+            return CTValue::fromI64(static_cast<int64_t>(std::ceil(*v)));
         return std::nullopt;
     }
     if (name == "round" && n == 1) {
-        if (auto v = dArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::round(*v)));
+        if (auto v = dArg(0))
+            return CTValue::fromI64(static_cast<int64_t>(std::round(*v)));
         return std::nullopt;
     }
 
     // ── log2 / log / log10 / exp2 ─────────────────────────────────────────
     if (name == "log2" && n == 1) {
         if (auto v = intArg(0)) {
-            if (*v <= 0) return std::nullopt;
+            if (*v <= 0)
+                return std::nullopt;
             int64_t x = *v, r = 0;
-            while (x > 1) { x >>= 1; r++; }
+            while (x > 1) {
+                x >>= 1;
+                r++;
+            }
             return CTValue::fromI64(r);
         }
         return std::nullopt;
     }
     if (name == "log" && n == 1) {
         if (auto v = intArg(0))
-            if (*v > 0) return CTValue::fromI64(static_cast<int64_t>(std::log(static_cast<double>(*v))));
+            if (*v > 0)
+                return CTValue::fromI64(static_cast<int64_t>(std::log(static_cast<double>(*v))));
         return std::nullopt;
     }
     if (name == "log10" && n == 1) {
         if (auto v = intArg(0))
-            if (*v > 0) return CTValue::fromI64(static_cast<int64_t>(std::log10(static_cast<double>(*v))));
+            if (*v > 0)
+                return CTValue::fromI64(static_cast<int64_t>(std::log10(static_cast<double>(*v))));
         return std::nullopt;
     }
     if (name == "exp2" && n == 1) {
         if (auto v = intArg(0))
-            if (*v >= 0 && *v < 63) return CTValue::fromI64(int64_t(1) << static_cast<int>(*v));
+            if (*v >= 0 && *v < 63)
+                return CTValue::fromI64(int64_t(1) << static_cast<int>(*v));
         return std::nullopt;
     }
 
@@ -1319,7 +1598,11 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
             // std::abs(INT64_MIN) is UB; use unsigned negation instead.
             uint64_t ua = (*a < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(*a)) : static_cast<uint64_t>(*a);
             uint64_t ub = (*b < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(*b)) : static_cast<uint64_t>(*b);
-            while (ub) { const uint64_t t = ub; ub = ua % ub; ua = t; }
+            while (ub) {
+                const uint64_t t = ub;
+                ub = ua % ub;
+                ua = t;
+            }
             return CTValue::fromI64(static_cast<int64_t>(ua));
         }
         return std::nullopt;
@@ -1330,17 +1613,30 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
             // std::abs(INT64_MIN) is UB; use unsigned negation instead.
             uint64_t ua = (*a < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(*a)) : static_cast<uint64_t>(*a);
             uint64_t ub = (*b < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(*b)) : static_cast<uint64_t>(*b);
-            if (ua == 0 || ub == 0) return CTValue::fromI64(0);
+            if (ua == 0 || ub == 0)
+                return CTValue::fromI64(0);
             uint64_t g = ua, tb = ub;
-            while (tb) { const uint64_t t = tb; tb = g % tb; g = t; }
+            while (tb) {
+                const uint64_t t = tb;
+                tb = g % tb;
+                g = t;
+            }
             return CTValue::fromI64(static_cast<int64_t>(ua / g * ub));
         }
         return std::nullopt;
     }
 
     // ── is_even / is_odd / is_power_of_2 ─────────────────────────────────
-    if (name == "is_even"       && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64((*v & 1) == 0 ? 1 : 0); return std::nullopt; }
-    if (name == "is_odd"        && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64((*v & 1)      ? 1 : 0); return std::nullopt; }
+    if (name == "is_even" && n == 1) {
+        if (auto v = intArg(0))
+            return CTValue::fromI64((*v & 1) == 0 ? 1 : 0);
+        return std::nullopt;
+    }
+    if (name == "is_odd" && n == 1) {
+        if (auto v = intArg(0))
+            return CTValue::fromI64((*v & 1) ? 1 : 0);
+        return std::nullopt;
+    }
     if (name == "is_power_of_2" && n == 1) {
         if (auto v = intArg(0))
             return CTValue::fromI64((*v > 0 && (*v & (*v - 1)) == 0) ? 1 : 0);
@@ -1355,12 +1651,14 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     }
     if (name == "clz" && n == 1) {
         if (auto v = intArg(0))
-            if (*v != 0) return CTValue::fromI64(static_cast<int64_t>(__builtin_clzll(static_cast<uint64_t>(*v))));
+            if (*v != 0)
+                return CTValue::fromI64(static_cast<int64_t>(__builtin_clzll(static_cast<uint64_t>(*v))));
         return std::nullopt;
     }
     if (name == "ctz" && n == 1) {
         if (auto v = intArg(0))
-            if (*v != 0) return CTValue::fromI64(static_cast<int64_t>(__builtin_ctzll(static_cast<uint64_t>(*v))));
+            if (*v != 0)
+                return CTValue::fromI64(static_cast<int64_t>(__builtin_ctzll(static_cast<uint64_t>(*v))));
         return std::nullopt;
     }
     if (name == "bswap" && n == 1) {
@@ -1385,7 +1683,8 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
             uint64_t x = static_cast<uint64_t>(*v);
             const int sh = static_cast<int>(*k) & 63;
             // When sh == 0, (64 - sh) == 64 which is UB for a 64-bit shift.
-            if (sh == 0) return CTValue::fromI64(static_cast<int64_t>(x));
+            if (sh == 0)
+                return CTValue::fromI64(static_cast<int64_t>(x));
             return CTValue::fromI64(static_cast<int64_t>((x << sh) | (x >> (64 - sh))));
         }
         return std::nullopt;
@@ -1396,7 +1695,8 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
             uint64_t x = static_cast<uint64_t>(*v);
             const int sh = static_cast<int>(*k) & 63;
             // When sh == 0, (64 - sh) == 64 which is UB for a 64-bit shift.
-            if (sh == 0) return CTValue::fromI64(static_cast<int64_t>(x));
+            if (sh == 0)
+                return CTValue::fromI64(static_cast<int64_t>(x));
             return CTValue::fromI64(static_cast<int64_t>((x >> sh) | (x << (64 - sh))));
         }
         return std::nullopt;
@@ -1404,7 +1704,9 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "saturating_add" && n == 2) {
         auto a = intArg(0), b = intArg(1);
         if (a && b) {
-            int64_t r; if (__builtin_add_overflow(*a, *b, &r)) r = (*a > 0) ? INT64_MAX : INT64_MIN;
+            int64_t r;
+            if (__builtin_add_overflow(*a, *b, &r))
+                r = (*a > 0) ? INT64_MAX : INT64_MIN;
             return CTValue::fromI64(r);
         }
         return std::nullopt;
@@ -1415,7 +1717,9 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
             // When overflow occurs, the saturation direction depends on whether
             // we subtracted a negative (effectively added), overflowing positively,
             // or subtracted a positive, overflowing negatively.
-            int64_t r; if (__builtin_sub_overflow(*a, *b, &r)) r = (*b < 0) ? INT64_MAX : INT64_MIN;
+            int64_t r;
+            if (__builtin_sub_overflow(*a, *b, &r))
+                r = (*b < 0) ? INT64_MAX : INT64_MIN;
             return CTValue::fromI64(r);
         }
         return std::nullopt;
@@ -1423,19 +1727,22 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
 
     // ── String builtins ───────────────────────────────────────────────────
     if (name == "char_at" && n == 2) {
-        auto s = strArg(0); auto i = intArg(1);
+        auto s = strArg(0);
+        auto i = intArg(1);
         if (s && i && *i >= 0 && *i < static_cast<int64_t>(s->size()))
             return CTValue::fromI64(static_cast<unsigned char>((*s)[static_cast<size_t>(*i)]));
         return std::nullopt;
     }
     if (name == "str_eq" && n == 2) {
         auto a = strArg(0), b = strArg(1);
-        if (a && b) return CTValue::fromI64(*a == *b ? 1 : 0);
+        if (a && b)
+            return CTValue::fromI64(*a == *b ? 1 : 0);
         return std::nullopt;
     }
     if (name == "str_concat" && n == 2) {
         auto a = strArg(0), b = strArg(1);
-        if (a && b) return CTValue::fromString(*a + *b);
+        if (a && b)
+            return CTValue::fromString(*a + *b);
         return std::nullopt;
     }
     if (name == "to_char" && n == 1) {
@@ -1446,26 +1753,33 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         return std::nullopt;
     }
     if ((name == "is_alpha") && n == 1) {
-        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isalpha(static_cast<unsigned char>(*v))) ? 1 : 0);
+        if (auto v = intArg(0))
+            return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isalpha(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if ((name == "is_digit") && n == 1) {
-        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isdigit(static_cast<unsigned char>(*v))) ? 1 : 0);
+        if (auto v = intArg(0))
+            return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isdigit(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if ((name == "to_string" || name == "number_to_string") && n == 1) {
-        if (auto v = intArg(0)) return CTValue::fromString(std::to_string(*v));
+        if (auto v = intArg(0))
+            return CTValue::fromString(std::to_string(*v));
         return std::nullopt;
     }
     if ((name == "to_int" || name == "string_to_number" || name == "str_to_int") && n == 1) {
         if (auto s = strArg(0)) {
-            try { return CTValue::fromI64(static_cast<int64_t>(std::stoll(*s))); } catch (...) {} // NOLINT(bugprone-empty-catch)
+            try {
+                return CTValue::fromI64(static_cast<int64_t>(std::stoll(*s)));
+            } catch (...) {
+            } // NOLINT(bugprone-empty-catch)
         }
         return std::nullopt;
     }
     if (name == "char_code" && n == 1) {
         if (auto s = strArg(0))
-            if (!s->empty()) return CTValue::fromI64(static_cast<unsigned char>((*s)[0]));
+            if (!s->empty())
+                return CTValue::fromI64(static_cast<unsigned char>((*s)[0]));
         return std::nullopt;
     }
     if ((name == "str_find" || name == "str_index_of") && n == 2) {
@@ -1478,7 +1792,8 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     }
     if (name == "str_contains" && n == 2) {
         auto hay = strArg(0), needle = strArg(1);
-        if (hay && needle) return CTValue::fromI64(hay->find(*needle) != std::string::npos ? 1 : 0);
+        if (hay && needle)
+            return CTValue::fromI64(hay->find(*needle) != std::string::npos ? 1 : 0);
         return std::nullopt;
     }
     if ((name == "str_starts_with" || name == "startswith") && n == 2) {
@@ -1498,7 +1813,9 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         return std::nullopt;
     }
     if (name == "str_substr" && n == 3) {
-        auto s = strArg(0); auto start = intArg(1); auto slen = intArg(2);
+        auto s = strArg(0);
+        auto start = intArg(1);
+        auto slen = intArg(2);
         if (s && start && slen) {
             int64_t sz = static_cast<int64_t>(s->size());
             int64_t st = std::max(int64_t(0), std::min(*start, sz));
@@ -1510,7 +1827,8 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "str_upper" && n == 1) {
         if (auto s = strArg(0)) {
             std::string r = *s;
-            for (char& c : r) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            for (char& c : r)
+                c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
             return CTValue::fromString(std::move(r));
         }
         return std::nullopt;
@@ -1518,19 +1836,24 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "str_lower" && n == 1) {
         if (auto s = strArg(0)) {
             std::string r = *s;
-            for (char& c : r) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            for (char& c : r)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             return CTValue::fromString(std::move(r));
         }
         return std::nullopt;
     }
     if (name == "str_repeat" && n == 2) {
-        auto s = strArg(0); auto cnt = intArg(1);
+        auto s = strArg(0);
+        auto cnt = intArg(1);
         if (s && cnt) {
-            if (*cnt <= 0) return CTValue::fromString("");
-            if (*cnt > 1000) return std::nullopt;
+            if (*cnt <= 0)
+                return CTValue::fromString("");
+            if (*cnt > 1000)
+                return std::nullopt;
             std::string r;
             r.reserve(s->size() * static_cast<size_t>(*cnt));
-            for (int64_t i = 0; i < *cnt; ++i) r += *s;
+            for (int64_t i = 0; i < *cnt; ++i)
+                r += *s;
             return CTValue::fromString(std::move(r));
         }
         return std::nullopt;
@@ -1538,8 +1861,10 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "str_trim" && n == 1) {
         if (auto s = strArg(0)) {
             size_t start = 0, end = s->size();
-            while (start < end && std::isspace(static_cast<unsigned char>((*s)[start]))) ++start;
-            while (end > start && std::isspace(static_cast<unsigned char>((*s)[end-1]))) --end;
+            while (start < end && std::isspace(static_cast<unsigned char>((*s)[start])))
+                ++start;
+            while (end > start && std::isspace(static_cast<unsigned char>((*s)[end - 1])))
+                --end;
             return CTValue::fromString(s->substr(start, end - start));
         }
         return std::nullopt;
@@ -1557,7 +1882,10 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         if (s && sub && !sub->empty()) {
             int64_t cnt = 0;
             size_t pos = 0;
-            while ((pos = s->find(*sub, pos)) != std::string::npos) { ++cnt; pos += sub->size(); }
+            while ((pos = s->find(*sub, pos)) != std::string::npos) {
+                ++cnt;
+                pos += sub->size();
+            }
             return CTValue::fromI64(cnt);
         }
         return std::nullopt;
@@ -1565,7 +1893,8 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "str_replace" && n == 3) {
         auto s = strArg(0), old_sub = strArg(1), new_sub = strArg(2);
         if (s && old_sub && new_sub) {
-            if (old_sub->empty()) return CTValue::fromString(*s);
+            if (old_sub->empty())
+                return CTValue::fromString(*s);
             std::string r;
             size_t pos = 0, prev = 0;
             while ((pos = s->find(*old_sub, prev)) != std::string::npos) {
@@ -1579,11 +1908,15 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         return std::nullopt;
     }
     if (name == "str_pad_left" && n == 3) {
-        auto s = strArg(0); auto w = intArg(1); auto fill = strArg(2);
+        auto s = strArg(0);
+        auto w = intArg(1);
+        auto fill = strArg(2);
         if (s && w && fill && !fill->empty()) {
             int64_t slen = static_cast<int64_t>(s->size());
-            if (*w <= slen) return CTValue::fromString(*s);
-            if (*w > 65536) return std::nullopt;
+            if (*w <= slen)
+                return CTValue::fromString(*s);
+            if (*w > 65536)
+                return std::nullopt;
             std::string r(*w - slen, (*fill)[0]);
             r += *s;
             return CTValue::fromString(std::move(r));
@@ -1591,11 +1924,15 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         return std::nullopt;
     }
     if (name == "str_pad_right" && n == 3) {
-        auto s = strArg(0); auto w = intArg(1); auto fill = strArg(2);
+        auto s = strArg(0);
+        auto w = intArg(1);
+        auto fill = strArg(2);
         if (s && w && fill && !fill->empty()) {
             int64_t slen = static_cast<int64_t>(s->size());
-            if (*w <= slen) return CTValue::fromString(*s);
-            if (*w > 65536) return std::nullopt;
+            if (*w <= slen)
+                return CTValue::fromString(*s);
+            if (*w > 65536)
+                return std::nullopt;
             std::string r(*s);
             r.append(*w - slen, (*fill)[0]);
             return CTValue::fromString(std::move(r));
@@ -1607,35 +1944,42 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
             CTArrayHandle h = heap_.alloc(static_cast<uint64_t>(s->size()));
             ++stats_.arraysAllocated;
             for (size_t i = 0; i < s->size(); ++i)
-                heap_.store(h, static_cast<int64_t>(i),
-                            CTValue::fromI64(static_cast<unsigned char>((*s)[i])));
+                heap_.store(h, static_cast<int64_t>(i), CTValue::fromI64(static_cast<unsigned char>((*s)[i])));
             return CTValue::fromArray(h);
         }
         return std::nullopt;
     }
     if (name == "typeof" && n == 1) {
-        if (args[0].isInt())    return CTValue::fromI64(1);
-        if (args[0].isFloat())  return CTValue::fromI64(2);
-        if (args[0].isString()) return CTValue::fromI64(3);
+        if (args[0].isInt())
+            return CTValue::fromI64(1);
+        if (args[0].isFloat())
+            return CTValue::fromI64(2);
+        if (args[0].isString())
+            return CTValue::fromI64(3);
         return CTValue::fromI64(1);
     }
 
     // ── Array builtins ────────────────────────────────────────────────────
     if (name == "array_fill" && n == 2) {
         auto cnt = intArg(0);
-        if (!cnt) return std::nullopt;
+        if (!cnt)
+            return std::nullopt;
         int64_t count = *cnt;
-        if (count < 0) count = 0;
-        if (count > 65536) return std::nullopt;
+        if (count < 0)
+            count = 0;
+        if (count > 65536)
+            return std::nullopt;
         CTArrayHandle h = heap_.alloc(static_cast<uint64_t>(count), args[1]);
         ++stats_.arraysAllocated;
         return CTValue::fromArray(h);
     }
     if (name == "range" && n == 2) {
         auto start = intArg(0), end = intArg(1);
-        if (!start || !end) return std::nullopt;
+        if (!start || !end)
+            return std::nullopt;
         int64_t len = std::max(int64_t(0), *end - *start);
-        if (len > 65536) return std::nullopt;
+        if (len > 65536)
+            return std::nullopt;
         CTArrayHandle h = heap_.alloc(static_cast<uint64_t>(len));
         ++stats_.arraysAllocated;
         for (int64_t i = 0; i < len; ++i)
@@ -1644,16 +1988,18 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     }
     if (name == "range_step" && n == 3) {
         auto start = intArg(0), end = intArg(1), step = intArg(2);
-        if (!start || !end || !step || *step == 0) return std::nullopt;
+        if (!start || !end || !step || *step == 0)
+            return std::nullopt;
         // Estimate element count for reserve.
-        int64_t estLen = (*step > 0 && *end > *start) ? ((*end - *start + *step - 1) / *step) :
-                         (*step < 0 && *end < *start) ? ((*start - *end + (-*step) - 1) / (-*step)) : 0;
-        if (estLen > 65536) estLen = 65536;
+        int64_t estLen = (*step > 0 && *end > *start)   ? ((*end - *start + *step - 1) / *step)
+                         : (*step < 0 && *end < *start) ? ((*start - *end + (-*step) - 1) / (-*step))
+                                                        : 0;
+        if (estLen > 65536)
+            estLen = 65536;
         std::vector<int64_t> vals;
-        if (estLen > 0) vals.reserve(static_cast<size_t>(estLen));
-        for (int64_t cur = *start;
-             (*step > 0 ? cur < *end : cur > *end) && vals.size() < 65536;
-             cur += *step)
+        if (estLen > 0)
+            vals.reserve(static_cast<size_t>(estLen));
+        for (int64_t cur = *start; (*step > 0 ? cur < *end : cur > *end) && vals.size() < 65536; cur += *step)
             vals.push_back(cur);
         CTArrayHandle h = heap_.alloc(static_cast<uint64_t>(vals.size()));
         ++stats_.arraysAllocated;
@@ -1663,20 +2009,26 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     }
     if (name == "array_concat" && n == 2) {
         CTArrayHandle ha = arrArg(0), hb = arrArg(1);
-        if (ha == CT_NULL_HANDLE || hb == CT_NULL_HANDLE) return std::nullopt;
-        const auto* ea = arrData(ha); const auto* eb = arrData(hb);
-        if (!ea || !eb) return std::nullopt;
+        if (ha == CT_NULL_HANDLE || hb == CT_NULL_HANDLE)
+            return std::nullopt;
+        const auto* ea = arrData(ha);
+        const auto* eb = arrData(hb);
+        if (!ea || !eb)
+            return std::nullopt;
         CTArrayHandle h = heap_.alloc(static_cast<uint64_t>(ea->size() + eb->size()));
         ++stats_.arraysAllocated;
         int64_t idx = 0;
-        for (const auto& v : *ea) heap_.store(h, idx++, v);
-        for (const auto& v : *eb) heap_.store(h, idx++, v);
+        for (const auto& v : *ea)
+            heap_.store(h, idx++, v);
+        for (const auto& v : *eb)
+            heap_.store(h, idx++, v);
         return CTValue::fromArray(h);
     }
     if (name == "array_slice" && n == 3) {
         CTArrayHandle ha = arrArg(0);
         auto start = intArg(1), end = intArg(2);
-        if (ha == CT_NULL_HANDLE || !start || !end) return std::nullopt;
+        if (ha == CT_NULL_HANDLE || !start || !end)
+            return std::nullopt;
         int64_t sz = static_cast<int64_t>(heap_.length(ha));
         int64_t st = std::max(int64_t(0), std::min(*start, sz));
         int64_t en = std::max(st, std::min(*end, sz));
@@ -1688,74 +2040,102 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     }
     if (name == "array_copy" && n == 1) {
         CTArrayHandle src = arrArg(0);
-        if (src == CT_NULL_HANDLE) return std::nullopt;
+        if (src == CT_NULL_HANDLE)
+            return std::nullopt;
         return CTValue::fromArray(snapshotArray(src));
     }
     if ((name == "sum") && n == 1) {
         CTArrayHandle h = arrArg(0);
-        if (h == CT_NULL_HANDLE) return std::nullopt;
+        if (h == CT_NULL_HANDLE)
+            return std::nullopt;
         const auto* elems = arrData(h);
-        if (!elems) return std::nullopt;
+        if (!elems)
+            return std::nullopt;
         int64_t total = 0;
         for (const auto& v : *elems) {
-            if (!v.isInt()) return std::nullopt;
+            if (!v.isInt())
+                return std::nullopt;
             total += v.asI64();
         }
         return CTValue::fromI64(total);
     }
     if (name == "array_product" && n == 1) {
         CTArrayHandle h = arrArg(0);
-        if (h == CT_NULL_HANDLE) return std::nullopt;
+        if (h == CT_NULL_HANDLE)
+            return std::nullopt;
         const auto* elems = arrData(h);
-        if (!elems) return std::nullopt;
+        if (!elems)
+            return std::nullopt;
         int64_t product = 1;
         for (const auto& v : *elems) {
-            if (!v.isInt()) return std::nullopt;
+            if (!v.isInt())
+                return std::nullopt;
             product *= v.asI64();
         }
         return CTValue::fromI64(product);
     }
     if (name == "array_min" && n == 1) {
         CTArrayHandle h = arrArg(0);
-        if (h == CT_NULL_HANDLE) return std::nullopt;
+        if (h == CT_NULL_HANDLE)
+            return std::nullopt;
         const auto* elems = arrData(h);
-        if (!elems || elems->empty()) return CTValue::fromI64(0);
+        if (!elems || elems->empty())
+            return CTValue::fromI64(0);
         int64_t minv = INT64_MAX;
-        for (const auto& v : *elems) { if (!v.isInt()) return std::nullopt; if (v.asI64() < minv) minv = v.asI64(); }
+        for (const auto& v : *elems) {
+            if (!v.isInt())
+                return std::nullopt;
+            if (v.asI64() < minv)
+                minv = v.asI64();
+        }
         return CTValue::fromI64(minv);
     }
     if (name == "array_max" && n == 1) {
         CTArrayHandle h = arrArg(0);
-        if (h == CT_NULL_HANDLE) return std::nullopt;
+        if (h == CT_NULL_HANDLE)
+            return std::nullopt;
         const auto* elems = arrData(h);
-        if (!elems || elems->empty()) return CTValue::fromI64(0);
+        if (!elems || elems->empty())
+            return CTValue::fromI64(0);
         int64_t maxv = INT64_MIN;
-        for (const auto& v : *elems) { if (!v.isInt()) return std::nullopt; if (v.asI64() > maxv) maxv = v.asI64(); }
+        for (const auto& v : *elems) {
+            if (!v.isInt())
+                return std::nullopt;
+            if (v.asI64() > maxv)
+                maxv = v.asI64();
+        }
         return CTValue::fromI64(maxv);
     }
     if (name == "array_last" && n == 1) {
         CTArrayHandle h = arrArg(0);
-        if (h == CT_NULL_HANDLE) return std::nullopt;
+        if (h == CT_NULL_HANDLE)
+            return std::nullopt;
         uint64_t len = heap_.length(h);
-        if (len == 0) return std::nullopt;
+        if (len == 0)
+            return std::nullopt;
         return heap_.load(h, static_cast<int64_t>(len - 1));
     }
     if (name == "array_contains" && n == 2) {
         CTArrayHandle h = arrArg(0);
-        if (h == CT_NULL_HANDLE || !args[1].isInt()) return std::nullopt;
+        if (h == CT_NULL_HANDLE || !args[1].isInt())
+            return std::nullopt;
         int64_t needle = args[1].asI64();
         const auto* elems = arrData(h);
-        if (!elems) return std::nullopt;
+        if (!elems)
+            return std::nullopt;
         for (const auto& v : *elems)
-            if (v.isInt() && v.asI64() == needle) return CTValue::fromI64(1);
+            if (v.isInt() && v.asI64() == needle)
+                return CTValue::fromI64(1);
         return CTValue::fromI64(0);
     }
     if ((name == "index_of" || name == "array_find") && n == 2) {
         CTArrayHandle h = arrArg(0);
-        if (h == CT_NULL_HANDLE || !args[1].isInt()) return std::nullopt;
+        if (h == CT_NULL_HANDLE || !args[1].isInt())
+            return std::nullopt;
         int64_t needle = args[1].asI64();
         const auto* elems = arrData(h);
-        if (!elems) return std::nullopt;
+        if (!elems)
+            return std::nullopt;
         for (size_t i = 0; i < elems->size(); ++i)
             if ((*elems)[i].isInt() && (*elems)[i].asI64() == needle)
                 return CTValue::fromI64(static_cast<int64_t>(i));
@@ -1764,53 +2144,162 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
 
     // ── Character classification predicates ──────────────────────────────
     if (name == "is_upper" && n == 1) {
-        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isupper(static_cast<unsigned char>(*v))) ? 1 : 0);
+        if (auto v = intArg(0))
+            return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isupper(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if (name == "is_lower" && n == 1) {
-        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::islower(static_cast<unsigned char>(*v))) ? 1 : 0);
+        if (auto v = intArg(0))
+            return CTValue::fromI64((*v >= 0 && *v <= 127 && std::islower(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if (name == "is_space" && n == 1) {
-        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isspace(static_cast<unsigned char>(*v))) ? 1 : 0);
+        if (auto v = intArg(0))
+            return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isspace(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
     if (name == "is_alnum" && n == 1) {
-        if (auto v = intArg(0)) return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isalnum(static_cast<unsigned char>(*v))) ? 1 : 0);
+        if (auto v = intArg(0))
+            return CTValue::fromI64((*v >= 0 && *v <= 127 && std::isalnum(static_cast<unsigned char>(*v))) ? 1 : 0);
         return std::nullopt;
     }
 
     // ── Unchecked integer arithmetic (fast_* and precise_*) ─────────────
     // At compile time these are identical to normal arithmetic.
-    if (name == "fast_add" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a + *b); return std::nullopt; }
-    if (name == "fast_sub" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a - *b); return std::nullopt; }
-    if (name == "fast_mul" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a * *b); return std::nullopt; }
-    if (name == "fast_div" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b && *b != 0) return CTValue::fromI64(*a / *b); return std::nullopt; }
-    if (name == "precise_add" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a + *b); return std::nullopt; }
-    if (name == "precise_sub" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a - *b); return std::nullopt; }
-    if (name == "precise_mul" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(*a * *b); return std::nullopt; }
-    if (name == "precise_div" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b && *b != 0) return CTValue::fromI64(*a / *b); return std::nullopt; }
+    if (name == "fast_add" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b)
+            return CTValue::fromI64(*a + *b);
+        return std::nullopt;
+    }
+    if (name == "fast_sub" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b)
+            return CTValue::fromI64(*a - *b);
+        return std::nullopt;
+    }
+    if (name == "fast_mul" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b)
+            return CTValue::fromI64(*a * *b);
+        return std::nullopt;
+    }
+    if (name == "fast_div" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b && *b != 0)
+            return CTValue::fromI64(*a / *b);
+        return std::nullopt;
+    }
+    if (name == "precise_add" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b)
+            return CTValue::fromI64(*a + *b);
+        return std::nullopt;
+    }
+    if (name == "precise_sub" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b)
+            return CTValue::fromI64(*a - *b);
+        return std::nullopt;
+    }
+    if (name == "precise_mul" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b)
+            return CTValue::fromI64(*a * *b);
+        return std::nullopt;
+    }
+    if (name == "precise_div" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b && *b != 0)
+            return CTValue::fromI64(*a / *b);
+        return std::nullopt;
+    }
 
     // ── Trigonometric / math (integer floor for integer args) ────────────
-    if (name == "sin" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::sin(static_cast<double>(*v)))); return std::nullopt; }
-    if (name == "cos" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::cos(static_cast<double>(*v)))); return std::nullopt; }
-    if (name == "tan" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::tan(static_cast<double>(*v)))); return std::nullopt; }
-    if (name == "asin" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::asin(static_cast<double>(*v)))); return std::nullopt; }
-    if (name == "acos" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::acos(static_cast<double>(*v)))); return std::nullopt; }
-    if (name == "atan" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::atan(static_cast<double>(*v)))); return std::nullopt; }
-    if (name == "atan2" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(static_cast<int64_t>(std::atan2(static_cast<double>(*a), static_cast<double>(*b)))); return std::nullopt; }
-    if (name == "exp" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::exp(static_cast<double>(*v)))); return std::nullopt; }
-    if (name == "cbrt" && n == 1) { if (auto v = intArg(0)) return CTValue::fromI64(static_cast<int64_t>(std::cbrt(static_cast<double>(*v)))); return std::nullopt; }
-    if (name == "hypot" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(static_cast<int64_t>(std::hypot(static_cast<double>(*a), static_cast<double>(*b)))); return std::nullopt; }
-    if (name == "fma" && n == 3) { auto a = intArg(0), b = intArg(1), c = intArg(2); if (a && b && c) return CTValue::fromI64(*a * *b + *c); return std::nullopt; }
-    if (name == "copysign" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) { int64_t mag = *a < 0 ? -*a : *a; return CTValue::fromI64(*b >= 0 ? mag : -mag); } return std::nullopt; }
-    if (name == "min_float" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(std::min(*a, *b)); return std::nullopt; }
-    if (name == "max_float" && n == 2) { auto a = intArg(0), b = intArg(1); if (a && b) return CTValue::fromI64(std::max(*a, *b)); return std::nullopt; }
+    if (name == "sin" && n == 1) {
+        if (auto v = intArg(0))
+            return CTValue::fromI64(static_cast<int64_t>(std::sin(static_cast<double>(*v))));
+        return std::nullopt;
+    }
+    if (name == "cos" && n == 1) {
+        if (auto v = intArg(0))
+            return CTValue::fromI64(static_cast<int64_t>(std::cos(static_cast<double>(*v))));
+        return std::nullopt;
+    }
+    if (name == "tan" && n == 1) {
+        if (auto v = intArg(0))
+            return CTValue::fromI64(static_cast<int64_t>(std::tan(static_cast<double>(*v))));
+        return std::nullopt;
+    }
+    if (name == "asin" && n == 1) {
+        if (auto v = intArg(0))
+            return CTValue::fromI64(static_cast<int64_t>(std::asin(static_cast<double>(*v))));
+        return std::nullopt;
+    }
+    if (name == "acos" && n == 1) {
+        if (auto v = intArg(0))
+            return CTValue::fromI64(static_cast<int64_t>(std::acos(static_cast<double>(*v))));
+        return std::nullopt;
+    }
+    if (name == "atan" && n == 1) {
+        if (auto v = intArg(0))
+            return CTValue::fromI64(static_cast<int64_t>(std::atan(static_cast<double>(*v))));
+        return std::nullopt;
+    }
+    if (name == "atan2" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b)
+            return CTValue::fromI64(static_cast<int64_t>(std::atan2(static_cast<double>(*a), static_cast<double>(*b))));
+        return std::nullopt;
+    }
+    if (name == "exp" && n == 1) {
+        if (auto v = intArg(0))
+            return CTValue::fromI64(static_cast<int64_t>(std::exp(static_cast<double>(*v))));
+        return std::nullopt;
+    }
+    if (name == "cbrt" && n == 1) {
+        if (auto v = intArg(0))
+            return CTValue::fromI64(static_cast<int64_t>(std::cbrt(static_cast<double>(*v))));
+        return std::nullopt;
+    }
+    if (name == "hypot" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b)
+            return CTValue::fromI64(static_cast<int64_t>(std::hypot(static_cast<double>(*a), static_cast<double>(*b))));
+        return std::nullopt;
+    }
+    if (name == "fma" && n == 3) {
+        auto a = intArg(0), b = intArg(1), c = intArg(2);
+        if (a && b && c)
+            return CTValue::fromI64(*a * *b + *c);
+        return std::nullopt;
+    }
+    if (name == "copysign" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b) {
+            int64_t mag = *a < 0 ? -*a : *a;
+            return CTValue::fromI64(*b >= 0 ? mag : -mag);
+        }
+        return std::nullopt;
+    }
+    if (name == "min_float" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b)
+            return CTValue::fromI64(std::min(*a, *b));
+        return std::nullopt;
+    }
+    if (name == "max_float" && n == 2) {
+        auto a = intArg(0), b = intArg(1);
+        if (a && b)
+            return CTValue::fromI64(std::max(*a, *b));
+        return std::nullopt;
+    }
 
     // ── Array: reverse, sort, remove, insert ────────────────────────────
     if (name == "reverse" && n == 1) {
         CTArrayHandle h = arrArg(0);
-        if (h == CT_NULL_HANDLE) return std::nullopt;
+        if (h == CT_NULL_HANDLE)
+            return std::nullopt;
         auto elems = arrCopy(h);
         std::reverse(elems.begin(), elems.end());
         CTArrayHandle nh = heap_.alloc(static_cast<uint64_t>(elems.size()));
@@ -1821,13 +2310,14 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     }
     if (name == "sort" && n == 1) {
         CTArrayHandle h = arrArg(0);
-        if (h == CT_NULL_HANDLE) return std::nullopt;
+        if (h == CT_NULL_HANDLE)
+            return std::nullopt;
         auto elems = arrCopy(h);
         // Sort only integer arrays at compile time.
-        for (auto& e : elems) if (!e.isInt()) return std::nullopt;
-        std::sort(elems.begin(), elems.end(), [](const CTValue& a, const CTValue& b) {
-            return a.asI64() < b.asI64();
-        });
+        for (auto& e : elems)
+            if (!e.isInt())
+                return std::nullopt;
+        std::sort(elems.begin(), elems.end(), [](const CTValue& a, const CTValue& b) { return a.asI64() < b.asI64(); });
         CTArrayHandle nh = heap_.alloc(static_cast<uint64_t>(elems.size()));
         ++stats_.arraysAllocated;
         for (size_t i = 0; i < elems.size(); ++i)
@@ -1837,10 +2327,12 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "array_remove" && n == 2) {
         CTArrayHandle h = arrArg(0);
         auto idx = intArg(1);
-        if (h == CT_NULL_HANDLE || !idx) return std::nullopt;
+        if (h == CT_NULL_HANDLE || !idx)
+            return std::nullopt;
         auto elems = arrCopy(h);
         int64_t i = *idx;
-        if (i < 0 || i >= static_cast<int64_t>(elems.size())) return std::nullopt;
+        if (i < 0 || i >= static_cast<int64_t>(elems.size()))
+            return std::nullopt;
         elems.erase(elems.begin() + i);
         CTArrayHandle nh = heap_.alloc(static_cast<uint64_t>(elems.size()));
         ++stats_.arraysAllocated;
@@ -1851,10 +2343,12 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "array_insert" && n == 3) {
         CTArrayHandle h = arrArg(0);
         auto idx = intArg(1);
-        if (h == CT_NULL_HANDLE || !idx || !args[2].isKnown()) return std::nullopt;
+        if (h == CT_NULL_HANDLE || !idx || !args[2].isKnown())
+            return std::nullopt;
         auto elems = arrCopy(h);
         int64_t i = *idx;
-        if (i < 0 || i > static_cast<int64_t>(elems.size())) return std::nullopt;
+        if (i < 0 || i > static_cast<int64_t>(elems.size()))
+            return std::nullopt;
         elems.insert(elems.begin() + i, args[2]);
         CTArrayHandle nh = heap_.alloc(static_cast<uint64_t>(elems.size()));
         ++stats_.arraysAllocated;
@@ -1864,39 +2358,50 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     }
     if (name == "array_any" && n == 1) {
         CTArrayHandle h = arrArg(0);
-        if (h == CT_NULL_HANDLE) return std::nullopt;
+        if (h == CT_NULL_HANDLE)
+            return std::nullopt;
         const auto* elems = arrData(h);
-        if (!elems) return std::nullopt;
+        if (!elems)
+            return std::nullopt;
         for (const auto& v : *elems)
-            if (v.isInt() && v.asI64() != 0) return CTValue::fromI64(1);
+            if (v.isInt() && v.asI64() != 0)
+                return CTValue::fromI64(1);
         return CTValue::fromI64(0);
     }
     if (name == "array_every" && n == 1) {
         CTArrayHandle h = arrArg(0);
-        if (h == CT_NULL_HANDLE) return std::nullopt;
+        if (h == CT_NULL_HANDLE)
+            return std::nullopt;
         const auto* elems = arrData(h);
-        if (!elems) return std::nullopt;
+        if (!elems)
+            return std::nullopt;
         for (const auto& v : *elems) {
-            if (!v.isInt()) return std::nullopt;
-            if (v.asI64() == 0) return CTValue::fromI64(0);
+            if (!v.isInt())
+                return std::nullopt;
+            if (v.asI64() == 0)
+                return CTValue::fromI64(0);
         }
         return CTValue::fromI64(1);
     }
     if (name == "array_count" && n == 2) {
         CTArrayHandle h = arrArg(0);
-        if (h == CT_NULL_HANDLE || !args[1].isInt()) return std::nullopt;
+        if (h == CT_NULL_HANDLE || !args[1].isInt())
+            return std::nullopt;
         int64_t needle = args[1].asI64(), count = 0;
         const auto* elems = arrData(h);
-        if (!elems) return std::nullopt;
+        if (!elems)
+            return std::nullopt;
         for (const auto& v : *elems)
-            if (v.isInt() && v.asI64() == needle) ++count;
+            if (v.isInt() && v.asI64() == needle)
+                ++count;
         return CTValue::fromI64(count);
     }
 
     // ── String: str_split, str_join ─────────────────────────────────────
     if (name == "str_split" && n == 2) {
         auto s = strArg(0), delim = strArg(1);
-        if (!s || !delim || delim->empty()) return std::nullopt;
+        if (!s || !delim || delim->empty())
+            return std::nullopt;
         std::vector<std::string> parts;
         size_t pos = 0, prev = 0;
         while ((pos = s->find(*delim, prev)) != std::string::npos) {
@@ -1913,13 +2418,17 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     if (name == "str_join" && n == 2) {
         CTArrayHandle h = arrArg(0);
         auto sep = strArg(1);
-        if (h == CT_NULL_HANDLE || !sep) return std::nullopt;
+        if (h == CT_NULL_HANDLE || !sep)
+            return std::nullopt;
         const auto* elems = arrData(h);
-        if (!elems) return std::nullopt;
+        if (!elems)
+            return std::nullopt;
         std::string result;
         for (size_t i = 0; i < elems->size(); ++i) {
-            if (!(*elems)[i].isString()) return std::nullopt;
-            if (i > 0) result += *sep;
+            if (!(*elems)[i].isString())
+                return std::nullopt;
+            if (i > 0)
+                result += *sep;
             result += (*elems)[i].asStr();
         }
         return CTValue::fromString(std::move(result));
@@ -1928,37 +2437,52 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     // Integer type-cast aliases (also handled by evalTypeCast).
     if (n == 1 && args[0].isInt()) {
         const int64_t v = args[0].asI64();
-        if (name == "u64" || name == "i64" || name == "int" || name == "uint") return CTValue::fromI64(v);
-        if (name == "u32") return CTValue::fromI64(static_cast<int64_t>(static_cast<uint32_t>(v)));
-        if (name == "i32") return CTValue::fromI64(static_cast<int64_t>(static_cast<int32_t>(v)));
-        if (name == "u16") return CTValue::fromI64(static_cast<int64_t>(static_cast<uint16_t>(v)));
-        if (name == "i16") return CTValue::fromI64(static_cast<int64_t>(static_cast<int16_t>(v)));
-        if (name == "u8")  return CTValue::fromI64(static_cast<int64_t>(static_cast<uint8_t>(v)));
-        if (name == "i8")  return CTValue::fromI64(static_cast<int64_t>(static_cast<int8_t>(v)));
-        if (name == "bool")return CTValue::fromI64(v != 0 ? 1 : 0);
+        if (name == "u64" || name == "i64" || name == "int" || name == "uint")
+            return CTValue::fromI64(v);
+        if (name == "u32")
+            return CTValue::fromI64(static_cast<int64_t>(static_cast<uint32_t>(v)));
+        if (name == "i32")
+            return CTValue::fromI64(static_cast<int64_t>(static_cast<int32_t>(v)));
+        if (name == "u16")
+            return CTValue::fromI64(static_cast<int64_t>(static_cast<uint16_t>(v)));
+        if (name == "i16")
+            return CTValue::fromI64(static_cast<int64_t>(static_cast<int16_t>(v)));
+        if (name == "u8")
+            return CTValue::fromI64(static_cast<int64_t>(static_cast<uint8_t>(v)));
+        if (name == "i8")
+            return CTValue::fromI64(static_cast<int64_t>(static_cast<int8_t>(v)));
+        if (name == "bool")
+            return CTValue::fromI64(v != 0 ? 1 : 0);
     }
 
     // ── std::synthesize (program synthesis stdlib function) ──────────────
     if ((name == "std__synthesize" || name == "std_synthesize") && n >= 1) {
         // Argument 0: examples must be a concrete array of arrays.
         CTArrayHandle examplesH = arrArg(0);
-        if (examplesH == CT_NULL_HANDLE) return std::nullopt;
+        if (examplesH == CT_NULL_HANDLE)
+            return std::nullopt;
         const auto* outerArr = heap_.get(examplesH);
-        if (!outerArr || outerArr->data.empty()) return std::nullopt;
+        if (!outerArr || outerArr->data.empty())
+            return std::nullopt;
 
         std::vector<omscript::SynthExample> examples;
         size_t nInputs = 0;
         for (const auto& inner : outerArr->data) {
-            if (!inner.isArray()) return std::nullopt;
+            if (!inner.isArray())
+                return std::nullopt;
             const auto* innerArr = heap_.get(inner.asArr());
-            if (!innerArr || innerArr->data.size() < 2) return std::nullopt;
-            if (nInputs == 0) nInputs = innerArr->data.size() - 1;
-            if (innerArr->data.size() - 1 != nInputs) return std::nullopt; // mismatched widths
+            if (!innerArr || innerArr->data.size() < 2)
+                return std::nullopt;
+            if (nInputs == 0)
+                nInputs = innerArr->data.size() - 1;
+            if (innerArr->data.size() - 1 != nInputs)
+                return std::nullopt; // mismatched widths
 
             omscript::SynthExample ex;
             ex.inputs.reserve(nInputs);
             for (size_t i = 0; i < innerArr->data.size(); ++i) {
-                if (!innerArr->data[i].isInt()) return std::nullopt;
+                if (!innerArr->data[i].isInt())
+                    return std::nullopt;
                 if (i < nInputs)
                     ex.inputs.push_back(innerArr->data[i].asI64());
                 else
@@ -1966,7 +2490,8 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
             }
             examples.push_back(std::move(ex));
         }
-        if (examples.empty()) return std::nullopt;
+        if (examples.empty())
+            return std::nullopt;
 
         omscript::SynthConfig cfg;
         cfg.maxCandidates = 200000;
@@ -1978,7 +2503,8 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
                 const auto* opsArr = heap_.get(opsH);
                 if (opsArr) {
                     for (const auto& opV : opsArr->data) {
-                        if (opV.isString()) cfg.ops.push_back(opV.asStr());
+                        if (opV.isString())
+                            cfg.ops.push_back(opV.asStr());
                     }
                 }
             }
@@ -1997,7 +2523,8 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
 
         omscript::SynthesisEngine eng;
         auto result = eng.synthesize(static_cast<int>(nInputs), examples, cfg);
-        if (!result) return std::nullopt;
+        if (!result)
+            return std::nullopt;
         return CTValue::fromI64(result->firstOutput);
     }
 
@@ -2017,10 +2544,9 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
         if (auto a = intArg(0))
             if (auto b = intArg(1)) {
                 using U128 = unsigned __int128;
-                U128 product = static_cast<U128>(static_cast<uint64_t>(*a))
-                             * static_cast<U128>(static_cast<uint64_t>(*b));
-                return CTValue::fromI64(static_cast<int64_t>(
-                    static_cast<uint64_t>(product >> 64)));
+                U128 product =
+                    static_cast<U128>(static_cast<uint64_t>(*a)) * static_cast<U128>(static_cast<uint64_t>(*b));
+                return CTValue::fromI64(static_cast<int64_t>(static_cast<uint64_t>(product >> 64)));
             }
         return std::nullopt;
     }
@@ -2031,7 +2557,8 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
             if (auto b = intArg(1)) {
                 using I128 = __int128;
                 I128 diff = static_cast<I128>(*a) - static_cast<I128>(*b);
-                if (diff < 0) diff = -diff;
+                if (diff < 0)
+                    diff = -diff;
                 return CTValue::fromI64(static_cast<int64_t>(diff));
             }
         return std::nullopt;
@@ -2067,121 +2594,200 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
     }
 
     // ── __tw_<op>_<N> — width-specific integer comptime evaluation ───────────
-    if (name.size() > 5 && name.substr(0,5) == "__tw_") {
+    if (name.size() > 5 && name.substr(0, 5) == "__tw_") {
         const std::string suffix = name.substr(5);
         const auto uscore = suffix.rfind('_');
-        if (uscore == std::string::npos) return std::nullopt;
-        const std::string opname   = suffix.substr(0, uscore);
-        const std::string widthStr = suffix.substr(uscore+1);
+        if (uscore == std::string::npos)
+            return std::nullopt;
+        const std::string opname = suffix.substr(0, uscore);
+        const std::string widthStr = suffix.substr(uscore + 1);
         int bw = 0;
         for (char c : widthStr) {
-            if (!std::isdigit(static_cast<unsigned char>(c))) return std::nullopt;
-            bw = bw*10+(c-'0');
+            if (!std::isdigit(static_cast<unsigned char>(c)))
+                return std::nullopt;
+            bw = bw * 10 + (c - '0');
         }
-        if (bw<1 || bw>64) return std::nullopt;
-        const uint64_t mask = (bw<64) ? ((1ULL<<bw)-1) : ~0ULL;
+        if (bw < 1 || bw > 64)
+            return std::nullopt;
+        const uint64_t mask = (bw < 64) ? ((1ULL << bw) - 1) : ~0ULL;
 
-        if (opname=="popcount" && n==1) {
+        if (opname == "popcount" && n == 1) {
             if (auto v = intArg(0))
                 return CTValue::fromI64(static_cast<int64_t>(__builtin_popcountll(static_cast<uint64_t>(*v) & mask)));
         }
-        if (opname=="clz" && n==1) {
+        if (opname == "clz" && n == 1) {
             if (auto v = intArg(0)) {
                 uint64_t bits = static_cast<uint64_t>(*v) & mask;
-                int64_t r = bits==0 ? bw : static_cast<int64_t>(__builtin_clzll(bits)-(64-bw));
+                int64_t r = bits == 0 ? bw : static_cast<int64_t>(__builtin_clzll(bits) - (64 - bw));
                 return CTValue::fromI64(r);
             }
         }
-        if (opname=="ctz" && n==1) {
+        if (opname == "ctz" && n == 1) {
             if (auto v = intArg(0)) {
                 uint64_t bits = static_cast<uint64_t>(*v) & mask;
-                int64_t r = bits==0 ? bw : static_cast<int64_t>(__builtin_ctzll(bits));
+                int64_t r = bits == 0 ? bw : static_cast<int64_t>(__builtin_ctzll(bits));
                 return CTValue::fromI64(r);
             }
         }
-        if (opname=="bitreverse" && n==1) {
+        if (opname == "bitreverse" && n == 1) {
             if (auto v = intArg(0)) {
                 uint64_t bits = static_cast<uint64_t>(*v) & mask;
                 uint64_t rev = 0;
-                for (int i=0;i<bw;++i) rev|=((bits>>i)&1ULL)<<(bw-1-i);
+                for (int i = 0; i < bw; ++i)
+                    rev |= ((bits >> i) & 1ULL) << (bw - 1 - i);
                 return CTValue::fromI64(static_cast<int64_t>(rev));
             }
         }
-        if (opname=="bswap" && n==1 && bw>=16 && (bw%8)==0) {
+        if (opname == "bswap" && n == 1 && bw >= 16 && (bw % 8) == 0) {
             if (auto v = intArg(0)) {
                 uint64_t bits = static_cast<uint64_t>(*v) & mask;
-                uint64_t sw = 0; int bytes=bw/8;
-                for (int i=0;i<bytes;++i) sw|=((bits>>(i*8))&0xFF)<<((bytes-1-i)*8);
+                uint64_t sw = 0;
+                int bytes = bw / 8;
+                for (int i = 0; i < bytes; ++i)
+                    sw |= ((bits >> (i * 8)) & 0xFF) << ((bytes - 1 - i) * 8);
                 return CTValue::fromI64(static_cast<int64_t>(sw));
             }
         }
-        if ((opname=="rotate_left"||opname=="rotl") && n==2) {
-            if (auto v=intArg(0)) if (auto a=intArg(1)) {
-                uint64_t bits=static_cast<uint64_t>(*v)&mask;
-                int amt=static_cast<int>(*a)%bw; if(amt<0) amt+=bw;
-                uint64_t r=(bits<<amt)|(bits>>(bw-amt));
-                return CTValue::fromI64(static_cast<int64_t>(r&mask));
-            }
+        if ((opname == "rotate_left" || opname == "rotl") && n == 2) {
+            if (auto v = intArg(0))
+                if (auto a = intArg(1)) {
+                    uint64_t bits = static_cast<uint64_t>(*v) & mask;
+                    int amt = static_cast<int>(*a) % bw;
+                    if (amt < 0)
+                        amt += bw;
+                    uint64_t r = (bits << amt) | (bits >> (bw - amt));
+                    return CTValue::fromI64(static_cast<int64_t>(r & mask));
+                }
         }
-        if ((opname=="rotate_right"||opname=="rotr") && n==2) {
-            if (auto v=intArg(0)) if (auto a=intArg(1)) {
-                uint64_t bits=static_cast<uint64_t>(*v)&mask;
-                int amt=static_cast<int>(*a)%bw; if(amt<0) amt+=bw;
-                uint64_t r=(bits>>amt)|(bits<<(bw-amt));
-                return CTValue::fromI64(static_cast<int64_t>(r&mask));
-            }
+        if ((opname == "rotate_right" || opname == "rotr") && n == 2) {
+            if (auto v = intArg(0))
+                if (auto a = intArg(1)) {
+                    uint64_t bits = static_cast<uint64_t>(*v) & mask;
+                    int amt = static_cast<int>(*a) % bw;
+                    if (amt < 0)
+                        amt += bw;
+                    uint64_t r = (bits >> amt) | (bits << (bw - amt));
+                    return CTValue::fromI64(static_cast<int64_t>(r & mask));
+                }
         }
-        if (opname=="saturating_add" && n==2) {
-            if (auto a=intArg(0)) if (auto b=intArg(1)) {
-                using I128=__int128;
-                I128 res=static_cast<I128>(*a)+static_cast<I128>(*b);
-                int64_t lo=-(int64_t(1)<<(bw-1)), hi=(int64_t(1)<<(bw-1))-1;
-                if (res < lo) res = lo;
-                if (res > hi) res = hi;
-                return CTValue::fromI64(static_cast<int64_t>(res));
-            }
+        if (opname == "saturating_add" && n == 2) {
+            if (auto a = intArg(0))
+                if (auto b = intArg(1)) {
+                    using I128 = __int128;
+                    I128 res = static_cast<I128>(*a) + static_cast<I128>(*b);
+                    int64_t lo = -(int64_t(1) << (bw - 1)), hi = (int64_t(1) << (bw - 1)) - 1;
+                    if (res < lo)
+                        res = lo;
+                    if (res > hi)
+                        res = hi;
+                    return CTValue::fromI64(static_cast<int64_t>(res));
+                }
         }
-        if (opname=="saturating_sub" && n==2) {
-            if (auto a=intArg(0)) if (auto b=intArg(1)) {
-                using I128=__int128;
-                I128 res=static_cast<I128>(*a)-static_cast<I128>(*b);
-                int64_t lo=-(int64_t(1)<<(bw-1)), hi=(int64_t(1)<<(bw-1))-1;
-                if (res < lo) res = lo;
-                if (res > hi) res = hi;
-                return CTValue::fromI64(static_cast<int64_t>(res));
-            }
+        if (opname == "saturating_sub" && n == 2) {
+            if (auto a = intArg(0))
+                if (auto b = intArg(1)) {
+                    using I128 = __int128;
+                    I128 res = static_cast<I128>(*a) - static_cast<I128>(*b);
+                    int64_t lo = -(int64_t(1) << (bw - 1)), hi = (int64_t(1) << (bw - 1)) - 1;
+                    if (res < lo)
+                        res = lo;
+                    if (res > hi)
+                        res = hi;
+                    return CTValue::fromI64(static_cast<int64_t>(res));
+                }
         }
         return std::nullopt;
     }
 
     // ── __tf_<op> — f32-typed float comptime evaluation ──────────────────────
-    if (name.size() > 5 && name.substr(0,5) == "__tf_") {
+    if (name.size() > 5 && name.substr(0, 5) == "__tf_") {
         const std::string opname = name.substr(5);
         // For comptime eval, just compute with double precision and return.
         auto dArg = [&](size_t i) -> std::optional<double> {
-            if (i>=n) return std::nullopt;
-            if (auto v = intArg(i)) return static_cast<double>(*v);
+            if (i >= n)
+                return std::nullopt;
+            if (auto v = intArg(i))
+                return static_cast<double>(*v);
             return std::nullopt;
         };
         auto fromD = [](double d) { return CTValue::fromI64(static_cast<int64_t>(d)); };
-        if (opname=="sqrt"  && n==1) { if(auto v=dArg(0)) return fromD(std::sqrt(*v)); }
-        if (opname=="sin"   && n==1) { if(auto v=dArg(0)) return fromD(std::sin(*v)); }
-        if (opname=="cos"   && n==1) { if(auto v=dArg(0)) return fromD(std::cos(*v)); }
-        if (opname=="tan"   && n==1) { if(auto v=dArg(0)) return fromD(std::tan(*v)); }
-        if (opname=="asin"  && n==1) { if(auto v=dArg(0)) return fromD(std::asin(*v)); }
-        if (opname=="acos"  && n==1) { if(auto v=dArg(0)) return fromD(std::acos(*v)); }
-        if (opname=="atan"  && n==1) { if(auto v=dArg(0)) return fromD(std::atan(*v)); }
-        if (opname=="atan2" && n==2) { if(auto a=dArg(0)) if(auto b=dArg(1)) return fromD(std::atan2(*a,*b)); }
-        if (opname=="log"   && n==1) { if(auto v=dArg(0)) return fromD(std::log(*v)); }
-        if (opname=="log2"  && n==1) { if(auto v=dArg(0)) return fromD(std::log2(*v)); }
-        if (opname=="log10" && n==1) { if(auto v=dArg(0)) return fromD(std::log10(*v)); }
-        if (opname=="exp"   && n==1) { if(auto v=dArg(0)) return fromD(std::exp(*v)); }
-        if (opname=="exp2"  && n==1) { if(auto v=dArg(0)) return fromD(std::exp2(*v)); }
-        if (opname=="cbrt"  && n==1) { if(auto v=dArg(0)) return fromD(std::cbrt(*v)); }
-        if (opname=="hypot" && n==2) { if(auto a=dArg(0)) if(auto b=dArg(1)) return fromD(std::hypot(*a,*b)); }
-        if (opname=="fma"   && n==3) { if(auto a=dArg(0)) if(auto b=dArg(1)) if(auto c=dArg(2)) return fromD(std::fma(*a,*b,*c)); }
-        if (opname=="copysign" && n==2) { if(auto a=dArg(0)) if(auto b=dArg(1)) return fromD(std::copysign(*a,*b)); }
-        if (opname=="fast_sqrt" && n==1) { if(auto v=dArg(0)) return fromD(std::sqrt(*v)); }
+        if (opname == "sqrt" && n == 1) {
+            if (auto v = dArg(0))
+                return fromD(std::sqrt(*v));
+        }
+        if (opname == "sin" && n == 1) {
+            if (auto v = dArg(0))
+                return fromD(std::sin(*v));
+        }
+        if (opname == "cos" && n == 1) {
+            if (auto v = dArg(0))
+                return fromD(std::cos(*v));
+        }
+        if (opname == "tan" && n == 1) {
+            if (auto v = dArg(0))
+                return fromD(std::tan(*v));
+        }
+        if (opname == "asin" && n == 1) {
+            if (auto v = dArg(0))
+                return fromD(std::asin(*v));
+        }
+        if (opname == "acos" && n == 1) {
+            if (auto v = dArg(0))
+                return fromD(std::acos(*v));
+        }
+        if (opname == "atan" && n == 1) {
+            if (auto v = dArg(0))
+                return fromD(std::atan(*v));
+        }
+        if (opname == "atan2" && n == 2) {
+            if (auto a = dArg(0))
+                if (auto b = dArg(1))
+                    return fromD(std::atan2(*a, *b));
+        }
+        if (opname == "log" && n == 1) {
+            if (auto v = dArg(0))
+                return fromD(std::log(*v));
+        }
+        if (opname == "log2" && n == 1) {
+            if (auto v = dArg(0))
+                return fromD(std::log2(*v));
+        }
+        if (opname == "log10" && n == 1) {
+            if (auto v = dArg(0))
+                return fromD(std::log10(*v));
+        }
+        if (opname == "exp" && n == 1) {
+            if (auto v = dArg(0))
+                return fromD(std::exp(*v));
+        }
+        if (opname == "exp2" && n == 1) {
+            if (auto v = dArg(0))
+                return fromD(std::exp2(*v));
+        }
+        if (opname == "cbrt" && n == 1) {
+            if (auto v = dArg(0))
+                return fromD(std::cbrt(*v));
+        }
+        if (opname == "hypot" && n == 2) {
+            if (auto a = dArg(0))
+                if (auto b = dArg(1))
+                    return fromD(std::hypot(*a, *b));
+        }
+        if (opname == "fma" && n == 3) {
+            if (auto a = dArg(0))
+                if (auto b = dArg(1))
+                    if (auto c = dArg(2))
+                        return fromD(std::fma(*a, *b, *c));
+        }
+        if (opname == "copysign" && n == 2) {
+            if (auto a = dArg(0))
+                if (auto b = dArg(1))
+                    return fromD(std::copysign(*a, *b));
+        }
+        if (opname == "fast_sqrt" && n == 1) {
+            if (auto v = dArg(0))
+                return fromD(std::sqrt(*v));
+        }
         return std::nullopt;
     }
 
@@ -2192,19 +2798,17 @@ std::optional<CTValue> CTEngine::evalBuiltin(const std::string& name,
 // ── Linear expression descriptor ─────────────────────────────────────────
 // Represents value = coefA * loopVar + coefB where coefA == 0 is invariant.
 struct LRLinear {
-    bool    valid{false};
-    int64_t a{0};   // coefficient of the loop induction variable
-    int64_t b{0};   // loop-invariant bias
+    bool valid{false};
+    int64_t a{0}; // coefficient of the loop induction variable
+    int64_t b{0}; // loop-invariant bias
 };
 
 // Classify an expression as a*iv + b, returning {false} if unrepresentable.
-static LRLinear lrLinearize(
-    const Expression*                                   e,
-    const std::string&                                  iv,
-    const std::unordered_map<std::string, CTValue>&     snap,
-    const std::unordered_set<std::string>&              modVars)
-{
-    if (!e) return {};
+static LRLinear lrLinearize(const Expression* e, const std::string& iv,
+                            const std::unordered_map<std::string, CTValue>& snap,
+                            const std::unordered_set<std::string>& modVars) {
+    if (!e)
+        return {};
     switch (e->type) {
 
     case ASTNodeType::LITERAL_EXPR: {
@@ -2216,8 +2820,10 @@ static LRLinear lrLinearize(
 
     case ASTNodeType::IDENTIFIER_EXPR: {
         auto* id = static_cast<const IdentifierExpr*>(e);
-        if (id->name == iv) return {true, 1, 0};
-        if (modVars.count(id->name)) return {};   // mutated — not invariant
+        if (id->name == iv)
+            return {true, 1, 0};
+        if (modVars.count(id->name))
+            return {}; // mutated — not invariant
         auto it = snap.find(id->name);
         if (it != snap.end() && it->second.isInt())
             return {true, 0, it->second.asI64()};
@@ -2228,14 +2834,16 @@ static LRLinear lrLinearize(
         auto* un = static_cast<const UnaryExpr*>(e);
         if (un->op == "-") {
             LRLinear s = lrLinearize(un->operand.get(), iv, snap, modVars);
-            if (!s.valid) return {};
+            if (!s.valid)
+                return {};
             return {true, -s.a, -s.b};
         }
         if (un->op == "+")
             return lrLinearize(un->operand.get(), iv, snap, modVars);
         if (un->op == "~") {
             LRLinear s = lrLinearize(un->operand.get(), iv, snap, modVars);
-            if (!s.valid || s.a != 0) return {};   // ~c only for invariant c
+            if (!s.valid || s.a != 0)
+                return {}; // ~c only for invariant c
             return {true, 0, ~s.b};
         }
         return {};
@@ -2244,35 +2852,44 @@ static LRLinear lrLinearize(
     case ASTNodeType::BINARY_EXPR: {
         auto* bin = static_cast<const BinaryExpr*>(e);
         if (bin->op == "+" || bin->op == "-") {
-            LRLinear L = lrLinearize(bin->left.get(),  iv, snap, modVars);
+            LRLinear L = lrLinearize(bin->left.get(), iv, snap, modVars);
             LRLinear R = lrLinearize(bin->right.get(), iv, snap, modVars);
-            if (!L.valid || !R.valid) return {};
-            int64_t ra = (bin->op == "+") ?  R.a : -R.a;
-            int64_t rb = (bin->op == "+") ?  R.b : -R.b;
+            if (!L.valid || !R.valid)
+                return {};
+            int64_t ra = (bin->op == "+") ? R.a : -R.a;
+            int64_t rb = (bin->op == "+") ? R.b : -R.b;
             return {true, L.a + ra, L.b + rb};
         }
         if (bin->op == "*") {
-            LRLinear L = lrLinearize(bin->left.get(),  iv, snap, modVars);
+            LRLinear L = lrLinearize(bin->left.get(), iv, snap, modVars);
             LRLinear R = lrLinearize(bin->right.get(), iv, snap, modVars);
-            if (!L.valid || !R.valid) return {};
-            if (L.a == 0 && R.a == 0) return {true, 0,       L.b * R.b};
-            if (L.a == 0)             return {true, L.b*R.a,  L.b*R.b};   // L invariant
-            if (R.a == 0)             return {true, R.b*L.a,  R.b*L.b};   // R invariant
-            return {};   // quadratic — not representable
+            if (!L.valid || !R.valid)
+                return {};
+            if (L.a == 0 && R.a == 0)
+                return {true, 0, L.b * R.b};
+            if (L.a == 0)
+                return {true, L.b * R.a, L.b * R.b}; // L invariant
+            if (R.a == 0)
+                return {true, R.b * L.a, R.b * L.b}; // R invariant
+            return {};                               // quadratic — not representable
         }
         if (bin->op == "<<") {
-            LRLinear L = lrLinearize(bin->left.get(),  iv, snap, modVars);
+            LRLinear L = lrLinearize(bin->left.get(), iv, snap, modVars);
             LRLinear R = lrLinearize(bin->right.get(), iv, snap, modVars);
-            if (!L.valid || !R.valid || R.a != 0) return {};
-            if (R.b < 0 || R.b >= 64) return {};
+            if (!L.valid || !R.valid || R.a != 0)
+                return {};
+            if (R.b < 0 || R.b >= 64)
+                return {};
             unsigned sh = static_cast<unsigned>(R.b);
             return {true, L.a << sh, L.b << sh};
         }
         if (bin->op == ">>" || bin->op == ">>>") {
-            LRLinear L = lrLinearize(bin->left.get(),  iv, snap, modVars);
+            LRLinear L = lrLinearize(bin->left.get(), iv, snap, modVars);
             LRLinear R = lrLinearize(bin->right.get(), iv, snap, modVars);
-            if (!L.valid || !R.valid || R.a != 0 || L.a != 0) return {};
-            if (R.b < 0 || R.b >= 64) return {};
+            if (!L.valid || !R.valid || R.a != 0 || L.a != 0)
+                return {};
+            if (R.b < 0 || R.b >= 64)
+                return {};
             int sh = static_cast<int>(R.b);
             if (bin->op == ">>")
                 return {true, 0, L.b >> sh};
@@ -2280,13 +2897,17 @@ static LRLinear lrLinearize(
         }
         // Bitwise ops on two invariant operands only.
         if (bin->op == "&" || bin->op == "|" || bin->op == "^") {
-            LRLinear L = lrLinearize(bin->left.get(),  iv, snap, modVars);
+            LRLinear L = lrLinearize(bin->left.get(), iv, snap, modVars);
             LRLinear R = lrLinearize(bin->right.get(), iv, snap, modVars);
-            if (!L.valid || !R.valid || L.a != 0 || R.a != 0) return {};
+            if (!L.valid || !R.valid || L.a != 0 || R.a != 0)
+                return {};
             int64_t res = 0;
-            if      (bin->op == "&") res = L.b & R.b;
-            else if (bin->op == "|") res = L.b | R.b;
-            else                     res = L.b ^ R.b;
+            if (bin->op == "&")
+                res = L.b & R.b;
+            else if (bin->op == "|")
+                res = L.b | R.b;
+            else
+                res = L.b ^ R.b;
             return {true, 0, res};
         }
         return {};
@@ -2298,14 +2919,16 @@ static LRLinear lrLinearize(
         const std::string& fn = call->callee;
         if (fn == "abs" && call->arguments.size() == 1) {
             LRLinear A = lrLinearize(call->arguments[0].get(), iv, snap, modVars);
-            if (!A.valid || A.a != 0) return {};   // only invariant operand
+            if (!A.valid || A.a != 0)
+                return {}; // only invariant operand
             int64_t v = A.b;
             return {true, 0, v < 0 ? -v : v};
         }
         if ((fn == "min" || fn == "max") && call->arguments.size() == 2) {
             LRLinear A = lrLinearize(call->arguments[0].get(), iv, snap, modVars);
             LRLinear B = lrLinearize(call->arguments[1].get(), iv, snap, modVars);
-            if (!A.valid || !B.valid || A.a != 0 || B.a != 0) return {};
+            if (!A.valid || !B.valid || A.a != 0 || B.a != 0)
+                return {};
             int64_t v = (fn == "min") ? std::min(A.b, B.b) : std::max(A.b, B.b);
             return {true, 0, v};
         }
@@ -2320,21 +2943,21 @@ static LRLinear lrLinearize(
 // ── Per-iteration effect on one scalar variable ───────────────────────────
 struct LREffect {
     enum class Kind { ADD, MUL, XOR, AND, OR, SET, INCR, DECR, MIN, MAX };
-    Kind        kind;
+    Kind kind;
     std::string var;
-    int64_t     a{0};   // coefficient of loop var (for ADD / SET / MIN / MAX)
-    int64_t     b{0};   // constant part           (all ops)
+    int64_t a{0}; // coefficient of loop var (for ADD / SET / MIN / MAX)
+    int64_t b{0}; // constant part           (all ops)
 };
 
 // Collect all variable names written in a statement subtree.
-static void lrCollectWrites(const Statement* s,
-                             std::unordered_set<std::string>& out)
-{
-    if (!s) return;
+static void lrCollectWrites(const Statement* s, std::unordered_set<std::string>& out) {
+    if (!s)
+        return;
     switch (s->type) {
     case ASTNodeType::BLOCK: {
         auto* blk = static_cast<const BlockStmt*>(s);
-        for (auto& st : blk->statements) lrCollectWrites(st.get(), out);
+        for (auto& st : blk->statements)
+            lrCollectWrites(st.get(), out);
         break;
     }
     case ASTNodeType::EXPR_STMT: {
@@ -2368,53 +2991,57 @@ static void lrCollectWrites(const Statement* s,
 
 // Analyze every statement in `body` and populate `effects`.
 // Returns false if any statement cannot be classified as a simple scalar effect.
-static bool lrAnalyzeBody(
-    const Statement*                                    body,
-    const std::string&                                  iv,
-    const std::unordered_map<std::string, CTValue>&     snap,
-    const std::unordered_set<std::string>&              modVars,
-    std::vector<LREffect>&                              effects)
-{
-    if (!body) return true;
+static bool lrAnalyzeBody(const Statement* body, const std::string& iv,
+                          const std::unordered_map<std::string, CTValue>& snap,
+                          const std::unordered_set<std::string>& modVars, std::vector<LREffect>& effects) {
+    if (!body)
+        return true;
 
     // Flatten top-level block (one level only — nested control flow → bail).
     std::vector<const Statement*> stmts;
     if (body->type == ASTNodeType::BLOCK) {
         auto* blk = static_cast<const BlockStmt*>(body);
-        for (auto& st : blk->statements) stmts.push_back(st.get());
+        for (auto& st : blk->statements)
+            stmts.push_back(st.get());
     } else {
         stmts.push_back(body);
     }
 
     for (const Statement* s : stmts) {
-        if (!s) continue;
-        if (s->type != ASTNodeType::EXPR_STMT) return false;  // control flow → bail
+        if (!s)
+            continue;
+        if (s->type != ASTNodeType::EXPR_STMT)
+            return false; // control flow → bail
 
-        auto* es   = static_cast<const ExprStmt*>(s);
+        auto* es = static_cast<const ExprStmt*>(s);
         const Expression* expr = es->expression.get();
 
         // ── x++ / x-- (postfix or prefix) ─────────────────────────────────
-        if (expr->type == ASTNodeType::POSTFIX_EXPR ||
-            expr->type == ASTNodeType::PREFIX_EXPR) {
+        if (expr->type == ASTNodeType::POSTFIX_EXPR || expr->type == ASTNodeType::PREFIX_EXPR) {
             const std::string* namePtr = nullptr;
             std::string op;
             if (expr->type == ASTNodeType::POSTFIX_EXPR) {
                 auto* pfx = static_cast<const PostfixExpr*>(expr);
-                if (pfx->operand->type != ASTNodeType::IDENTIFIER_EXPR) return false;
+                if (pfx->operand->type != ASTNodeType::IDENTIFIER_EXPR)
+                    return false;
                 namePtr = &static_cast<const IdentifierExpr*>(pfx->operand.get())->name;
                 op = pfx->op;
             } else {
                 auto* pfx = static_cast<const PrefixExpr*>(expr);
-                if (pfx->op != "++" && pfx->op != "--") return false;
-                if (pfx->operand->type != ASTNodeType::IDENTIFIER_EXPR) return false;
+                if (pfx->op != "++" && pfx->op != "--")
+                    return false;
+                if (pfx->operand->type != ASTNodeType::IDENTIFIER_EXPR)
+                    return false;
                 namePtr = &static_cast<const IdentifierExpr*>(pfx->operand.get())->name;
                 op = pfx->op;
             }
-            if (*namePtr == iv) return false;  // can't modify loop var
+            if (*namePtr == iv)
+                return false; // can't modify loop var
             // Each variable may appear at most once (no double-effect).
-            for (auto& eff : effects) if (eff.var == *namePtr) return false;
-            effects.push_back({op == "++" ? LREffect::Kind::INCR : LREffect::Kind::DECR,
-                                *namePtr, 0, 0});
+            for (auto& eff : effects)
+                if (eff.var == *namePtr)
+                    return false;
+            effects.push_back({op == "++" ? LREffect::Kind::INCR : LREffect::Kind::DECR, *namePtr, 0, 0});
             continue;
         }
 
@@ -2422,8 +3049,11 @@ static bool lrAnalyzeBody(
         if (expr->type == ASTNodeType::ASSIGN_EXPR) {
             auto* assign = static_cast<const AssignExpr*>(expr);
             const std::string& varName = assign->name;
-            if (varName == iv) return false;
-            for (auto& eff : effects) if (eff.var == varName) return false;
+            if (varName == iv)
+                return false;
+            for (auto& eff : effects)
+                if (eff.var == varName)
+                    return false;
 
             const Expression* rhs = assign->value.get();
 
@@ -2442,14 +3072,14 @@ static bool lrAnalyzeBody(
                     bool sr = isSelf(bin->right.get());
                     if (sl || sr) {
                         // For subtraction, only x - delta is an accumulation.
-                        if (bin->op == "-" && !sl) return false;
-                        const Expression* deltaExpr =
-                            sl ? bin->right.get() : bin->left.get();
+                        if (bin->op == "-" && !sl)
+                            return false;
+                        const Expression* deltaExpr = sl ? bin->right.get() : bin->left.get();
                         LRLinear d = lrLinearize(deltaExpr, iv, snap, modVars);
-                        if (!d.valid) return false;
+                        if (!d.valid)
+                            return false;
                         int64_t sign = (bin->op == "-") ? -1 : 1;
-                        effects.push_back({LREffect::Kind::ADD, varName,
-                                           d.a * sign, d.b * sign});
+                        effects.push_back({LREffect::Kind::ADD, varName, d.a * sign, d.b * sign});
                         continue;
                     }
                 }
@@ -2459,10 +3089,10 @@ static bool lrAnalyzeBody(
                     bool sl = isSelf(bin->left.get());
                     bool sr = isSelf(bin->right.get());
                     if (sl || sr) {
-                        const Expression* factExpr =
-                            sl ? bin->right.get() : bin->left.get();
+                        const Expression* factExpr = sl ? bin->right.get() : bin->left.get();
                         LRLinear f = lrLinearize(factExpr, iv, snap, modVars);
-                        if (!f.valid || f.a != 0) return false;
+                        if (!f.valid || f.a != 0)
+                            return false;
                         effects.push_back({LREffect::Kind::MUL, varName, 0, f.b});
                         continue;
                     }
@@ -2473,10 +3103,10 @@ static bool lrAnalyzeBody(
                     bool sl = isSelf(bin->left.get());
                     bool sr = isSelf(bin->right.get());
                     if (sl || sr) {
-                        const Expression* maskExpr =
-                            sl ? bin->right.get() : bin->left.get();
+                        const Expression* maskExpr = sl ? bin->right.get() : bin->left.get();
                         LRLinear m = lrLinearize(maskExpr, iv, snap, modVars);
-                        if (!m.valid || m.a != 0) return false;
+                        if (!m.valid || m.a != 0)
+                            return false;
                         effects.push_back({LREffect::Kind::XOR, varName, 0, m.b});
                         continue;
                     }
@@ -2487,10 +3117,10 @@ static bool lrAnalyzeBody(
                     bool sl = isSelf(bin->left.get());
                     bool sr = isSelf(bin->right.get());
                     if (sl || sr) {
-                        const Expression* maskExpr =
-                            sl ? bin->right.get() : bin->left.get();
+                        const Expression* maskExpr = sl ? bin->right.get() : bin->left.get();
                         LRLinear m = lrLinearize(maskExpr, iv, snap, modVars);
-                        if (!m.valid || m.a != 0) return false;
+                        if (!m.valid || m.a != 0)
+                            return false;
                         effects.push_back({LREffect::Kind::AND, varName, 0, m.b});
                         continue;
                     }
@@ -2501,10 +3131,10 @@ static bool lrAnalyzeBody(
                     bool sl = isSelf(bin->left.get());
                     bool sr = isSelf(bin->right.get());
                     if (sl || sr) {
-                        const Expression* maskExpr =
-                            sl ? bin->right.get() : bin->left.get();
+                        const Expression* maskExpr = sl ? bin->right.get() : bin->left.get();
                         LRLinear m = lrLinearize(maskExpr, iv, snap, modVars);
-                        if (!m.valid || m.a != 0) return false;
+                        if (!m.valid || m.a != 0)
+                            return false;
                         effects.push_back({LREffect::Kind::OR, varName, 0, m.b});
                         continue;
                     }
@@ -2523,15 +3153,14 @@ static bool lrAnalyzeBody(
                     bool sl = isSelfArg(call->arguments[0].get());
                     bool sr = isSelfArg(call->arguments[1].get());
                     if (sl || sr) {
-                        const Expression* otherExpr =
-                            sl ? call->arguments[1].get() : call->arguments[0].get();
+                        const Expression* otherExpr = sl ? call->arguments[1].get() : call->arguments[0].get();
                         LRLinear o = lrLinearize(otherExpr, iv, snap, modVars);
-                        if (!o.valid) return false;
+                        if (!o.valid)
+                            return false;
                         // Encode (a, b) of the other-side expression into the effect.
                         // a == 0 → pure invariant; a != 0 → linear in iv.
-                        effects.push_back({
-                            (fn == "min") ? LREffect::Kind::MIN : LREffect::Kind::MAX,
-                            varName, o.a, o.b});
+                        effects.push_back(
+                            {(fn == "min") ? LREffect::Kind::MIN : LREffect::Kind::MAX, varName, o.a, o.b});
                         continue;
                     }
                 }
@@ -2540,63 +3169,52 @@ static bool lrAnalyzeBody(
             // Pure SET:  x = expr  (RHS must not reference varName itself,
             // which lrLinearize enforces via modVars containing varName).
             LRLinear rhs_info = lrLinearize(rhs, iv, snap, modVars);
-            if (!rhs_info.valid) return false;
-            effects.push_back({LREffect::Kind::SET, varName,
-                                rhs_info.a, rhs_info.b});
+            if (!rhs_info.valid)
+                return false;
+            effects.push_back({LREffect::Kind::SET, varName, rhs_info.a, rhs_info.b});
             continue;
         }
 
-        return false;  // unrecognized expression statement
+        return false; // unrecognized expression statement
     }
 
     return true;
 }
 
 // Apply a set of loop effects after N full iterations.
-static void lrApplyEffects(
-    CTFrame&                        frame,
-    const std::vector<LREffect>&    effects,
-    int64_t                         start,
-    int64_t                         step,
-    int64_t                         N)
-{
+static void lrApplyEffects(CTFrame& frame, const std::vector<LREffect>& effects, int64_t start, int64_t step,
+                           int64_t N) {
     // Sum of the induction variable over all N iterations:
-    const __int128 bigN    = static_cast<__int128>(N);
-    const __int128 bigS    = static_cast<__int128>(start);
+    const __int128 bigN = static_cast<__int128>(N);
+    const __int128 bigS = static_cast<__int128>(start);
     const __int128 bigStep = static_cast<__int128>(step);
-    const int64_t  sumIV   = static_cast<int64_t>(
-        static_cast<uint64_t>(bigN * bigS + bigStep * bigN * (bigN - 1) / 2));
+    const int64_t sumIV = static_cast<int64_t>(static_cast<uint64_t>(bigN * bigS + bigStep * bigN * (bigN - 1) / 2));
 
     for (const auto& eff : effects) {
-        auto it  = frame.locals.find(eff.var);
-        int64_t cur = (it != frame.locals.end() && it->second.isInt())
-                      ? it->second.asI64() : 0;
+        auto it = frame.locals.find(eff.var);
+        int64_t cur = (it != frame.locals.end() && it->second.isInt()) ? it->second.asI64() : 0;
 
         switch (eff.kind) {
 
         case LREffect::Kind::INCR:
             // x++ N times  →  x += N
-            frame.locals[eff.var] = CTValue::fromI64(
-                static_cast<int64_t>(static_cast<uint64_t>(cur) +
-                                     static_cast<uint64_t>(N)));
+            frame.locals[eff.var] =
+                CTValue::fromI64(static_cast<int64_t>(static_cast<uint64_t>(cur) + static_cast<uint64_t>(N)));
             break;
 
         case LREffect::Kind::DECR:
             // x-- N times  →  x -= N
-            frame.locals[eff.var] = CTValue::fromI64(
-                static_cast<int64_t>(static_cast<uint64_t>(cur) -
-                                     static_cast<uint64_t>(N)));
+            frame.locals[eff.var] =
+                CTValue::fromI64(static_cast<int64_t>(static_cast<uint64_t>(cur) - static_cast<uint64_t>(N)));
             break;
 
         case LREffect::Kind::ADD: {
             // delta per iteration = eff.a * iv + eff.b
             // total               = eff.a * Σiv + eff.b * N
-            const int64_t total = static_cast<int64_t>(
-                static_cast<uint64_t>(eff.a) * static_cast<uint64_t>(sumIV) +
-                static_cast<uint64_t>(eff.b) * static_cast<uint64_t>(N));
-            frame.locals[eff.var] = CTValue::fromI64(
-                static_cast<int64_t>(static_cast<uint64_t>(cur) +
-                                     static_cast<uint64_t>(total)));
+            const int64_t total = static_cast<int64_t>(static_cast<uint64_t>(eff.a) * static_cast<uint64_t>(sumIV) +
+                                                       static_cast<uint64_t>(eff.b) * static_cast<uint64_t>(N));
+            frame.locals[eff.var] =
+                CTValue::fromI64(static_cast<int64_t>(static_cast<uint64_t>(cur) + static_cast<uint64_t>(total)));
             break;
         }
 
@@ -2604,24 +3222,21 @@ static void lrApplyEffects(
             // x *= c, N times  →  x *= c^N
             int64_t r = 1;
             int64_t base = eff.b;
-            int64_t rem  = N;
+            int64_t rem = N;
             while (rem > 0) {
-                if (rem & 1) r = static_cast<int64_t>(
-                    static_cast<uint64_t>(r) * static_cast<uint64_t>(base));
-                base = static_cast<int64_t>(
-                    static_cast<uint64_t>(base) * static_cast<uint64_t>(base));
+                if (rem & 1)
+                    r = static_cast<int64_t>(static_cast<uint64_t>(r) * static_cast<uint64_t>(base));
+                base = static_cast<int64_t>(static_cast<uint64_t>(base) * static_cast<uint64_t>(base));
                 rem >>= 1;
             }
-            frame.locals[eff.var] = CTValue::fromI64(
-                static_cast<int64_t>(static_cast<uint64_t>(cur) *
-                                     static_cast<uint64_t>(r)));
+            frame.locals[eff.var] =
+                CTValue::fromI64(static_cast<int64_t>(static_cast<uint64_t>(cur) * static_cast<uint64_t>(r)));
             break;
         }
 
         case LREffect::Kind::XOR:
             // x ^= c, N times  →  x ^ c  if N is odd, else x unchanged
-            frame.locals[eff.var] = CTValue::fromI64(
-                (N & 1) ? (cur ^ eff.b) : cur);
+            frame.locals[eff.var] = CTValue::fromI64((N & 1) ? (cur ^ eff.b) : cur);
             break;
 
         case LREffect::Kind::AND:
@@ -2636,13 +3251,10 @@ static void lrApplyEffects(
 
         case LREffect::Kind::SET: {
             // x = a*iv + b  →  value at last iteration iv_{N-1} = start+(N-1)*step
-            const int64_t lastIV = static_cast<int64_t>(
-                static_cast<uint64_t>(start) +
-                static_cast<uint64_t>(N - 1) * static_cast<uint64_t>(step));
-            frame.locals[eff.var] = CTValue::fromI64(
-                static_cast<int64_t>(
-                    static_cast<uint64_t>(eff.a) * static_cast<uint64_t>(lastIV) +
-                    static_cast<uint64_t>(eff.b)));
+            const int64_t lastIV = static_cast<int64_t>(static_cast<uint64_t>(start) +
+                                                        static_cast<uint64_t>(N - 1) * static_cast<uint64_t>(step));
+            frame.locals[eff.var] = CTValue::fromI64(static_cast<int64_t>(
+                static_cast<uint64_t>(eff.a) * static_cast<uint64_t>(lastIV) + static_cast<uint64_t>(eff.b)));
             break;
         }
 
@@ -2650,22 +3262,18 @@ static void lrApplyEffects(
         case LREffect::Kind::MAX: {
             // x = min/max(x, a*iv + b) for k = 0..N-1.
             const __int128 ivFirst128 = static_cast<__int128>(start);
-            const __int128 ivLast128  = ivFirst128 +
-                static_cast<__int128>(step) * static_cast<__int128>(N - 1);
+            const __int128 ivLast128 = ivFirst128 + static_cast<__int128>(step) * static_cast<__int128>(N - 1);
             const __int128 a128 = static_cast<__int128>(eff.a);
             const __int128 b128 = static_cast<__int128>(eff.b);
             // Wrap intermediate products via uint64 cast (matches OmScript
             // wrapping arithmetic — same convention used by the SET case).
-            const int64_t valFirst = static_cast<int64_t>(
-                static_cast<uint64_t>(static_cast<int64_t>(a128 * ivFirst128 + b128)));
-            const int64_t valLast  = static_cast<int64_t>(
-                static_cast<uint64_t>(static_cast<int64_t>(a128 * ivLast128  + b128)));
-            int64_t reduced = (eff.kind == LREffect::Kind::MIN)
-                ? std::min(valFirst, valLast)
-                : std::max(valFirst, valLast);
-            int64_t out = (eff.kind == LREffect::Kind::MIN)
-                ? std::min(cur, reduced)
-                : std::max(cur, reduced);
+            const int64_t valFirst =
+                static_cast<int64_t>(static_cast<uint64_t>(static_cast<int64_t>(a128 * ivFirst128 + b128)));
+            const int64_t valLast =
+                static_cast<int64_t>(static_cast<uint64_t>(static_cast<int64_t>(a128 * ivLast128 + b128)));
+            int64_t reduced =
+                (eff.kind == LREffect::Kind::MIN) ? std::min(valFirst, valLast) : std::max(valFirst, valLast);
+            int64_t out = (eff.kind == LREffect::Kind::MIN) ? std::min(cur, reduced) : std::max(cur, reduced);
             frame.locals[eff.var] = CTValue::fromI64(out);
             break;
         }
@@ -2675,16 +3283,15 @@ static void lrApplyEffects(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-bool CTEngine::tryReasonForLoop(CTFrame& frame, const ForStmt* fs,
-                                 int64_t start, int64_t /*end*/, int64_t step,
-                                 int64_t N)
-{
+bool CTEngine::tryReasonForLoop(CTFrame& frame, const ForStmt* fs, int64_t start, int64_t /*end*/, int64_t step,
+                                int64_t N) {
     // Collect all variables written by the loop body.
     std::unordered_set<std::string> modVars;
     lrCollectWrites(fs->body.get(), modVars);
 
     // If the loop body writes to the loop variable itself, bail out.
-    if (modVars.count(fs->iteratorVar)) return false;
+    if (modVars.count(fs->iteratorVar))
+        return false;
 
     // Build a snapshot of pre-loop locals, excluding modified variables and
     // the loop induction variable (which changes each iteration).
@@ -2707,22 +3314,28 @@ bool CTEngine::tryReasonForLoop(CTFrame& frame, const ForStmt* fs,
 }
 
 
-
 bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
-    if (!s || frame.hasReturned || frame.didBreak || frame.didContinue) return true;
+    if (!s || frame.hasReturned || frame.didBreak || frame.didContinue)
+        return true;
     ++stats_.instructionsExecuted;
-    if (++fuel_ > kMaxInstructions) return false;
+    if (++fuel_ > kMaxInstructions)
+        return false;
 
     switch (s->type) {
 
     // ── Return ────────────────────────────────────────────────────────────
     case ASTNodeType::RETURN_STMT: {
         auto* ret = static_cast<const ReturnStmt*>(s);
-        if (!ret->value) { frame.returnValue = CTValue::fromI64(0); frame.hasReturned = true; return true; }
+        if (!ret->value) {
+            frame.returnValue = CTValue::fromI64(0);
+            frame.hasReturned = true;
+            return true;
+        }
         CTValue v = evalExpr(frame, ret->value.get());
         // Propagate SYMBOLIC returns — caller (executeFunction) will check and
         // discard them rather than baking a symbolic value into the IR.
-        if (!v.isKnown() && !v.isSymbolic()) return false;
+        if (!v.isKnown() && !v.isSymbolic())
+            return false;
         frame.returnValue = std::move(v);
         frame.hasReturned = true;
         return true;
@@ -2731,12 +3344,11 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
     // ── Variable declaration ──────────────────────────────────────────────
     case ASTNodeType::VAR_DECL: {
         auto* decl = static_cast<const VarDecl*>(s);
-        CTValue v = decl->initializer
-                    ? evalExpr(frame, decl->initializer.get())
-                    : CTValue::fromI64(0);
+        CTValue v = decl->initializer ? evalExpr(frame, decl->initializer.get()) : CTValue::fromI64(0);
         // Allow SYMBOLIC to be stored — it propagates through subsequent uses
         // of this variable.  UNINITIALIZED (truly unknown expr) still aborts.
-        if (!v.isKnown() && !v.isSymbolic()) return false;
+        if (!v.isKnown() && !v.isSymbolic())
+            return false;
         frame.locals[decl->name] = std::move(v);
         return true;
     }
@@ -2749,7 +3361,8 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
             auto* assign = static_cast<const AssignExpr*>(es->expression.get());
             CTValue v = evalExpr(frame, assign->value.get());
             // Allow SYMBOLIC assignments — propagates unknown value into variable.
-            if (!v.isKnown() && !v.isSymbolic()) return false;
+            if (!v.isKnown() && !v.isSymbolic())
+                return false;
             frame.locals[assign->name] = std::move(v);
             return true;
         }
@@ -2759,15 +3372,21 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
             CTValue arrVal = evalExpr(frame, ia->array.get());
             CTValue idxVal = evalExpr(frame, ia->index.get());
             CTValue newVal = evalExpr(frame, ia->value.get());
-            if (!arrVal.isKnown() || !idxVal.isKnown() || !newVal.isKnown()) return false;
-            if (arrVal.isSymbolic() || idxVal.isSymbolic()) return false;
-            if (!arrVal.isArray() || !idxVal.isInt()) return false;
+            if (!arrVal.isKnown() || !idxVal.isKnown() || !newVal.isKnown())
+                return false;
+            if (arrVal.isSymbolic() || idxVal.isSymbolic())
+                return false;
+            if (!arrVal.isArray() || !idxVal.isInt())
+                return false;
             heap_.store(arrVal.asArr(), idxVal.asI64(), std::move(newVal));
             return true;
         }
         // General expression (++/-- / function call with side effects / etc.)
         CTValue v = evalExpr(frame, es->expression.get());
-        if (v.isConcrete()) { frame.lastBareExpr = v; frame.hasLastBare = true; }
+        if (v.isConcrete()) {
+            frame.lastBareExpr = v;
+            frame.hasLastBare = true;
+        }
         return v.isKnown(); // includes SYMBOLIC (just don't set lastBare)
     }
 
@@ -2782,10 +3401,14 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
 
             // Fork A: then-branch.
             CTFrame thenF = frame;
-            thenF.hasReturned = false; thenF.didBreak = false; thenF.didContinue = false;
+            thenF.hasReturned = false;
+            thenF.didBreak = false;
+            thenF.didContinue = false;
             // Narrow variable ranges inside each branch based on the branch condition.
-            CTFrame elsePreF = frame;   // pre-narrow else frame (shared setup)
-            elsePreF.hasReturned = false; elsePreF.didBreak = false; elsePreF.didContinue = false;
+            CTFrame elsePreF = frame; // pre-narrow else frame (shared setup)
+            elsePreF.hasReturned = false;
+            elsePreF.didBreak = false;
+            elsePreF.didContinue = false;
             narrowBranchConstraints(ifs->condition.get(), thenF, elsePreF);
             bool thenOk = evalStmt(thenF, ifs->thenBranch.get());
             const int64_t fuelAfterThen = fuel_;
@@ -2801,12 +3424,9 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
 
             // Case 1: both branches return the same concrete non-array value.
             auto isConcreteScalarReturn = [](const CTFrame& f) {
-                return f.hasReturned &&
-                       !f.returnValue.isArray() &&
-                       !f.returnValue.isSymbolic();
+                return f.hasReturned && !f.returnValue.isArray() && !f.returnValue.isSymbolic();
             };
-            if (thenOk && elseOk &&
-                isConcreteScalarReturn(thenF) && isConcreteScalarReturn(elseF) &&
+            if (thenOk && elseOk && isConcreteScalarReturn(thenF) && isConcreteScalarReturn(elseF) &&
                 thenF.returnValue == elseF.returnValue) {
                 frame.returnValue = thenF.returnValue;
                 frame.hasReturned = true;
@@ -2815,8 +3435,7 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
             }
 
             // Case 2: neither branch returns or breaks — merge locals.
-            if (thenOk && !thenF.hasReturned && !thenF.didBreak &&
-                elseOk && !elseF.hasReturned && !elseF.didBreak) {
+            if (thenOk && !thenF.hasReturned && !thenF.didBreak && elseOk && !elseF.hasReturned && !elseF.didBreak) {
                 // Apply merged state: iterate over all keys in both branches.
                 for (auto& [k, v] : thenF.locals) {
                     auto eit = elseF.locals.find(k);
@@ -2840,9 +3459,12 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
             return false;
         }
 
-        if (!cond.isKnown() || cond.isSymbolic()) return false;
-        if (cond.isTruthy()) return evalStmt(frame, ifs->thenBranch.get());
-        if (ifs->elseBranch) return evalStmt(frame, ifs->elseBranch.get());
+        if (!cond.isKnown() || cond.isSymbolic())
+            return false;
+        if (cond.isTruthy())
+            return evalStmt(frame, ifs->thenBranch.get());
+        if (ifs->elseBranch)
+            return evalStmt(frame, ifs->elseBranch.get());
         return true;
     }
 
@@ -2851,16 +3473,19 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
         auto* fs = static_cast<const ForStmt*>(s);
         CTValue sv = evalExpr(frame, fs->start.get());
         CTValue ev = evalExpr(frame, fs->end.get());
-        if (!sv.isKnown() || !ev.isKnown() || !sv.isInt() || !ev.isInt()) return false;
+        if (!sv.isKnown() || !ev.isKnown() || !sv.isInt() || !ev.isInt())
+            return false;
         int64_t step = (sv.asI64() <= ev.asI64()) ? 1 : -1;
         if (fs->step) {
             CTValue stv = evalExpr(frame, fs->step.get());
-            if (!stv.isKnown() || !stv.isInt()) return false;
+            if (!stv.isKnown() || !stv.isInt())
+                return false;
             step = stv.asI64();
         }
-        if (step == 0) return false;
+        if (step == 0)
+            return false;
         const int64_t startV = sv.asI64();
-        const int64_t endV   = ev.asI64();
+        const int64_t endV = ev.asI64();
 
         // Compute exact iteration count N.
         int64_t N = 0;
@@ -2884,11 +3509,19 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
         // ── Direct iteration (fallback for complex bodies) ────────────────
         int64_t cur = startV;
         while (step > 0 ? cur < endV : cur > endV) {
-            if (++fuel_ > kMaxInstructions) return false;
+            if (++fuel_ > kMaxInstructions)
+                return false;
             frame.locals[fs->iteratorVar] = CTValue::fromI64(cur);
-            if (!evalStmt(frame, fs->body.get())) return false;
-            if (frame.hasReturned) { frame.locals.erase(fs->iteratorVar); return true; }
-            if (frame.didBreak) { frame.didBreak = false; break; }
+            if (!evalStmt(frame, fs->body.get()))
+                return false;
+            if (frame.hasReturned) {
+                frame.locals.erase(fs->iteratorVar);
+                return true;
+            }
+            if (frame.didBreak) {
+                frame.didBreak = false;
+                break;
+            }
             frame.didContinue = false;
             cur += step;
         }
@@ -2900,15 +3533,24 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
     case ASTNodeType::FOR_EACH_STMT: {
         auto* fes = static_cast<const ForEachStmt*>(s);
         CTValue coll = evalExpr(frame, fes->collection.get());
-        if (!coll.isKnown()) return false;
+        if (!coll.isKnown())
+            return false;
         if (coll.isString()) {
             const std::string str = coll.asStr();
             for (size_t i = 0; i < str.size(); ++i) {
-                if (++fuel_ > kMaxInstructions) return false;
+                if (++fuel_ > kMaxInstructions)
+                    return false;
                 frame.locals[fes->iteratorVar] = CTValue::fromI64(static_cast<unsigned char>(str[i]));
-                if (!evalStmt(frame, fes->body.get())) return false;
-                if (frame.hasReturned) { frame.locals.erase(fes->iteratorVar); return true; }
-                if (frame.didBreak) { frame.didBreak = false; break; }
+                if (!evalStmt(frame, fes->body.get()))
+                    return false;
+                if (frame.hasReturned) {
+                    frame.locals.erase(fes->iteratorVar);
+                    return true;
+                }
+                if (frame.didBreak) {
+                    frame.didBreak = false;
+                    break;
+                }
                 frame.didContinue = false;
             }
         } else if (coll.isArray()) {
@@ -2916,11 +3558,19 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
             // need our own stable copy of the array data to iterate over.
             auto elems = extractArray(coll.asArr());
             for (const auto& elem : elems) {
-                if (++fuel_ > kMaxInstructions) return false;
+                if (++fuel_ > kMaxInstructions)
+                    return false;
                 frame.locals[fes->iteratorVar] = elem;
-                if (!evalStmt(frame, fes->body.get())) return false;
-                if (frame.hasReturned) { frame.locals.erase(fes->iteratorVar); return true; }
-                if (frame.didBreak) { frame.didBreak = false; break; }
+                if (!evalStmt(frame, fes->body.get()))
+                    return false;
+                if (frame.hasReturned) {
+                    frame.locals.erase(fes->iteratorVar);
+                    return true;
+                }
+                if (frame.didBreak) {
+                    frame.didBreak = false;
+                    break;
+                }
                 frame.didContinue = false;
             }
         } else {
@@ -2934,13 +3584,21 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
     case ASTNodeType::WHILE_STMT: {
         auto* ws = static_cast<const WhileStmt*>(s);
         while (true) {
-            if (++fuel_ > kMaxInstructions) return false;
+            if (++fuel_ > kMaxInstructions)
+                return false;
             CTValue cond = evalExpr(frame, ws->condition.get());
-            if (!cond.isKnown()) return false;
-            if (!cond.isTruthy()) break;
-            if (!evalStmt(frame, ws->body.get())) return false;
-            if (frame.hasReturned) return true;
-            if (frame.didBreak) { frame.didBreak = false; break; }
+            if (!cond.isKnown())
+                return false;
+            if (!cond.isTruthy())
+                break;
+            if (!evalStmt(frame, ws->body.get()))
+                return false;
+            if (frame.hasReturned)
+                return true;
+            if (frame.didBreak) {
+                frame.didBreak = false;
+                break;
+            }
             frame.didContinue = false;
         }
         return true;
@@ -2950,14 +3608,22 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
     case ASTNodeType::DO_WHILE_STMT: {
         auto* dw = static_cast<const DoWhileStmt*>(s);
         do {
-            if (++fuel_ > kMaxInstructions) return false;
-            if (!evalStmt(frame, dw->body.get())) return false;
-            if (frame.hasReturned) return true;
-            if (frame.didBreak) { frame.didBreak = false; break; }
+            if (++fuel_ > kMaxInstructions)
+                return false;
+            if (!evalStmt(frame, dw->body.get()))
+                return false;
+            if (frame.hasReturned)
+                return true;
+            if (frame.didBreak) {
+                frame.didBreak = false;
+                break;
+            }
             frame.didContinue = false;
             CTValue cond = evalExpr(frame, dw->condition.get());
-            if (!cond.isKnown()) return false;
-            if (!cond.isTruthy()) break;
+            if (!cond.isKnown())
+                return false;
+            if (!cond.isTruthy())
+                break;
         } while (true);
         return true;
     }
@@ -2966,41 +3632,65 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
     case ASTNodeType::SWITCH_STMT: {
         auto* sw = static_cast<const SwitchStmt*>(s);
         CTValue cond = evalExpr(frame, sw->condition.get());
-        if (!cond.isKnown() || !cond.isInt()) return false;
+        if (!cond.isKnown() || !cond.isInt())
+            return false;
         int64_t condVal = cond.asI64();
         const SwitchCase* matched = nullptr;
         const SwitchCase* defaultCase = nullptr;
         for (auto& c : sw->cases) {
-            if (c.isDefault) { defaultCase = &c; continue; }
+            if (c.isDefault) {
+                defaultCase = &c;
+                continue;
+            }
             if (c.value) {
                 CTValue cv = evalExpr(frame, c.value.get());
-                if (!cv.isKnown() || !cv.isInt()) return false;
-                if (cv.asI64() == condVal) { matched = &c; break; }
+                if (!cv.isKnown() || !cv.isInt())
+                    return false;
+                if (cv.asI64() == condVal) {
+                    matched = &c;
+                    break;
+                }
             }
             bool found = false;
             for (auto& vx : c.values) {
                 CTValue cv = evalExpr(frame, vx.get());
-                if (!cv.isKnown() || !cv.isInt()) return false;
-                if (cv.asI64() == condVal) { found = true; break; }
+                if (!cv.isKnown() || !cv.isInt())
+                    return false;
+                if (cv.asI64() == condVal) {
+                    found = true;
+                    break;
+                }
             }
-            if (found) { matched = &c; break; }
+            if (found) {
+                matched = &c;
+                break;
+            }
         }
         const SwitchCase* target = matched ? matched : defaultCase;
-        if (!target) return true;
+        if (!target)
+            return true;
         for (auto& stmt : target->body) {
-            if (!evalStmt(frame, stmt.get())) return false;
-            if (frame.hasReturned) return true;
-            if (frame.didBreak) { frame.didBreak = false; return true; }
-            if (frame.didContinue) return true;
+            if (!evalStmt(frame, stmt.get()))
+                return false;
+            if (frame.hasReturned)
+                return true;
+            if (frame.didBreak) {
+                frame.didBreak = false;
+                return true;
+            }
+            if (frame.didContinue)
+                return true;
         }
         return true;
     }
 
     // ── Break / Continue ──────────────────────────────────────────────────
     case ASTNodeType::BREAK_STMT:
-        frame.didBreak = true; return true;
+        frame.didBreak = true;
+        return true;
     case ASTNodeType::CONTINUE_STMT:
-        frame.didContinue = true; return true;
+        frame.didContinue = true;
+        return true;
 
     // ── Block ─────────────────────────────────────────────────────────────
     case ASTNodeType::BLOCK: {
@@ -3018,19 +3708,28 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
             }
             if (!evalStmt(frame, stmt.get())) {
                 for (auto& [nm, val] : scopeGuard) {
-                    if (val) frame.locals[nm] = *val; else frame.locals.erase(nm);
+                    if (val)
+                        frame.locals[nm] = *val;
+                    else
+                        frame.locals.erase(nm);
                 }
                 return false;
             }
             if (frame.hasReturned || frame.didBreak || frame.didContinue) {
                 for (auto& [nm, val] : scopeGuard) {
-                    if (val) frame.locals[nm] = *val; else frame.locals.erase(nm);
+                    if (val)
+                        frame.locals[nm] = *val;
+                    else
+                        frame.locals.erase(nm);
                 }
                 return true;
             }
         }
         for (auto& [nm, val] : scopeGuard) {
-            if (val) frame.locals[nm] = *val; else frame.locals.erase(nm);
+            if (val)
+                frame.locals[nm] = *val;
+            else
+                frame.locals.erase(nm);
         }
         return true;
     }
@@ -3047,14 +3746,15 @@ bool CTEngine::evalStmt(CTFrame& frame, const Statement* s) {
     case ASTNodeType::OWN_STMT:
     case ASTNodeType::PREFETCH_STMT:
     case ASTNodeType::DEFER_STMT:
-    case ASTNodeType::CONSTRUCT_STMT:   // side-effecting field stores — not CT-foldable
-        return true;  // no-op in CT evaluation
+    case ASTNodeType::CONSTRUCT_STMT: // side-effecting field stores — not CT-foldable
+        return true;                  // no-op in CT evaluation
 
     // ── MoveDecl: treat like VarDecl ──────────────────────────────────────
     case ASTNodeType::MOVE_DECL: {
         auto* md = static_cast<const MoveDecl*>(s);
         CTValue v = md->initializer ? evalExpr(frame, md->initializer.get()) : CTValue::fromI64(0);
-        if (!v.isKnown()) return false;
+        if (!v.isKnown())
+            return false;
         frame.locals[md->name] = std::move(v);
         return true;
     }
@@ -3076,7 +3776,8 @@ bool CTEngine::evalPipelineStmt(CTFrame& frame, const Statement* s) {
     auto runStagesWithFailure = [&]() -> bool {
         if (nStages <= 1) {
             // Single stage — just run it.
-            if (!executeBody(frame, ps->stages[0].body.get())) return false;
+            if (!executeBody(frame, ps->stages[0].body.get()))
+                return false;
             return true;
         }
 
@@ -3099,7 +3800,8 @@ bool CTEngine::evalPipelineStmt(CTFrame& frame, const Statement* s) {
             return false;
 
         // If a middle stage failed, signal cancellation to the caller.
-        if (stageFailed) return false;
+        if (stageFailed)
+            return false;
         return true;
     };
 
@@ -3110,9 +3812,11 @@ bool CTEngine::evalPipelineStmt(CTFrame& frame, const Statement* s) {
     }
 
     CTValue countVal = evalExpr(frame, ps->count.get());
-    if (!countVal.isKnown() || !countVal.isInt()) return false;
+    if (!countVal.isKnown() || !countVal.isInt())
+        return false;
     int64_t n = countVal.asI64();
-    if (n <= 0) return true;  // zero-trip loop
+    if (n <= 0)
+        return true; // zero-trip loop
 
     // Collect all stage bodies in order.
     std::vector<const Statement*> stageStmts;
@@ -3124,28 +3828,31 @@ bool CTEngine::evalPipelineStmt(CTFrame& frame, const Statement* s) {
     for (int64_t tile = 0; tile < nTiles; ++tile) {
         int64_t base = tile * kSIMDLaneWidth;
         executeTile(frame, stageStmts, base, n);
-        if (frame.hasReturned || frame.didBreak) return true;
+        if (frame.hasReturned || frame.didBreak)
+            return true;
         ++stats_.pipelineTilesExecuted;
     }
     return true;
 }
 
-void CTEngine::executeTile(CTFrame& frame,
-                            const std::vector<const Statement*>& stageStmts,
-                            int64_t baseIdx, int64_t n) {
+void CTEngine::executeTile(CTFrame& frame, const std::vector<const Statement*>& stageStmts, int64_t baseIdx,
+                           int64_t n) {
     const int nStages = static_cast<int>(stageStmts.size());
 
     // Execute each lane in the tile sequentially.
     for (int lane = 0; lane < kSIMDLaneWidth; ++lane) {
         int64_t i = baseIdx + lane;
-        if (i >= n) break;  // mask inactive lanes
+        if (i >= n)
+            break; // mask inactive lanes
         // Set the pipeline iterator.
         frame.locals["__pipeline_i"] = CTValue::fromI64(i);
 
         if (nStages <= 1) {
             // Single stage — just run it.
-            if (!evalStmt(frame, stageStmts[0])) return;
-            if (frame.hasReturned || frame.didBreak || frame.didContinue) return;
+            if (!evalStmt(frame, stageStmts[0]))
+                return;
+            if (frame.hasReturned || frame.didBreak || frame.didContinue)
+                return;
         } else {
             // Execute non-final stages; on failure skip to last stage.
             bool stageFailed = false;
@@ -3161,11 +3868,14 @@ void CTEngine::executeTile(CTFrame& frame,
             }
 
             // Last stage always runs ("finally").
-            if (!evalStmt(frame, stageStmts[nStages - 1])) return;
-            if (frame.hasReturned || frame.didBreak || frame.didContinue) return;
+            if (!evalStmt(frame, stageStmts[nStages - 1]))
+                return;
+            if (frame.hasReturned || frame.didBreak || frame.didContinue)
+                return;
 
             // If a middle stage failed, cancel the pipeline (no more lanes).
-            if (stageFailed) return;
+            if (stageFailed)
+                return;
         }
 
         frame.didContinue = false;
@@ -3178,16 +3888,16 @@ namespace {
 constexpr int kCompoundDepthBudget = 6;
 
 // Atomic narrowing: handle one comparison (varName op literal) with optional
-inline void mergeConstraint(
-    std::unordered_map<std::string, omscript::CTInterval>& dst,
-    const std::string& var,
-    const omscript::CTInterval& iv)
-{
-    if (iv.isTop()) return;          // adds nothing
+inline void mergeConstraint(std::unordered_map<std::string, omscript::CTInterval>& dst, const std::string& var,
+                            const omscript::CTInterval& iv) {
+    if (iv.isTop())
+        return; // adds nothing
     auto it = dst.find(var);
     if (it == dst.end()) {
-        if (!iv.isBottom()) dst[var] = iv;
-        else                dst[var] = omscript::CTInterval::bottom();
+        if (!iv.isBottom())
+            dst[var] = iv;
+        else
+            dst[var] = omscript::CTInterval::bottom();
         return;
     }
     it->second = it->second.intersect(iv);
@@ -3195,33 +3905,26 @@ inline void mergeConstraint(
 
 // Lookup the current concrete bound for `id` from an existing constraint set.
 // Returns CTInterval::top() if no information is available.
-inline omscript::CTInterval lookupConstraint(
-    const std::unordered_map<std::string, omscript::CTInterval>& src,
-    const std::string& var)
-{
+inline omscript::CTInterval lookupConstraint(const std::unordered_map<std::string, omscript::CTInterval>& src,
+                                             const std::string& var) {
     auto it = src.find(var);
     return (it != src.end()) ? it->second : omscript::CTInterval::top();
 }
 } // namespace
 
-void CTEngine::narrowBranchConstraints(const Expression* cond,
-                                        CTFrame& thenF,
-                                        CTFrame& elseF) const
-{
-    if (!cond) return;
+void CTEngine::narrowBranchConstraints(const Expression* cond, CTFrame& thenF, CTFrame& elseF) const {
+    if (!cond)
+        return;
 
     // ── Recursive worker — builds new constraint deltas without mutating frames
     // until the recursion completes, so we can apply A∧B / A∨B correctly.
-    std::function<void(const Expression*,
-                       std::unordered_map<std::string, CTInterval>&,
-                       std::unordered_map<std::string, CTInterval>&,
-                       int)> walk;
-    walk = [&](const Expression* c,
-               std::unordered_map<std::string, CTInterval>& thenC,
-               std::unordered_map<std::string, CTInterval>& elseC,
-               int depth)
-    {
-        if (!c || depth > kCompoundDepthBudget) return;
+    std::function<void(const Expression*, std::unordered_map<std::string, CTInterval>&,
+                       std::unordered_map<std::string, CTInterval>&, int)>
+        walk;
+    walk = [&](const Expression* c, std::unordered_map<std::string, CTInterval>& thenC,
+               std::unordered_map<std::string, CTInterval>& elseC, int depth) {
+        if (!c || depth > kCompoundDepthBudget)
+            return;
 
         // ── Logical NOT: !A swaps then/else narrowings of A ────────────────
         if (c->type == ASTNodeType::UNARY_EXPR) {
@@ -3232,63 +3935,67 @@ void CTEngine::narrowBranchConstraints(const Expression* cond,
             return;
         }
 
-        if (c->type != ASTNodeType::BINARY_EXPR) return;
+        if (c->type != ASTNodeType::BINARY_EXPR)
+            return;
         auto* bin = static_cast<const BinaryExpr*>(c);
         const std::string& op = bin->op;
 
         // ── Logical AND: both narrowings apply on then; nothing on else ───
         if (op == "&&") {
             std::unordered_map<std::string, CTInterval> dummyElse;
-            walk(bin->left.get(),  thenC, dummyElse, depth + 1);
+            walk(bin->left.get(), thenC, dummyElse, depth + 1);
             walk(bin->right.get(), thenC, dummyElse, depth + 1);
             return;
         }
         // ── Logical OR: both narrowings apply on else; nothing on then ───
         if (op == "||") {
             std::unordered_map<std::string, CTInterval> dummyThen;
-            walk(bin->left.get(),  dummyThen, elseC, depth + 1);
+            walk(bin->left.get(), dummyThen, elseC, depth + 1);
             walk(bin->right.get(), dummyThen, elseC, depth + 1);
             return;
         }
 
         // ── Atomic comparison ──────────────────────────────────────────────
-        static const std::unordered_set<std::string> kCmpOps{
-            "==", "!=", "<", "<=", ">", ">="
-        };
-        if (!kCmpOps.count(op)) return;
+        static const std::unordered_set<std::string> kCmpOps{"==", "!=", "<", "<=", ">", ">="};
+        if (!kCmpOps.count(op))
+            return;
 
         // Helper: from `op`, derive (then-narrow, else-narrow) on a CTInterval
         // applied to a numeric bound.
         auto deriveNarrow = [](const std::string& cmpOp, int64_t bound,
-                                const CTInterval& start)
-            -> std::pair<CTInterval, CTInterval>
-        {
-            if (cmpOp == "==") return {start.narrowEQ(bound), start.narrowNE(bound)};
-            if (cmpOp == "!=") return {start.narrowNE(bound), start.narrowEQ(bound)};
-            if (cmpOp == "<")  return {start.narrowLT(bound), start.narrowGE(bound)};
-            if (cmpOp == "<=") return {start.narrowLE(bound), start.narrowGT(bound)};
-            if (cmpOp == ">")  return {start.narrowGT(bound), start.narrowLE(bound)};
-            if (cmpOp == ">=") return {start.narrowGE(bound), start.narrowLT(bound)};
+                               const CTInterval& start) -> std::pair<CTInterval, CTInterval> {
+            if (cmpOp == "==")
+                return {start.narrowEQ(bound), start.narrowNE(bound)};
+            if (cmpOp == "!=")
+                return {start.narrowNE(bound), start.narrowEQ(bound)};
+            if (cmpOp == "<")
+                return {start.narrowLT(bound), start.narrowGE(bound)};
+            if (cmpOp == "<=")
+                return {start.narrowLE(bound), start.narrowGT(bound)};
+            if (cmpOp == ">")
+                return {start.narrowGT(bound), start.narrowLE(bound)};
+            if (cmpOp == ">=")
+                return {start.narrowGE(bound), start.narrowLT(bound)};
             return {start, start};
         };
 
         // Resolve each side to either an identifier name or a concrete int.
-        auto resolveSide = [&](const Expression* side,
-                                std::string& varName,
-                                int64_t& litVal,
-                                bool& isVar,
-                                bool& isLit)
-        {
+        auto resolveSide = [&](const Expression* side, std::string& varName, int64_t& litVal, bool& isVar,
+                               bool& isLit) {
             isVar = isLit = false;
-            if (!side) return;
+            if (!side)
+                return;
             if (side->type == ASTNodeType::IDENTIFIER_EXPR) {
                 isVar = true;
                 varName = static_cast<const IdentifierExpr*>(side)->name;
                 // Promote known concrete locals/globals/enums to literals.
                 CTInterval iv = lookupConstraint(thenC, varName);
-                if (iv.isTop()) iv = lookupConstraint(thenF.constraints, varName);
-                if (iv.isConcrete()) { isLit = true; litVal = iv.lo; }
-                else {
+                if (iv.isTop())
+                    iv = lookupConstraint(thenF.constraints, varName);
+                if (iv.isConcrete()) {
+                    isLit = true;
+                    litVal = iv.lo;
+                } else {
                     auto lit = thenF.locals.find(varName);
                     if (lit != thenF.locals.end() && lit->second.isInt()) {
                         isLit = true;
@@ -3317,9 +4024,9 @@ void CTEngine::narrowBranchConstraints(const Expression* cond,
         };
 
         std::string lName, rName;
-        int64_t     lVal = 0,  rVal = 0;
-        bool lIsVar=false, lIsLit=false, rIsVar=false, rIsLit=false;
-        resolveSide(bin->left.get(),  lName, lVal, lIsVar, lIsLit);
+        int64_t lVal = 0, rVal = 0;
+        bool lIsVar = false, lIsLit = false, rIsVar = false, rIsLit = false;
+        resolveSide(bin->left.get(), lName, lVal, lIsVar, lIsLit);
         resolveSide(bin->right.get(), rName, rVal, rIsVar, rIsLit);
 
         const CTInterval full = CTInterval::top();
@@ -3333,10 +4040,14 @@ void CTEngine::narrowBranchConstraints(const Expression* cond,
         // Case B: literal ∘ var  →  flip the operator and narrow the variable.
         else if (rIsVar && lIsLit) {
             std::string flipped = op;
-            if      (op == "<")  flipped = ">";
-            else if (op == "<=") flipped = ">=";
-            else if (op == ">")  flipped = "<";
-            else if (op == ">=") flipped = "<=";
+            if (op == "<")
+                flipped = ">";
+            else if (op == "<=")
+                flipped = ">=";
+            else if (op == ">")
+                flipped = "<";
+            else if (op == ">=")
+                flipped = "<=";
             auto [t, e] = deriveNarrow(flipped, lVal, full);
             mergeConstraint(thenC, rName, t);
             mergeConstraint(elseC, rName, e);
@@ -3350,10 +4061,14 @@ void CTEngine::narrowBranchConstraints(const Expression* cond,
             }
             if (lIsLit) {
                 std::string flipped = op;
-                if      (op == "<")  flipped = ">";
-                else if (op == "<=") flipped = ">=";
-                else if (op == ">")  flipped = "<";
-                else if (op == ">=") flipped = "<=";
+                if (op == "<")
+                    flipped = ">";
+                else if (op == "<=")
+                    flipped = ">=";
+                else if (op == ">")
+                    flipped = "<";
+                else if (op == ">=")
+                    flipped = "<=";
                 auto [t, e] = deriveNarrow(flipped, lVal, full);
                 mergeConstraint(thenC, rName, t);
                 mergeConstraint(elseC, rName, e);
@@ -3370,29 +4085,27 @@ void CTEngine::narrowBranchConstraints(const Expression* cond,
     // Commit non-trivial deltas back to the frames, intersecting with any
     // prior constraint (preserves outer-guard narrowing).
     for (auto& [var, iv] : thenC) {
-        if (iv.isTop()) continue;
+        if (iv.isTop())
+            continue;
         auto it = thenF.constraints.find(var);
-        thenF.constraints[var] =
-            (it == thenF.constraints.end()) ? iv : it->second.intersect(iv);
+        thenF.constraints[var] = (it == thenF.constraints.end()) ? iv : it->second.intersect(iv);
     }
     for (auto& [var, iv] : elseC) {
-        if (iv.isTop()) continue;
+        if (iv.isTop())
+            continue;
         auto it = elseF.constraints.find(var);
-        elseF.constraints[var] =
-            (it == elseF.constraints.end()) ? iv : it->second.intersect(iv);
+        elseF.constraints[var] = (it == elseF.constraints.end()) ? iv : it->second.intersect(iv);
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-std::string CTEngine::partialSpecKey(const std::string& fnName,
-                                      const std::vector<CTValue>& args) const
-{
+std::string CTEngine::partialSpecKey(const std::string& fnName, const std::vector<CTValue>& args) const {
     std::string key;
     key.reserve(fnName.size() + args.size() * 16 + 2);
     key.append(fnName);
     key.push_back('|');
     for (const auto& a : args) {
-        a.appendMemoHash(key);   // handles SYMBOLIC via the symId path added in Phase A
+        a.appendMemoHash(key); // handles SYMBOLIC via the symId path added in Phase A
         key.push_back(',');
     }
     return key;
@@ -3401,7 +4114,8 @@ std::string CTEngine::partialSpecKey(const std::string& fnName,
 // ═══════════════════════════════════════════════════════════════════════════
 
 void CTEngine::runPass(const Program* program) {
-    if (!program) return;
+    if (!program)
+        return;
 
     // ── Phase 1: register all functions ──────────────────────────────────
     for (auto& fn : program->functions)
@@ -3417,7 +4131,8 @@ void CTEngine::runPass(const Program* program) {
 
     // ── Phase 2: purity analysis — mark @pure / @const_eval functions ────
     for (auto& fn : program->functions) {
-        if (fn->hintPure || fn->hintConstEval) markPure(fn->name);
+        if (fn->hintPure || fn->hintConstEval)
+            markPure(fn->name);
     }
 
     // ── Phase 3: auto-detect pure functions (fixed-point) ────────────────
@@ -3427,30 +4142,38 @@ void CTEngine::runPass(const Program* program) {
     // single source of truth); we no longer maintain a local copy here.
     std::function<bool(const FunctionDecl*, std::unordered_set<std::string>&)> isPureBody;
     isPureBody = [&](const FunctionDecl* fn, std::unordered_set<std::string>& visiting) -> bool {
-        if (!fn || !fn->body) return false;
-        if (BuiltinEffectTable::isPure(fn->name) || BuiltinEffectTable::isWidthCastName(fn->name)) return true;
-        if (pureFunctions_.count(fn->name)) return true;
-        if (visiting.count(fn->name)) return false; // conservatively not pure (recursion)
+        if (!fn || !fn->body)
+            return false;
+        if (BuiltinEffectTable::isPure(fn->name) || BuiltinEffectTable::isWidthCastName(fn->name))
+            return true;
+        if (pureFunctions_.count(fn->name))
+            return true;
+        if (visiting.count(fn->name))
+            return false; // conservatively not pure (recursion)
         visiting.insert(fn->name);
 
         // Walk the body; reject if any I/O or non-pure call is found.
-        std::function<bool(const Statement*)>  pureS;
+        std::function<bool(const Statement*)> pureS;
         std::function<bool(const Expression*)> pureE;
         pureE = [&](const Expression* ex) -> bool {
-            if (!ex) return true;
+            if (!ex)
+                return true;
             if (ex->type == ASTNodeType::CALL_EXPR) {
                 auto* call = static_cast<const CallExpr*>(ex);
-                if (BuiltinEffectTable::isImpure(call->callee)) return false;
+                if (BuiltinEffectTable::isImpure(call->callee))
+                    return false;
                 if (!BuiltinEffectTable::isPure(call->callee) && !BuiltinEffectTable::isWidthCastName(call->callee)) {
                     auto it = functions_.find(call->callee);
                     if (it != functions_.end()) {
-                        if (!isPureBody(it->second, visiting)) return false;
+                        if (!isPureBody(it->second, visiting))
+                            return false;
                     } else {
                         return false; // unknown external — assume impure
                     }
                 }
                 for (auto& arg : call->arguments)
-                    if (!pureE(arg.get())) return false;
+                    if (!pureE(arg.get()))
+                        return false;
                 return true;
             }
             // Other expressions: recurse into sub-expressions.
@@ -3473,15 +4196,19 @@ void CTEngine::runPass(const Program* program) {
             if (ex->type == ASTNodeType::ARRAY_EXPR) {
                 auto* ae = static_cast<const ArrayExpr*>(ex);
                 for (auto& el : ae->elements)
-                    if (!pureE(el.get())) return false;
+                    if (!pureE(el.get()))
+                        return false;
                 return true;
             }
             return true;
         };
         pureS = [&](const Statement* st) -> bool {
-            if (!st) return true;
-            if (st->type == ASTNodeType::THROW_STMT) return false;
-            if (st->type == ASTNodeType::CATCH_STMT) return false;
+            if (!st)
+                return true;
+            if (st->type == ASTNodeType::THROW_STMT)
+                return false;
+            if (st->type == ASTNodeType::CATCH_STMT)
+                return false;
             if (st->type == ASTNodeType::RETURN_STMT) {
                 auto* r = static_cast<const ReturnStmt*>(st);
                 return !r->value || pureE(r->value.get());
@@ -3500,20 +4227,20 @@ void CTEngine::runPass(const Program* program) {
             }
             if (st->type == ASTNodeType::IF_STMT) {
                 auto* ifs = static_cast<const IfStmt*>(st);
-                return pureE(ifs->condition.get()) &&
-                       pureS(ifs->thenBranch.get()) &&
+                return pureE(ifs->condition.get()) && pureS(ifs->thenBranch.get()) &&
                        (!ifs->elseBranch || pureS(ifs->elseBranch.get()));
             }
             if (st->type == ASTNodeType::BLOCK) {
                 auto* blk = static_cast<const BlockStmt*>(st);
                 for (auto& s2 : blk->statements)
-                    if (!pureS(s2.get())) return false;
+                    if (!pureS(s2.get()))
+                        return false;
                 return true;
             }
             if (st->type == ASTNodeType::FOR_STMT) {
                 auto* fs = static_cast<const ForStmt*>(st);
-                return pureE(fs->start.get()) && pureE(fs->end.get()) &&
-                       (!fs->step || pureE(fs->step.get())) && pureS(fs->body.get());
+                return pureE(fs->start.get()) && pureE(fs->end.get()) && (!fs->step || pureE(fs->step.get())) &&
+                       pureS(fs->body.get());
             }
             if (st->type == ASTNodeType::FOR_EACH_STMT) {
                 auto* fes = static_cast<const ForEachStmt*>(st);
@@ -3529,10 +4256,12 @@ void CTEngine::runPass(const Program* program) {
             }
             if (st->type == ASTNodeType::SWITCH_STMT) {
                 auto* sw = static_cast<const SwitchStmt*>(st);
-                if (!pureE(sw->condition.get())) return false;
+                if (!pureE(sw->condition.get()))
+                    return false;
                 for (auto& c : sw->cases)
                     for (auto& bs : c.body)
-                        if (!pureS(bs.get())) return false;
+                        if (!pureS(bs.get()))
+                            return false;
                 return true;
             }
             // break, continue, freeze, invalidate, prefetch, assume: pure
@@ -3541,7 +4270,10 @@ void CTEngine::runPass(const Program* program) {
 
         bool pure = true;
         for (auto& stmt : fn->body->statements) {
-            if (!pureS(stmt.get())) { pure = false; break; }
+            if (!pureS(stmt.get())) {
+                pure = false;
+                break;
+            }
         }
         visiting.erase(fn->name);
         return pure;
@@ -3552,7 +4284,8 @@ void CTEngine::runPass(const Program* program) {
     while (changed) {
         changed = false;
         for (auto& fn : program->functions) {
-            if (pureFunctions_.count(fn->name)) continue;
+            if (pureFunctions_.count(fn->name))
+                continue;
             std::unordered_set<std::string> vis;
             if (isPureBody(fn.get(), vis)) {
                 markPure(fn->name);
@@ -3563,8 +4296,10 @@ void CTEngine::runPass(const Program* program) {
 
     // ── Phase 4: pre-evaluate zero-arg pure functions ─────────────────────
     for (auto& fn : program->functions) {
-        if (!fn->body || !fn->parameters.empty()) continue;
-        if (!pureFunctions_.count(fn->name)) continue;
+        if (!fn->body || !fn->parameters.empty())
+            continue;
+        if (!pureFunctions_.count(fn->name))
+            continue;
         auto result = executeFunction(fn.get(), {});
         if (result) {
             // Store result as global const for downstream fold.
@@ -3577,17 +4312,20 @@ void CTEngine::runPass(const Program* program) {
         graph_.nodes.push_back(fn->name);
         // Walk all expressions to collect call edges.
         std::function<void(const Expression*)> walkE = [&](const Expression* ex) {
-            if (!ex) return;
+            if (!ex)
+                return;
             switch (ex->type) {
             case ASTNodeType::CALL_EXPR: {
                 auto* call = static_cast<const CallExpr*>(ex);
                 graph_.edges.push_back({fn->name, call->callee});
-                for (auto& arg : call->arguments) walkE(arg.get());
+                for (auto& arg : call->arguments)
+                    walkE(arg.get());
                 return;
             }
             case ASTNodeType::BINARY_EXPR: {
                 auto* b = static_cast<const BinaryExpr*>(ex);
-                walkE(b->left.get()); walkE(b->right.get());
+                walkE(b->left.get());
+                walkE(b->right.get());
                 return;
             }
             case ASTNodeType::UNARY_EXPR: {
@@ -3607,22 +4345,28 @@ void CTEngine::runPass(const Program* program) {
             }
             case ASTNodeType::TERNARY_EXPR: {
                 auto* t = static_cast<const TernaryExpr*>(ex);
-                walkE(t->condition.get()); walkE(t->thenExpr.get()); walkE(t->elseExpr.get());
+                walkE(t->condition.get());
+                walkE(t->thenExpr.get());
+                walkE(t->elseExpr.get());
                 return;
             }
             case ASTNodeType::INDEX_EXPR: {
                 auto* idx = static_cast<const IndexExpr*>(ex);
-                walkE(idx->array.get()); walkE(idx->index.get());
+                walkE(idx->array.get());
+                walkE(idx->index.get());
                 return;
             }
             case ASTNodeType::INDEX_ASSIGN_EXPR: {
                 auto* ia = static_cast<const IndexAssignExpr*>(ex);
-                walkE(ia->array.get()); walkE(ia->index.get()); walkE(ia->value.get());
+                walkE(ia->array.get());
+                walkE(ia->index.get());
+                walkE(ia->value.get());
                 return;
             }
             case ASTNodeType::ARRAY_EXPR: {
                 auto* ae = static_cast<const ArrayExpr*>(ex);
-                for (auto& el : ae->elements) walkE(el.get());
+                for (auto& el : ae->elements)
+                    walkE(el.get());
                 return;
             }
             case ASTNodeType::PIPE_EXPR: {
@@ -3652,7 +4396,8 @@ void CTEngine::runPass(const Program* program) {
         };
         // Walk all statements to find call expressions.
         std::function<void(const Statement*)> walkS = [&](const Statement* st) {
-            if (!st) return;
+            if (!st)
+                return;
             switch (st->type) {
             case ASTNodeType::EXPR_STMT: {
                 auto* es = static_cast<const ExprStmt*>(st);
@@ -3676,7 +4421,8 @@ void CTEngine::runPass(const Program* program) {
             }
             case ASTNodeType::BLOCK: {
                 auto* blk = static_cast<const BlockStmt*>(st);
-                for (auto& s2 : blk->statements) walkS(s2.get());
+                for (auto& s2 : blk->statements)
+                    walkS(s2.get());
                 return;
             }
             case ASTNodeType::IF_STMT: {
@@ -3688,8 +4434,10 @@ void CTEngine::runPass(const Program* program) {
             }
             case ASTNodeType::FOR_STMT: {
                 auto* fs = static_cast<const ForStmt*>(st);
-                walkE(fs->start.get()); walkE(fs->end.get());
-                if (fs->step) walkE(fs->step.get());
+                walkE(fs->start.get());
+                walkE(fs->end.get());
+                if (fs->step)
+                    walkE(fs->step.get());
                 walkS(fs->body.get());
                 return;
             }
@@ -3715,23 +4463,29 @@ void CTEngine::runPass(const Program* program) {
                 auto* sw = static_cast<const SwitchStmt*>(st);
                 walkE(sw->condition.get());
                 for (auto& c : sw->cases) {
-                    if (c.value) walkE(c.value.get());
-                    for (auto& v : c.values) walkE(v.get());
-                    for (auto& bs : c.body) walkS(bs.get());
+                    if (c.value)
+                        walkE(c.value.get());
+                    for (auto& v : c.values)
+                        walkE(v.get());
+                    for (auto& bs : c.body)
+                        walkS(bs.get());
                 }
                 return;
             }
             case ASTNodeType::PIPELINE_STMT: {
                 auto* ps = static_cast<const PipelineStmt*>(st);
-                if (ps->count) walkE(ps->count.get());
-                for (auto& stage : ps->stages) walkS(stage.body.get());
+                if (ps->count)
+                    walkE(ps->count.get());
+                for (auto& stage : ps->stages)
+                    walkS(stage.body.get());
                 return;
             }
             default:
                 return;
             }
         };
-        for (auto& stmt : fn->body->statements) walkS(stmt.get());
+        for (auto& stmt : fn->body->statements)
+            walkS(stmt.get());
     });
 
     // ── Phase 6: deduplicate graph nodes ──────────────────────────────────
@@ -3740,9 +4494,12 @@ void CTEngine::runPass(const Program* program) {
 
     // ── Phase 7: uniform return value detection ────────────────────────────
     forEachFunction(program, [&](const FunctionDecl* fn) {
-        if (!pureFunctions_.count(fn->name)) return;
-        if (uniformReturnValues_.count(fn->name)) return; // zero-arg: already in globalConsts_
-        if (fn->parameters.empty()) return;
+        if (!pureFunctions_.count(fn->name))
+            return;
+        if (uniformReturnValues_.count(fn->name))
+            return; // zero-arg: already in globalConsts_
+        if (fn->parameters.empty())
+            return;
 
         // Build all-symbolic argument vector.
         std::vector<CTValue> symbolicArgs;
@@ -3791,7 +4548,8 @@ void CTEngine::runPass(const Program* program) {
                 std::string curr = std::move(worklist.back());
                 worklist.pop_back();
                 auto it = callees.find(curr);
-                if (it == callees.end()) continue;
+                if (it == callees.end())
+                    continue;
                 for (auto& callee : it->second) {
                     if (alive.insert(callee).second)
                         worklist.push_back(callee);
@@ -3819,7 +4577,8 @@ void CTEngine::runPass(const Program* program) {
         // sub-expressions.  Recursive, so -1, 2 + 3 * 4, etc. all work.
         std::function<std::optional<CTValue>(const Expression*)> tryResolveLiteral;
         tryResolveLiteral = [&](const Expression* ex) -> std::optional<CTValue> {
-            if (!ex) return std::nullopt;
+            if (!ex)
+                return std::nullopt;
             if (ex->type == ASTNodeType::LITERAL_EXPR) {
                 auto* lit = static_cast<const LiteralExpr*>(ex);
                 if (lit->literalType == LiteralExpr::LiteralType::INTEGER)
@@ -3841,7 +4600,8 @@ void CTEngine::runPass(const Program* program) {
                 auto* sr = static_cast<const ScopeResolutionExpr*>(ex);
                 const std::string flat = sr->scopeName + "_" + sr->memberName;
                 auto eit = enumConsts_.find(flat);
-                if (eit != enumConsts_.end()) return CTValue::fromI64(eit->second);
+                if (eit != enumConsts_.end())
+                    return CTValue::fromI64(eit->second);
             }
             // Unary negation / logical-not on a resolvable sub-expression.
             if (ex->type == ASTNodeType::UNARY_EXPR) {
@@ -3849,7 +4609,8 @@ void CTEngine::runPass(const Program* program) {
                 auto inner = tryResolveLiteral(un->operand.get());
                 if (inner) {
                     CTValue v = evalUnaryOp(un->op, *inner);
-                    if (v.isConcrete()) return v;
+                    if (v.isConcrete())
+                        return v;
                 }
                 return std::nullopt;
             }
@@ -3860,7 +4621,8 @@ void CTEngine::runPass(const Program* program) {
                 auto r = tryResolveLiteral(bin->right.get());
                 if (l && r) {
                     CTValue v = evalBinaryOp(bin->op, *l, *r);
-                    if (v.isConcrete()) return v;
+                    if (v.isConcrete())
+                        return v;
                 }
                 return std::nullopt;
             }
@@ -3868,7 +4630,8 @@ void CTEngine::runPass(const Program* program) {
         };
 
         std::function<void(const Expression*)> walkCallSites = [&](const Expression* ex) {
-            if (!ex) return;
+            if (!ex)
+                return;
             if (ex->type == ASTNodeType::CALL_EXPR) {
                 auto* call = static_cast<const CallExpr*>(ex);
                 // Only handle calls to registered pure user functions.
@@ -3878,53 +4641,78 @@ void CTEngine::runPass(const Program* program) {
                     bool allConcrete = true;
                     for (auto& arg : call->arguments) {
                         auto v = tryResolveLiteral(arg.get());
-                        if (!v) { allConcrete = false; break; }
+                        if (!v) {
+                            allConcrete = false;
+                            break;
+                        }
                         resolvedArgs.push_back(*v);
                     }
                     if (allConcrete) {
                         // Evaluate with concrete args; result will be stored in memoCache_.
                         auto result = executeFunction(call->callee, resolvedArgs);
-                        if (result) ++stats_.callSitesFolded;
+                        if (result)
+                            ++stats_.callSitesFolded;
                     }
                 }
-                for (auto& arg : call->arguments) walkCallSites(arg.get());
+                for (auto& arg : call->arguments)
+                    walkCallSites(arg.get());
                 return;
             }
             // Recurse into sub-expressions.
             switch (ex->type) {
             case ASTNodeType::BINARY_EXPR: {
                 auto* b = static_cast<const BinaryExpr*>(ex);
-                walkCallSites(b->left.get()); walkCallSites(b->right.get()); break; }
+                walkCallSites(b->left.get());
+                walkCallSites(b->right.get());
+                break;
+            }
             case ASTNodeType::UNARY_EXPR: {
                 auto* u = static_cast<const UnaryExpr*>(ex);
-                walkCallSites(u->operand.get()); break; }
+                walkCallSites(u->operand.get());
+                break;
+            }
             case ASTNodeType::TERNARY_EXPR: {
                 auto* t = static_cast<const TernaryExpr*>(ex);
-                walkCallSites(t->condition.get()); walkCallSites(t->thenExpr.get());
-                walkCallSites(t->elseExpr.get()); break; }
+                walkCallSites(t->condition.get());
+                walkCallSites(t->thenExpr.get());
+                walkCallSites(t->elseExpr.get());
+                break;
+            }
             case ASTNodeType::INDEX_EXPR: {
                 auto* i = static_cast<const IndexExpr*>(ex);
-                walkCallSites(i->array.get()); walkCallSites(i->index.get()); break; }
+                walkCallSites(i->array.get());
+                walkCallSites(i->index.get());
+                break;
+            }
             case ASTNodeType::ARRAY_EXPR: {
                 auto* a = static_cast<const ArrayExpr*>(ex);
-                for (auto& el : a->elements) walkCallSites(el.get());
-                break; }
+                for (auto& el : a->elements)
+                    walkCallSites(el.get());
+                break;
+            }
             case ASTNodeType::ASSIGN_EXPR: {
                 auto* a = static_cast<const AssignExpr*>(ex);
-                walkCallSites(a->value.get()); break; }
-            default: break;
+                walkCallSites(a->value.get());
+                break;
+            }
+            default:
+                break;
             }
         };
 
         std::function<void(const Statement*)> walkStmtCallSites = [&](const Statement* st) {
-            if (!st) return;
+            if (!st)
+                return;
             switch (st->type) {
             case ASTNodeType::EXPR_STMT:
-                walkCallSites(static_cast<const ExprStmt*>(st)->expression.get()); break;
+                walkCallSites(static_cast<const ExprStmt*>(st)->expression.get());
+                break;
             case ASTNodeType::RETURN_STMT:
-                walkCallSites(static_cast<const ReturnStmt*>(st)->value.get()); break;
+                walkCallSites(static_cast<const ReturnStmt*>(st)->value.get());
+                break;
             case ASTNodeType::VAR_DECL:
-                walkCallSites(static_cast<const VarDecl*>(st)->initializer.get()); break;
+                walkCallSites(static_cast<const VarDecl*>(st)->initializer.get());
+                break;
             case ASTNodeType::BLOCK:
                 for (auto& s2 : static_cast<const BlockStmt*>(st)->statements)
                     walkStmtCallSites(s2.get());
@@ -3933,28 +4721,43 @@ void CTEngine::runPass(const Program* program) {
                 auto* ifs = static_cast<const IfStmt*>(st);
                 walkCallSites(ifs->condition.get());
                 walkStmtCallSites(ifs->thenBranch.get());
-                walkStmtCallSites(ifs->elseBranch.get()); break; }
+                walkStmtCallSites(ifs->elseBranch.get());
+                break;
+            }
             case ASTNodeType::FOR_STMT: {
                 auto* fs = static_cast<const ForStmt*>(st);
-                walkCallSites(fs->start.get()); walkCallSites(fs->end.get());
-                if (fs->step) walkCallSites(fs->step.get());
-                walkStmtCallSites(fs->body.get()); break; }
+                walkCallSites(fs->start.get());
+                walkCallSites(fs->end.get());
+                if (fs->step)
+                    walkCallSites(fs->step.get());
+                walkStmtCallSites(fs->body.get());
+                break;
+            }
             case ASTNodeType::WHILE_STMT: {
                 auto* ws = static_cast<const WhileStmt*>(st);
                 walkCallSites(ws->condition.get());
-                walkStmtCallSites(ws->body.get()); break; }
+                walkStmtCallSites(ws->body.get());
+                break;
+            }
             case ASTNodeType::FOR_EACH_STMT: {
                 auto* fes = static_cast<const ForEachStmt*>(st);
                 walkCallSites(fes->collection.get());
-                walkStmtCallSites(fes->body.get()); break; }
+                walkStmtCallSites(fes->body.get());
+                break;
+            }
             case ASTNodeType::SWITCH_STMT: {
                 auto* sw = static_cast<const SwitchStmt*>(st);
                 walkCallSites(sw->condition.get());
                 for (auto& c : sw->cases) {
-                    if (c.value) walkCallSites(c.value.get());
-                    for (auto& bs : c.body) walkStmtCallSites(bs.get()); }
-                break; }
-            default: break;
+                    if (c.value)
+                        walkCallSites(c.value.get());
+                    for (auto& bs : c.body)
+                        walkStmtCallSites(bs.get());
+                }
+                break;
+            }
+            default:
+                break;
             }
         };
 
@@ -3974,8 +4777,10 @@ inline bool safeAddI64(int64_t a, int64_t b, int64_t& out) {
 #if defined(__GNUC__) || defined(__clang__)
     return !__builtin_add_overflow(a, b, &out);
 #else
-    if (b > 0 && a > std::numeric_limits<int64_t>::max() - b) return false;
-    if (b < 0 && a < std::numeric_limits<int64_t>::min() - b) return false;
+    if (b > 0 && a > std::numeric_limits<int64_t>::max() - b)
+        return false;
+    if (b < 0 && a < std::numeric_limits<int64_t>::min() - b)
+        return false;
     out = a + b;
     return true;
 #endif
@@ -3984,11 +4789,18 @@ inline bool safeMulI64(int64_t a, int64_t b, int64_t& out) {
 #if defined(__GNUC__) || defined(__clang__)
     return !__builtin_mul_overflow(a, b, &out);
 #else
-    if (a == 0 || b == 0) { out = 0; return true; }
-    if (a > 0 && b > 0 && a > std::numeric_limits<int64_t>::max() / b) return false;
-    if (a < 0 && b < 0 && (-a) > std::numeric_limits<int64_t>::max() / (-b)) return false;
-    if (a > 0 && b < 0 && b < std::numeric_limits<int64_t>::min() / a) return false;
-    if (a < 0 && b > 0 && a < std::numeric_limits<int64_t>::min() / b) return false;
+    if (a == 0 || b == 0) {
+        out = 0;
+        return true;
+    }
+    if (a > 0 && b > 0 && a > std::numeric_limits<int64_t>::max() / b)
+        return false;
+    if (a < 0 && b < 0 && (-a) > std::numeric_limits<int64_t>::max() / (-b))
+        return false;
+    if (a > 0 && b < 0 && b < std::numeric_limits<int64_t>::min() / a)
+        return false;
+    if (a < 0 && b > 0 && a < std::numeric_limits<int64_t>::min() / b)
+        return false;
     out = a * b;
     return true;
 #endif
@@ -3997,87 +4809,113 @@ inline bool safeMulI64(int64_t a, int64_t b, int64_t& out) {
 // All 4 corner products for multiplication on intervals.
 inline CTInterval mulInterval(int64_t la, int64_t ha, int64_t lb, int64_t hb) {
     int64_t p[4] = {};
-    bool ok = safeMulI64(la, lb, p[0]) && safeMulI64(la, hb, p[1]) &&
-              safeMulI64(ha, lb, p[2]) && safeMulI64(ha, hb, p[3]);
-    if (!ok) return CTInterval::top();
-    return CTInterval::range(*std::min_element(p, p+4),
-                             *std::max_element(p, p+4));
+    bool ok =
+        safeMulI64(la, lb, p[0]) && safeMulI64(la, hb, p[1]) && safeMulI64(ha, lb, p[2]) && safeMulI64(ha, hb, p[3]);
+    if (!ok)
+        return CTInterval::top();
+    return CTInterval::range(*std::min_element(p, p + 4), *std::max_element(p, p + 4));
 }
 
 } // anonymous namespace
 
 CTInterval CTInterval::opAdd(const CTInterval& o) const noexcept {
-    if (isBottom() || o.isBottom()) return bottom();
-    if (isTop() || o.isTop()) return top();
+    if (isBottom() || o.isBottom())
+        return bottom();
+    if (isTop() || o.isTop())
+        return top();
     int64_t newLo, newHi;
-    if (!safeAddI64(lo, o.lo, newLo) || !safeAddI64(hi, o.hi, newHi)) return top();
+    if (!safeAddI64(lo, o.lo, newLo) || !safeAddI64(hi, o.hi, newHi))
+        return top();
     return range(newLo, newHi);
 }
 
 CTInterval CTInterval::opSub(const CTInterval& o) const noexcept {
-    if (isBottom() || o.isBottom()) return bottom();
-    if (isTop() || o.isTop()) return top();
+    if (isBottom() || o.isBottom())
+        return bottom();
+    if (isTop() || o.isTop())
+        return top();
     // [la,ha] - [lb,hb] = [la-hb, ha-lb]
     int64_t newLo, newHi;
-    if (!safeAddI64(lo,  -o.hi, newLo) || !safeAddI64(hi, -o.lo, newHi)) return top();
+    if (!safeAddI64(lo, -o.hi, newLo) || !safeAddI64(hi, -o.lo, newHi))
+        return top();
     return range(newLo, newHi);
 }
 
 CTInterval CTInterval::opMul(const CTInterval& o) const noexcept {
-    if (isBottom() || o.isBottom()) return bottom();
-    if (isTop() || o.isTop()) return top();
+    if (isBottom() || o.isBottom())
+        return bottom();
+    if (isTop() || o.isTop())
+        return top();
     return mulInterval(lo, hi, o.lo, o.hi);
 }
 
 CTInterval CTInterval::opDiv(const CTInterval& o) const noexcept {
-    if (isBottom() || o.isBottom()) return bottom();
-    if (isTop() || o.isTop()) return top();
+    if (isBottom() || o.isBottom())
+        return bottom();
+    if (isTop() || o.isTop())
+        return top();
     // Division by zero is undefined — return TOP conservatively.
-    if (o.includesZero()) return top();
+    if (o.includesZero())
+        return top();
     // Avoid MIN / -1 overflow.
-    if (lo == std::numeric_limits<int64_t>::min() && o.includes(-1)) return top();
+    if (lo == std::numeric_limits<int64_t>::min() && o.includes(-1))
+        return top();
     // Divide by extreme divisors to find the tightest bounds.
     const int64_t divs[4] = {lo / o.lo, lo / o.hi, hi / o.lo, hi / o.hi};
-    return range(*std::min_element(divs, divs+4),
-                 *std::max_element(divs, divs+4));
+    return range(*std::min_element(divs, divs + 4), *std::max_element(divs, divs + 4));
 }
 
 CTInterval CTInterval::opMod(const CTInterval& o) const noexcept {
-    if (isBottom() || o.isBottom()) return bottom();
-    if (o.includesZero()) return top();
+    if (isBottom() || o.isBottom())
+        return bottom();
+    if (o.includesZero())
+        return top();
     // For signed modulo: result lies in [-(|divisor|-1), |divisor|-1]
     // We use the abs of the divisor's maximum absolute magnitude.
     const int64_t absDivisorMax = std::max(std::abs(o.lo), std::abs(o.hi));
-    if (absDivisorMax <= 0) return top();
+    if (absDivisorMax <= 0)
+        return top();
     return range(-(absDivisorMax - 1), absDivisorMax - 1);
 }
 
 CTInterval CTInterval::opShl(const CTInterval& o) const noexcept {
-    if (isBottom() || o.isBottom()) return bottom();
-    if (isTop() || o.isTop()) return top();
+    if (isBottom() || o.isBottom())
+        return bottom();
+    if (isTop() || o.isTop())
+        return top();
     // Only safe when shift amount is in [0, 62] and base is non-negative.
-    if (o.lo < 0 || o.hi > 62) return top();
-    if (lo < 0) return top();  // signed shift of negative: UB in C++
+    if (o.lo < 0 || o.hi > 62)
+        return top();
+    if (lo < 0)
+        return top(); // signed shift of negative: UB in C++
     int64_t newLo, newHi;
     // lo << o.lo and hi << o.hi — if either overflows, return TOP.
-    if (!safeMulI64(lo, int64_t(1) << o.lo, newLo)) return top();
-    if (!safeMulI64(hi, int64_t(1) << o.hi, newHi)) return top();
+    if (!safeMulI64(lo, int64_t(1) << o.lo, newLo))
+        return top();
+    if (!safeMulI64(hi, int64_t(1) << o.hi, newHi))
+        return top();
     return range(newLo, newHi);
 }
 
 CTInterval CTInterval::opShr(const CTInterval& o) const noexcept {
-    if (isBottom() || o.isBottom()) return bottom();
-    if (isTop() || o.isTop()) return top();
-    if (o.lo < 0 || o.hi > 63) return top();
+    if (isBottom() || o.isBottom())
+        return bottom();
+    if (isTop() || o.isTop())
+        return top();
+    if (o.lo < 0 || o.hi > 63)
+        return top();
     // For positive values: [lo >> o.hi, hi >> o.lo] (right shift reduces magnitude)
-    if (lo >= 0) return range(lo >> o.hi, hi >> o.lo);
+    if (lo >= 0)
+        return range(lo >> o.hi, hi >> o.lo);
     // Negative values: arithmetic shift preserves sign; result is still negative
     return range(lo >> o.lo, hi >> o.hi);
 }
 
 CTInterval CTInterval::opBitAnd(const CTInterval& o) const noexcept {
-    if (isBottom() || o.isBottom()) return bottom();
-    if (isTop() || o.isTop()) return top();
+    if (isBottom() || o.isBottom())
+        return bottom();
+    if (isTop() || o.isTop())
+        return top();
     // Conservative: [0, min(ha, hb)] when both are non-negative
     if (lo >= 0 && o.lo >= 0)
         return range(0, std::min(hi, o.hi));
@@ -4085,81 +4923,107 @@ CTInterval CTInterval::opBitAnd(const CTInterval& o) const noexcept {
 }
 
 CTInterval CTInterval::opBitOr(const CTInterval& o) const noexcept {
-    if (isBottom() || o.isBottom()) return bottom();
-    if (isTop() || o.isTop()) return top();
+    if (isBottom() || o.isBottom())
+        return bottom();
+    if (isTop() || o.isTop())
+        return top();
     // Conservative: [max(la,lb), ha|hb] when both non-negative
     if (lo >= 0 && o.lo >= 0) {
         // Upper bound: all bits set up to the highest bit of either hi
-        int64_t upper = hi | o.hi;  // bitwise OR of upper bounds
+        int64_t upper = hi | o.hi; // bitwise OR of upper bounds
         return range(std::max(lo, o.lo), upper);
     }
     return top();
 }
 
 CTInterval CTInterval::opBitXor(const CTInterval& o) const noexcept {
-    if (isBottom() || o.isBottom()) return bottom();
-    if (isTop() || o.isTop()) return top();
+    if (isBottom() || o.isBottom())
+        return bottom();
+    if (isTop() || o.isTop())
+        return top();
     if (lo >= 0 && o.lo >= 0)
         return range(0, hi | o.hi);
     return top();
 }
 
 CTInterval CTInterval::opNeg() const noexcept {
-    if (isBottom() || isTop()) return *this;
+    if (isBottom() || isTop())
+        return *this;
     // Careful: -INT64_MIN overflows
-    if (lo == std::numeric_limits<int64_t>::min()) return top();
+    if (lo == std::numeric_limits<int64_t>::min())
+        return top();
     return range(-hi, -lo);
 }
 
 CTInterval CTInterval::opAbs() const noexcept {
-    if (isBottom() || isTop()) return *this;
-    if (lo == std::numeric_limits<int64_t>::min()) return top();
-    if (lo >= 0) return *this;
-    if (hi < 0) return range(-hi, -lo);
+    if (isBottom() || isTop())
+        return *this;
+    if (lo == std::numeric_limits<int64_t>::min())
+        return top();
+    if (lo >= 0)
+        return *this;
+    if (hi < 0)
+        return range(-hi, -lo);
     return range(0, std::max(-lo, hi));
 }
 
 CTInterval::CmpResult CTInterval::cmpLT(const CTInterval& o) const noexcept {
-    if (isBottom() || o.isBottom()) return CmpResult::UNKNOWN;
+    if (isBottom() || o.isBottom())
+        return CmpResult::UNKNOWN;
     if (!isTop() && !o.isTop()) {
-        if (hi < o.lo) return CmpResult::ALWAYS_TRUE;   // every a < every b
-        if (lo >= o.hi) return CmpResult::ALWAYS_FALSE; // every a >= every b
+        if (hi < o.lo)
+            return CmpResult::ALWAYS_TRUE; // every a < every b
+        if (lo >= o.hi)
+            return CmpResult::ALWAYS_FALSE; // every a >= every b
     }
     return CmpResult::UNKNOWN;
 }
 CTInterval::CmpResult CTInterval::cmpLE(const CTInterval& o) const noexcept {
-    if (isBottom() || o.isBottom()) return CmpResult::UNKNOWN;
+    if (isBottom() || o.isBottom())
+        return CmpResult::UNKNOWN;
     if (!isTop() && !o.isTop()) {
-        if (hi <= o.lo) return CmpResult::ALWAYS_TRUE;
-        if (lo > o.hi) return CmpResult::ALWAYS_FALSE;
+        if (hi <= o.lo)
+            return CmpResult::ALWAYS_TRUE;
+        if (lo > o.hi)
+            return CmpResult::ALWAYS_FALSE;
     }
     return CmpResult::UNKNOWN;
 }
-CTInterval::CmpResult CTInterval::cmpGT(const CTInterval& o) const noexcept { return o.cmpLT(*this); }
-CTInterval::CmpResult CTInterval::cmpGE(const CTInterval& o) const noexcept { return o.cmpLE(*this); }
+CTInterval::CmpResult CTInterval::cmpGT(const CTInterval& o) const noexcept {
+    return o.cmpLT(*this);
+}
+CTInterval::CmpResult CTInterval::cmpGE(const CTInterval& o) const noexcept {
+    return o.cmpLE(*this);
+}
 CTInterval::CmpResult CTInterval::cmpEQ(const CTInterval& o) const noexcept {
-    if (isBottom() || o.isBottom()) return CmpResult::UNKNOWN;
+    if (isBottom() || o.isBottom())
+        return CmpResult::UNKNOWN;
     if (!isTop() && !o.isTop()) {
-        if (isConcrete() && o.isConcrete() && lo == o.lo) return CmpResult::ALWAYS_TRUE;
+        if (isConcrete() && o.isConcrete() && lo == o.lo)
+            return CmpResult::ALWAYS_TRUE;
         // No overlap → always false
-        if (hi < o.lo || lo > o.hi) return CmpResult::ALWAYS_FALSE;
+        if (hi < o.lo || lo > o.hi)
+            return CmpResult::ALWAYS_FALSE;
     }
     return CmpResult::UNKNOWN;
 }
 CTInterval::CmpResult CTInterval::cmpNE(const CTInterval& o) const noexcept {
     auto eq = cmpEQ(o);
-    if (eq == CmpResult::ALWAYS_TRUE)  return CmpResult::ALWAYS_FALSE;
-    if (eq == CmpResult::ALWAYS_FALSE) return CmpResult::ALWAYS_TRUE;
+    if (eq == CmpResult::ALWAYS_TRUE)
+        return CmpResult::ALWAYS_FALSE;
+    if (eq == CmpResult::ALWAYS_FALSE)
+        return CmpResult::ALWAYS_TRUE;
     return CmpResult::UNKNOWN;
 }
 
 // ── CTEngine::getExitRange ────────────────────────────────────────────────────
-CTInterval CTEngine::getExitRange(const std::string& fnName,
-                                  const std::string& varName) const noexcept {
+CTInterval CTEngine::getExitRange(const std::string& fnName, const std::string& varName) const noexcept {
     auto fi = analysisExitEnvs_.find(fnName);
-    if (fi == analysisExitEnvs_.end()) return CTInterval::top();
+    if (fi == analysisExitEnvs_.end())
+        return CTInterval::top();
     auto vi = fi->second.find(varName);
-    if (vi == fi->second.end()) return CTInterval::top();
+    if (vi == fi->second.end())
+        return CTInterval::top();
     return vi->second;
 }
 
@@ -4171,10 +5035,9 @@ static CTInterval envGet(const CTAbstractEnv& env, const std::string& name) {
     return (it != env.end()) ? it->second : CTInterval::top();
 }
 
-CTInterval CTAbstractInterpreter::analyzeExpr(const Expression* e,
-                                               const CTAbstractEnv& env,
-                                               CTAnalysisResult& result) {
-    if (!e) return CTInterval::top();
+CTInterval CTAbstractInterpreter::analyzeExpr(const Expression* e, const CTAbstractEnv& env, CTAnalysisResult& result) {
+    if (!e)
+        return CTInterval::top();
 
     switch (e->type) {
     // ── Literals ──────────────────────────────────────────────────────────
@@ -4184,7 +5047,7 @@ CTInterval CTAbstractInterpreter::analyzeExpr(const Expression* e,
             return CTInterval::exact(lit->intValue);
         if (lit->literalType == LiteralExpr::LiteralType::FLOAT)
             return CTInterval::top(); // float domain not tracked
-        return CTInterval::top();    // strings
+        return CTInterval::top();     // strings
     }
 
     // ── Variable / global constant lookup ────────────────────────────────
@@ -4192,14 +5055,16 @@ CTInterval CTAbstractInterpreter::analyzeExpr(const Expression* e,
         auto* id = static_cast<const IdentifierExpr*>(e);
         // 1. Local variable: use the abstract environment.
         auto localIt = env.find(id->name);
-        if (localIt != env.end()) return localIt->second;
+        if (localIt != env.end())
+            return localIt->second;
         // 2. Global constant: if it has a known integer value, convert it.
         auto gIt = globals_.find(id->name);
         if (gIt != globals_.end() && gIt->second.isInt())
             return CTInterval::exact(gIt->second.asI64());
         // 3. Enum constant.
         auto eIt = enums_.find(id->name);
-        if (eIt != enums_.end()) return CTInterval::exact(eIt->second);
+        if (eIt != enums_.end())
+            return CTInterval::exact(eIt->second);
         return CTInterval::top();
     }
 
@@ -4208,35 +5073,48 @@ CTInterval CTAbstractInterpreter::analyzeExpr(const Expression* e,
         auto* sr = static_cast<const ScopeResolutionExpr*>(e);
         const std::string key = sr->scopeName + "::" + sr->memberName;
         auto eIt = enums_.find(key);
-        if (eIt != enums_.end()) return CTInterval::exact(eIt->second);
+        if (eIt != enums_.end())
+            return CTInterval::exact(eIt->second);
         return CTInterval::top();
     }
 
     // ── Binary operations — semantic transfer functions ───────────────────
     case ASTNodeType::BINARY_EXPR: {
         auto* bin = static_cast<const BinaryExpr*>(e);
-        CTInterval lhs = analyzeExpr(bin->left.get(),  env, result);
+        CTInterval lhs = analyzeExpr(bin->left.get(), env, result);
         CTInterval rhs = analyzeExpr(bin->right.get(), env, result);
 
         // Arithmetic operations: apply the appropriate transfer function.
         CTInterval res = CTInterval::top();
         const std::string& op = bin->op;
 
-        if      (op == "+")  res = lhs.opAdd(rhs);
-        else if (op == "-")  res = lhs.opSub(rhs);
-        else if (op == "*")  res = lhs.opMul(rhs);
-        else if (op == "/")  { res = lhs.opDiv(rhs);
-                               if (!rhs.includesZero()) result.safeDivisions.insert(e); }
-        else if (op == "%")  { res = lhs.opMod(rhs);
-                               if (!rhs.includesZero()) result.safeDivisions.insert(e); }
-        else if (op == "<<") res = lhs.opShl(rhs);
-        else if (op == ">>") res = lhs.opShr(rhs);
-        else if (op == "&")  res = lhs.opBitAnd(rhs);
-        else if (op == "|")  res = lhs.opBitOr(rhs);
-        else if (op == "^")  res = lhs.opBitXor(rhs);
+        if (op == "+")
+            res = lhs.opAdd(rhs);
+        else if (op == "-")
+            res = lhs.opSub(rhs);
+        else if (op == "*")
+            res = lhs.opMul(rhs);
+        else if (op == "/") {
+            res = lhs.opDiv(rhs);
+            if (!rhs.includesZero())
+                result.safeDivisions.insert(e);
+        } else if (op == "%") {
+            res = lhs.opMod(rhs);
+            if (!rhs.includesZero())
+                result.safeDivisions.insert(e);
+        } else if (op == "<<")
+            res = lhs.opShl(rhs);
+        else if (op == ">>")
+            res = lhs.opShr(rhs);
+        else if (op == "&")
+            res = lhs.opBitAnd(rhs);
+        else if (op == "|")
+            res = lhs.opBitOr(rhs);
+        else if (op == "^")
+            res = lhs.opBitXor(rhs);
         // Comparisons: result is 0 or 1
-        else if (op == "<" || op == "<=" || op == ">" || op == ">=" ||
-                 op == "==" || op == "!=" || op == "&&" || op == "||")
+        else if (op == "<" || op == "<=" || op == ">" || op == ">=" || op == "==" || op == "!=" || op == "&&" ||
+                 op == "||")
             res = CTInterval::range(0, 1);
 
         // Q5: arithmetic overflow safety — if operands' ranges fit within int64
@@ -4247,24 +5125,22 @@ CTInterval CTAbstractInterpreter::analyzeExpr(const Expression* e,
         }
 
         // Q4: Range-conditioned cheaper rewrites.
-        if (op == "/" && !rhs.isTop() && rhs.isConcrete() && rhs.lo > 0 &&
-            lhs.isNonNegative()) {
+        if (op == "/" && !rhs.isTop() && rhs.isConcrete() && rhs.lo > 0 && lhs.isNonNegative()) {
             int64_t divisor = rhs.lo;
             // Is divisor a power of 2?
             if (divisor > 0 && (divisor & (divisor - 1)) == 0)
-                result.cheaperRewrites[e] = ">>";  // x/2^k → x>>k
+                result.cheaperRewrites[e] = ">>"; // x/2^k → x>>k
         }
-        if (op == "%" && !rhs.isTop() && rhs.isConcrete() && rhs.lo > 0 &&
-            lhs.isNonNegative()) {
+        if (op == "%" && !rhs.isTop() && rhs.isConcrete() && rhs.lo > 0 && lhs.isNonNegative()) {
             int64_t divisor = rhs.lo;
             if (divisor > 0 && (divisor & (divisor - 1)) == 0)
-                result.cheaperRewrites[e] = "&";   // x%2^k → x&(2^k-1)
+                result.cheaperRewrites[e] = "&"; // x%2^k → x&(2^k-1)
         }
         if (op == "*" && !rhs.isTop() && rhs.isConcrete()) {
             int64_t factor = rhs.lo;
             // x * 2^k → x << k  (valid for all integer values — no precondition needed)
             if (factor > 0 && (factor & (factor - 1)) == 0)
-                result.cheaperRewrites[e] = "<<";  // x*2^k → x<<k
+                result.cheaperRewrites[e] = "<<"; // x*2^k → x<<k
         }
 
         return res;
@@ -4274,9 +5150,12 @@ CTInterval CTAbstractInterpreter::analyzeExpr(const Expression* e,
     case ASTNodeType::UNARY_EXPR: {
         auto* u = static_cast<const UnaryExpr*>(e);
         CTInterval operand = analyzeExpr(u->operand.get(), env, result);
-        if (u->op == "-") return operand.opNeg();
-        if (u->op == "!" || u->op == "not") return CTInterval::range(0, 1);
-        if (u->op == "~") return CTInterval::top(); // bitwise NOT
+        if (u->op == "-")
+            return operand.opNeg();
+        if (u->op == "!" || u->op == "not")
+            return CTInterval::range(0, 1);
+        if (u->op == "~")
+            return CTInterval::top(); // bitwise NOT
         return CTInterval::top();
     }
 
@@ -4290,8 +5169,10 @@ CTInterval CTAbstractInterpreter::analyzeExpr(const Expression* e,
         auto* t = static_cast<const TernaryExpr*>(e);
         CTInterval cond = analyzeExpr(t->condition.get(), env, result);
         if (cond.isConcrete()) {
-            if (cond.lo != 0) return analyzeExpr(t->thenExpr.get(), env, result);
-            else              return analyzeExpr(t->elseExpr.get(), env, result);
+            if (cond.lo != 0)
+                return analyzeExpr(t->thenExpr.get(), env, result);
+            else
+                return analyzeExpr(t->elseExpr.get(), env, result);
         }
         CTInterval thenI = analyzeExpr(t->thenExpr.get(), env, result);
         CTInterval elseI = analyzeExpr(t->elseExpr.get(), env, result);
@@ -4327,15 +5208,15 @@ namespace {
 constexpr int kAINarrowDepthBudget = 6;
 }
 
-void CTAbstractInterpreter::narrowCondition(const Expression* cond,
-                                             CTAbstractEnv& thenEnv,
-                                             CTAbstractEnv& elseEnv) {
-    if (!cond) return;
+void CTAbstractInterpreter::narrowCondition(const Expression* cond, CTAbstractEnv& thenEnv, CTAbstractEnv& elseEnv) {
+    if (!cond)
+        return;
 
     // ── Compound dispatcher ────────────────────────────────────────────────
     std::function<void(const Expression*, CTAbstractEnv&, CTAbstractEnv&, int)> walk;
     walk = [&](const Expression* c, CTAbstractEnv& thenE, CTAbstractEnv& elseE, int depth) {
-        if (!c || depth > kAINarrowDepthBudget) return;
+        if (!c || depth > kAINarrowDepthBudget)
+            return;
 
         // !A: swap then/else of A.
         if (c->type == ASTNodeType::UNARY_EXPR) {
@@ -4346,71 +5227,76 @@ void CTAbstractInterpreter::narrowCondition(const Expression* cond,
             return;
         }
 
-        if (c->type != ASTNodeType::BINARY_EXPR) return;
+        if (c->type != ASTNodeType::BINARY_EXPR)
+            return;
         auto* bin = static_cast<const BinaryExpr*>(c);
         const std::string& op = bin->op;
 
         // A && B: both narrowings on then; nothing on else.
         if (op == "&&") {
             CTAbstractEnv dummyElse = elseE;
-            walk(bin->left.get(),  thenE, dummyElse, depth + 1);
+            walk(bin->left.get(), thenE, dummyElse, depth + 1);
             walk(bin->right.get(), thenE, dummyElse, depth + 1);
             return;
         }
         // A || B: both narrowings on else; nothing on then.
         if (op == "||") {
             CTAbstractEnv dummyThen = thenE;
-            walk(bin->left.get(),  dummyThen, elseE, depth + 1);
+            walk(bin->left.get(), dummyThen, elseE, depth + 1);
             walk(bin->right.get(), dummyThen, elseE, depth + 1);
             return;
         }
 
         // Atomic comparison (var ∘ literal, literal ∘ var, var ∘ var).
-        auto narrowAtomic = [&](const Expression* varExpr, const CTInterval& bound,
-                                 bool varOnLeft) {
-            if (!varExpr || varExpr->type != ASTNodeType::IDENTIFIER_EXPR) return;
+        auto narrowAtomic = [&](const Expression* varExpr, const CTInterval& bound, bool varOnLeft) {
+            if (!varExpr || varExpr->type != ASTNodeType::IDENTIFIER_EXPR)
+                return;
             auto* id = static_cast<const IdentifierExpr*>(varExpr);
-            if (!bound.isConcrete()) return;
+            if (!bound.isConcrete())
+                return;
             const int64_t B = bound.lo;
             CTInterval cur = envGet(thenE, id->name);
             CTInterval newThen = cur, newElse = cur;
-            if ((varOnLeft  && op == "<")  || (!varOnLeft && op == ">")) {
-                newThen = cur.narrowLT(B); newElse = cur.narrowGE(B);
-            } else if ((varOnLeft  && op == "<=") || (!varOnLeft && op == ">=")) {
-                newThen = cur.narrowLE(B); newElse = cur.narrowGT(B);
-            } else if ((varOnLeft  && op == ">")  || (!varOnLeft && op == "<")) {
-                newThen = cur.narrowGT(B); newElse = cur.narrowLE(B);
-            } else if ((varOnLeft  && op == ">=") || (!varOnLeft && op == "<=")) {
-                newThen = cur.narrowGE(B); newElse = cur.narrowLT(B);
+            if ((varOnLeft && op == "<") || (!varOnLeft && op == ">")) {
+                newThen = cur.narrowLT(B);
+                newElse = cur.narrowGE(B);
+            } else if ((varOnLeft && op == "<=") || (!varOnLeft && op == ">=")) {
+                newThen = cur.narrowLE(B);
+                newElse = cur.narrowGT(B);
+            } else if ((varOnLeft && op == ">") || (!varOnLeft && op == "<")) {
+                newThen = cur.narrowGT(B);
+                newElse = cur.narrowLE(B);
+            } else if ((varOnLeft && op == ">=") || (!varOnLeft && op == "<=")) {
+                newThen = cur.narrowGE(B);
+                newElse = cur.narrowLT(B);
             } else if (op == "==") {
-                newThen = cur.narrowEQ(B); newElse = cur.narrowNE(B);
+                newThen = cur.narrowEQ(B);
+                newElse = cur.narrowNE(B);
             } else if (op == "!=") {
-                newThen = cur.narrowNE(B); newElse = cur.narrowEQ(B);
+                newThen = cur.narrowNE(B);
+                newElse = cur.narrowEQ(B);
             } else {
                 return;
             }
             // Compose with anything previously deduced for this variable in this
             // pass via intersection (compound conditions stack tighter bounds).
             auto tIt = thenE.find(id->name);
-            thenE[id->name] = (tIt == thenE.end()) ? newThen
-                                                   : tIt->second.intersect(newThen);
+            thenE[id->name] = (tIt == thenE.end()) ? newThen : tIt->second.intersect(newThen);
             auto eIt = elseE.find(id->name);
-            elseE[id->name] = (eIt == elseE.end()) ? newElse
-                                                   : eIt->second.intersect(newElse);
+            elseE[id->name] = (eIt == elseE.end()) ? newElse : eIt->second.intersect(newElse);
         };
 
         CTAnalysisResult tmp;
-        CTInterval lhsI = analyzeExpr(bin->left.get(),  thenE, tmp);
+        CTInterval lhsI = analyzeExpr(bin->left.get(), thenE, tmp);
         CTInterval rhsI = analyzeExpr(bin->right.get(), thenE, tmp);
-        narrowAtomic(bin->left.get(),  rhsI, /*varOnLeft=*/true);
+        narrowAtomic(bin->left.get(), rhsI, /*varOnLeft=*/true);
         narrowAtomic(bin->right.get(), lhsI, /*varOnLeft=*/false);
     };
 
     walk(cond, thenEnv, elseEnv, 0);
 }
 
-CTAbstractEnv CTAbstractInterpreter::joinEnvs(const CTAbstractEnv& a,
-                                               const CTAbstractEnv& b) {
+CTAbstractEnv CTAbstractInterpreter::joinEnvs(const CTAbstractEnv& a, const CTAbstractEnv& b) {
     CTAbstractEnv result = a;
     for (auto& [name, valB] : b) {
         auto it = result.find(name);
@@ -4422,15 +5308,14 @@ CTAbstractEnv CTAbstractInterpreter::joinEnvs(const CTAbstractEnv& a,
     return result;
 }
 
-int64_t CTAbstractInterpreter::getArrayLength(const std::string& varName,
-                                               const CTAbstractEnv& /*env*/) const {
+int64_t CTAbstractInterpreter::getArrayLength(const std::string& varName, const CTAbstractEnv& /*env*/) const {
     auto it = arrayLengths_.find(varName);
     return (it != arrayLengths_.end()) ? it->second : -1;
 }
 
-bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
-                                         CTAnalysisResult& result) {
-    if (!s) return true;
+bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env, CTAnalysisResult& result) {
+    if (!s)
+        return true;
 
     switch (s->type) {
 
@@ -4440,8 +5325,7 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
         CTInterval iv = analyzeExpr(d->initializer.get(), env, result);
         env[d->name] = iv;
         // Track array lengths from array literal declarations.
-        if (d->initializer &&
-            d->initializer->type == ASTNodeType::ARRAY_EXPR) {
+        if (d->initializer && d->initializer->type == ASTNodeType::ARRAY_EXPR) {
             auto* ae = static_cast<const ArrayExpr*>(d->initializer.get());
             arrayLengths_[d->name] = static_cast<int64_t>(ae->elements.size());
         }
@@ -4493,13 +5377,13 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
         // Derive reachability from the condition's abstract value.
         // condAlwaysTrue:  condition range cannot contain 0 and is a concrete range.
         // condAlwaysFalse: condition is the single concrete value 0.
-        const bool condAlwaysTrue  = condRange.isRange() &&
-                                      !condRange.includesZero() && !condRange.isTop();
+        const bool condAlwaysTrue = condRange.isRange() && !condRange.includesZero() && !condRange.isTop();
         const bool condAlwaysFalse = condRange.isConcrete() && condRange.lo == 0;
 
         if (condAlwaysFalse) {
             result.deadThenBranches.insert(s);
-            if (ifs->elseBranch) analyzeStmt(ifs->elseBranch.get(), env, result);
+            if (ifs->elseBranch)
+                analyzeStmt(ifs->elseBranch.get(), env, result);
             return true;
         }
         if (condAlwaysTrue) {
@@ -4515,17 +5399,20 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
         // After narrowing compound/atomic conditions, check whether any
         auto bottomFromTopVarOnly = [&](const CTAbstractEnv& narrowed) -> bool {
             for (auto& [name, iv] : narrowed) {
-                if (!iv.isBottom()) continue;
+                if (!iv.isBottom())
+                    continue;
                 auto eIt = env.find(name);
                 // Variable was TOP (or absent) before narrowing → the
                 // contradiction must come from the condition itself.
-                if (eIt == env.end() || eIt->second.isTop()) return true;
+                if (eIt == env.end() || eIt->second.isTop())
+                    return true;
             }
             return false;
         };
         if (bottomFromTopVarOnly(thenEnv)) {
             result.deadThenBranches.insert(s);
-            if (ifs->elseBranch) analyzeStmt(ifs->elseBranch.get(), elseEnv, result);
+            if (ifs->elseBranch)
+                analyzeStmt(ifs->elseBranch.get(), elseEnv, result);
             env = elseEnv;
             return true;
         }
@@ -4548,15 +5435,13 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
     case ASTNodeType::FOR_STMT: {
         auto* fs = static_cast<const ForStmt*>(s);
         CTInterval startI = analyzeExpr(fs->start.get(), env, result);
-        CTInterval endI   = analyzeExpr(fs->end.get(),   env, result);
-        CTInterval stepI  = fs->step
-                            ? analyzeExpr(fs->step.get(), env, result)
-                            : CTInterval::exact(1);
+        CTInterval endI = analyzeExpr(fs->end.get(), env, result);
+        CTInterval stepI = fs->step ? analyzeExpr(fs->step.get(), env, result) : CTInterval::exact(1);
 
         // Compute induction variable range from start/end semantics.
         CTInterval ivRange;
-        if (startI.isRange() && endI.isRange() && stepI.isRange() &&
-            !startI.isTop() && !endI.isTop() && !stepI.isTop()) {
+        if (startI.isRange() && endI.isRange() && stepI.isRange() && !startI.isTop() && !endI.isTop() &&
+            !stepI.isTop()) {
             if (stepI.lo > 0) {
                 // Positive step: i iterates from start (inclusive) to end (exclusive).
                 // Range: [startI.lo, endI.hi - 1]
@@ -4590,12 +5475,12 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
         // Widening: for any variable that changed in the loop body,
         // widen its range to prevent infinite iteration of the fixpoint.
         for (auto& [name, postVal] : postBody) {
-            if (name == fs->iteratorVar) continue;  // IV handled separately
+            if (name == fs->iteratorVar)
+                continue; // IV handled separately
             auto preIt = bodyEnv.find(name);
             if (preIt == bodyEnv.end()) {
                 env[name] = postVal;
-            } else if (!(preIt->second.isRange() && postVal.isRange() &&
-                         preIt->second.lo == postVal.lo &&
+            } else if (!(preIt->second.isRange() && postVal.isRange() && preIt->second.lo == postVal.lo &&
                          preIt->second.hi == postVal.hi)) {
                 // Range changed: widen to prevent non-termination.
                 env[name] = postVal.widen(preIt->second);
@@ -4615,9 +5500,8 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
         analyzeStmt(ws->body.get(), loopEnv, result);
         for (auto& [name, val] : loopEnv) {
             auto preIt = env.find(name);
-            if (preIt == env.end() || !(preIt->second.isRange() &&
-                val.isRange() && preIt->second.lo == val.lo &&
-                preIt->second.hi == val.hi)) {
+            if (preIt == env.end() || !(preIt->second.isRange() && val.isRange() && preIt->second.lo == val.lo &&
+                                        preIt->second.hi == val.hi)) {
                 env[name] = CTInterval::top();
             }
         }
@@ -4630,9 +5514,8 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
         analyzeStmt(dw->body.get(), loopEnv, result);
         for (auto& [name, val] : loopEnv) {
             auto preIt = env.find(name);
-            if (preIt == env.end() || !(preIt->second.isRange() &&
-                val.isRange() && preIt->second.lo == val.lo &&
-                preIt->second.hi == val.hi)) {
+            if (preIt == env.end() || !(preIt->second.isRange() && val.isRange() && preIt->second.lo == val.lo &&
+                                        preIt->second.hi == val.hi)) {
                 env[name] = CTInterval::top();
             }
         }
@@ -4647,11 +5530,16 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
         bool first = true;
         for (auto& c : sw->cases) {
             CTAbstractEnv caseEnv = env;
-            for (auto& bs : c.body) analyzeStmt(bs.get(), caseEnv, result);
-            if (first) { merged = caseEnv; first = false; }
-            else merged = joinEnvs(merged, caseEnv);
+            for (auto& bs : c.body)
+                analyzeStmt(bs.get(), caseEnv, result);
+            if (first) {
+                merged = caseEnv;
+                first = false;
+            } else
+                merged = joinEnvs(merged, caseEnv);
         }
-        if (!first) env = merged;
+        if (!first)
+            env = merged;
         return true;
     }
 
@@ -4660,18 +5548,19 @@ bool CTAbstractInterpreter::analyzeStmt(const Statement* s, CTAbstractEnv& env,
     }
 }
 
-void CTAbstractInterpreter::analyzeBlock(const BlockStmt* block,
-                                          CTAbstractEnv& env,
-                                          CTAnalysisResult& result) {
-    if (!block) return;
+void CTAbstractInterpreter::analyzeBlock(const BlockStmt* block, CTAbstractEnv& env, CTAnalysisResult& result) {
+    if (!block)
+        return;
     for (auto& stmt : block->statements) {
-        if (!analyzeStmt(stmt.get(), env, result)) break;
+        if (!analyzeStmt(stmt.get(), env, result))
+            break;
     }
 }
 
 CTAnalysisResult CTAbstractInterpreter::analyzeFunction(const FunctionDecl* fn) {
     CTAnalysisResult result;
-    if (!fn || !fn->body) return result;
+    if (!fn || !fn->body)
+        return result;
 
     // Initial environment: parameters start as TOP (any value).
     CTAbstractEnv env;
@@ -4685,7 +5574,8 @@ CTAnalysisResult CTAbstractInterpreter::analyzeFunction(const FunctionDecl* fn) 
 
 // ── CTEngine::runAbstractInterpretation ──────────────────────────────────────
 void CTEngine::runAbstractInterpretation(const Program* program) {
-    if (!program) return;
+    if (!program)
+        return;
 
     CTAbstractInterpreter interp(*this, globalConsts_, enumConsts_);
 

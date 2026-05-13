@@ -16,9 +16,9 @@ namespace omscript {
 // evalExprRange — compute the range of a single expression
 // ─────────────────────────────────────────────────────────────────────────────
 
-std::optional<ValueRange> evalExprRange(const Expression* expr,
-                                         const VarRangeMap& env) {
-    if (!expr) return {};
+std::optional<ValueRange> evalExprRange(const Expression* expr, const VarRangeMap& env) {
+    if (!expr)
+        return {};
 
     // ── Integer literal → exact point range ──────────────────────────────────
     long long iv = 0;
@@ -35,7 +35,8 @@ std::optional<ValueRange> evalExprRange(const Expression* expr,
     if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
         const auto* id = static_cast<const IdentifierExpr*>(expr);
         const auto it = env.find(id->name);
-        if (it != env.end()) return it->second;
+        if (it != env.end())
+            return it->second;
         return {};
     }
 
@@ -58,39 +59,34 @@ std::optional<ValueRange> evalExprRange(const Expression* expr,
         // x + y  (non-negative inputs only — avoids signed-overflow in the
         //         range arithmetic itself)
         if (op == "+") {
-            auto lr = evalExprRange(bin->left.get(),  env);
+            auto lr = evalExprRange(bin->left.get(), env);
             auto rr = evalExprRange(bin->right.get(), env);
             if (lr && rr && lr->lo >= 0 && rr->lo >= 0) {
                 const int64_t lo = lr->lo + rr->lo;
-                const int64_t hi = (rr->hi <= INT64_MAX - lr->hi)
-                                       ? lr->hi + rr->hi
-                                       : INT64_MAX;
+                const int64_t hi = (rr->hi <= INT64_MAX - lr->hi) ? lr->hi + rr->hi : INT64_MAX;
                 return ValueRange{lo, hi};
             }
         }
 
         // x - y  → [lo(x)-hi(y), hi(x)-lo(y)]  (with overflow guards)
         if (op == "-") {
-            auto lr = evalExprRange(bin->left.get(),  env);
+            auto lr = evalExprRange(bin->left.get(), env);
             auto rr = evalExprRange(bin->right.get(), env);
             if (lr && rr && rr->hi != INT64_MIN) {
-                const int64_t lo = (lr->lo > INT64_MIN + rr->hi)
-                                       ? lr->lo - rr->hi
-                                       : INT64_MIN;
+                const int64_t lo = (lr->lo > INT64_MIN + rr->hi) ? lr->lo - rr->hi : INT64_MIN;
                 const int64_t hi = (rr->lo > 0 && lr->hi < INT64_MAX + rr->lo)
                                        ? lr->hi - rr->lo
                                        : (rr->lo <= 0 ? INT64_MAX : lr->hi - rr->lo);
-                if (lo <= hi) return ValueRange{lo, hi};
+                if (lo <= hi)
+                    return ValueRange{lo, hi};
             }
         }
 
         // x * y  (both non-negative, overflow-guarded) → [lo*lo, hi*hi]
         if (op == "*") {
-            auto lr = evalExprRange(bin->left.get(),  env);
+            auto lr = evalExprRange(bin->left.get(), env);
             auto rr = evalExprRange(bin->right.get(), env);
-            if (lr && rr && lr->lo >= 0 && rr->lo >= 0 &&
-                lr->hi > 0 && rr->hi > 0 &&
-                lr->hi <= INT64_MAX / rr->hi) {
+            if (lr && rr && lr->lo >= 0 && rr->lo >= 0 && lr->hi > 0 && rr->hi > 0 && lr->hi <= INT64_MAX / rr->hi) {
                 return ValueRange{lr->lo * rr->lo, lr->hi * rr->hi};
             }
         }
@@ -100,7 +96,7 @@ std::optional<ValueRange> evalExprRange(const Expression* expr,
             long long mask = 0;
             if (isIntLiteral(bin->right.get(), &mask) && mask >= 0)
                 return ValueRange{0, mask};
-            if (isIntLiteral(bin->left.get(),  &mask) && mask >= 0)
+            if (isIntLiteral(bin->left.get(), &mask) && mask >= 0)
                 return ValueRange{0, mask};
         }
 
@@ -137,8 +133,8 @@ std::optional<ValueRange> evalExprRange(const Expression* expr,
         }
 
         // comparison operators → boolean result in {0, 1}
-        if (op == "==" || op == "!=" || op == "<" || op == "<=" ||
-            op == ">"  || op == ">=" || op == "&&" || op == "||") {
+        if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=" || op == "&&" ||
+            op == "||") {
             return ValueRange{0, 1};
         }
 
@@ -160,8 +156,7 @@ std::optional<ValueRange> evalExprRange(const Expression* expr,
         // clamp(x, lo, hi) with literal bounds
         if (call->callee == "clamp" && call->arguments.size() == 3) {
             long long lo = 0, hi = 0;
-            if (isIntLiteral(call->arguments[1].get(), &lo) &&
-                isIntLiteral(call->arguments[2].get(), &hi) && lo <= hi)
+            if (isIntLiteral(call->arguments[1].get(), &lo) && isIntLiteral(call->arguments[2].get(), &hi) && lo <= hi)
                 return ValueRange{lo, hi};
         }
 
@@ -193,8 +188,7 @@ std::optional<ValueRange> evalExprRange(const Expression* expr,
     return {};
 }
 
-bool definitelyNonNeg(const Expression* expr, const VarRangeMap& env)
-{
+bool definitelyNonNeg(const Expression* expr, const VarRangeMap& env) {
     const auto r = evalExprRange(expr, env);
     return r.has_value() && r->lo >= 0;
 }
@@ -223,64 +217,81 @@ static VarRangeMap joinMaps(const VarRangeMap& a, const VarRangeMap& b) {
 /// Handles: `id OP literal` and `literal OP id` patterns.
 static void narrowFromBinary(const BinaryExpr* bin, VarRangeMap& env, bool taken) {
     // We need: identifier on one side, integer literal on the other.
-    const IdentifierExpr* id  = nullptr;
-    long long              lit = 0;
-    std::string            op  = bin->op;
+    const IdentifierExpr* id = nullptr;
+    long long lit = 0;
+    std::string op = bin->op;
 
     if (asIdentifier(bin->left.get()) && isIntLiteral(bin->right.get(), &lit)) {
         id = static_cast<const IdentifierExpr*>(bin->left.get());
     } else if (asIdentifier(bin->right.get()) && isIntLiteral(bin->left.get(), &lit)) {
         id = static_cast<const IdentifierExpr*>(bin->right.get());
         // Flip the operator: `lit OP id` becomes `id FLIP(OP) lit`.
-        if      (op == "<")  op = ">";
-        else if (op == "<=") op = ">=";
-        else if (op == ">")  op = "<";
-        else if (op == ">=") op = "<=";
+        if (op == "<")
+            op = ">";
+        else if (op == "<=")
+            op = ">=";
+        else if (op == ">")
+            op = "<";
+        else if (op == ">=")
+            op = "<=";
     }
-    if (!id) return;
+    if (!id)
+        return;
 
     // Get or default to full range.
     ValueRange cur{INT64_MIN, INT64_MAX};
     const auto it = env.find(id->name);
-    if (it != env.end()) cur = it->second;
+    if (it != env.end())
+        cur = it->second;
 
     ValueRange narrowed = cur;
     if (taken) {
         // Condition is true in this branch.
-        if      (op == "<")  narrowed.hi = std::min(cur.hi, static_cast<int64_t>(lit) - 1);
-        else if (op == "<=") narrowed.hi = std::min(cur.hi, static_cast<int64_t>(lit));
-        else if (op == ">")  narrowed.lo = std::max(cur.lo, static_cast<int64_t>(lit) + 1);
-        else if (op == ">=") narrowed.lo = std::max(cur.lo, static_cast<int64_t>(lit));
-        else if (op == "==") narrowed     = {static_cast<int64_t>(lit), static_cast<int64_t>(lit)};
+        if (op == "<")
+            narrowed.hi = std::min(cur.hi, static_cast<int64_t>(lit) - 1);
+        else if (op == "<=")
+            narrowed.hi = std::min(cur.hi, static_cast<int64_t>(lit));
+        else if (op == ">")
+            narrowed.lo = std::max(cur.lo, static_cast<int64_t>(lit) + 1);
+        else if (op == ">=")
+            narrowed.lo = std::max(cur.lo, static_cast<int64_t>(lit));
+        else if (op == "==")
+            narrowed = {static_cast<int64_t>(lit), static_cast<int64_t>(lit)};
         // !=: can't usefully narrow a single exclusion
     } else {
         // Condition is false in this branch (we are in the else arm).
-        if      (op == "<")  narrowed.lo = std::max(cur.lo, static_cast<int64_t>(lit));
-        else if (op == "<=") narrowed.lo = std::max(cur.lo, static_cast<int64_t>(lit) + 1);
-        else if (op == ">")  narrowed.hi = std::min(cur.hi, static_cast<int64_t>(lit));
-        else if (op == ">=") narrowed.hi = std::min(cur.hi, static_cast<int64_t>(lit) - 1);
+        if (op == "<")
+            narrowed.lo = std::max(cur.lo, static_cast<int64_t>(lit));
+        else if (op == "<=")
+            narrowed.lo = std::max(cur.lo, static_cast<int64_t>(lit) + 1);
+        else if (op == ">")
+            narrowed.hi = std::min(cur.hi, static_cast<int64_t>(lit));
+        else if (op == ">=")
+            narrowed.hi = std::min(cur.hi, static_cast<int64_t>(lit) - 1);
         else if (op == "!=") {
             // !taken means the condition `id != lit` is FALSE → id == lit.
             // We can narrow to the exact value.
             narrowed = ValueRange{static_cast<int64_t>(lit), static_cast<int64_t>(lit)};
+        } else if (op == "==") { /* we know id != lit; can't represent easily */
         }
-        else if (op == "==") { /* we know id != lit; can't represent easily */ }
     }
 
-    if (narrowed.isEmpty()) return; // Sanity guard: don't insert empty range.
+    if (narrowed.isEmpty())
+        return; // Sanity guard: don't insert empty range.
     if (narrowed.lo > cur.lo || narrowed.hi < cur.hi)
         env[id->name] = narrowed;
 }
 
 /// Narrow @p env using the condition @p cond being taken or not-taken.
 static void narrowFromCondition(const Expression* cond, VarRangeMap& env, bool taken) {
-    if (!cond) return;
+    if (!cond)
+        return;
     if (cond->type == ASTNodeType::BINARY_EXPR) {
         const auto* bin = static_cast<const BinaryExpr*>(cond);
         if (bin->op == "&&") {
             if (taken) {
                 // Both sub-conditions are true: narrow for each in sequence.
-                narrowFromCondition(bin->left.get(),  env, true);
+                narrowFromCondition(bin->left.get(), env, true);
                 narrowFromCondition(bin->right.get(), env, true);
             } else {
                 // !(a && b) = !a || !b: conservative — can't narrow further.
@@ -290,7 +301,7 @@ static void narrowFromCondition(const Expression* cond, VarRangeMap& env, bool t
         if (bin->op == "||") {
             if (!taken) {
                 // Both sub-conditions are false: narrow for each in sequence.
-                narrowFromCondition(bin->left.get(),  env, false);
+                narrowFromCondition(bin->left.get(), env, false);
                 narrowFromCondition(bin->right.get(), env, false);
             } else {
                 // a || b is true but we don't know which branch: conservative.
@@ -311,9 +322,9 @@ static void narrowFromCondition(const Expression* cond, VarRangeMap& env, bool t
 /// Collect the names of all variables that are *written* anywhere inside
 /// @p stmt (including nested blocks / loop bodies).  Used to conservatively
 /// invalidate loop-body variables in the range map.
-static void collectWritten(const Statement* stmt,
-                            std::unordered_set<std::string>& out) {
-    if (!stmt) return;
+static void collectWritten(const Statement* stmt, std::unordered_set<std::string>& out) {
+    if (!stmt)
+        return;
     switch (stmt->type) {
     case ASTNodeType::VAR_DECL:
         out.insert(static_cast<const VarDecl*>(stmt)->name);
@@ -323,12 +334,14 @@ static void collectWritten(const Statement* stmt,
         break;
     case ASTNodeType::PREFETCH_STMT: {
         const auto* ps = static_cast<const PrefetchStmt*>(stmt);
-        if (ps->varDecl) out.insert(ps->varDecl->name);
+        if (ps->varDecl)
+            out.insert(ps->varDecl->name);
         break;
     }
     case ASTNodeType::EXPR_STMT: {
         std::function<void(const Expression*)> scan = [&](const Expression* e) {
-            if (!e) return;
+            if (!e)
+                return;
             if (e->type == ASTNodeType::ASSIGN_EXPR)
                 out.insert(static_cast<const AssignExpr*>(e)->name);
             if (e->type == ASTNodeType::POSTFIX_EXPR) {
@@ -343,11 +356,13 @@ static void collectWritten(const Statement* stmt,
             }
             if (e->type == ASTNodeType::BINARY_EXPR) {
                 const auto* b = static_cast<const BinaryExpr*>(e);
-                scan(b->left.get()); scan(b->right.get());
+                scan(b->left.get());
+                scan(b->right.get());
             }
             if (e->type == ASTNodeType::CALL_EXPR) {
                 const auto* c = static_cast<const CallExpr*>(e);
-                for (const auto& arg : c->arguments) scan(arg.get());
+                for (const auto& arg : c->arguments)
+                    scan(arg.get());
             }
         };
         scan(static_cast<const ExprStmt*>(stmt)->expression.get());
@@ -416,14 +431,15 @@ static void collectWritten(const Statement* stmt,
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void scanBlock(const BlockStmt* block, VarRangeMap& env);
-static void scanStmt (const Statement*  stmt,  VarRangeMap& env);
+static void scanStmt(const Statement* stmt, VarRangeMap& env);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // scanStmt — update @p env with the ranges implied by @p stmt
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void scanStmt(const Statement* stmt, VarRangeMap& env) {
-    if (!stmt) return;
+    if (!stmt)
+        return;
     switch (stmt->type) {
 
     // ── Variable declaration ─────────────────────────────────────────────────
@@ -472,12 +488,14 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
         // Then-branch: narrow from condition being true.
         VarRangeMap thenEnv = env;
         narrowFromCondition(ifs->condition.get(), thenEnv, /*taken=*/true);
-        if (ifs->thenBranch) scanStmt(ifs->thenBranch.get(), thenEnv);
+        if (ifs->thenBranch)
+            scanStmt(ifs->thenBranch.get(), thenEnv);
 
         // Else-branch: narrow from condition being false.
         VarRangeMap elseEnv = env;
         narrowFromCondition(ifs->condition.get(), elseEnv, /*taken=*/false);
-        if (ifs->elseBranch) scanStmt(ifs->elseBranch.get(), elseEnv);
+        if (ifs->elseBranch)
+            scanStmt(ifs->elseBranch.get(), elseEnv);
 
         // Join results back into env.
         if (ifs->thenBranch && ifs->elseBranch) {
@@ -498,7 +516,7 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
 
         // Determine iterator range from start/end expressions.
         auto sr = evalExprRange(fs->start.get(), env);
-        auto er = evalExprRange(fs->end.get(),   env);
+        auto er = evalExprRange(fs->end.get(), env);
 
         if (sr && er) {
             // Induction variable: [start_lo, end_hi - 1]
@@ -522,10 +540,12 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
         // Invalidate all variables written in the loop body (conservative).
         std::unordered_set<std::string> bodyWrites;
         collectWritten(fs->body.get(), bodyWrites);
-        for (const auto& w : bodyWrites) env.erase(w);
+        for (const auto& w : bodyWrites)
+            env.erase(w);
 
         // Recurse into body so nested declarations are seen.
-        if (fs->body) scanStmt(fs->body.get(), env);
+        if (fs->body)
+            scanStmt(fs->body.get(), env);
         break;
     }
 
@@ -535,16 +555,20 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
         // Kill all variables written in the loop (may iterate ≥ 0 times).
         std::unordered_set<std::string> writes;
         collectWritten(ws->body.get(), writes);
-        for (const auto& w : writes) env.erase(w);
-        if (ws->body) scanStmt(ws->body.get(), env);
+        for (const auto& w : writes)
+            env.erase(w);
+        if (ws->body)
+            scanStmt(ws->body.get(), env);
         break;
     }
     case ASTNodeType::DO_WHILE_STMT: {
         const auto* dw = static_cast<const DoWhileStmt*>(stmt);
         std::unordered_set<std::string> writes;
         collectWritten(dw->body.get(), writes);
-        for (const auto& w : writes) env.erase(w);
-        if (dw->body) scanStmt(dw->body.get(), env);
+        for (const auto& w : writes)
+            env.erase(w);
+        if (dw->body)
+            scanStmt(dw->body.get(), env);
         break;
     }
 
@@ -556,8 +580,10 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
         env.erase(fe->iteratorVar);
         std::unordered_set<std::string> writes;
         collectWritten(fe->body.get(), writes);
-        for (const auto& w : writes) env.erase(w);
-        if (fe->body) scanStmt(fe->body.get(), env);
+        for (const auto& w : writes)
+            env.erase(w);
+        if (fe->body)
+            scanStmt(fe->body.get(), env);
         break;
     }
 
@@ -569,7 +595,8 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
         for (const auto& sc : sw->cases)
             for (const auto& s : sc.body)
                 collectWritten(s.get(), writes);
-        for (const auto& w : writes) env.erase(w);
+        for (const auto& w : writes)
+            env.erase(w);
         // Recurse into case bodies for nested declarations.
         for (const auto& sc : sw->cases)
             for (const auto& s : sc.body)
@@ -582,16 +609,20 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
         const auto* cs = static_cast<const CatchStmt*>(stmt);
         std::unordered_set<std::string> writes;
         collectWritten(cs->body.get(), writes);
-        for (const auto& w : writes) env.erase(w);
-        if (cs->body) scanStmt(cs->body.get(), env);
+        for (const auto& w : writes)
+            env.erase(w);
+        if (cs->body)
+            scanStmt(cs->body.get(), env);
         break;
     }
     case ASTNodeType::DEFER_STMT: {
         const auto* ds = static_cast<const DeferStmt*>(stmt);
         std::unordered_set<std::string> writes;
         collectWritten(ds->body.get(), writes);
-        for (const auto& w : writes) env.erase(w);
-        if (ds->body) scanStmt(ds->body.get(), env);
+        for (const auto& w : writes)
+            env.erase(w);
+        if (ds->body)
+            scanStmt(ds->body.get(), env);
         break;
     }
 
@@ -602,9 +633,11 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
         std::unordered_set<std::string> writes;
         for (const auto& stage : pl->stages)
             collectWritten(stage.body.get(), writes);
-        for (const auto& w : writes) env.erase(w);
+        for (const auto& w : writes)
+            env.erase(w);
         for (const auto& stage : pl->stages)
-            if (stage.body) scanStmt(stage.body.get(), env);
+            if (stage.body)
+                scanStmt(stage.body.get(), env);
         break;
     }
 
@@ -626,10 +659,8 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
     // ── Expression statement — propagate ranges through assignments ──────────
     case ASTNodeType::EXPR_STMT: {
         const auto* es = static_cast<const ExprStmt*>(stmt);
-        if (es->expression &&
-            es->expression->type == ASTNodeType::ASSIGN_EXPR) {
-            const auto* ae =
-                static_cast<const AssignExpr*>(es->expression.get());
+        if (es->expression && es->expression->type == ASTNodeType::ASSIGN_EXPR) {
+            const auto* ae = static_cast<const AssignExpr*>(es->expression.get());
             auto r = evalExprRange(ae->value.get(), env);
             if (r && r->isNarrowed())
                 env[ae->name] = *r;
@@ -650,7 +681,8 @@ static void scanStmt(const Statement* stmt, VarRangeMap& env) {
 }
 
 static void scanBlock(const BlockStmt* block, VarRangeMap& env) {
-    if (!block) return;
+    if (!block)
+        return;
     for (const auto& s : block->statements)
         scanStmt(s.get(), env);
 }
@@ -660,7 +692,8 @@ static void scanBlock(const BlockStmt* block, VarRangeMap& env) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 VarRangeMap computeVarRanges(const FunctionDecl& fn) {
-    if (!fn.body) return {};
+    if (!fn.body)
+        return {};
 
     VarRangeMap env;
 

@@ -1,3 +1,4 @@
+import std;
 // Test chained dict indexing: dict["key1"]["key2"], list-in-dict, etc.
 fn main() {
     var total = 0;

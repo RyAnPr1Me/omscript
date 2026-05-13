@@ -1,3 +1,4 @@
+import std;
 OPTMAX=:
 fn optmax_sum(n: int) {
     var total: int = 0;

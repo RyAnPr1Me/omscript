@@ -59,18 +59,24 @@ namespace omscript {
 /// with its signedness.  A width of 0 means "unknown / untracked".
 
 struct SemanticWidth {
-    uint32_t bits     = 0;      ///< Exact minimum bits required (0 = unknown)
-    bool     isSigned = true;   ///< True for i-prefixed (signed); false for u-prefixed
+    uint32_t bits = 0;    ///< Exact minimum bits required (0 = unknown)
+    bool isSigned = true; ///< True for i-prefixed (signed); false for u-prefixed
 
     // ── Construction helpers ──────────────────────────────────────────────
 
-    static SemanticWidth unknown() noexcept { return {0, true}; }
+    static SemanticWidth unknown() noexcept {
+        return {0, true};
+    }
 
     /// Signed width for an exact bit count.
-    static SemanticWidth i(uint32_t bits) noexcept { return {bits, true}; }
+    static SemanticWidth i(uint32_t bits) noexcept {
+        return {bits, true};
+    }
 
     /// Unsigned width for an exact bit count.
-    static SemanticWidth u(uint32_t bits) noexcept { return {bits, false}; }
+    static SemanticWidth u(uint32_t bits) noexcept {
+        return {bits, false};
+    }
 
     /// Derive from a signed constant value.
     static SemanticWidth fromSignedValue(int64_t v) noexcept;
@@ -93,9 +99,15 @@ struct SemanticWidth {
 
     // ── Predicates ────────────────────────────────────────────────────────
 
-    bool isKnown()  const noexcept { return bits > 0; }
-    bool isWide()   const noexcept { return bits > 64; }  ///< Needs multi-limb representation
-    bool isScalar() const noexcept { return bits > 0 && bits <= 64; }
+    bool isKnown() const noexcept {
+        return bits > 0;
+    }
+    bool isWide() const noexcept {
+        return bits > 64;
+    } ///< Needs multi-limb representation
+    bool isScalar() const noexcept {
+        return bits > 0 && bits <= 64;
+    }
 
     // ── Formatting ────────────────────────────────────────────────────────
 
@@ -171,12 +183,13 @@ SemanticWidth join(SemanticWidth a, SemanticWidth b) noexcept;
 /// WidthInfo to choose the LLVM type for each sub-expression.
 
 struct WidthInfo {
-    SemanticWidth semantic;  ///< Exact minimum width computed by analysis
-    SemanticWidth legal;     ///< Hardware-legalized width (= legalize(semantic))
+    SemanticWidth semantic; ///< Exact minimum width computed by analysis
+    SemanticWidth legal;    ///< Hardware-legalized width (= legalize(semantic))
 
     /// True when the semantic width fits in the legal width without truncation.
     bool fitsExact() const noexcept {
-        if (!semantic.isKnown()) return true; // unknown — assume no truncation needed
+        if (!semantic.isKnown())
+            return true; // unknown — assume no truncation needed
         return semantic.bits <= legal.bits;
     }
 
@@ -201,14 +214,14 @@ struct WidthInfo {
 ///   wa.analyze(program);
 ///   SemanticWidth sw = wa.widthOf(exprPtr);
 
-class OptimizationContext;  // forward
-class Program;              // forward (AST)
-struct Expression;          // forward
-struct Statement;           // forward
-struct FunctionDecl;        // forward
+class OptimizationContext; // forward
+class Program;             // forward (AST)
+struct Expression;         // forward
+struct Statement;          // forward
+struct FunctionDecl;       // forward
 
 class WidthAnalyzer {
-public:
+  public:
     explicit WidthAnalyzer(const OptimizationContext& ctx) noexcept : ctx_(ctx) {}
 
     /// Analyze the entire program; populates the internal width map.
@@ -221,16 +234,18 @@ public:
     WidthInfo infoOf(const Expression* expr) const noexcept;
 
     /// Total number of expression nodes analyzed.
-    std::size_t nodeCount() const noexcept { return widths_.size(); }
+    std::size_t nodeCount() const noexcept {
+        return widths_.size();
+    }
 
-private:
+  private:
     const OptimizationContext& ctx_;
     std::unordered_map<const Expression*, SemanticWidth> widths_;
 
     // Internal traversal helpers.
     SemanticWidth analyzeExpr(const Expression* expr);
-    void          analyzeStmt(const Statement* stmt);
-    void          analyzeFunction(const FunctionDecl* fn);
+    void analyzeStmt(const Statement* stmt);
+    void analyzeFunction(const FunctionDecl* fn);
 
     // Cache the result and return it.
     SemanticWidth cache(const Expression* expr, SemanticWidth sw) {
@@ -248,7 +263,7 @@ private:
 /// subsequent phases (LLVM IR emission) can look up legal types cheaply.
 
 class WidthLegalizationPass {
-public:
+  public:
     explicit WidthLegalizationPass(OptimizationContext& ctx) noexcept : ctx_(ctx) {}
 
     /// Run the pass over the program and populate width annotations.
@@ -258,17 +273,21 @@ public:
     WidthInfo infoOf(const Expression* expr) const noexcept;
 
     /// Number of wide (>64-bit) expressions detected.
-    uint32_t wideCount() const noexcept { return wideCount_; }
+    uint32_t wideCount() const noexcept {
+        return wideCount_;
+    }
 
     /// Number of expressions where semantic width differs from 64 bits
     /// (i.e., the pass found something actionable).
-    uint32_t narrowedCount() const noexcept { return narrowedCount_; }
+    uint32_t narrowedCount() const noexcept {
+        return narrowedCount_;
+    }
 
-private:
+  private:
     OptimizationContext& ctx_;
-    WidthAnalyzer        analyzer_{ctx_};
-    uint32_t             wideCount_    = 0;
-    uint32_t             narrowedCount_ = 0;
+    WidthAnalyzer analyzer_{ctx_};
+    uint32_t wideCount_ = 0;
+    uint32_t narrowedCount_ = 0;
 };
 
 } // namespace omscript

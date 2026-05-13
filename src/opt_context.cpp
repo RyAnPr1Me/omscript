@@ -292,7 +292,8 @@ const BuiltinEffects& BuiltinEffectTable::get(std::string_view name) noexcept {
 // this class rather than calling egraph::optimizeProgram() directly.
 
 std::unique_ptr<Expression> EGraphSubsystem::optimizeExpression(const Expression* expr) {
-    if (!expr) return nullptr;
+    if (!expr)
+        return nullptr;
 
     ++stats_.expressionsAttempted;
 
@@ -309,7 +310,8 @@ std::unique_ptr<Expression> EGraphSubsystem::optimizeExpression(const Expression
 }
 
 void EGraphSubsystem::optimizeFunction(FunctionDecl* func) {
-    if (!func || !func->body) return;
+    if (!func || !func->body)
+        return;
 
     // Note: egraph::optimizeFunction does not update stats_.expressionsSimplified
     // (that counter is only incremented by optimizeExpression()).  Count every
@@ -321,7 +323,8 @@ void EGraphSubsystem::optimizeFunction(FunctionDecl* func) {
 }
 
 void EGraphSubsystem::optimizeProgram(Program* program) {
-    if (!program) return;
+    if (!program)
+        return;
     stats_.reset();
 
     const egraph::EGraphOptContext ctx = toOptContext();

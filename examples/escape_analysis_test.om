@@ -1,3 +1,4 @@
+import std;
 // Test escape analysis: small integer arrays should be stack-allocated
 // when they don't escape (not returned, not passed to functions).
 fn main() {

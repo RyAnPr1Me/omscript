@@ -1,3 +1,4 @@
+import std;
 // physics package - basic physics formulas using integer arithmetic
 
 fn phys_kinetic_energy(mass, velocity) {

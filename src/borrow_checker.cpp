@@ -22,22 +22,20 @@ using BorrowMap = std::unordered_map<std::string, BorrowState>;
 /// A borrow record: the alias variable that holds the borrow, and the source
 /// variable being borrowed.
 struct BorrowRecord {
-    std::string refVar;      ///< Name of the borrow alias
-    std::string srcVar;      ///< Name of the source variable
-    bool        isMut;       ///< True for mutable borrows
-    bool        isReborrow;  ///< True when created via `reborrow` (not `borrow`)
+    std::string refVar; ///< Name of the borrow alias
+    std::string srcVar; ///< Name of the source variable
+    bool isMut;         ///< True for mutable borrows
+    bool isReborrow;    ///< True when created via `reborrow` (not `borrow`)
 };
 
 /// Make a DiagnosticError with source location extracted from an ASTNode.
-static DiagnosticError makeBorrowError(ErrorCode code,
-                                        const std::string& message,
-                                        const ASTNode* node) {
+static DiagnosticError makeBorrowError(ErrorCode code, const std::string& message, const ASTNode* node) {
     Diagnostic diag;
     diag.severity = DiagnosticSeverity::Error;
-    diag.code     = code;
-    diag.message  = message;
+    diag.code = code;
+    diag.message = message;
     if (node) {
-        diag.location.line   = node->line;
+        diag.location.line = node->line;
         diag.location.column = node->column;
     }
     return DiagnosticError(diag);
@@ -63,7 +61,7 @@ static BorrowMap joinMaps(const BorrowMap& a, const BorrowMap& b) {
             rs.invalidated = rs.invalidated || sb.invalidated;
             // Take maximum borrow count (conservative).
             rs.immutBorrows = std::max(rs.immutBorrows, sb.immutBorrows);
-            rs.reborrows    = std::max(rs.reborrows,    sb.reborrows);
+            rs.reborrows = std::max(rs.reborrows, sb.reborrows);
             // Mutable borrow in either branch.
             rs.mutBorrowed = rs.mutBorrowed || sb.mutBorrowed;
             // Frozen in either branch.
@@ -80,15 +78,15 @@ static BorrowMap joinMaps(const BorrowMap& a, const BorrowMap& b) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class BorrowChecker {
-public:
+  public:
     explicit BorrowChecker(const FunctionDecl& fn) : fn_(fn) {}
 
     /// Run the checker.  Throws DiagnosticError on the first violation.
     void run();
 
-private:
+  private:
     const FunctionDecl& fn_;
-    BorrowMap           states_;     ///< Per-variable borrow state
+    BorrowMap states_; ///< Per-variable borrow state
     /// Stack of borrow scopes.  Each scope holds records to release on exit.
     std::vector<std::vector<BorrowRecord>> scopeStack_;
     /// Deferred statement bodies per scope — run at scope exit (LIFO), in
@@ -98,7 +96,7 @@ private:
     // ── State accessors ────────────────────────────────────────────────────
 
     BorrowState& stateOf(const std::string& name) {
-        return states_[name];  // default-constructed if absent
+        return states_[name]; // default-constructed if absent
     }
     const BorrowState* stateOfOpt(const std::string& name) const {
         auto it = states_.find(name);
@@ -113,12 +111,13 @@ private:
     }
 
     void popScope() {
-        if (scopeStack_.empty()) return;
+        if (scopeStack_.empty())
+            return;
         // Run deferred bodies in reverse order (last defer fires first).
         if (!deferredBodies_.empty()) {
-            for (auto it = deferredBodies_.back().rbegin();
-                      it != deferredBodies_.back().rend(); ++it) {
-                if (*it) checkStmt(*it);
+            for (auto it = deferredBodies_.back().rbegin(); it != deferredBodies_.back().rend(); ++it) {
+                if (*it)
+                    checkStmt(*it);
             }
             deferredBodies_.pop_back();
         }
@@ -135,14 +134,17 @@ private:
 
     void releaseBorrow(const BorrowRecord& rec) {
         auto it = states_.find(rec.srcVar);
-        if (it == states_.end()) return;
+        if (it == states_.end())
+            return;
         BorrowState& s = it->second;
         if (rec.isMut) {
             s.mutBorrowed = false;
         } else if (rec.isReborrow) {
-            if (s.reborrows > 0) --s.reborrows;
+            if (s.reborrows > 0)
+                --s.reborrows;
         } else {
-            if (s.immutBorrows > 0) --s.immutBorrows;
+            if (s.immutBorrows > 0)
+                --s.immutBorrows;
         }
         // Remove the reference variable itself (it goes out of scope).
         states_.erase(rec.refVar);
@@ -150,55 +152,60 @@ private:
 
     // ── Borrow state saving/restoring for branches ────────────────────────
 
-    BorrowMap saveState()     const { return states_; }
-    void      restoreState(BorrowMap m) { states_ = std::move(m); }
+    BorrowMap saveState() const {
+        return states_;
+    }
+    void restoreState(BorrowMap m) {
+        states_ = std::move(m);
+    }
 
     // ── Checker core ──────────────────────────────────────────────────────
 
     /// Check that @p name can be READ at @p site.
     void checkRead(const std::string& name, const ASTNode* site) {
         const auto* s = stateOfOpt(name);
-        if (!s) return;  // never declared → let codegen handle
+        if (!s)
+            return; // never declared → let codegen handle
         if (s->moved) {
-            throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
-                "use of moved variable '" + name + "'", site);
+            throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE, "use of moved variable '" + name + "'", site);
         }
         if (s->invalidated) {
-            throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
-                "use of invalidated variable '" + name + "'", site);
+            throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE, "use of invalidated variable '" + name + "'", site);
         }
         if (s->mutBorrowed) {
             throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
-                "cannot read '" + name + "' — it has an active mutable borrow", site);
+                                  "cannot read '" + name + "' — it has an active mutable borrow", site);
         }
     }
 
     /// Check that @p name can be WRITTEN at @p site.
     void checkWrite(const std::string& name, const ASTNode* site) {
         const auto* s = stateOfOpt(name);
-        if (!s) return;
+        if (!s)
+            return;
         if (s->moved) {
-            throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
-                "write to moved variable '" + name + "'", site);
+            throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE, "write to moved variable '" + name + "'", site);
         }
         if (s->invalidated) {
-            throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
-                "write to invalidated variable '" + name + "'", site);
+            throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE, "write to invalidated variable '" + name + "'", site);
         }
         if (s->mutBorrowed) {
             throw makeBorrowError(ErrorCode::E016_BORROW_WRITE_CONFLICT,
-                "cannot write to '" + name + "' — it has an active mutable borrow", site);
+                                  "cannot write to '" + name + "' — it has an active mutable borrow", site);
         }
         if (s->immutBorrows > 0) {
             throw makeBorrowError(ErrorCode::E016_BORROW_WRITE_CONFLICT,
-                "cannot write to '" + name + "' — it has " +
-                std::to_string(s->immutBorrows) + " active immutable borrow(s)", site);
+                                  "cannot write to '" + name + "' — it has " + std::to_string(s->immutBorrows) +
+                                      " active immutable borrow(s)",
+                                  site);
         }
         if (s->shared) {
             throw makeBorrowError(ErrorCode::E020_WRITE_TO_SHARED,
-                "cannot write to '" + name + "' — it is in shared ownership state "
-                "(Ω spec §3.1); use 'own " + name + ";' to restore unique ownership first",
-                site);
+                                  "cannot write to '" + name +
+                                      "' — it is in shared ownership state "
+                                      "(Ω spec §3.1); use 'own " +
+                                      name + ";' to restore unique ownership first",
+                                  site);
         }
         if (s->frozen) {
             // Frozen variables are const — but E005 handles that.
@@ -208,20 +215,23 @@ private:
     /// Check that @p name can be MOVED at @p site.
     void checkMove(const std::string& name, const ASTNode* site) {
         const auto* s = stateOfOpt(name);
-        if (!s) return;
+        if (!s)
+            return;
         if (s->moved) {
-            throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
-                "cannot move '" + name + "' — it was already moved", site);
+            throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE, "cannot move '" + name + "' — it was already moved",
+                                  site);
         }
         if (s->invalidated) {
-            throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
-                "cannot move invalidated variable '" + name + "'", site);
+            throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE, "cannot move invalidated variable '" + name + "'",
+                                  site);
         }
         // Full `borrow` aliases always block moves.
         if (s->mutBorrowed || s->immutBorrows > 0) {
             throw makeBorrowError(ErrorCode::E018_MOVE_WHILE_BORROWED,
-                "cannot move '" + name + "' — it has active borrow(s); "
-                "end the borrow before moving", site);
+                                  "cannot move '" + name +
+                                      "' — it has active borrow(s); "
+                                      "end the borrow before moving",
+                                  site);
         }
         // `reborrow` aliases block moves *unless* the variable is frozen or shared.
         // A frozen/shared variable with only reborrow aliases is movable: `reborrow`
@@ -229,8 +239,11 @@ private:
         // promises the alias won't be used after the move.
         if (s->reborrows > 0 && !s->frozen && !s->shared) {
             throw makeBorrowError(ErrorCode::E018_MOVE_WHILE_BORROWED,
-                "cannot move '" + name + "' — it has active reborrow alias(es); "
-                "end the reborrow scope or freeze/share '" + name + "' before moving", site);
+                                  "cannot move '" + name +
+                                      "' — it has active reborrow alias(es); "
+                                      "end the reborrow scope or freeze/share '" +
+                                      name + "' before moving",
+                                  site);
         }
     }
 
@@ -240,7 +253,8 @@ private:
     /// Returns the "source variable" name if the expression is a simple
     /// identifier read (used to propagate borrow source info).
     void checkExpr(const Expression* expr) {
-        if (!expr) return;
+        if (!expr)
+            return;
         switch (expr->type) {
         case ASTNodeType::IDENTIFIER_EXPR: {
             const auto* id = static_cast<const IdentifierExpr*>(expr);
@@ -253,7 +267,7 @@ private:
             checkExpr(ae->value.get());
             // After assignment the variable is live again (not dead).
             auto& s = stateOf(ae->name);
-            s.moved      = false;
+            s.moved = false;
             s.invalidated = false;
             break;
         }
@@ -349,7 +363,8 @@ private:
             const Expression* srcExpr = bw->source.get();
             if (srcExpr && srcExpr->type == ASTNodeType::UNARY_EXPR) {
                 const auto* ue = static_cast<const UnaryExpr*>(srcExpr);
-                if (ue->op == "&") srcExpr = ue->operand.get();
+                if (ue->op == "&")
+                    srcExpr = ue->operand.get();
             }
 
             std::string srcName;
@@ -359,30 +374,31 @@ private:
             if (!srcName.empty()) {
                 BorrowState& src = stateOf(srcName);
                 if (src.isDead()) {
-                    throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
-                        "cannot borrow '" + srcName + "' — variable is " +
-                        (src.moved ? "moved" : "invalidated"), vd);
+                    throw makeBorrowError(
+                        ErrorCode::E015_USE_AFTER_MOVE,
+                        "cannot borrow '" + srcName + "' — variable is " + (src.moved ? "moved" : "invalidated"), vd);
                 }
                 if (bw->isMut) {
                     if (src.immutBorrows > 0) {
                         throw makeBorrowError(ErrorCode::E017_DOUBLE_MUT_BORROW,
-                            "cannot create mutable borrow of '" + srcName +
-                            "' — it already has " +
-                            std::to_string(src.immutBorrows) +
-                            " active immutable borrow(s)", vd);
+                                              "cannot create mutable borrow of '" + srcName + "' — it already has " +
+                                                  std::to_string(src.immutBorrows) + " active immutable borrow(s)",
+                                              vd);
                     }
                     if (src.mutBorrowed) {
                         throw makeBorrowError(ErrorCode::E017_DOUBLE_MUT_BORROW,
-                            "cannot create mutable borrow of '" + srcName +
-                            "' — it already has an active mutable borrow", vd);
+                                              "cannot create mutable borrow of '" + srcName +
+                                                  "' — it already has an active mutable borrow",
+                                              vd);
                     }
                     src.mutBorrowed = true;
                     registerBorrow({vd->name, srcName, true, /*isReborrow=*/false});
                 } else {
                     if (src.mutBorrowed) {
                         throw makeBorrowError(ErrorCode::E017_DOUBLE_MUT_BORROW,
-                            "cannot create immutable borrow of '" + srcName +
-                            "' — it already has an active mutable borrow", vd);
+                                              "cannot create immutable borrow of '" + srcName +
+                                                  "' — it already has an active mutable borrow",
+                                              vd);
                     }
                     ++src.immutBorrows;
                     registerBorrow({vd->name, srcName, false, /*isReborrow=*/false});
@@ -403,23 +419,25 @@ private:
             if (!srcName.empty()) {
                 BorrowState& src = stateOf(srcName);
                 if (src.isDead()) {
-                    throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
-                        "cannot reborrow '" + srcName + "' — variable is " +
-                        (src.moved ? "moved" : "invalidated"), vd);
+                    throw makeBorrowError(
+                        ErrorCode::E015_USE_AFTER_MOVE,
+                        "cannot reborrow '" + srcName + "' — variable is " + (src.moved ? "moved" : "invalidated"), vd);
                 }
                 if (rb->isMut) {
                     if (src.mutBorrowed || src.immutBorrows > 0 || src.reborrows > 0) {
                         throw makeBorrowError(ErrorCode::E017_DOUBLE_MUT_BORROW,
-                            "cannot create mutable reborrow of '" + srcName +
-                            "' — it already has active borrow(s)", vd);
+                                              "cannot create mutable reborrow of '" + srcName +
+                                                  "' — it already has active borrow(s)",
+                                              vd);
                     }
                     src.mutBorrowed = true;
                     registerBorrow({vd->name, srcName, true, /*isReborrow=*/true});
                 } else {
                     if (src.mutBorrowed) {
                         throw makeBorrowError(ErrorCode::E017_DOUBLE_MUT_BORROW,
-                            "cannot create immutable reborrow of '" + srcName +
-                            "' — it already has an active mutable borrow", vd);
+                                              "cannot create immutable reborrow of '" + srcName +
+                                                  "' — it already has an active mutable borrow",
+                                              vd);
                     }
                     ++src.reborrows;
                     registerBorrow({vd->name, srcName, false, /*isReborrow=*/true});
@@ -447,7 +465,8 @@ private:
     }
 
     void checkStmt(const Statement* stmt) {
-        if (!stmt) return;
+        if (!stmt)
+            return;
         switch (stmt->type) {
         case ASTNodeType::BLOCK: {
             const auto* blk = static_cast<const BlockStmt*>(stmt);
@@ -490,7 +509,8 @@ private:
         }
         case ASTNodeType::RETURN_STMT: {
             const auto* rs = static_cast<const ReturnStmt*>(stmt);
-            if (rs->value) checkExpr(rs->value.get());
+            if (rs->value)
+                checkExpr(rs->value.get());
             break;
         }
         case ASTNodeType::IF_STMT: {
@@ -538,7 +558,8 @@ private:
             const auto* fs = static_cast<const ForStmt*>(stmt);
             checkExpr(fs->start.get());
             checkExpr(fs->end.get());
-            if (fs->step) checkExpr(fs->step.get());
+            if (fs->step)
+                checkExpr(fs->step.get());
             // Loop variable is a fresh integer — always Owned.
             stateOf(fs->iteratorVar) = BorrowState{};
             auto preLoop = saveState();
@@ -571,8 +592,11 @@ private:
                 for (const auto& s : c.body)
                     checkStmt(s.get());
                 popScope();
-                if (first) { joinedAfter = states_; first = false; }
-                else        joinedAfter = joinMaps(joinedAfter, states_);
+                if (first) {
+                    joinedAfter = states_;
+                    first = false;
+                } else
+                    joinedAfter = joinMaps(joinedAfter, states_);
             }
             restoreState(joinedAfter);
             break;
@@ -583,27 +607,28 @@ private:
             if (s) {
                 if (s->invalidated) {
                     // E019 — double-invalidate: variable already freed at compile time.
-                    throw makeBorrowError(ErrorCode::E019_DOUBLE_INVALIDATE,
-                        "double invalidation of '" + iv->varName +
-                        "' — variable was already invalidated", stmt);
+                    throw makeBorrowError(
+                        ErrorCode::E019_DOUBLE_INVALIDATE,
+                        "double invalidation of '" + iv->varName + "' — variable was already invalidated", stmt);
                 }
                 if (s->moved) {
                     throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
-                        "cannot invalidate '" + iv->varName +
-                        "' — variable was already moved", stmt);
+                                          "cannot invalidate '" + iv->varName + "' — variable was already moved", stmt);
                 }
                 // E022 — invalidate while borrowed: active borrows still reference
                 // this variable; freeing the memory now would dangle the alias.
                 if (s->mutBorrowed || s->immutBorrows > 0 || s->reborrows > 0) {
                     std::string detail;
-                    if (s->mutBorrowed)          detail = "a mutable borrow";
-                    else if (s->immutBorrows > 0) detail = std::to_string(s->immutBorrows) +
-                                                           " immutable borrow(s)";
-                    else                          detail = std::to_string(s->reborrows) +
-                                                           " reborrow alias(es)";
+                    if (s->mutBorrowed)
+                        detail = "a mutable borrow";
+                    else if (s->immutBorrows > 0)
+                        detail = std::to_string(s->immutBorrows) + " immutable borrow(s)";
+                    else
+                        detail = std::to_string(s->reborrows) + " reborrow alias(es)";
                     throw makeBorrowError(ErrorCode::E022_INVALIDATE_WHILE_BORROWED,
-                        "cannot invalidate '" + iv->varName + "' — it still has " + detail +
-                        " active; end all borrows before invalidating (Ω spec §6.2)", stmt);
+                                          "cannot invalidate '" + iv->varName + "' — it still has " + detail +
+                                              " active; end all borrows before invalidating (Ω spec §6.2)",
+                                          stmt);
                 }
             }
             // Use stateOf() to upsert the entry once — if s was non-null above
@@ -621,13 +646,14 @@ private:
             if (s) {
                 if (s->isDead()) {
                     throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
-                        "cannot freeze '" + fz->varName + "' — variable is " +
-                        (s->moved ? "moved" : "invalidated"), stmt);
+                                          "cannot freeze '" + fz->varName + "' — variable is " +
+                                              (s->moved ? "moved" : "invalidated"),
+                                          stmt);
                 }
                 if (s->mutBorrowed) {
                     throw makeBorrowError(ErrorCode::E016_BORROW_WRITE_CONFLICT,
-                        "cannot freeze '" + fz->varName +
-                        "' — it has an active mutable borrow", stmt);
+                                          "cannot freeze '" + fz->varName + "' — it has an active mutable borrow",
+                                          stmt);
                 }
             }
             stateOf(fz->varName).frozen = true;
@@ -642,13 +668,14 @@ private:
             if (s) {
                 if (s->isDead()) {
                     throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
-                        "cannot mark '" + sh->varName + "' as shared — variable is " +
-                        (s->moved ? "moved" : "invalidated"), stmt);
+                                          "cannot mark '" + sh->varName + "' as shared — variable is " +
+                                              (s->moved ? "moved" : "invalidated"),
+                                          stmt);
                 }
                 if (s->mutBorrowed) {
-                    throw makeBorrowError(ErrorCode::E016_BORROW_WRITE_CONFLICT,
-                        "cannot mark '" + sh->varName +
-                        "' as shared — it has an active mutable borrow", stmt);
+                    throw makeBorrowError(
+                        ErrorCode::E016_BORROW_WRITE_CONFLICT,
+                        "cannot mark '" + sh->varName + "' as shared — it has an active mutable borrow", stmt);
                 }
             }
             stateOf(sh->varName).shared = true;
@@ -662,21 +689,24 @@ private:
             if (s) {
                 if (s->isDead()) {
                     throw makeBorrowError(ErrorCode::E015_USE_AFTER_MOVE,
-                        "cannot assert ownership of '" + ow->varName +
-                        "' — variable is " + (s->moved ? "moved" : "invalidated"), stmt);
+                                          "cannot assert ownership of '" + ow->varName + "' — variable is " +
+                                              (s->moved ? "moved" : "invalidated"),
+                                          stmt);
                 }
                 // E021 — own on frozen: freeze is irreversible; 'own' cannot
                 // downgrade a frozen variable back to a writable owned state.
                 if (s->frozen) {
                     throw makeBorrowError(ErrorCode::E021_OWN_ON_FROZEN,
-                        "cannot assert unique ownership of '" + ow->varName +
-                        "' — it is frozen (freeze is irreversible; use a new variable if "
-                        "you need a mutable copy)", stmt);
+                                          "cannot assert unique ownership of '" + ow->varName +
+                                              "' — it is frozen (freeze is irreversible; use a new variable if "
+                                              "you need a mutable copy)",
+                                          stmt);
                 }
                 if (s->mutBorrowed || s->immutBorrows > 0 || s->reborrows > 0) {
                     throw makeBorrowError(ErrorCode::E018_MOVE_WHILE_BORROWED,
-                        "cannot assert unique ownership of '" + ow->varName +
-                        "' — it has active borrow(s); end all borrows first", stmt);
+                                          "cannot assert unique ownership of '" + ow->varName +
+                                              "' — it has active borrow(s); end all borrows first",
+                                          stmt);
                 }
             }
             // Clear shared state; frozen remains (freeze is stronger than shared).
@@ -685,7 +715,8 @@ private:
         }
         case ASTNodeType::THROW_STMT: {
             const auto* ts = static_cast<const ThrowStmt*>(stmt);
-            if (ts->value) checkExpr(ts->value.get());
+            if (ts->value)
+                checkExpr(ts->value.get());
             break;
         }
         case ASTNodeType::CATCH_STMT: {
@@ -713,10 +744,12 @@ private:
         }
         case ASTNodeType::PIPELINE_STMT: {
             const auto* pl = static_cast<const PipelineStmt*>(stmt);
-            if (pl->count) checkExpr(pl->count.get());
+            if (pl->count)
+                checkExpr(pl->count.get());
             // Each stage is a separate scope.
             for (const auto& stage : pl->stages) {
-                if (!stage.body) continue;
+                if (!stage.body)
+                    continue;
                 pushScope();
                 for (const auto& s : stage.body->statements)
                     checkStmt(s.get());
@@ -727,7 +760,8 @@ private:
         case ASTNodeType::ASSUME_STMT: {
             const auto* as = static_cast<const AssumeStmt*>(stmt);
             checkExpr(as->condition.get());
-            if (as->deoptBody) checkStmt(as->deoptBody.get());
+            if (as->deoptBody)
+                checkStmt(as->deoptBody.get());
             break;
         }
         default:
@@ -757,22 +791,19 @@ void BorrowChecker::run() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Forward declaration for the mem-sanitizer helper.
-static void runMemSanitizer(const Program& program,
-                             BorrowCheckResult& result);
+static void runMemSanitizer(const Program& program, BorrowCheckResult& result);
 
-BorrowCheckResult runBorrowCheck(const Program& program,
-                                 bool verbose,
-                                 bool noOwnershipChecks,
-                                 bool memSanitize) {
+BorrowCheckResult runBorrowCheck(const Program& program, bool verbose, bool noOwnershipChecks, bool memSanitize) {
     BorrowCheckResult result;
 
     if (!noOwnershipChecks) {
         for (const auto& fn : program.functions) {
-            if (!fn || !fn->body) continue;
+            if (!fn || !fn->body)
+                continue;
             if (verbose)
                 std::cerr << "[borrow-check] checking function '" << fn->name << "'\n";
             BorrowChecker checker(*fn);
-            checker.run();  // throws DiagnosticError on first violation
+            checker.run(); // throws DiagnosticError on first violation
         }
     } else if (verbose) {
         std::cerr << "[borrow-check] ownership checks disabled (--no-ownership-checks)\n";
@@ -797,138 +828,137 @@ BorrowCheckResult runBorrowCheck(const Program& program,
 struct MemEvent {
     enum class Kind { Invalidate, Move, NullAssign };
     std::string varName;
-    Kind        kind;
-    int         line;
-    std::string desc;  // human-readable description
+    Kind kind;
+    int line;
+    std::string desc; // human-readable description
 };
 
 /// Collect memory events from a statement list (simplified sequential scan).
-static void collectMemEvents(const Statement* stmt,
-                              std::vector<MemEvent>& events,
-                              std::unordered_map<std::string, MemEvent>& deathMap,
-                              BorrowCheckResult& result,
-                              const std::string& file) {
-    if (!stmt) return;
+static void collectMemEvents(const Statement* stmt, std::vector<MemEvent>& events,
+                             std::unordered_map<std::string, MemEvent>& deathMap, BorrowCheckResult& result,
+                             const std::string& file) {
+    if (!stmt)
+        return;
 
-    auto reportUse = [&](const std::string& varName, int useLine,
-                         const std::string& useDesc) {
+    auto reportUse = [&](const std::string& varName, int useLine, const std::string& useDesc) {
         auto it = deathMap.find(varName);
-        if (it == deathMap.end()) return;
+        if (it == deathMap.end())
+            return;
         const auto& ev = it->second;
         MemSanitizerDiag diag;
-        diag.file      = file;
-        diag.varName   = varName;
+        diag.file = file;
+        diag.varName = varName;
         diag.causeLine = ev.line;
-        diag.useLine   = useLine;
-        diag.useDesc   = useDesc;
+        diag.useLine = useLine;
+        diag.useDesc = useDesc;
         if (ev.kind == MemEvent::Kind::Invalidate) {
-            diag.kind      = "use-after-invalidate";
+            diag.kind = "use-after-invalidate";
             diag.causeDesc = "invalidate " + varName;
         } else if (ev.kind == MemEvent::Kind::Move) {
-            diag.kind      = "use-after-move";
+            diag.kind = "use-after-move";
             diag.causeDesc = "move " + varName;
         } else {
-            diag.kind      = "null-deref";
+            diag.kind = "null-deref";
             diag.causeDesc = varName + " = null";
         }
         result.memSanitizerDiags.push_back(std::move(diag));
     };
 
     // Scan for dereferences of dead pointers in an expression.
-    std::function<void(const Expression*, int)> scanExpr =
-        [&](const Expression* expr, int parentLine) {
-            if (!expr) return;
-            const int eline = expr->line ? expr->line : parentLine;
+    std::function<void(const Expression*, int)> scanExpr = [&](const Expression* expr, int parentLine) {
+        if (!expr)
+            return;
+        const int eline = expr->line ? expr->line : parentLine;
 
-            if (expr->type == ASTNodeType::UNARY_EXPR) {
-                const auto* ue = static_cast<const UnaryExpr*>(expr);
-                if (ue->op == "deref" && ue->operand &&
-                    ue->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
-                    const auto* id = static_cast<const IdentifierExpr*>(ue->operand.get());
-                    reportUse(id->name, eline, "*" + id->name + " (invalid use)");
-                }
-                scanExpr(ue->operand.get(), eline);
-            } else if (expr->type == ASTNodeType::BINARY_EXPR) {
-                const auto* be = static_cast<const BinaryExpr*>(expr);
-                scanExpr(be->left.get(), eline);
-                scanExpr(be->right.get(), eline);
-            } else if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
-                const auto* id = static_cast<const IdentifierExpr*>(expr);
-                reportUse(id->name, eline, id->name + " (use of dead variable)");
-            } else if (expr->type == ASTNodeType::CALL_EXPR) {
-                const auto* ce = static_cast<const CallExpr*>(expr);
-                for (const auto& arg : ce->arguments)
-                    scanExpr(arg.get(), eline);
-            } else if (expr->type == ASTNodeType::INDEX_EXPR) {
-                const auto* ie = static_cast<const IndexExpr*>(expr);
-                scanExpr(ie->array.get(), eline);
-                scanExpr(ie->index.get(), eline);
+        if (expr->type == ASTNodeType::UNARY_EXPR) {
+            const auto* ue = static_cast<const UnaryExpr*>(expr);
+            if (ue->op == "deref" && ue->operand && ue->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
+                const auto* id = static_cast<const IdentifierExpr*>(ue->operand.get());
+                reportUse(id->name, eline, "*" + id->name + " (invalid use)");
             }
-        };
+            scanExpr(ue->operand.get(), eline);
+        } else if (expr->type == ASTNodeType::BINARY_EXPR) {
+            const auto* be = static_cast<const BinaryExpr*>(expr);
+            scanExpr(be->left.get(), eline);
+            scanExpr(be->right.get(), eline);
+        } else if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const auto* id = static_cast<const IdentifierExpr*>(expr);
+            reportUse(id->name, eline, id->name + " (use of dead variable)");
+        } else if (expr->type == ASTNodeType::CALL_EXPR) {
+            const auto* ce = static_cast<const CallExpr*>(expr);
+            for (const auto& arg : ce->arguments)
+                scanExpr(arg.get(), eline);
+        } else if (expr->type == ASTNodeType::INDEX_EXPR) {
+            const auto* ie = static_cast<const IndexExpr*>(expr);
+            scanExpr(ie->array.get(), eline);
+            scanExpr(ie->index.get(), eline);
+        }
+    };
 
     switch (stmt->type) {
-        case ASTNodeType::INVALIDATE_STMT: {
-            const auto* iv = static_cast<const InvalidateStmt*>(stmt);
-            deathMap[iv->varName] = {iv->varName, MemEvent::Kind::Invalidate,
-                                     stmt->line, "invalidate " + iv->varName};
-            break;
-        }
-        case ASTNodeType::MOVE_DECL:
-        case ASTNodeType::MOVE_EXPR: {
-            // No direct variable name here in all cases, skip for now.
-            break;
-        }
-        case ASTNodeType::VAR_DECL: {
-            const auto* vd = static_cast<const VarDecl*>(stmt);
-            // If a previously dead variable is re-declared, clear death record.
-            deathMap.erase(vd->name);
-            if (vd->initializer)
-                scanExpr(vd->initializer.get(), stmt->line);
-            break;
-        }
-        case ASTNodeType::EXPR_STMT: {
-            const auto* es = static_cast<const ExprStmt*>(stmt);
-            if (es->expression)
-                scanExpr(es->expression.get(), stmt->line);
-            break;
-        }
-        case ASTNodeType::RETURN_STMT: {
-            const auto* rs = static_cast<const ReturnStmt*>(stmt);
-            if (rs->value)
-                scanExpr(rs->value.get(), stmt->line);
-            break;
-        }
-        case ASTNodeType::BLOCK: {
-            const auto* bs = static_cast<const BlockStmt*>(stmt);
-            for (const auto& s : bs->statements)
-                collectMemEvents(s.get(), events, deathMap, result, file);
-            break;
-        }
-        case ASTNodeType::IF_STMT: {
-            const auto* is = static_cast<const IfStmt*>(stmt);
-            if (is->condition) scanExpr(is->condition.get(), stmt->line);
-            if (is->thenBranch)
-                collectMemEvents(is->thenBranch.get(), events, deathMap, result, file);
-            if (is->elseBranch)
-                collectMemEvents(is->elseBranch.get(), events, deathMap, result, file);
-            break;
-        }
-        case ASTNodeType::WHILE_STMT: {
-            const auto* ws = static_cast<const WhileStmt*>(stmt);
-            if (ws->condition) scanExpr(ws->condition.get(), stmt->line);
-            if (ws->body)
-                collectMemEvents(ws->body.get(), events, deathMap, result, file);
-            break;
-        }
-        default:
-            break;
+    case ASTNodeType::INVALIDATE_STMT: {
+        const auto* iv = static_cast<const InvalidateStmt*>(stmt);
+        deathMap[iv->varName] = {iv->varName, MemEvent::Kind::Invalidate, stmt->line, "invalidate " + iv->varName};
+        break;
+    }
+    case ASTNodeType::MOVE_DECL:
+    case ASTNodeType::MOVE_EXPR: {
+        // No direct variable name here in all cases, skip for now.
+        break;
+    }
+    case ASTNodeType::VAR_DECL: {
+        const auto* vd = static_cast<const VarDecl*>(stmt);
+        // If a previously dead variable is re-declared, clear death record.
+        deathMap.erase(vd->name);
+        if (vd->initializer)
+            scanExpr(vd->initializer.get(), stmt->line);
+        break;
+    }
+    case ASTNodeType::EXPR_STMT: {
+        const auto* es = static_cast<const ExprStmt*>(stmt);
+        if (es->expression)
+            scanExpr(es->expression.get(), stmt->line);
+        break;
+    }
+    case ASTNodeType::RETURN_STMT: {
+        const auto* rs = static_cast<const ReturnStmt*>(stmt);
+        if (rs->value)
+            scanExpr(rs->value.get(), stmt->line);
+        break;
+    }
+    case ASTNodeType::BLOCK: {
+        const auto* bs = static_cast<const BlockStmt*>(stmt);
+        for (const auto& s : bs->statements)
+            collectMemEvents(s.get(), events, deathMap, result, file);
+        break;
+    }
+    case ASTNodeType::IF_STMT: {
+        const auto* is = static_cast<const IfStmt*>(stmt);
+        if (is->condition)
+            scanExpr(is->condition.get(), stmt->line);
+        if (is->thenBranch)
+            collectMemEvents(is->thenBranch.get(), events, deathMap, result, file);
+        if (is->elseBranch)
+            collectMemEvents(is->elseBranch.get(), events, deathMap, result, file);
+        break;
+    }
+    case ASTNodeType::WHILE_STMT: {
+        const auto* ws = static_cast<const WhileStmt*>(stmt);
+        if (ws->condition)
+            scanExpr(ws->condition.get(), stmt->line);
+        if (ws->body)
+            collectMemEvents(ws->body.get(), events, deathMap, result, file);
+        break;
+    }
+    default:
+        break;
     }
 }
 
-static void runMemSanitizer(const Program& program,
-                             BorrowCheckResult& result) {
+static void runMemSanitizer(const Program& program, BorrowCheckResult& result) {
     for (const auto& fn : program.functions) {
-        if (!fn || !fn->body) continue;
+        if (!fn || !fn->body)
+            continue;
         std::vector<MemEvent> events;
         std::unordered_map<std::string, MemEvent> deathMap;
         collectMemEvents(fn->body.get(), events, deathMap, result, fn->name);
@@ -942,7 +972,7 @@ static void runMemSanitizer(const Program& program,
                   << "variable: " << d.varName << "\n"
                   << "control path:\n"
                   << "  line " << d.causeLine << " -> " << d.causeDesc << "\n"
-                  << "  line " << d.useLine   << " -> " << d.useDesc   << "\n\n";
+                  << "  line " << d.useLine << " -> " << d.useDesc << "\n\n";
     }
 }
 

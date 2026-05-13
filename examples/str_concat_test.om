@@ -1,3 +1,4 @@
+import std;
 // Test str_concat built-in function
 fn main() {
     var result = 0;

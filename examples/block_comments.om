@@ -1,3 +1,4 @@
+import std;
 /*
  * Test multi-line block comments.
  * This entire block is a comment.

@@ -1,3 +1,4 @@
+import std;
 // Test null coalescing operator (??) and multi-line strings
 fn main() {
     var total = 0;

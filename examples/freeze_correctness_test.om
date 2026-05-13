@@ -1,3 +1,4 @@
+import std;
 // Test freeze correctness: LLVM freeze instruction + alias propagation
 fn main() {
     var x = 42;

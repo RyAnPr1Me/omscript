@@ -1,3 +1,4 @@
+import std;
 // arrays package - utility functions for array operations
 
 fn arr_average(arr) {

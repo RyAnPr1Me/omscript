@@ -1,3 +1,4 @@
+import std;
 // to_int_to_float_string_test.om
 //
 // Regression test: to_int(string) and to_float(string) previously returned

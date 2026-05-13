@@ -1,3 +1,4 @@
+import std;
 // Test that function inlining works correctly at O2/O3.
 // The compiler should inline these small helper functions,
 // enabling constant propagation to compute the result at compile time.

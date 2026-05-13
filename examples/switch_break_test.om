@@ -1,3 +1,4 @@
+import std;
 // Test break inside switch statement
 fn classify(x) {
     var result = 0;

@@ -1,3 +1,4 @@
+import std;
 // Test: indexed foreach
 // foreach (i, item in arr) — gives both index and value
 

@@ -1,3 +1,4 @@
+import std;
 // Test @allocator annotation: marks function as allocator wrapper.
 // LLVM adds allocsize attribute for alias analysis.
 @allocator(size=0)

@@ -15,14 +15,11 @@ namespace omscript {
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-LoopLegalityContext
-UnifiedLoopTransformer::buildLegalityContext(
-    const LoopTransformRequest& req) const
-{
+LoopLegalityContext UnifiedLoopTransformer::buildLegalityContext(const LoopTransformRequest& req) const {
     LoopLegalityContext ctx;
-    ctx.function   = req.function;
-    ctx.outerLoop  = req.outerLoop;
-    ctx.effects    = req.effects;
+    ctx.function = req.function;
+    ctx.outerLoop = req.outerLoop;
+    ctx.effects = req.effects;
     ctx.skewFactor = req.skewFactor;
 
     // Count loop depth and find innermost loop.
@@ -40,11 +37,9 @@ UnifiedLoopTransformer::buildLegalityContext(
     return ctx;
 }
 
-bool UnifiedLoopTransformer::checkProfitability(
-    LoopTransform transform,
-    llvm::Loop*   loop) const noexcept
-{
-    if (!costModel_ || !loop) return true; // conservative: assume profitable
+bool UnifiedLoopTransformer::checkProfitability(LoopTransform transform, llvm::Loop* loop) const noexcept {
+    if (!costModel_ || !loop)
+        return true; // conservative: assume profitable
 
     // Estimate the cost of all instructions in the loop body.
     double totalCost = 0.0;
@@ -90,12 +85,8 @@ bool UnifiedLoopTransformer::checkProfitability(
 // UnifiedLoopTransformer::execute
 // ─────────────────────────────────────────────────────────────────────────────
 
-LoopTransformResult
-UnifiedLoopTransformer::execute(const LoopTransformRequest& req,
-                                llvm::ScalarEvolution& SE,
-                                llvm::DominatorTree&   DT,
-                                llvm::LoopInfo&        LI) const
-{
+LoopTransformResult UnifiedLoopTransformer::execute(const LoopTransformRequest& req, llvm::ScalarEvolution& SE,
+                                                    llvm::DominatorTree& DT, llvm::LoopInfo& LI) const {
     LoopTransformResult result;
 
     if (!req.outerLoop || !req.function) {
@@ -110,8 +101,8 @@ UnifiedLoopTransformer::execute(const LoopTransformRequest& req,
         // attributes otherwise.
         LegalityVerdict verdict;
         if (req.effects) {
-            auto lctx         = buildLegalityContext(req);
-            verdict           = legality_->checkLegality(req.transform, lctx);
+            auto lctx = buildLegalityContext(req);
+            verdict = legality_->checkLegality(req.transform, lctx);
         } else {
             verdict = legality_->canTransformFunction(*req.function);
         }
@@ -126,21 +117,27 @@ UnifiedLoopTransformer::execute(const LoopTransformRequest& req,
     }
 
     // ── Step 2: Polyhedral legality (dependence-direction-vector check) ───
-    polyopt::PolyOptConfig pcfg =
-        req.polyConfig.value_or(polyopt::PolyOptConfig{});
-    pcfg.legality  = legality_;
+    polyopt::PolyOptConfig pcfg = req.polyConfig.value_or(polyopt::PolyOptConfig{});
+    pcfg.legality = legality_;
     pcfg.costModel = costModel_;
 
-    const auto polyLegality =
-        polyopt::checkLoopLegality(req.outerLoop, SE, DT, LI, pcfg);
+    const auto polyLegality = polyopt::checkLoopLegality(req.outerLoop, SE, DT, LI, pcfg);
     result.polyLegality = polyLegality;
 
     bool transformAllowed = false;
     switch (req.transform) {
-    case LoopTransform::Interchange: transformAllowed = polyLegality.interchange; break;
-    case LoopTransform::Tiling:      transformAllowed = polyLegality.tiling;      break;
-    case LoopTransform::Reversal:    transformAllowed = polyLegality.reversal;    break;
-    case LoopTransform::Skewing:     transformAllowed = polyLegality.skewing;     break;
+    case LoopTransform::Interchange:
+        transformAllowed = polyLegality.interchange;
+        break;
+    case LoopTransform::Tiling:
+        transformAllowed = polyLegality.tiling;
+        break;
+    case LoopTransform::Reversal:
+        transformAllowed = polyLegality.reversal;
+        break;
+    case LoopTransform::Skewing:
+        transformAllowed = polyLegality.skewing;
+        break;
     case LoopTransform::Fusion:
     case LoopTransform::Fission:
         // Fusion and fission legality depends on adjacent loop compatibility;
@@ -152,14 +149,14 @@ UnifiedLoopTransformer::execute(const LoopTransformRequest& req,
     }
 
     if (!transformAllowed) {
-        result.status = polyLegality.scopDetected ? LoopTransformStatus::SkippedIllegal
-                                                  : LoopTransformStatus::SkippedNoSCoP;
+        result.status =
+            polyLegality.scopDetected ? LoopTransformStatus::SkippedIllegal : LoopTransformStatus::SkippedNoSCoP;
         return result;
     }
 
     // ── Step 3: CostModel profitability check ─────────────────────────────
     if (!checkProfitability(req.transform, req.outerLoop)) {
-        result.status        = LoopTransformStatus::SkippedUnprof;
+        result.status = LoopTransformStatus::SkippedUnprof;
         result.wasProfitable = false;
         return result;
     }
@@ -171,66 +168,62 @@ UnifiedLoopTransformer::execute(const LoopTransformRequest& req,
     // and apply only the transform we asked for (other transforms disabled).
     switch (req.transform) {
     case LoopTransform::Interchange:
-        pcfg.enableTiling     = false;
-        pcfg.enableInterchange= true;
-        pcfg.enableSkewing    = false;
-        pcfg.enableFusion     = false;
-        pcfg.enableFission    = false;
-        pcfg.enableReversal   = false;
+        pcfg.enableTiling = false;
+        pcfg.enableInterchange = true;
+        pcfg.enableSkewing = false;
+        pcfg.enableFusion = false;
+        pcfg.enableFission = false;
+        pcfg.enableReversal = false;
         break;
     case LoopTransform::Tiling:
-        pcfg.enableTiling     = true;
-        pcfg.enableInterchange= false;
-        pcfg.enableSkewing    = false;
-        pcfg.enableFusion     = false;
-        pcfg.enableFission    = false;
-        pcfg.enableReversal   = false;
+        pcfg.enableTiling = true;
+        pcfg.enableInterchange = false;
+        pcfg.enableSkewing = false;
+        pcfg.enableFusion = false;
+        pcfg.enableFission = false;
+        pcfg.enableReversal = false;
         break;
     case LoopTransform::Reversal:
-        pcfg.enableTiling     = false;
-        pcfg.enableInterchange= false;
-        pcfg.enableSkewing    = false;
-        pcfg.enableFusion     = false;
-        pcfg.enableFission    = false;
-        pcfg.enableReversal   = true;
+        pcfg.enableTiling = false;
+        pcfg.enableInterchange = false;
+        pcfg.enableSkewing = false;
+        pcfg.enableFusion = false;
+        pcfg.enableFission = false;
+        pcfg.enableReversal = true;
         break;
     case LoopTransform::Skewing:
-        pcfg.enableTiling     = false;
-        pcfg.enableInterchange= false;
-        pcfg.enableSkewing    = true;
-        pcfg.enableFusion     = false;
-        pcfg.enableFission    = false;
-        pcfg.enableReversal   = false;
+        pcfg.enableTiling = false;
+        pcfg.enableInterchange = false;
+        pcfg.enableSkewing = true;
+        pcfg.enableFusion = false;
+        pcfg.enableFission = false;
+        pcfg.enableReversal = false;
         break;
     case LoopTransform::Fusion:
-        pcfg.enableTiling     = false;
-        pcfg.enableInterchange= false;
-        pcfg.enableSkewing    = false;
-        pcfg.enableFusion     = true;
-        pcfg.enableFission    = false;
-        pcfg.enableReversal   = false;
+        pcfg.enableTiling = false;
+        pcfg.enableInterchange = false;
+        pcfg.enableSkewing = false;
+        pcfg.enableFusion = true;
+        pcfg.enableFission = false;
+        pcfg.enableReversal = false;
         break;
     case LoopTransform::Fission:
-        pcfg.enableTiling     = false;
-        pcfg.enableInterchange= false;
-        pcfg.enableSkewing    = false;
-        pcfg.enableFusion     = false;
-        pcfg.enableFission    = true;
-        pcfg.enableReversal   = false;
+        pcfg.enableTiling = false;
+        pcfg.enableInterchange = false;
+        pcfg.enableSkewing = false;
+        pcfg.enableFusion = false;
+        pcfg.enableFission = true;
+        pcfg.enableReversal = false;
         break;
     }
 
     result.polyStats = polyopt::optimizeFunction(*req.function, pcfg);
 
-    const unsigned total = result.polyStats.loopsTiled    +
-                           result.polyStats.loopsInterchanged +
-                           result.polyStats.loopsSkewed   +
-                           result.polyStats.loopsFused    +
-                           result.polyStats.loopsFissioned+
-                           result.polyStats.loopsReversed;
+    const unsigned total = result.polyStats.loopsTiled + result.polyStats.loopsInterchanged +
+                           result.polyStats.loopsSkewed + result.polyStats.loopsFused +
+                           result.polyStats.loopsFissioned + result.polyStats.loopsReversed;
 
-    result.status = (total > 0) ? LoopTransformStatus::Applied
-                                : LoopTransformStatus::Failed;
+    result.status = (total > 0) ? LoopTransformStatus::Applied : LoopTransformStatus::Failed;
     return result;
 }
 

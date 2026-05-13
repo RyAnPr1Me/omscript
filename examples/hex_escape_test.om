@@ -1,3 +1,4 @@
+import std;
 // Test hex escape sequences in strings
 fn main() {
     // \x41 = 'A', \x42 = 'B', \x43 = 'C'

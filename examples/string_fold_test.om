@@ -1,3 +1,4 @@
+import std;
 // Test string constant folding — "hello" + " " + "world" should be folded at compile time
 fn main() {
     var s = "hello" + " world";

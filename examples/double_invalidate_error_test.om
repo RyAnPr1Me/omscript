@@ -1,3 +1,4 @@
+import std;
 // double_invalidate_error_test.om — verify E019 double-invalidate is a compile error
 // This test is expected to FAIL at compile time with:
 //   [E019] double invalidation of 'p'

@@ -1,3 +1,4 @@
+import std;
 // Test prefix increment/decrement (++x, --x) vs postfix (x++, x--)
 fn main() {
     // Prefix increment returns updated value

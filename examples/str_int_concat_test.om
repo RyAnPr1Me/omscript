@@ -1,3 +1,4 @@
+import std;
 // Test automatic string + integer/float concatenation
 // Previously, "string" + int would cause pointer arithmetic instead of
 // concatenation, resulting in garbled output or SIGSEGV.

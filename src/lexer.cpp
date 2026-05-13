@@ -26,13 +26,27 @@ namespace {
 // for every identifier token.  The string literals have static storage
 // duration so the views remain valid for the lifetime of the program.
 static const std::unordered_map<std::string_view, TokenType> keywords = {
-    {"fn", TokenType::FN},         {"return", TokenType::RETURN},     {"if", TokenType::IF},
-    {"else", TokenType::ELSE},     {"while", TokenType::WHILE},       {"do", TokenType::DO},
-    {"for", TokenType::FOR},       {"var", TokenType::VAR},           {"const", TokenType::CONST},
-    {"break", TokenType::BREAK},   {"continue", TokenType::CONTINUE}, {"in", TokenType::IN},
-    {"true", TokenType::TRUE},     {"false", TokenType::FALSE},       {"null", TokenType::NULL_LITERAL},
-    {"switch", TokenType::SWITCH}, {"case", TokenType::CASE},         {"default", TokenType::DEFAULT},
-    {"try", TokenType::TRY},       {"catch", TokenType::CATCH},       {"throw", TokenType::THROW},
+    {"fn", TokenType::FN},
+    {"return", TokenType::RETURN},
+    {"if", TokenType::IF},
+    {"else", TokenType::ELSE},
+    {"while", TokenType::WHILE},
+    {"do", TokenType::DO},
+    {"for", TokenType::FOR},
+    {"var", TokenType::VAR},
+    {"const", TokenType::CONST},
+    {"break", TokenType::BREAK},
+    {"continue", TokenType::CONTINUE},
+    {"in", TokenType::IN},
+    {"true", TokenType::TRUE},
+    {"false", TokenType::FALSE},
+    {"null", TokenType::NULL_LITERAL},
+    {"switch", TokenType::SWITCH},
+    {"case", TokenType::CASE},
+    {"default", TokenType::DEFAULT},
+    {"try", TokenType::TRY},
+    {"catch", TokenType::CATCH},
+    {"throw", TokenType::THROW},
     {"enum", TokenType::ENUM},
     {"struct", TokenType::STRUCT},
     {"import", TokenType::IMPORT},
@@ -62,15 +76,16 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"comptime", TokenType::COMPTIME},
     {"reborrow", TokenType::REBORROW},
     {"pipeline", TokenType::PIPELINE},
-    {"stage",    TokenType::STAGE},
-    {"global",   TokenType::GLOBAL},
-    {"atomic",   TokenType::ATOMIC},
+    {"stage", TokenType::STAGE},
+    {"global", TokenType::GLOBAL},
+    {"atomic", TokenType::ATOMIC},
     {"volatile", TokenType::VOLATILE},
-    {"type",     TokenType::TYPE},
-    {"nullptr",  TokenType::NULL_LITERAL},  // Ω spec §2.2: nullptr == null
-    {"shared",   TokenType::SHARED},        // Ω spec §3.1: read-only aliasable ownership
-    {"own",      TokenType::OWN},
-    {"construct",TokenType::CONSTRUCT}};   // in-place field initialisation
+    {"type", TokenType::TYPE},
+    {"nullptr", TokenType::NULL_LITERAL}, // Ω spec §2.2: nullptr == null
+    {"shared", TokenType::SHARED},        // Ω spec §3.1: read-only aliasable ownership
+    {"own", TokenType::OWN},
+    {"construct", TokenType::CONSTRUCT},  // in-place field initialisation
+    {"namespace", TokenType::NAMESPACE}}; // user-defined namespace block
 
 /// Throw a DiagnosticError with the given message and source location.
 [[noreturn]] [[gnu::cold]] static void lexError(const std::string& msg, int ln, int col) {
@@ -297,8 +312,7 @@ Token Lexer::scanNumber() {
         if (source[i] != '_') {
             continue;
         }
-        if (i == numStart || i + 1 >= pos ||
-            !isDigit(source[i - 1]) || !isDigit(source[i + 1])) {
+        if (i == numStart || i + 1 >= pos || !isDigit(source[i - 1]) || !isDigit(source[i + 1])) {
             lexError("Invalid underscore placement in numeric literal", line, column);
         }
     }
@@ -318,8 +332,7 @@ Token Lexer::scanNumber() {
     if (!isAtEnd() && (peek() == 'e' || peek() == 'E')) {
         // Only treat as exponent if followed by a digit or +/- then digit.
         const char next1 = peek(1);
-        const bool hasExp = isDigit(next1) ||
-                            ((next1 == '+' || next1 == '-') && isDigit(peek(2)));
+        const bool hasExp = isDigit(next1) || ((next1 == '+' || next1 == '-') && isDigit(peek(2)));
         if (hasExp) {
             isFloat = true;
             num += advance(); // consume 'e'/'E'
@@ -773,7 +786,7 @@ Token Lexer::scanMultiLineString() {
             // Backtick-quoted infix operator name: `op`
             // Scans all characters up to the closing backtick.
             const int btLine = tokenLine;
-            const int btCol  = tokenColumn;
+            const int btCol = tokenColumn;
             std::string btIdent;
             while (!isAtEnd() && peek() != '`') {
                 btIdent += advance();
@@ -880,8 +893,8 @@ void Lexer::scanInterpolatedString(std::vector<Token>& tokens) {
                 break;
             }
             default:
-                lexError("Unknown escape sequence '\\" + std::string(1, escaped) + "' in interpolated string",
-                         line, column);
+                lexError("Unknown escape sequence '\\" + std::string(1, escaped) + "' in interpolated string", line,
+                         column);
             }
         } else if (peek() == '{') {
             advance(); // skip '{'

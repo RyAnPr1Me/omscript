@@ -1,3 +1,4 @@
+import std;
 // geometry package - 2D geometry calculations using integer arithmetic
 
 fn geo_distance_sq(x1, y1, x2, y2) {

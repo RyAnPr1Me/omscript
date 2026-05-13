@@ -1,3 +1,4 @@
+import std;
 // string_comparison_test.om
 //
 // Regression test: string <, >, <=, >= with variable operands previously

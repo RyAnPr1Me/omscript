@@ -1,3 +1,4 @@
+import std;
 // to_char_test.om
 //
 // Regression test: to_char(n) previously returned the raw integer n unchanged.

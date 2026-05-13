@@ -2,14 +2,6 @@
 
 #include "ipof_pass.h"
 
-#include <llvm/IR/BasicBlock.h>
-#include <llvm/IR/Constant.h>
-#include <llvm/IR/Function.h>
-#include <llvm/IR/InstIterator.h>
-#include <llvm/IR/Instructions.h>
-#include <llvm/IR/Module.h>
-#include <llvm/IR/PassManager.h>
-#include <llvm/IR/Verifier.h>
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/AssumptionCache.h>
 #include <llvm/Analysis/LoopInfo.h>
@@ -19,6 +11,14 @@
 #include <llvm/Analysis/ScalarEvolution.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
+#include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/Constant.h>
+#include <llvm/IR/Function.h>
+#include <llvm/IR/InstIterator.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/Module.h>
+#include <llvm/IR/PassManager.h>
+#include <llvm/IR/Verifier.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Transforms/IPO/AlwaysInliner.h>
 #include <llvm/Transforms/Scalar/ADCE.h>
@@ -64,16 +64,17 @@ static uint64_t hashFunction(const llvm::Function& F) noexcept {
 /// Count all non-declaration instructions in @p F.
 static unsigned instrCount(const llvm::Function& F) noexcept {
     unsigned n = 0;
-    for (const auto& BB : F) n += static_cast<unsigned>(BB.size());
+    for (const auto& BB : F)
+        n += static_cast<unsigned>(BB.size());
     return n;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct MissedOp {
-    MissedOpKind     kind;
-    llvm::Function*  fn;          ///< Owning function
-    llvm::Instruction* site;      ///< Representative instruction
+    MissedOpKind kind;
+    llvm::Function* fn;      ///< Owning function
+    llvm::Instruction* site; ///< Representative instruction
 };
 
 /// Check whether @p I is a binary/unary op on IR constants that wasn't folded.
@@ -81,7 +82,8 @@ static bool isUnfoldedConstantExpr(const llvm::Instruction* I) noexcept {
     if (!llvm::isa<llvm::BinaryOperator>(I) && !llvm::isa<llvm::UnaryOperator>(I))
         return false;
     for (unsigned i = 0; i < I->getNumOperands(); ++i)
-        if (!llvm::isa<llvm::Constant>(I->getOperand(i))) return false;
+        if (!llvm::isa<llvm::Constant>(I->getOperand(i)))
+            return false;
     return true;
 }
 
@@ -101,9 +103,11 @@ static bool isRedundantLoad(const llvm::LoadInst* LD) noexcept {
     while (it != BB->begin()) {
         --it;
         if (const auto* prevLD = llvm::dyn_cast<llvm::LoadInst>(&*it))
-            if (prevLD->getPointerOperand() == ptr) return true;
+            if (prevLD->getPointerOperand() == ptr)
+                return true;
         if (const auto* prevST = llvm::dyn_cast<llvm::StoreInst>(&*it))
-            if (prevST->getPointerOperand() == ptr) return false;
+            if (prevST->getPointerOperand() == ptr)
+                return false;
     }
     return false;
 }
@@ -112,10 +116,13 @@ static bool isRedundantLoad(const llvm::LoadInst* LD) noexcept {
 /// function with a body (inlinable).
 static bool isConstArgCall(const llvm::CallInst* call) noexcept {
     const llvm::Function* callee = call->getCalledFunction();
-    if (!callee || callee->isDeclaration()) return false;
-    if (call->arg_empty()) return false; // Zero-arg calls are already handled by CFCTRE.
+    if (!callee || callee->isDeclaration())
+        return false;
+    if (call->arg_empty())
+        return false; // Zero-arg calls are already handled by CFCTRE.
     for (const llvm::Value* arg : call->args())
-        if (!llvm::isa<llvm::Constant>(arg)) return false;
+        if (!llvm::isa<llvm::Constant>(arg))
+            return false;
     return true;
 }
 
@@ -123,7 +130,8 @@ static std::vector<MissedOp> step1Detect(llvm::Function& F, const IpofConfig& cf
     std::vector<MissedOp> ops;
 
     // Skip oversized functions to bound compile time.
-    if (instrCount(F) > cfg.maxFunctionSize) return ops;
+    if (instrCount(F) > cfg.maxFunctionSize)
+        return ops;
 
     // CSE detection: map (opcode, num-operands, op0) → first occurrence.
     std::unordered_map<size_t, llvm::Instruction*> exprSeen;
@@ -158,8 +166,8 @@ static std::vector<MissedOp> step1Detect(llvm::Function& F, const IpofConfig& cf
 
             // ── CommonSubexpr (level ≥ 2) ────────────────────────────────
             // Cheap structural hash: combine opcode + num-operands + op0 pointer.
-            if (cfg.aggressionLevel >= 2 && !I.isTerminator() &&
-                !llvm::isa<llvm::PHINode>(I) && !I.mayHaveSideEffects()) {
+            if (cfg.aggressionLevel >= 2 && !I.isTerminator() && !llvm::isa<llvm::PHINode>(I) &&
+                !I.mayHaveSideEffects()) {
                 size_t key = static_cast<size_t>(I.getOpcode());
                 key ^= (I.getNumOperands() * 2654435761ULL);
                 if (I.getNumOperands() > 0)
@@ -179,39 +187,48 @@ static std::vector<MissedOp> step1Detect(llvm::Function& F, const IpofConfig& cf
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum class PassSeq {
-    FoldThenDCE,       // InstSimplify + ADCE
-    CSEFoldDCE,        // EarlyCSE + InstSimplify + ADCE
-    LoadElim,          // MemCpyOpt + InstSimplify
-    InlineFoldDCE,     // AlwaysInliner + InstSimplify + ADCE + SimplifyCFG
+    FoldThenDCE,   // InstSimplify + ADCE
+    CSEFoldDCE,    // EarlyCSE + InstSimplify + ADCE
+    LoadElim,      // MemCpyOpt + InstSimplify
+    InlineFoldDCE, // AlwaysInliner + InstSimplify + ADCE + SimplifyCFG
 };
 
 /// Determine the pass sequence for a group of missed ops in one function.
 /// Multiple kinds may be present; the sequence covers all of them.
 static PassSeq selectPassSeq(const std::vector<MissedOp>& ops) {
-    bool hasCSE    = false;
-    bool hasLoad   = false;
+    bool hasCSE = false;
+    bool hasLoad = false;
     bool hasInline = false;
 
     for (const auto& op : ops) {
         switch (op.kind) {
-            case MissedOpKind::CommonSubexpr:    hasCSE    = true; break;
-            case MissedOpKind::RedundantLoad:    hasLoad   = true; break;
-            case MissedOpKind::CallWithConst:    hasInline = true; break;
-            default: break; // ConstantFolding + DeadCode fall through to FoldThenDCE
+        case MissedOpKind::CommonSubexpr:
+            hasCSE = true;
+            break;
+        case MissedOpKind::RedundantLoad:
+            hasLoad = true;
+            break;
+        case MissedOpKind::CallWithConst:
+            hasInline = true;
+            break;
+        default:
+            break; // ConstantFolding + DeadCode fall through to FoldThenDCE
         }
     }
 
-    if (hasInline) return PassSeq::InlineFoldDCE;
-    if (hasLoad)   return PassSeq::LoadElim;
-    if (hasCSE)    return PassSeq::CSEFoldDCE;
+    if (hasInline)
+        return PassSeq::InlineFoldDCE;
+    if (hasLoad)
+        return PassSeq::LoadElim;
+    if (hasCSE)
+        return PassSeq::CSEFoldDCE;
     return PassSeq::FoldThenDCE; // covers ConstantFolding + DeadCode
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Apply @p seq to @p F (function-level) or to the whole @p M (module-level
-static bool applyPassSeq(PassSeq seq, llvm::Function& F, llvm::Module& M,
-                         llvm::FunctionAnalysisManager& FAM,
+static bool applyPassSeq(PassSeq seq, llvm::Function& F, llvm::Module& M, llvm::FunctionAnalysisManager& FAM,
                          llvm::ModuleAnalysisManager& MAM) {
     if (seq == PassSeq::InlineFoldDCE) {
         // Module-level: inliner must run at module scope.
@@ -229,21 +246,21 @@ static bool applyPassSeq(PassSeq seq, llvm::Function& F, llvm::Module& M,
     // Function-level sequences.
     llvm::FunctionPassManager FPM;
     switch (seq) {
-        case PassSeq::FoldThenDCE:
-            FPM.addPass(llvm::InstSimplifyPass());
-            FPM.addPass(llvm::ADCEPass());
-            break;
-        case PassSeq::CSEFoldDCE:
-            FPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/false));
-            FPM.addPass(llvm::InstSimplifyPass());
-            FPM.addPass(llvm::ADCEPass());
-            break;
-        case PassSeq::LoadElim:
-            FPM.addPass(llvm::MemCpyOptPass());
-            FPM.addPass(llvm::InstSimplifyPass());
-            break;
-        default:
-            break;
+    case PassSeq::FoldThenDCE:
+        FPM.addPass(llvm::InstSimplifyPass());
+        FPM.addPass(llvm::ADCEPass());
+        break;
+    case PassSeq::CSEFoldDCE:
+        FPM.addPass(llvm::EarlyCSEPass(/*UseMemorySSA=*/false));
+        FPM.addPass(llvm::InstSimplifyPass());
+        FPM.addPass(llvm::ADCEPass());
+        break;
+    case PassSeq::LoadElim:
+        FPM.addPass(llvm::MemCpyOptPass());
+        FPM.addPass(llvm::InstSimplifyPass());
+        break;
+    default:
+        break;
     }
     FPM.run(F, FAM);
     return true;
@@ -251,17 +268,16 @@ static bool applyPassSeq(PassSeq seq, llvm::Function& F, llvm::Module& M,
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-static IpofStats runOnFunction(llvm::Function& F,
-                                llvm::Module& M,
-                                const IpofConfig& cfg,
-                                llvm::FunctionAnalysisManager& FAM,
-                                llvm::ModuleAnalysisManager& MAM) {
+static IpofStats runOnFunction(llvm::Function& F, llvm::Module& M, const IpofConfig& cfg,
+                               llvm::FunctionAnalysisManager& FAM, llvm::ModuleAnalysisManager& MAM) {
     IpofStats stats;
-    if (F.isDeclaration()) return stats;
+    if (F.isDeclaration())
+        return stats;
 
     // Step 1: detect.
     auto ops = step1Detect(F, cfg);
-    if (ops.empty()) return stats;
+    if (ops.empty())
+        return stats;
     stats.opportunitiesFound = static_cast<unsigned>(ops.size());
 
     // Step 2: select pass sequence.
@@ -286,7 +302,7 @@ static IpofStats runOnFunction(llvm::Function& F,
         ++stats.rerunsApplied;
 
         const unsigned after = instrCount(F);
-        const int64_t delta  = static_cast<int64_t>(before) - static_cast<int64_t>(after);
+        const int64_t delta = static_cast<int64_t>(before) - static_cast<int64_t>(after);
 
         if (delta >= static_cast<int64_t>(cfg.minInstrReduction)) {
             ++stats.acceptedImprovements;
@@ -294,21 +310,23 @@ static IpofStats runOnFunction(llvm::Function& F,
 
             // Credit the right per-kind counter.
             switch (seq) {
-                case PassSeq::FoldThenDCE:
-                    for (const auto& op : ops) {
-                        if (op.kind == MissedOpKind::ConstantFolding) ++stats.foldedConstants;
-                        if (op.kind == MissedOpKind::DeadCode)         ++stats.eliminatedDead;
-                    }
-                    break;
-                case PassSeq::CSEFoldDCE:
-                    ++stats.eliminatedCSE;
-                    break;
-                case PassSeq::LoadElim:
-                    ++stats.eliminatedLoads;
-                    break;
-                case PassSeq::InlineFoldDCE:
-                    ++stats.inlinedAndFolded;
-                    break;
+            case PassSeq::FoldThenDCE:
+                for (const auto& op : ops) {
+                    if (op.kind == MissedOpKind::ConstantFolding)
+                        ++stats.foldedConstants;
+                    if (op.kind == MissedOpKind::DeadCode)
+                        ++stats.eliminatedDead;
+                }
+                break;
+            case PassSeq::CSEFoldDCE:
+                ++stats.eliminatedCSE;
+                break;
+            case PassSeq::LoadElim:
+                ++stats.eliminatedLoads;
+                break;
+            case PassSeq::InlineFoldDCE:
+                ++stats.inlinedAndFolded;
+                break;
             }
         } else {
             ++stats.rejectedNoGain;
@@ -317,7 +335,8 @@ static IpofStats runOnFunction(llvm::Function& F,
 
         // Re-scan for remaining opportunities; break early if none left.
         auto remaining = step1Detect(F, cfg);
-        if (remaining.empty()) break;
+        if (remaining.empty())
+            break;
     }
 
     // Count this function as "acted upon" only when at least one improvement
@@ -336,14 +355,10 @@ static IpofStats runOnFunction(llvm::Function& F,
 IpofStats runIPOF(llvm::Module& module, const IpofConfig& cfg) {
     // Apply aggression-level overrides to the effective config.
     IpofConfig eff = cfg;
-    eff.aggressionLevel     = std::min(cfg.aggressionLevel, 3u);
+    eff.aggressionLevel = std::min(cfg.aggressionLevel, 3u);
     eff.enableCallWithConst = cfg.enableCallWithConst || (cfg.aggressionLevel >= 2);
-    eff.enableNearVectorizable =
-        cfg.enableNearVectorizable && (cfg.aggressionLevel >= 3);
-    eff.maxIterations = std::min(
-        cfg.maxIterations,
-        cfg.aggressionLevel == 1 ? 1u :
-        cfg.aggressionLevel == 2 ? 2u : 3u);
+    eff.enableNearVectorizable = cfg.enableNearVectorizable && (cfg.aggressionLevel >= 3);
+    eff.maxIterations = std::min(cfg.maxIterations, cfg.aggressionLevel == 1 ? 1u : cfg.aggressionLevel == 2 ? 2u : 3u);
 
     // Build analysis managers once for the whole module.  Recreating them per
     // function (the old approach) paid O(N) construction cost for N functions.
@@ -361,20 +376,21 @@ IpofStats runIPOF(llvm::Module& module, const IpofConfig& cfg) {
     IpofStats total;
 
     for (llvm::Function& F : module) {
-        if (F.isDeclaration()) continue;
+        if (F.isDeclaration())
+            continue;
         IpofStats fs = runOnFunction(F, module, eff, FAM, MAM);
-        total.opportunitiesFound   += fs.opportunitiesFound;
-        total.opportunitiesActed   += fs.opportunitiesActed;
-        total.rerunsApplied        += fs.rerunsApplied;
+        total.opportunitiesFound += fs.opportunitiesFound;
+        total.opportunitiesActed += fs.opportunitiesActed;
+        total.rerunsApplied += fs.rerunsApplied;
         total.acceptedImprovements += fs.acceptedImprovements;
-        total.rejectedNoGain       += fs.rejectedNoGain;
-        total.rejectedOscillation  += fs.rejectedOscillation;
-        total.foldedConstants      += fs.foldedConstants;
-        total.eliminatedCSE        += fs.eliminatedCSE;
-        total.eliminatedDead       += fs.eliminatedDead;
-        total.eliminatedLoads      += fs.eliminatedLoads;
-        total.inlinedAndFolded     += fs.inlinedAndFolded;
-        total.netInstrReduction    += fs.netInstrReduction;
+        total.rejectedNoGain += fs.rejectedNoGain;
+        total.rejectedOscillation += fs.rejectedOscillation;
+        total.foldedConstants += fs.foldedConstants;
+        total.eliminatedCSE += fs.eliminatedCSE;
+        total.eliminatedDead += fs.eliminatedDead;
+        total.eliminatedLoads += fs.eliminatedLoads;
+        total.inlinedAndFolded += fs.inlinedAndFolded;
+        total.netInstrReduction += fs.netInstrReduction;
     }
 
     return total;

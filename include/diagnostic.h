@@ -34,48 +34,71 @@ enum class ErrorCode {
     E010_UNKNOWN_FIELD,
     E011_DIVISION_BY_ZERO,
     E012_INDEX_OUT_OF_BOUNDS,
-    E013_REGION_NOT_INVALIDATED, ///< Region variable created with newRegion() not invalidated before function end
+    E013_REGION_NOT_INVALIDATED,      ///< Region variable created with newRegion() not invalidated before function end
     E014_REGION_USE_AFTER_INVALIDATE, ///< Region variable referenced after it was invalidated
 
     // ── Borrow checker errors (E015–E021) ─────────────────────────────────
-    E015_USE_AFTER_MOVE,        ///< Variable read/written after ownership was moved out
-    E016_BORROW_WRITE_CONFLICT, ///< Write to variable with active immutable borrow(s)
-    E017_DOUBLE_MUT_BORROW,     ///< Mutable borrow of already mutably-borrowed variable
-    E018_MOVE_WHILE_BORROWED,   ///< Move of variable with active borrow(s)
-    E019_DOUBLE_INVALIDATE,     ///< invalidate called on already-invalidated variable (Ω spec §6.1)
-    E020_WRITE_TO_SHARED,       ///< Write to variable in shared ownership state (Ω spec §3.1)
-    E021_OWN_ON_FROZEN,         ///< own called on frozen variable — freeze is irreversible (Ω spec §3.1)
+    E015_USE_AFTER_MOVE,            ///< Variable read/written after ownership was moved out
+    E016_BORROW_WRITE_CONFLICT,     ///< Write to variable with active immutable borrow(s)
+    E017_DOUBLE_MUT_BORROW,         ///< Mutable borrow of already mutably-borrowed variable
+    E018_MOVE_WHILE_BORROWED,       ///< Move of variable with active borrow(s)
+    E019_DOUBLE_INVALIDATE,         ///< invalidate called on already-invalidated variable (Ω spec §6.1)
+    E020_WRITE_TO_SHARED,           ///< Write to variable in shared ownership state (Ω spec §3.1)
+    E021_OWN_ON_FROZEN,             ///< own called on frozen variable — freeze is irreversible (Ω spec §3.1)
     E022_INVALIDATE_WHILE_BORROWED, ///< invalidate called while active borrow(s) exist (Ω spec §6.2)
 
-    NONE  ///< No specific error code (legacy/fallback).
+    NONE ///< No specific error code (legacy/fallback).
 };
 
 /// Return the string code (e.g. "E001") for a given ErrorCode.
 inline const char* errorCodeString(ErrorCode code) {
     switch (code) {
-    case ErrorCode::E001_UNDEFINED_VARIABLE:  return "E001";
-    case ErrorCode::E002_TYPE_MISMATCH:       return "E002";
-    case ErrorCode::E003_UNDEFINED_FUNCTION:  return "E003";
-    case ErrorCode::E004_WRONG_ARG_COUNT:     return "E004";
-    case ErrorCode::E005_CONST_MODIFICATION:  return "E005";
-    case ErrorCode::E006_SYNTAX_ERROR:        return "E006";
-    case ErrorCode::E007_IMPORT_NOT_FOUND:    return "E007";
-    case ErrorCode::E008_CIRCULAR_IMPORT:     return "E008";
-    case ErrorCode::E009_DUPLICATE_FIELD:     return "E009";
-    case ErrorCode::E010_UNKNOWN_FIELD:       return "E010";
-    case ErrorCode::E011_DIVISION_BY_ZERO:    return "E011";
-    case ErrorCode::E012_INDEX_OUT_OF_BOUNDS: return "E012";
-    case ErrorCode::E013_REGION_NOT_INVALIDATED:      return "E013";
-    case ErrorCode::E014_REGION_USE_AFTER_INVALIDATE:  return "E014";
-    case ErrorCode::E015_USE_AFTER_MOVE:               return "E015";
-    case ErrorCode::E016_BORROW_WRITE_CONFLICT:        return "E016";
-    case ErrorCode::E017_DOUBLE_MUT_BORROW:            return "E017";
-    case ErrorCode::E018_MOVE_WHILE_BORROWED:          return "E018";
-    case ErrorCode::E019_DOUBLE_INVALIDATE:            return "E019";
-    case ErrorCode::E020_WRITE_TO_SHARED:              return "E020";
-    case ErrorCode::E021_OWN_ON_FROZEN:                return "E021";
-    case ErrorCode::E022_INVALIDATE_WHILE_BORROWED:    return "E022";
-    case ErrorCode::NONE:                              return "";
+    case ErrorCode::E001_UNDEFINED_VARIABLE:
+        return "E001";
+    case ErrorCode::E002_TYPE_MISMATCH:
+        return "E002";
+    case ErrorCode::E003_UNDEFINED_FUNCTION:
+        return "E003";
+    case ErrorCode::E004_WRONG_ARG_COUNT:
+        return "E004";
+    case ErrorCode::E005_CONST_MODIFICATION:
+        return "E005";
+    case ErrorCode::E006_SYNTAX_ERROR:
+        return "E006";
+    case ErrorCode::E007_IMPORT_NOT_FOUND:
+        return "E007";
+    case ErrorCode::E008_CIRCULAR_IMPORT:
+        return "E008";
+    case ErrorCode::E009_DUPLICATE_FIELD:
+        return "E009";
+    case ErrorCode::E010_UNKNOWN_FIELD:
+        return "E010";
+    case ErrorCode::E011_DIVISION_BY_ZERO:
+        return "E011";
+    case ErrorCode::E012_INDEX_OUT_OF_BOUNDS:
+        return "E012";
+    case ErrorCode::E013_REGION_NOT_INVALIDATED:
+        return "E013";
+    case ErrorCode::E014_REGION_USE_AFTER_INVALIDATE:
+        return "E014";
+    case ErrorCode::E015_USE_AFTER_MOVE:
+        return "E015";
+    case ErrorCode::E016_BORROW_WRITE_CONFLICT:
+        return "E016";
+    case ErrorCode::E017_DOUBLE_MUT_BORROW:
+        return "E017";
+    case ErrorCode::E018_MOVE_WHILE_BORROWED:
+        return "E018";
+    case ErrorCode::E019_DOUBLE_INVALIDATE:
+        return "E019";
+    case ErrorCode::E020_WRITE_TO_SHARED:
+        return "E020";
+    case ErrorCode::E021_OWN_ON_FROZEN:
+        return "E021";
+    case ErrorCode::E022_INVALIDATE_WHILE_BORROWED:
+        return "E022";
+    case ErrorCode::NONE:
+        return "";
     }
     return "";
 }
@@ -89,8 +112,10 @@ inline const char* errorCodeString(ErrorCode code) {
 inline size_t editDistance(const std::string& a, const std::string& b) {
     const size_t m = a.size(), n = b.size();
     // Fast paths for trivial cases.
-    if (m == 0) return n;
-    if (n == 0) return m;
+    if (m == 0)
+        return n;
+    if (n == 0)
+        return m;
     // Use a single-row DP array for space efficiency: O(min(m,n)).
     std::vector<size_t> prev(n + 1), curr(n + 1);
     for (size_t j = 0; j <= n; ++j)
@@ -108,8 +133,7 @@ inline size_t editDistance(const std::string& a, const std::string& b) {
 
 /// Find the most similar name from a list of candidates.
 /// Returns empty string if no close match (distance > threshold).
-inline std::string suggestSimilar(const std::string& name,
-                                  const std::vector<std::string>& candidates,
+inline std::string suggestSimilar(const std::string& name, const std::vector<std::string>& candidates,
                                   size_t threshold = 3) {
     std::string best;
     size_t bestDist = threshold + 1;
@@ -147,7 +171,7 @@ struct Diagnostic {
     DiagnosticSeverity severity = DiagnosticSeverity::Error;
     SourceLocation location;
     std::string message;
-    ErrorCode code = ErrorCode::NONE;  ///< Machine-readable error code.
+    ErrorCode code = ErrorCode::NONE; ///< Machine-readable error code.
 
     /// Format as "[E001] file:L:C: error: message" (or "error at line L, column C: message" if no file).
     std::string format() const {
@@ -172,8 +196,8 @@ struct Diagnostic {
             codePrefix = std::string("[") + errorCodeString(code) + "] ";
         }
         if (!location.filename.empty() && location.line > 0) {
-            return codePrefix + location.filename + ":" + std::to_string(location.line) + ":" + std::to_string(location.column) +
-                   ": " + prefix + ": " + message;
+            return codePrefix + location.filename + ":" + std::to_string(location.line) + ":" +
+                   std::to_string(location.column) + ": " + prefix + ": " + message;
         }
         if (location.line > 0) {
             return codePrefix + prefix + " at line " + std::to_string(location.line) + ", column " +

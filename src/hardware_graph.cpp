@@ -2,20 +2,20 @@
 
 // Apply maximum compiler optimizations to this hot path.
 #ifdef __GNUC__
-#  pragma GCC optimize("O3,unroll-loops,tree-vectorize")
+#pragma GCC optimize("O3,unroll-loops,tree-vectorize")
 #endif
 ///   2. Converting LLVM IR functions into program dependency graphs
 
 #include "hardware_graph.h"
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Intrinsics.h>
-#include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/IR/PatternMatch.h>
-#include <llvm/Analysis/ValueTracking.h>
 
 // LLVM 19 introduced getOrInsertDeclaration; older versions only have getDeclaration.
 #if LLVM_VERSION_MAJOR >= 19
@@ -41,8 +41,7 @@ namespace hgoe {
 
 // Forward declaration: defined later in this file (Step 7).
 // Allows buildFromFunction (Step 2) to call it without reordering definitions.
-static unsigned getOpcodeLatency(const llvm::Instruction* inst,
-                                  const MicroarchProfile& profile);
+static unsigned getOpcodeLatency(const llvm::Instruction* inst, const MicroarchProfile& profile);
 
 /// Return the memory pointer operand for load/store instructions.
 [[nodiscard]] static const llvm::Value* getMemoryPointerOperand(const llvm::Instruction* inst) {
@@ -54,22 +53,21 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
 }
 
 /// Resolve a pointer to (base, constant byte offset) when provable.
-[[nodiscard]] static bool getBaseAndConstByteOffset(const llvm::Value* ptr,
-                                                    const llvm::DataLayout& dl,
-                                                    const llvm::Value*& base,
-                                                    int64_t& offset) {
-    if (!ptr || !ptr->getType()->isPointerTy()) return false;
+[[nodiscard]] static bool getBaseAndConstByteOffset(const llvm::Value* ptr, const llvm::DataLayout& dl,
+                                                    const llvm::Value*& base, int64_t& offset) {
+    if (!ptr || !ptr->getType()->isPointerTy())
+        return false;
     int64_t off = 0;
     const llvm::Value* rawBase = llvm::GetPointerBaseWithConstantOffset(ptr, off, dl);
-    if (!rawBase) return false;
+    if (!rawBase)
+        return false;
     base = rawBase->stripPointerCasts();
     offset = off;
     return true;
 }
 
 /// Alias query used by HGOE memory-edge construction.
-[[nodiscard]] static bool hgoeMayAlias(const llvm::Instruction* a,
-                                       const llvm::Instruction* b,
+[[nodiscard]] static bool hgoeMayAlias(const llvm::Instruction* a, const llvm::Instruction* b,
                                        const llvm::DataLayout& dl) {
     // Side-effecting calls/barriers are always conservative-alias.
     if ((llvm::isa<llvm::CallBase>(a) && a->mayHaveSideEffects()) ||
@@ -78,11 +76,13 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
 
     const llvm::Value* ptrA = getMemoryPointerOperand(a);
     const llvm::Value* ptrB = getMemoryPointerOperand(b);
-    if (!ptrA || !ptrB) return true;
+    if (!ptrA || !ptrB)
+        return true;
 
     ptrA = ptrA->stripPointerCasts();
     ptrB = ptrB->stripPointerCasts();
-    if (ptrA == ptrB) return true;
+    if (ptrA == ptrB)
+        return true;
 
     // ── TBAA metadata disambiguation ────────────────────────────────────────
     {
@@ -95,7 +95,8 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
                 unsigned depthLimit = 16; // prevent infinite loops on malformed MD
                 while (cur && cur->getNumOperands() >= 2 && depthLimit-- > 0) {
                     auto* parent = llvm::dyn_cast<llvm::MDNode>(cur->getOperand(1));
-                    if (!parent || parent == cur) return cur;
+                    if (!parent || parent == cur)
+                        return cur;
                     cur = parent;
                 }
                 return cur;
@@ -148,10 +149,14 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
     // Fall back to underlying-object disambiguation.
     const llvm::Value* objA = llvm::getUnderlyingObject(ptrA);
     const llvm::Value* objB = llvm::getUnderlyingObject(ptrB);
-    if (objA) objA = objA->stripPointerCasts();
-    if (objB) objB = objB->stripPointerCasts();
-    if (!objA || !objB) return true;
-    if (objA == objB) return true;
+    if (objA)
+        objA = objA->stripPointerCasts();
+    if (objB)
+        objB = objB->stripPointerCasts();
+    if (!objA || !objB)
+        return true;
+    if (objA == objB)
+        return true;
 
     const bool aIsAlloca = llvm::isa<llvm::AllocaInst>(objA);
     const bool bIsAlloca = llvm::isa<llvm::AllocaInst>(objB);
@@ -160,9 +165,7 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
     const bool aIsGlobal = llvm::isa<llvm::GlobalVariable>(objA);
     const bool bIsGlobal = llvm::isa<llvm::GlobalVariable>(objB);
 
-    if ((aIsAlloca && bIsAlloca) ||
-        (aIsGlobal && bIsGlobal) ||
-        (aIsAlloca && bIsArg) || (aIsArg && bIsAlloca) ||
+    if ((aIsAlloca && bIsAlloca) || (aIsGlobal && bIsGlobal) || (aIsAlloca && bIsArg) || (aIsArg && bIsAlloca) ||
         (aIsAlloca && bIsGlobal) || (aIsGlobal && bIsAlloca))
         return false;
 
@@ -176,8 +179,7 @@ static unsigned getOpcodeLatency(const llvm::Instruction* inst,
     // noalias argument vs global: noalias guarantees the argument doesn't
     // alias anything the callee can see through other means (globals, other args).
     if ((aIsArg && bIsGlobal) || (aIsGlobal && bIsArg)) {
-        const auto* arg = aIsArg ? llvm::cast<llvm::Argument>(objA)
-                                 : llvm::cast<llvm::Argument>(objB);
+        const auto* arg = aIsArg ? llvm::cast<llvm::Argument>(objA) : llvm::cast<llvm::Argument>(objB);
         if (arg->hasNoAliasAttr())
             return false;
     }
@@ -195,28 +197,29 @@ static std::string resolveNativeCpu(const std::string& cpu) {
 
 // ═════════════════════════════════════════════════════════════════════════════
 
-unsigned HardwareGraph::addNode(ResourceType type, const std::string& name,
-                                 unsigned count, double latency,
-                                 double throughput, unsigned pipelineDepth) {
+unsigned HardwareGraph::addNode(ResourceType type, const std::string& name, unsigned count, double latency,
+                                double throughput, unsigned pipelineDepth) {
     auto id = static_cast<unsigned>(nodes_.size());
     nodes_.push_back({id, type, name, count, latency, throughput, pipelineDepth});
     return id;
 }
 
-void HardwareGraph::addEdge(unsigned srcId, unsigned dstId, double latency,
-                             double bandwidth, const std::string& label) {
+void HardwareGraph::addEdge(unsigned srcId, unsigned dstId, double latency, double bandwidth,
+                            const std::string& label) {
     edges_.push_back({srcId, dstId, latency, bandwidth, label});
 }
 
 const HardwareNode* HardwareGraph::getNode(unsigned id) const noexcept {
-    if (id < nodes_.size()) return &nodes_[id];
+    if (id < nodes_.size())
+        return &nodes_[id];
     return nullptr;
 }
 
 std::vector<const HardwareNode*> HardwareGraph::findNodes(ResourceType type) const {
     std::vector<const HardwareNode*> result;
     for (const auto& node : nodes_) {
-        if (node.type == type) result.push_back(&node);
+        if (node.type == type)
+            result.push_back(&node);
     }
     return result;
 }
@@ -224,7 +227,8 @@ std::vector<const HardwareNode*> HardwareGraph::findNodes(ResourceType type) con
 std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) const {
     std::vector<const HardwareEdge*> result;
     for (const auto& edge : edges_) {
-        if (edge.srcId == nodeId) result.push_back(&edge);
+        if (edge.srcId == nodeId)
+            result.push_back(&edge);
     }
     return result;
 }
@@ -233,7 +237,8 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
 
 /// Classify an LLVM instruction into an OpClass.
 [[gnu::hot]] static OpClass classifyOp(const llvm::Instruction* inst) {
-    if (!inst) return OpClass::Other;
+    if (!inst)
+        return OpClass::Other;
 
     switch (inst->getOpcode()) {
     case llvm::Instruction::Add:
@@ -254,7 +259,7 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
 
     case llvm::Instruction::FAdd:
     case llvm::Instruction::FSub:
-    case llvm::Instruction::FNeg:   // bit-flip on sign; uses FP pipeline
+    case llvm::Instruction::FNeg: // bit-flip on sign; uses FP pipeline
         return OpClass::FPArith;
 
     case llvm::Instruction::FMul:
@@ -317,12 +322,13 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
     case llvm::Instruction::PHI:
     case llvm::Instruction::ExtractValue:
     case llvm::Instruction::InsertValue:
-    case llvm::Instruction::Alloca:   // stack allocation done in function prolog
+    case llvm::Instruction::Alloca: // stack allocation done in function prolog
         return OpClass::Phi;
 
     case llvm::Instruction::Call: {
         const auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(inst);
-        if (!ii) return OpClass::Call;
+        if (!ii)
+            return OpClass::Call;
         // Dispatch known intrinsics to the correct execution-unit class so
         // the scheduler assigns them to the right hardware ports.
         switch (ii->getIntrinsicID()) {
@@ -342,8 +348,8 @@ std::vector<const HardwareEdge*> HardwareGraph::getOutEdges(unsigned nodeId) con
         case llvm::Intrinsic::roundeven:
         case llvm::Intrinsic::rint:
         case llvm::Intrinsic::nearbyint:
-        case llvm::Intrinsic::trunc:    // llvm.trunc intrinsic = FP rounding toward zero (VROUNDPD mode 3),
-                                        // NOT the integer-narrowing Trunc opcode (llvm::Instruction::Trunc)
+        case llvm::Intrinsic::trunc: // llvm.trunc intrinsic = FP rounding toward zero (VROUNDPD mode 3),
+                                     // NOT the integer-narrowing Trunc opcode (llvm::Instruction::Trunc)
         case llvm::Intrinsic::fabs:
         case llvm::Intrinsic::copysign:
         case llvm::Intrinsic::minnum:
@@ -387,29 +393,32 @@ unsigned ProgramGraph::addNode(OpClass opClass, llvm::Instruction* inst) {
     node.opClass = opClass;
     node.inst = inst;
     nodes_.push_back(node);
-    if (inst) instToNode_[inst] = id;
+    if (inst)
+        instToNode_[inst] = id;
     return id;
 }
 
-void ProgramGraph::addEdge(unsigned srcId, unsigned dstId, DepType type,
-                            unsigned latency) {
+void ProgramGraph::addEdge(unsigned srcId, unsigned dstId, DepType type, unsigned latency) {
     edges_.push_back({srcId, dstId, type, latency});
 }
 
 const ProgramNode* ProgramGraph::getNode(unsigned id) const {
-    if (id < nodes_.size()) return &nodes_[id];
+    if (id < nodes_.size())
+        return &nodes_[id];
     return nullptr;
 }
 
 ProgramNode* ProgramGraph::getNodeMut(unsigned id) {
-    if (id < nodes_.size()) return &nodes_[id];
+    if (id < nodes_.size())
+        return &nodes_[id];
     return nullptr;
 }
 
 std::vector<unsigned> ProgramGraph::getPredecessors(unsigned nodeId) const {
     std::vector<unsigned> preds;
     for (const auto& e : edges_) {
-        if (e.dstId == nodeId) preds.push_back(e.srcId);
+        if (e.dstId == nodeId)
+            preds.push_back(e.srcId);
     }
     return preds;
 }
@@ -417,7 +426,8 @@ std::vector<unsigned> ProgramGraph::getPredecessors(unsigned nodeId) const {
 std::vector<unsigned> ProgramGraph::getSuccessors(unsigned nodeId) const {
     std::vector<unsigned> succs;
     for (const auto& e : edges_) {
-        if (e.srcId == nodeId) succs.push_back(e.dstId);
+        if (e.srcId == nodeId)
+            succs.push_back(e.dstId);
     }
     return succs;
 }
@@ -437,7 +447,7 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
     }
 
     // Phase 2: Add data-dependency edges based on def-use chains.
-    static const MicroarchProfile kAbstractProfile = []{
+    static const MicroarchProfile kAbstractProfile = [] {
         MicroarchProfile p;
         // Integer division: use 20 cycles for the abstract graph to match the
         // Haswell/Broadwell range; exact values are used by scheduleBasicBlock.
@@ -448,7 +458,8 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             auto consIt = instToNode_.find(&inst);
-            if (consIt == instToNode_.end()) continue;
+            if (consIt == instToNode_.end())
+                continue;
             unsigned consId = consIt->second;
 
             for (unsigned i = 0; i < inst.getNumOperands(); ++i) {
@@ -477,8 +488,7 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
         for (auto& inst : bb) {
             const bool isStore = llvm::isa<llvm::StoreInst>(inst);
             const bool isLoad = llvm::isa<llvm::LoadInst>(inst);
-            const bool isBarrierMem =
-                inst.mayReadOrWriteMemory() && !isLoad && !isStore;
+            const bool isBarrierMem = inst.mayReadOrWriteMemory() && !isLoad && !isStore;
 
             if (isBarrierMem) {
                 // All prior memory ops must complete before a side-effecting op
@@ -559,7 +569,8 @@ void ProgramGraph::buildFromFunction(llvm::Function& func) {
 }
 
 unsigned ProgramGraph::criticalPathLength() const {
-    if (nodes_.empty()) return 0;
+    if (nodes_.empty())
+        return 0;
     const size_t n = nodes_.size();
 
     // Build adjacency list (outgoing edges per node) and in-degree array in
@@ -587,34 +598,39 @@ unsigned ProgramGraph::criticalPathLength() const {
         ready.pop();
         for (auto [v, lat] : succ[u]) {
             unsigned newDist = dist[u] + lat;
-            if (newDist > dist[v]) dist[v] = newDist;
-            if (--inDeg[v] == 0) ready.push(v);
+            if (newDist > dist[v])
+                dist[v] = newDist;
+            if (--inDeg[v] == 0)
+                ready.push(v);
         }
     }
 
     unsigned maxDist = 0;
     for (unsigned d : dist)
-        if (d > maxDist) maxDist = d;
+        if (d > maxDist)
+            maxDist = d;
     return maxDist;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 
-HardwareCostModel::HardwareCostModel(const HardwareGraph& hw,
-                                     const MicroarchProfile& profile)
+HardwareCostModel::HardwareCostModel(const HardwareGraph& hw, const MicroarchProfile& profile)
     : hw_(hw), profile_(profile) {
     // Derive vector width directly from the profile's SIMD width field (bits).
     // The old code used pipelineDepth as a proxy; the profile field is exact.
-    if (profile.vectorWidth >= 512)      vectorWidth_ = 16; // AVX-512
-    else if (profile.vectorWidth >= 256) vectorWidth_ = 8;  // AVX2 / Neon 256
-    else                                 vectorWidth_ = 4;  // SSE / NEON 128
+    if (profile.vectorWidth >= 512)
+        vectorWidth_ = 16; // AVX-512
+    else if (profile.vectorWidth >= 256)
+        vectorWidth_ = 8; // AVX2 / Neon 256
+    else
+        vectorWidth_ = 4; // SSE / NEON 128
 
     // Issue width, cache penalties: read directly from the profile rather than
     // reverse-engineering them from hardware-graph node attributes.
-    issueWidth_          = static_cast<double>(profile.issueWidth);
-    cacheMissL1Penalty_  = static_cast<double>(profile.l1DLatency);
-    cacheMissL2Penalty_  = static_cast<double>(profile.l2Latency);
-    cacheMissL3Penalty_  = static_cast<double>(profile.l3Latency);
+    issueWidth_ = static_cast<double>(profile.issueWidth);
+    cacheMissL1Penalty_ = static_cast<double>(profile.l1DLatency);
+    cacheMissL2Penalty_ = static_cast<double>(profile.l2Latency);
+    cacheMissL3Penalty_ = static_cast<double>(profile.l3Latency);
 }
 
 OpClass HardwareCostModel::classifyInstruction(const llvm::Instruction* inst) const {
@@ -622,20 +638,23 @@ OpClass HardwareCostModel::classifyInstruction(const llvm::Instruction* inst) co
 }
 
 double HardwareCostModel::instructionCost(const llvm::Instruction* inst) const {
-    if (!inst) return 0.0;
+    if (!inst)
+        return 0.0;
     // Delegate to the single authoritative latency function (getOpcodeLatency)
     return static_cast<double>(getOpcodeLatency(inst, profile_));
 }
 
 double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
     const size_t n = pg.nodeCount();
-    if (n == 0) return 0.0;
+    if (n == 0)
+        return 0.0;
 
     // ── 1. Derive port capacities from the hardware graph ───────────────────────
     // Helper: sum the 'count' field of all nodes of a given resource type.
     auto portCapacity = [this](ResourceType rt) -> unsigned {
         unsigned total = 0;
-        for (auto* nd : hw_.findNodes(rt)) total += nd->count;
+        for (auto* nd : hw_.findNodes(rt))
+            total += nd->count;
         return total ? total : 1u;
     };
 
@@ -643,25 +662,25 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
     // efficiently track port availability.  Each group maps to one capacity.
     enum PClass : unsigned {
         PC_IntArith = 0, // IntArith, Shift, Comparison, Conversion
-        PC_IntMul   = 1, // IntMul (subset of ALU ports on most µarchs)
-        PC_Div      = 2, // IntDiv, FPDiv — shares the divider unit
-        PC_FP       = 3, // FPArith, FPMul, FMA
-        PC_Load     = 4, // Load
-        PC_Store    = 5, // Store
-        PC_Branch   = 6, // Branch
-        PC_Free     = 7, // PHI, Other — no port constraint (rename / free)
-        PC_COUNT    = 8
+        PC_IntMul = 1,   // IntMul (subset of ALU ports on most µarchs)
+        PC_Div = 2,      // IntDiv, FPDiv — shares the divider unit
+        PC_FP = 3,       // FPArith, FPMul, FMA
+        PC_Load = 4,     // Load
+        PC_Store = 5,    // Store
+        PC_Branch = 6,   // Branch
+        PC_Free = 7,     // PHI, Other — no port constraint (rename / free)
+        PC_COUNT = 8
     };
 
     const unsigned cap[PC_COUNT] = {
-        portCapacity(ResourceType::IntegerALU),        // PC_IntArith
+        portCapacity(ResourceType::IntegerALU),                    // PC_IntArith
         std::max(1u, portCapacity(ResourceType::IntegerALU) / 2u), // PC_IntMul
-        portCapacity(ResourceType::DividerUnit),       // PC_Div
-        portCapacity(ResourceType::FMAUnit),           // PC_FP
-        portCapacity(ResourceType::LoadUnit),          // PC_Load
-        portCapacity(ResourceType::StoreUnit),         // PC_Store
-        portCapacity(ResourceType::BranchUnit),        // PC_Branch
-        ~0u,                                           // PC_Free (unlimited)
+        portCapacity(ResourceType::DividerUnit),                   // PC_Div
+        portCapacity(ResourceType::FMAUnit),                       // PC_FP
+        portCapacity(ResourceType::LoadUnit),                      // PC_Load
+        portCapacity(ResourceType::StoreUnit),                     // PC_Store
+        portCapacity(ResourceType::BranchUnit),                    // PC_Branch
+        ~0u,                                                       // PC_Free (unlimited)
     };
 
     const unsigned issueWidth = static_cast<unsigned>(issueWidth_);
@@ -672,23 +691,32 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
         case OpClass::IntArith:
         case OpClass::Shift:
         case OpClass::Comparison:
-        case OpClass::Conversion:   return PC_IntArith;
-        case OpClass::IntMul:       return PC_IntMul;
-        case OpClass::IntDiv:       return PC_Div;
+        case OpClass::Conversion:
+            return PC_IntArith;
+        case OpClass::IntMul:
+            return PC_IntMul;
+        case OpClass::IntDiv:
+            return PC_Div;
         case OpClass::FPArith:
         case OpClass::FPMul:
-        case OpClass::FMA:          return PC_FP;
-        case OpClass::FPDiv:        return PC_Div;
-        case OpClass::Load:         return PC_Load;
-        case OpClass::Store:        return PC_Store;
-        case OpClass::Branch:       return PC_Branch;
-        default:                    return PC_Free;
+        case OpClass::FMA:
+            return PC_FP;
+        case OpClass::FPDiv:
+            return PC_Div;
+        case OpClass::Load:
+            return PC_Load;
+        case OpClass::Store:
+            return PC_Store;
+        case OpClass::Branch:
+            return PC_Branch;
+        default:
+            return PC_Free;
         }
     };
 
     // ── 2. Build adjacency lists (O(N+E)) ───────────────────────────────────────
-    std::vector<std::vector<std::pair<unsigned,unsigned>>> succList(n); // (dst, edge_lat)
-    std::vector<std::vector<std::pair<unsigned,unsigned>>> predList(n); // (src, edge_lat)
+    std::vector<std::vector<std::pair<unsigned, unsigned>>> succList(n); // (dst, edge_lat)
+    std::vector<std::vector<std::pair<unsigned, unsigned>>> predList(n); // (src, edge_lat)
     std::vector<unsigned> inDeg(n, 0);
 
     for (const auto& e : pg.edges()) {
@@ -704,9 +732,8 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
     for (unsigned i = 0; i < n; ++i) {
         const ProgramNode* node = pg.getNode(i);
         if (node) {
-            unsigned lat = node->inst
-                ? getOpcodeLatency(node->inst, profile_)
-                : static_cast<unsigned>(std::max(0.0, node->estimatedLatency));
+            unsigned lat = node->inst ? getOpcodeLatency(node->inst, profile_)
+                                      : static_cast<unsigned>(std::max(0.0, node->estimatedLatency));
             nodeLat[i] = lat;
         }
     }
@@ -719,14 +746,16 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
         std::vector<unsigned> deg(inDeg);
         std::queue<unsigned> q;
         for (unsigned i = 0; i < n; ++i)
-            if (deg[i] == 0) q.push(i);
+            if (deg[i] == 0)
+                q.push(i);
         while (!q.empty()) {
             unsigned u = q.front();
             q.pop();
             topo.push_back(u);
             for (auto [v, edgeLat] : succList[u]) {
                 (void)edgeLat;
-                if (--deg[v] == 0) q.push(v);
+                if (--deg[v] == 0)
+                    q.push(v);
             }
         }
         for (auto it = topo.rbegin(); it != topo.rend(); ++it) {
@@ -753,8 +782,7 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
         remainingUsers[i] = static_cast<unsigned>(succList[i].size());
 
     // Lightweight register/rename-pressure model.
-    const unsigned regBudget = std::max(
-        8u, profile_.intRegisters + profile_.vecRegisters + profile_.fpRegisters);
+    const unsigned regBudget = std::max(8u, profile_.intRegisters + profile_.vecRegisters + profile_.fpRegisters);
     unsigned liveValues = 0;
 
     // Track total scheduled instructions; when numScheduled < robSize the ROB
@@ -764,7 +792,8 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
     auto inflightAt = [&](unsigned cycle) -> unsigned {
         unsigned inflight = 0;
         for (unsigned i = 0; i < n; ++i) {
-            if (!isScheduled[i]) continue;
+            if (!isScheduled[i])
+                continue;
             if (scheduledAt[i] <= cycle && completedAt[i] > cycle)
                 ++inflight;
         }
@@ -776,12 +805,14 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
         unsigned id;
     };
     auto readyCmp = [](const ReadyEntry& a, const ReadyEntry& b) {
-        if (a.prio != b.prio) return a.prio < b.prio; // max-heap by priority
+        if (a.prio != b.prio)
+            return a.prio < b.prio; // max-heap by priority
         return a.id > b.id;
     };
     std::priority_queue<ReadyEntry, std::vector<ReadyEntry>, decltype(readyCmp)> ready(readyCmp);
     for (unsigned i = 0; i < n; ++i)
-        if (inDeg[i] == 0) ready.push({priority[i], i});
+        if (inDeg[i] == 0)
+            ready.push({priority[i], i});
 
     unsigned maxCycle = 0;
 
@@ -817,8 +848,7 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
                     continue;
             }
             // Rename/ROB pressure: avoid over-issuing when too many uops are
-            if (robSize > 0 && numScheduled >= robSize &&
-                inflightAt(scheduleCycle) >= robSize)
+            if (robSize > 0 && numScheduled >= robSize && inflightAt(scheduleCycle) >= robSize)
                 continue;
             break; // valid cycle found
         }
@@ -827,25 +857,21 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
         ++issueUsed[scheduleCycle]; // value-initialises to 0 on first access
         if (pc != PC_Free) {
             // try_emplace zero-initialises the array on first insertion.
-            auto& row = portUsed.try_emplace(scheduleCycle,
-                std::array<unsigned, PC_COUNT>{}).first->second;
+            auto& row = portUsed.try_emplace(scheduleCycle, std::array<unsigned, PC_COUNT>{}).first->second;
             ++row[pc];
         }
 
         unsigned freesNow = 0;
         for (const auto& [pred, ignored] : predList[u]) {
             (void)ignored;
-            if (remainingUsers[pred] == 1) ++freesNow;
+            if (remainingUsers[pred] == 1)
+                ++freesNow;
         }
         const bool producesValue = !succList[u].empty();
         const int projectedLiveSigned =
-            static_cast<int>(liveValues) +
-            (producesValue ? 1 : 0) -
-            static_cast<int>(freesNow);
-        const unsigned projectedLive =
-            static_cast<unsigned>(std::max(projectedLiveSigned, 0));
-        const unsigned spillPenalty =
-            (projectedLive > regBudget) ? (projectedLive - regBudget) : 0u;
+            static_cast<int>(liveValues) + (producesValue ? 1 : 0) - static_cast<int>(freesNow);
+        const unsigned projectedLive = static_cast<unsigned>(std::max(projectedLiveSigned, 0));
+        const unsigned spillPenalty = (projectedLive > regBudget) ? (projectedLive - regBudget) : 0u;
 
         scheduledAt[u] = scheduleCycle;
         isScheduled[u] = true;
@@ -859,7 +885,8 @@ double HardwareCostModel::simulateExecution(const ProgramGraph& pg) const {
             if (remainingUsers[pred] > 0 && --remainingUsers[pred] == 0 && liveValues > 0)
                 --liveValues;
         }
-        if (producesValue) ++liveValues;
+        if (producesValue)
+            ++liveValues;
 
         // Release successors whose in-degree drops to zero.
         for (auto& [v, ignored] : succList[u]) {
@@ -883,12 +910,11 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // Integer ALU contention
     auto aluNodes = hw_.findNodes(ResourceType::IntegerALU);
     unsigned aluPorts = 0;
-    for (auto* n : aluNodes) aluPorts += n->count;
+    for (auto* n : aluNodes)
+        aluPorts += n->count;
     if (aluPorts > 0) {
-        unsigned intOps = opCounts[static_cast<int>(OpClass::IntArith)] +
-                          opCounts[static_cast<int>(OpClass::IntMul)] +
-                          opCounts[static_cast<int>(OpClass::Shift)] +
-                          opCounts[static_cast<int>(OpClass::Comparison)];
+        unsigned intOps = opCounts[static_cast<int>(OpClass::IntArith)] + opCounts[static_cast<int>(OpClass::IntMul)] +
+                          opCounts[static_cast<int>(OpClass::Shift)] + opCounts[static_cast<int>(OpClass::Comparison)];
         if (intOps > aluPorts) {
             penalty += static_cast<double>(intOps - aluPorts) * 0.5;
         }
@@ -897,7 +923,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // Load port contention
     auto loadNodes = hw_.findNodes(ResourceType::LoadUnit);
     unsigned loadPorts = 0;
-    for (auto* n : loadNodes) loadPorts += n->count;
+    for (auto* n : loadNodes)
+        loadPorts += n->count;
     if (loadPorts > 0) {
         unsigned loadOps = opCounts[static_cast<int>(OpClass::Load)];
         if (loadOps > loadPorts) {
@@ -915,31 +942,47 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     MicroarchProfile p;
     p.name = "skylake";
     p.isa = ISAFamily::X86_64;
-    p.decodeWidth = 6;       // µop cache delivers 6/cycle; legacy decode 4/cycle
-    p.issueWidth = 6;        // 6 µops dispatched per cycle
-    p.pipelineDepth = 14;    // front-end to retire (from µop cache path)
-    p.intALUs = 4;           // P0, P1, P5, P6
-    p.vecUnits = 3;          // P0, P1, P5 (vector ALU)
-    p.fmaUnits = 2;          // P0, P1
-    p.loadPorts = 2;         // P2, P3
-    p.storePorts = 2;        // P4, P7 (store data)
-    p.branchUnits = 2;       // P0 (branch2), P6 (branch1)
-    p.agus = 2;              // P2, P3 also do AGU
-    p.dividers = 1;          // shared divider on P0
+    p.decodeWidth = 6;    // µop cache delivers 6/cycle; legacy decode 4/cycle
+    p.issueWidth = 6;     // 6 µops dispatched per cycle
+    p.pipelineDepth = 14; // front-end to retire (from µop cache path)
+    p.intALUs = 4;        // P0, P1, P5, P6
+    p.vecUnits = 3;       // P0, P1, P5 (vector ALU)
+    p.fmaUnits = 2;       // P0, P1
+    p.loadPorts = 2;      // P2, P3
+    p.storePorts = 2;     // P4, P7 (store data)
+    p.branchUnits = 2;    // P0 (branch2), P6 (branch1)
+    p.agus = 2;           // P2, P3 also do AGU
+    p.dividers = 1;       // shared divider on P0
     // Skylake: integer multiply on ports P0 and P1 only (2 of the 4 ALU ports).
     p.mulPortCount = 2;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 26;
-    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 14; p.latFMA = 4;
-    p.latLoad = 5; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.25; p.tputIntMul = 1.0;
-    p.tputFPAdd = 0.5; p.tputFPMul = 0.5;
-    p.tputLoad = 0.5; p.tputStore = 1.0;
-    p.l1DSize = 32; p.l1DLatency = 4;   // 4-cycle load-to-use
-    p.l2Size = 256; p.l2Latency = 12;
-    p.l3Size = 8192; p.l3Latency = 42;
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 26;
+    p.latFPAdd = 4;
+    p.latFPMul = 4;
+    p.latFPDiv = 14;
+    p.latFMA = 4;
+    p.latLoad = 5;
+    p.latStore = 5;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.25;
+    p.tputIntMul = 1.0;
+    p.tputFPAdd = 0.5;
+    p.tputFPMul = 0.5;
+    p.tputLoad = 0.5;
+    p.tputStore = 1.0;
+    p.l1DSize = 32;
+    p.l1DLatency = 4; // 4-cycle load-to-use
+    p.l2Size = 256;
+    p.l2Latency = 12;
+    p.l3Size = 8192;
+    p.l3Latency = 42;
     p.cacheLineSize = 64;
     p.vectorWidth = 256; // AVX2
-    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.intRegisters = 16;
+    p.vecRegisters = 16;
+    p.fpRegisters = 16;
     p.branchMispredictPenalty = 15.0;
     p.btbEntries = 4096;
     p.memoryLatency = 200;
@@ -962,8 +1005,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     // L1D bandwidth: 2 load ports × 32 B = 64 B/cycle.
     // L2 bandwidth: ~32 B/cycle.  L3 ~16 B/cycle.  DRAM ~8 B/cycle at 1 GHz.
     p.l1DBandwidthBytesPerCycle = 64;
-    p.l2BandwidthBytesPerCycle  = 32;
-    p.l3BandwidthBytesPerCycle  = 16;
+    p.l2BandwidthBytesPerCycle = 32;
+    p.l3BandwidthBytesPerCycle = 16;
     p.memBandwidthBytesPerCycle = 8;
     // Skylake supports Hyperthreading (SMT2) on desktop and server parts.
     p.hasHyperthreading = true;
@@ -979,29 +1022,45 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.name = "sandybridge";
     p.isa = ISAFamily::X86_64;
     p.decodeWidth = 4;
-    p.issueWidth = 4;           // 4-wide dispatch
+    p.issueWidth = 4; // 4-wide dispatch
     p.pipelineDepth = 14;
-    p.intALUs = 3;              // ports 0, 1, 5 (no port 6 like Skylake)
-    p.vecUnits = 2;             // ports 0 and 1 handle vector ops
-    p.fmaUnits = 0;             // Sandy Bridge has no FMA; introduced in Haswell
-    p.loadPorts = 2;            // ports 2, 3
-    p.storePorts = 1;           // port 4 (data); port 7 (address) counted in agus
+    p.intALUs = 3;    // ports 0, 1, 5 (no port 6 like Skylake)
+    p.vecUnits = 2;   // ports 0 and 1 handle vector ops
+    p.fmaUnits = 0;   // Sandy Bridge has no FMA; introduced in Haswell
+    p.loadPorts = 2;  // ports 2, 3
+    p.storePorts = 1; // port 4 (data); port 7 (address) counted in agus
     p.branchUnits = 1;
     p.agus = 2;
     p.dividers = 1;
-    p.mulPortCount = 1;         // integer multiply: port 1 only
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 22;
-    p.latFPAdd = 5; p.latFPMul = 5; p.latFPDiv = 14; p.latFMA = 0;
-    p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.33; p.tputIntMul = 1.0;
-    p.tputFPAdd = 1.0; p.tputFPMul = 1.0;
-    p.tputLoad = 0.5; p.tputStore = 1.0;
-    p.l1DSize = 32;   p.l1DLatency = 4;
-    p.l2Size = 256;   p.l2Latency = 12;
-    p.l3Size = 8192;  p.l3Latency = 36;
+    p.mulPortCount = 1; // integer multiply: port 1 only
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 22;
+    p.latFPAdd = 5;
+    p.latFPMul = 5;
+    p.latFPDiv = 14;
+    p.latFMA = 0;
+    p.latLoad = 4;
+    p.latStore = 4;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.33;
+    p.tputIntMul = 1.0;
+    p.tputFPAdd = 1.0;
+    p.tputFPMul = 1.0;
+    p.tputLoad = 0.5;
+    p.tputStore = 1.0;
+    p.l1DSize = 32;
+    p.l1DLatency = 4;
+    p.l2Size = 256;
+    p.l2Latency = 12;
+    p.l3Size = 8192;
+    p.l3Latency = 36;
     p.cacheLineSize = 64;
-    p.vectorWidth = 256;        // AVX1 (256-bit SIMD, but FP ops are 2×128-bit)
-    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.vectorWidth = 256; // AVX1 (256-bit SIMD, but FP ops are 2×128-bit)
+    p.intRegisters = 16;
+    p.vecRegisters = 16;
+    p.fpRegisters = 16;
     p.branchMispredictPenalty = 15.0;
     p.btbEntries = 2048;
     p.memoryLatency = 200;
@@ -1015,8 +1074,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 64;
     p.storeBufferEntries = 36;
     p.l1DBandwidthBytesPerCycle = 32; // 1 full-width load port (256-bit AVX split as 2×128)
-    p.l2BandwidthBytesPerCycle  = 16;
-    p.l3BandwidthBytesPerCycle  = 12;
+    p.l2BandwidthBytesPerCycle = 16;
+    p.l3BandwidthBytesPerCycle = 12;
     p.memBandwidthBytesPerCycle = 6;
     p.hasHyperthreading = true;
     // Sandy Bridge: CVTSI2SD = 6 cycles (latFPAdd=5), VADDPD = 5 cycles.
@@ -1046,8 +1105,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 72;
     p.storeBufferEntries = 42;
     p.l1DBandwidthBytesPerCycle = 64;
-    p.l2BandwidthBytesPerCycle  = 32;
-    p.l3BandwidthBytesPerCycle  = 16;
+    p.l2BandwidthBytesPerCycle = 32;
+    p.l3BandwidthBytesPerCycle = 16;
     p.memBandwidthBytesPerCycle = 8;
     p.hasHyperthreading = true;
     return p;
@@ -1058,35 +1117,48 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     MicroarchProfile p;
     p.name = "alderlake";
     p.isa = ISAFamily::X86_64;
-    p.decodeWidth = 6;        // 6-wide decode from µop cache
-    p.issueWidth = 6;         // 6 µops dispatched per cycle
-    p.pipelineDepth = 14;     // similar depth to Skylake, improved prediction
-    p.intALUs = 5;            // 5 integer execution ports
-    p.vecUnits = 3;           // 3 vector ALU ports
-    p.fmaUnits = 2;           // 2 FMA units
-    p.loadPorts = 2;          // 2 load ports
-    p.storePorts = 2;         // 2 store data ports
+    p.decodeWidth = 6;    // 6-wide decode from µop cache
+    p.issueWidth = 6;     // 6 µops dispatched per cycle
+    p.pipelineDepth = 14; // similar depth to Skylake, improved prediction
+    p.intALUs = 5;        // 5 integer execution ports
+    p.vecUnits = 3;       // 3 vector ALU ports
+    p.fmaUnits = 2;       // 2 FMA units
+    p.loadPorts = 2;      // 2 load ports
+    p.storePorts = 2;     // 2 store data ports
     p.branchUnits = 2;
-    p.agus = 3;               // 3 AGU ports (2 load + 1 store address)
+    p.agus = 3; // 3 AGU ports (2 load + 1 store address)
     p.dividers = 1;
     p.mulPortCount = 2;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 23;
-    p.latFPAdd = 3; p.latFPMul = 4; p.latFPDiv = 11; p.latFMA = 4;
-    p.latLoad = 5; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.20; p.tputIntMul = 1.0;
-    p.tputFPAdd = 0.5; p.tputFPMul = 0.5;
-    p.tputLoad = 0.5; p.tputStore = 1.0;
-    p.l1DSize = 48;           // 48 KB L1D
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 23;
+    p.latFPAdd = 3;
+    p.latFPMul = 4;
+    p.latFPDiv = 11;
+    p.latFMA = 4;
+    p.latLoad = 5;
+    p.latStore = 5;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.20;
+    p.tputIntMul = 1.0;
+    p.tputFPAdd = 0.5;
+    p.tputFPMul = 0.5;
+    p.tputLoad = 0.5;
+    p.tputStore = 1.0;
+    p.l1DSize = 48; // 48 KB L1D
     p.l1DLatency = 5;
-    p.l2Size = 1280;          // 1.25 MB L2 per P-core
+    p.l2Size = 1280; // 1.25 MB L2 per P-core
     p.l2Latency = 12;
-    p.l3Size = 30720;         // 30 MB shared L3
+    p.l3Size = 30720; // 30 MB shared L3
     p.l3Latency = 44;
     p.cacheLineSize = 64;
-    p.vectorWidth = 256;      // AVX2
-    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.vectorWidth = 256; // AVX2
+    p.intRegisters = 16;
+    p.vecRegisters = 16;
+    p.fpRegisters = 16;
     p.branchMispredictPenalty = 14.0;
-    p.btbEntries = 12288;     // much larger BTB
+    p.btbEntries = 12288; // much larger BTB
     p.memoryLatency = 180;
     p.robSize = 256;
     // Alder Lake store-to-load forwarding: 4-5 cycles (L1D latency = 5 cycles;
@@ -1099,8 +1171,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 192;
     p.storeBufferEntries = 114;
     p.l1DBandwidthBytesPerCycle = 96; // 2 load ports × 32 B + partial store bandwidth
-    p.l2BandwidthBytesPerCycle  = 48;
-    p.l3BandwidthBytesPerCycle  = 20;
+    p.l2BandwidthBytesPerCycle = 48;
+    p.l3BandwidthBytesPerCycle = 20;
     p.memBandwidthBytesPerCycle = 10;
     p.hasHyperthreading = true; // Golden Cove P-cores support HT
     return p;
@@ -1111,31 +1183,47 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     MicroarchProfile p;
     p.name = "znver4";
     p.isa = ISAFamily::X86_64;
-    p.decodeWidth = 4;        // 4-wide x86 decode
-    p.issueWidth = 6;         // 6-wide dispatch to backend
-    p.pipelineDepth = 19;     // integer pipeline ~19 stages (fetch to retire)
-    p.intALUs = 4;            // 4 integer ALU pipes
-    p.vecUnits = 2;           // 2× 256-bit FP/SIMD pipes
-    p.fmaUnits = 2;           // 2 FMA units
-    p.loadPorts = 3;          // 3 load/store AGU units
-    p.storePorts = 2;         // 2 store data units
+    p.decodeWidth = 4;    // 4-wide x86 decode
+    p.issueWidth = 6;     // 6-wide dispatch to backend
+    p.pipelineDepth = 19; // integer pipeline ~19 stages (fetch to retire)
+    p.intALUs = 4;        // 4 integer ALU pipes
+    p.vecUnits = 2;       // 2× 256-bit FP/SIMD pipes
+    p.fmaUnits = 2;       // 2 FMA units
+    p.loadPorts = 3;      // 3 load/store AGU units
+    p.storePorts = 2;     // 2 store data units
     p.branchUnits = 1;
     p.agus = 3;
     p.dividers = 1;
     // Zen 4: integer multiply on 2 of the 4 integer execution pipes.
     p.mulPortCount = 2;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 17;
-    p.latFPAdd = 3; p.latFPMul = 3; p.latFPDiv = 13; p.latFMA = 4;
-    p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.25; p.tputIntMul = 0.5;
-    p.tputFPAdd = 0.5; p.tputFPMul = 0.5;
-    p.tputLoad = 0.33; p.tputStore = 0.5;
-    p.l1DSize = 32; p.l1DLatency = 4;
-    p.l2Size = 1024; p.l2Latency = 12;
-    p.l3Size = 32768; p.l3Latency = 50;
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 17;
+    p.latFPAdd = 3;
+    p.latFPMul = 3;
+    p.latFPDiv = 13;
+    p.latFMA = 4;
+    p.latLoad = 4;
+    p.latStore = 4;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.25;
+    p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.5;
+    p.tputFPMul = 0.5;
+    p.tputLoad = 0.33;
+    p.tputStore = 0.5;
+    p.l1DSize = 32;
+    p.l1DLatency = 4;
+    p.l2Size = 1024;
+    p.l2Latency = 12;
+    p.l3Size = 32768;
+    p.l3Latency = 50;
     p.cacheLineSize = 64;
     p.vectorWidth = 256; // AVX2 natively (AVX-512 double-pumped from 256-bit)
-    p.intRegisters = 16; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.intRegisters = 16;
+    p.vecRegisters = 32;
+    p.fpRegisters = 32;
     p.branchMispredictPenalty = 13.0;
     p.btbEntries = 6144;
     p.memoryLatency = 180;
@@ -1149,8 +1237,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 88;
     p.storeBufferEntries = 64;
     p.l1DBandwidthBytesPerCycle = 96; // 3 AGU × 32 B
-    p.l2BandwidthBytesPerCycle  = 48;
-    p.l3BandwidthBytesPerCycle  = 24;
+    p.l2BandwidthBytesPerCycle = 48;
+    p.l3BandwidthBytesPerCycle = 24;
     p.memBandwidthBytesPerCycle = 12;
     p.hasHyperthreading = false; // Zen 4 desktop: SMT disabled by default; server enables it
     // Zen 4: VCVTSI2SD = 4 cycles, VADDPD = 3 cycles → +1 for CVT bypass.
@@ -1163,16 +1251,16 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 [[gnu::cold]] static MicroarchProfile zen3Profile() {
     MicroarchProfile p = zen4Profile();
     p.name = "znver3";
-    p.pipelineDepth = 19;     // similar pipeline depth to Zen 4
+    p.pipelineDepth = 19; // similar pipeline depth to Zen 4
     p.loadPorts = 3;
     p.storePorts = 2;
     p.latIntDiv = 18;
     p.latFPDiv = 15;
-    p.l2Size = 512;           // 512 KB L2 per core (vs 1 MB on Zen 4)
+    p.l2Size = 512; // 512 KB L2 per core (vs 1 MB on Zen 4)
     p.l3Size = 32768;
     p.l3Latency = 46;
     p.vectorWidth = 256;
-    p.vecRegisters = 16;      // no AVX-512 support
+    p.vecRegisters = 16; // no AVX-512 support
     p.fpRegisters = 16;
     p.robSize = 256;
     return p;
@@ -1196,18 +1284,34 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.dividers = 2;
     // Apple M1: multiply available on 4 of the 6 integer execution ports.
     p.mulPortCount = 4;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 10;
-    p.latFPAdd = 3; p.latFPMul = 3; p.latFPDiv = 10; p.latFMA = 4;
-    p.latLoad = 3; p.latStore = 3; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.17; p.tputIntMul = 0.5;
-    p.tputFPAdd = 0.25; p.tputFPMul = 0.25;
-    p.tputLoad = 0.33; p.tputStore = 0.5;
-    p.l1DSize = 128; p.l1DLatency = 3;
-    p.l2Size = 4096; p.l2Latency = 12;
-    p.l3Size = 16384; p.l3Latency = 36;
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 10;
+    p.latFPAdd = 3;
+    p.latFPMul = 3;
+    p.latFPDiv = 10;
+    p.latFMA = 4;
+    p.latLoad = 3;
+    p.latStore = 3;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.17;
+    p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.25;
+    p.tputFPMul = 0.25;
+    p.tputLoad = 0.33;
+    p.tputStore = 0.5;
+    p.l1DSize = 128;
+    p.l1DLatency = 3;
+    p.l2Size = 4096;
+    p.l2Latency = 12;
+    p.l3Size = 16384;
+    p.l3Latency = 36;
     p.cacheLineSize = 128; // Apple uses 128-byte cache lines
-    p.vectorWidth = 128; // NEON (128-bit)
-    p.intRegisters = 31; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.vectorWidth = 128;   // NEON (128-bit)
+    p.intRegisters = 31;
+    p.vecRegisters = 32;
+    p.fpRegisters = 32;
     p.branchMispredictPenalty = 12.0;
     p.btbEntries = 7168;
     p.memoryLatency = 120;
@@ -1222,10 +1326,10 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 320;
     p.storeBufferEntries = 168;
     p.l1DBandwidthBytesPerCycle = 192; // 3 wide load paths × 16 B NEON (AMX aside)
-    p.l2BandwidthBytesPerCycle  = 96;
-    p.l3BandwidthBytesPerCycle  = 48;
+    p.l2BandwidthBytesPerCycle = 96;
+    p.l3BandwidthBytesPerCycle = 48;
     p.memBandwidthBytesPerCycle = 32; // LPDDR5 ~32 GB/s / 3.2 GHz ≈ 10 B/cyc; rough
-    p.hasHyperthreading = false; // Apple Silicon: no SMT
+    p.hasHyperthreading = false;      // Apple Silicon: no SMT
     return p;
 }
 
@@ -1247,18 +1351,34 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.dividers = 2;
     // Neoverse V2: multiply available on 4 of the 6 integer ALU pipes.
     p.mulPortCount = 4;
-    p.latIntAdd = 1; p.latIntMul = 2; p.latIntDiv = 12;
-    p.latFPAdd = 2; p.latFPMul = 3; p.latFPDiv = 10; p.latFMA = 4;
-    p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.17; p.tputIntMul = 0.5;
-    p.tputFPAdd = 0.25; p.tputFPMul = 0.25;
-    p.tputLoad = 0.33; p.tputStore = 0.5;
-    p.l1DSize = 64; p.l1DLatency = 4;
-    p.l2Size = 1024; p.l2Latency = 11;
-    p.l3Size = 32768; p.l3Latency = 38;
+    p.latIntAdd = 1;
+    p.latIntMul = 2;
+    p.latIntDiv = 12;
+    p.latFPAdd = 2;
+    p.latFPMul = 3;
+    p.latFPDiv = 10;
+    p.latFMA = 4;
+    p.latLoad = 4;
+    p.latStore = 4;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.17;
+    p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.25;
+    p.tputFPMul = 0.25;
+    p.tputLoad = 0.33;
+    p.tputStore = 0.5;
+    p.l1DSize = 64;
+    p.l1DLatency = 4;
+    p.l2Size = 1024;
+    p.l2Latency = 11;
+    p.l3Size = 32768;
+    p.l3Latency = 38;
     p.cacheLineSize = 64;
     p.vectorWidth = 256; // SVE2 at 256-bit
-    p.intRegisters = 31; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.intRegisters = 31;
+    p.vecRegisters = 32;
+    p.fpRegisters = 32;
     p.branchMispredictPenalty = 11.0;
     p.btbEntries = 8192;
     p.memoryLatency = 150;
@@ -1272,8 +1392,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 128;
     p.storeBufferEntries = 72;
     p.l1DBandwidthBytesPerCycle = 48; // 3 load paths × 16 B
-    p.l2BandwidthBytesPerCycle  = 32;
-    p.l3BandwidthBytesPerCycle  = 16;
+    p.l2BandwidthBytesPerCycle = 32;
+    p.l3BandwidthBytesPerCycle = 16;
     p.memBandwidthBytesPerCycle = 10;
     p.hasHyperthreading = false; // Neoverse V2: no SMT
     return p;
@@ -1311,18 +1431,34 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.branchUnits = 1;
     p.agus = 1;
     p.dividers = 1;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 20;
-    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 18; p.latFMA = 5;
-    p.latLoad = 3; p.latStore = 3; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.5; p.tputIntMul = 1.0;
-    p.tputFPAdd = 1.0; p.tputFPMul = 1.0;
-    p.tputLoad = 1.0; p.tputStore = 1.0;
-    p.l1DSize = 32; p.l1DLatency = 3;
-    p.l2Size = 512; p.l2Latency = 10;
-    p.l3Size = 2048; p.l3Latency = 30;
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 20;
+    p.latFPAdd = 4;
+    p.latFPMul = 4;
+    p.latFPDiv = 18;
+    p.latFMA = 5;
+    p.latLoad = 3;
+    p.latStore = 3;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.5;
+    p.tputIntMul = 1.0;
+    p.tputFPAdd = 1.0;
+    p.tputFPMul = 1.0;
+    p.tputLoad = 1.0;
+    p.tputStore = 1.0;
+    p.l1DSize = 32;
+    p.l1DLatency = 3;
+    p.l2Size = 512;
+    p.l2Latency = 10;
+    p.l3Size = 2048;
+    p.l3Latency = 30;
     p.cacheLineSize = 64;
     p.vectorWidth = 128; // RVV at 128-bit VLEN
-    p.intRegisters = 31; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.intRegisters = 31;
+    p.vecRegisters = 32;
+    p.fpRegisters = 32;
     p.branchMispredictPenalty = 6.0;
     p.btbEntries = 512;
     p.memoryLatency = 200;
@@ -1336,8 +1472,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 8;
     p.storeBufferEntries = 8;
     p.l1DBandwidthBytesPerCycle = 8;
-    p.l2BandwidthBytesPerCycle  = 8;
-    p.l3BandwidthBytesPerCycle  = 6;
+    p.l2BandwidthBytesPerCycle = 8;
+    p.l3BandwidthBytesPerCycle = 6;
     p.memBandwidthBytesPerCycle = 4;
     p.hasHyperthreading = false;
     return p;
@@ -1363,32 +1499,47 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.isa = ISAFamily::AArch64;
     p.decodeWidth = 8;
     p.issueWidth = 8;
-    p.pipelineDepth = 13;      // Neoverse V1 pipeline
+    p.pipelineDepth = 13; // Neoverse V1 pipeline
     p.intALUs = 6;
-    p.vecUnits = 4;            // 4× 128-bit NEON / 2× 256-bit SVE
+    p.vecUnits = 4; // 4× 128-bit NEON / 2× 256-bit SVE
     p.fmaUnits = 4;
     p.loadPorts = 3;
     p.storePorts = 2;
     p.branchUnits = 2;
     p.agus = 3;
     p.dividers = 2;
-    p.mulPortCount = 4;        // multiply on 4 of 6 integer pipes
-    p.latIntAdd = 1; p.latIntMul = 2; p.latIntDiv = 12;
-    p.latFPAdd = 2; p.latFPMul = 3; p.latFPDiv = 10; p.latFMA = 4;
-    p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.17;       // 6 ALUs → ~6/cycle
+    p.mulPortCount = 4; // multiply on 4 of 6 integer pipes
+    p.latIntAdd = 1;
+    p.latIntMul = 2;
+    p.latIntDiv = 12;
+    p.latFPAdd = 2;
+    p.latFPMul = 3;
+    p.latFPDiv = 10;
+    p.latFMA = 4;
+    p.latLoad = 4;
+    p.latStore = 4;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.17; // 6 ALUs → ~6/cycle
     p.tputIntMul = 0.5;
-    p.tputFPAdd = 0.25; p.tputFPMul = 0.25;
-    p.tputLoad = 0.33; p.tputStore = 0.5;
-    p.l1DSize = 64; p.l1DLatency = 4;
-    p.l2Size = 1024; p.l2Latency = 11;
-    p.l3Size = 32768; p.l3Latency = 40;
+    p.tputFPAdd = 0.25;
+    p.tputFPMul = 0.25;
+    p.tputLoad = 0.33;
+    p.tputStore = 0.5;
+    p.l1DSize = 64;
+    p.l1DLatency = 4;
+    p.l2Size = 1024;
+    p.l2Latency = 11;
+    p.l3Size = 32768;
+    p.l3Latency = 40;
     p.cacheLineSize = 64;
-    p.vectorWidth = 256;       // SVE at 256-bit
-    p.intRegisters = 31; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.vectorWidth = 256; // SVE at 256-bit
+    p.intRegisters = 31;
+    p.vecRegisters = 32;
+    p.fpRegisters = 32;
     p.branchMispredictPenalty = 11.0;
     p.btbEntries = 8192;
-    p.memoryLatency = 140;     // DDR5 latency
+    p.memoryLatency = 140; // DDR5 latency
     p.robSize = 256;
     // Graviton3 (Neoverse V1): store-to-load forwarding = 4 cycles.
     p.latStoLForward = 4;
@@ -1399,8 +1550,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 120;
     p.storeBufferEntries = 64;
     p.l1DBandwidthBytesPerCycle = 48; // 3 load pipes × 16 B
-    p.l2BandwidthBytesPerCycle  = 32;
-    p.l3BandwidthBytesPerCycle  = 18;
+    p.l2BandwidthBytesPerCycle = 32;
+    p.l3BandwidthBytesPerCycle = 18;
     p.memBandwidthBytesPerCycle = 12; // DDR5
     p.hasHyperthreading = false;
     return p;
@@ -1411,9 +1562,9 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
 [[gnu::cold]] static MicroarchProfile graviton4Profile() {
     MicroarchProfile p = neoverseV2Profile();
     p.name = "graviton4";
-    p.l2Size = 2048;           // 2 MB L2 per core
-    p.l3Size = 36864;          // 36 MB shared L3
-    p.memoryLatency = 130;     // DDR5-5600
+    p.l2Size = 2048;       // 2 MB L2 per core
+    p.l3Size = 36864;      // 36 MB shared L3
+    p.memoryLatency = 130; // DDR5-5600
     p.robSize = 256;
     return p;
 }
@@ -1424,36 +1575,49 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     MicroarchProfile p;
     p.name = "lunar-lake";
     p.isa = ISAFamily::X86_64;
-    p.decodeWidth = 8;         // 8-wide decode
-    p.issueWidth = 8;          // 8-wide dispatch
+    p.decodeWidth = 8; // 8-wide decode
+    p.issueWidth = 8;  // 8-wide dispatch
     p.pipelineDepth = 14;
-    p.intALUs = 6;             // 6 integer execution ports
-    p.vecUnits = 3;            // 3 vector ALU ports
+    p.intALUs = 6;  // 6 integer execution ports
+    p.vecUnits = 3; // 3 vector ALU ports
     p.fmaUnits = 2;
-    p.loadPorts = 3;           // 3 load ports
+    p.loadPorts = 3; // 3 load ports
     p.storePorts = 2;
     p.branchUnits = 2;
     p.agus = 3;
     p.dividers = 1;
     p.mulPortCount = 2;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 20;
-    p.latFPAdd = 3; p.latFPMul = 4; p.latFPDiv = 10; p.latFMA = 4;
-    p.latLoad = 5; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.17;      // 6 ALUs → ~6/cycle
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 20;
+    p.latFPAdd = 3;
+    p.latFPMul = 4;
+    p.latFPDiv = 10;
+    p.latFMA = 4;
+    p.latLoad = 5;
+    p.latStore = 5;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.17; // 6 ALUs → ~6/cycle
     p.tputIntMul = 0.5;
-    p.tputFPAdd = 0.5; p.tputFPMul = 0.5;
-    p.tputLoad = 0.33; p.tputStore = 0.5;
-    p.l1DSize = 48; p.l1DLatency = 5;
-    p.l2Size = 2560;           // 2.5 MB L2 per P-core
+    p.tputFPAdd = 0.5;
+    p.tputFPMul = 0.5;
+    p.tputLoad = 0.33;
+    p.tputStore = 0.5;
+    p.l1DSize = 48;
+    p.l1DLatency = 5;
+    p.l2Size = 2560; // 2.5 MB L2 per P-core
     p.l2Latency = 12;
-    p.l3Size = 12288;          // 12 MB shared L3
+    p.l3Size = 12288; // 12 MB shared L3
     p.l3Latency = 38;
     p.cacheLineSize = 64;
-    p.vectorWidth = 256;       // AVX2
-    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.vectorWidth = 256; // AVX2
+    p.intRegisters = 16;
+    p.vecRegisters = 16;
+    p.fpRegisters = 16;
     p.branchMispredictPenalty = 13.0;
-    p.btbEntries = 16384;      // larger BTB
-    p.memoryLatency = 170;     // LPDDR5x
+    p.btbEntries = 16384;  // larger BTB
+    p.memoryLatency = 170; // LPDDR5x
     p.robSize = 256;
     // Lion Cove: store-to-load forwarding = 4 cycles (store buffer bypass).
     p.latStoLForward = 4;
@@ -1464,8 +1628,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 256;
     p.storeBufferEntries = 120;
     p.l1DBandwidthBytesPerCycle = 96; // 3 load ports × 32 B
-    p.l2BandwidthBytesPerCycle  = 48;
-    p.l3BandwidthBytesPerCycle  = 20;
+    p.l2BandwidthBytesPerCycle = 48;
+    p.l3BandwidthBytesPerCycle = 20;
     p.memBandwidthBytesPerCycle = 10;
     p.hasHyperthreading = false; // Lunar Lake: no Hyperthreading on Lion Cove
     // Lunar Lake (Lion Cove): CVTSI2SD = latFPAdd+1 (x86 CVT bypass cycle).
@@ -1478,31 +1642,46 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     MicroarchProfile p;
     p.name = "znver5";
     p.isa = ISAFamily::X86_64;
-    p.decodeWidth = 4;         // x86 decode still 4-wide
-    p.issueWidth = 8;          // 8-wide dispatch to backend
-    p.pipelineDepth = 18;      // slightly shorter than Zen 4
-    p.intALUs = 6;             // 6 integer ALU pipes (up from 4)
-    p.vecUnits = 4;            // 4× 256-bit SIMD pipes (up from 2)
-    p.fmaUnits = 4;            // 4 FMA units (up from 2)
-    p.loadPorts = 4;           // 4 load/store AGU units (up from 3)
+    p.decodeWidth = 4;    // x86 decode still 4-wide
+    p.issueWidth = 8;     // 8-wide dispatch to backend
+    p.pipelineDepth = 18; // slightly shorter than Zen 4
+    p.intALUs = 6;        // 6 integer ALU pipes (up from 4)
+    p.vecUnits = 4;       // 4× 256-bit SIMD pipes (up from 2)
+    p.fmaUnits = 4;       // 4 FMA units (up from 2)
+    p.loadPorts = 4;      // 4 load/store AGU units (up from 3)
     p.storePorts = 2;
-    p.branchUnits = 2;         // 2 branch units (up from 1)
+    p.branchUnits = 2; // 2 branch units (up from 1)
     p.agus = 4;
     p.dividers = 1;
     p.mulPortCount = 2;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 15;
-    p.latFPAdd = 3; p.latFPMul = 3; p.latFPDiv = 12; p.latFMA = 4;
-    p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.17;      // 6 ALUs
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 15;
+    p.latFPAdd = 3;
+    p.latFPMul = 3;
+    p.latFPDiv = 12;
+    p.latFMA = 4;
+    p.latLoad = 4;
+    p.latStore = 4;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.17; // 6 ALUs
     p.tputIntMul = 0.5;
-    p.tputFPAdd = 0.25; p.tputFPMul = 0.25;
-    p.tputLoad = 0.25; p.tputStore = 0.5;
-    p.l1DSize = 48; p.l1DLatency = 4;
-    p.l2Size = 1024; p.l2Latency = 12;
-    p.l3Size = 32768; p.l3Latency = 45;
+    p.tputFPAdd = 0.25;
+    p.tputFPMul = 0.25;
+    p.tputLoad = 0.25;
+    p.tputStore = 0.5;
+    p.l1DSize = 48;
+    p.l1DLatency = 4;
+    p.l2Size = 1024;
+    p.l2Latency = 12;
+    p.l3Size = 32768;
+    p.l3Latency = 45;
     p.cacheLineSize = 64;
-    p.vectorWidth = 512;       // AVX-512 native (not double-pumped)
-    p.intRegisters = 16; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.vectorWidth = 512; // AVX-512 native (not double-pumped)
+    p.intRegisters = 16;
+    p.vecRegisters = 32;
+    p.fpRegisters = 32;
     p.branchMispredictPenalty = 12.0;
     p.btbEntries = 8192;
     p.memoryLatency = 170;
@@ -1518,8 +1697,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 128;
     p.storeBufferEntries = 80;
     p.l1DBandwidthBytesPerCycle = 128; // 4 load ports × 32 B
-    p.l2BandwidthBytesPerCycle  = 64;
-    p.l3BandwidthBytesPerCycle  = 32;
+    p.l2BandwidthBytesPerCycle = 64;
+    p.l3BandwidthBytesPerCycle = 32;
     p.memBandwidthBytesPerCycle = 16;
     p.hasHyperthreading = false;
     // Zen 5: VCVTSI2SD = latFPAdd+1 cycles (x86 CVT bypass path).
@@ -1532,38 +1711,50 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     MicroarchProfile p;
     p.name = "sapphirerapids";
     p.isa = ISAFamily::X86_64;
-    p.decodeWidth = 6;         // µop cache delivers 6/cycle (MITE decoder 4)
-    p.issueWidth = 6;          // 6 µops dispatched per cycle (same as Skylake)
+    p.decodeWidth = 6; // µop cache delivers 6/cycle (MITE decoder 4)
+    p.issueWidth = 6;  // 6 µops dispatched per cycle (same as Skylake)
     p.pipelineDepth = 14;
-    p.intALUs = 5;             // ports 0,1,5,6,10 (5 integer execution ports)
-    p.vecUnits = 3;            // ports 0,1,5 with native 512-bit EVEX width
-    p.fmaUnits = 2;            // ports 0 and 1
-    p.loadPorts = 3;           // ports 2,3,8 (all three with AGU)
-    p.storePorts = 3;          // ports 4,7,9 (incl. store-address port 9)
+    p.intALUs = 5;    // ports 0,1,5,6,10 (5 integer execution ports)
+    p.vecUnits = 3;   // ports 0,1,5 with native 512-bit EVEX width
+    p.fmaUnits = 2;   // ports 0 and 1
+    p.loadPorts = 3;  // ports 2,3,8 (all three with AGU)
+    p.storePorts = 3; // ports 4,7,9 (incl. store-address port 9)
     p.branchUnits = 2;
-    p.agus = 5;                // 3 load AGUs + 2 store-address AGUs
+    p.agus = 5; // 3 load AGUs + 2 store-address AGUs
     p.dividers = 1;
     p.mulPortCount = 2;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 18;
-    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 15; p.latFMA = 4;
-    p.latLoad = 5; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.20;       // 5 integer ports → ~5/cycle
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 18;
+    p.latFPAdd = 4;
+    p.latFPMul = 4;
+    p.latFPDiv = 15;
+    p.latFMA = 4;
+    p.latLoad = 5;
+    p.latStore = 5;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.20; // 5 integer ports → ~5/cycle
     p.tputIntMul = 0.5;
-    p.tputFPAdd = 0.33; p.tputFPMul = 0.33;
-    p.tputLoad = 0.33; p.tputStore = 0.33;
-    p.l1DSize = 48;            // 48 KB L1D (same as Ice Lake)
+    p.tputFPAdd = 0.33;
+    p.tputFPMul = 0.33;
+    p.tputLoad = 0.33;
+    p.tputStore = 0.33;
+    p.l1DSize = 48; // 48 KB L1D (same as Ice Lake)
     p.l1DLatency = 5;
-    p.l2Size = 2048;           // 2 MB L2 per core
+    p.l2Size = 2048; // 2 MB L2 per core
     p.l2Latency = 14;
-    p.l3Size = 61440;          // up to 60 MB shared L3
-    p.l3Latency = 52;          // larger L3 → higher latency
+    p.l3Size = 61440; // up to 60 MB shared L3
+    p.l3Latency = 52; // larger L3 → higher latency
     p.cacheLineSize = 64;
-    p.vectorWidth = 512;       // Native AVX-512, not double-pumped
-    p.intRegisters = 16; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.vectorWidth = 512; // Native AVX-512, not double-pumped
+    p.intRegisters = 16;
+    p.vecRegisters = 32;
+    p.fpRegisters = 32;
     p.branchMispredictPenalty = 15.0;
     p.btbEntries = 12288;
     p.memoryLatency = 200;
-    p.robSize = 512;           // Doubled from Skylake's 224
+    p.robSize = 512; // Doubled from Skylake's 224
     // Sapphire Rapids: store-to-load forwarding ≈ 4 cycles (store buffer bypass),
     // shorter than the full 5-cycle L1D latency.
     p.latStoLForward = 4;
@@ -1576,8 +1767,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 192;
     p.storeBufferEntries = 128;
     p.l1DBandwidthBytesPerCycle = 96; // 3 load ports × 32 B
-    p.l2BandwidthBytesPerCycle  = 64;
-    p.l3BandwidthBytesPerCycle  = 32;
+    p.l2BandwidthBytesPerCycle = 64;
+    p.l3BandwidthBytesPerCycle = 32;
     p.memBandwidthBytesPerCycle = 14;
     p.hasHyperthreading = true; // Sapphire Rapids server: HT enabled
     // Sapphire Rapids: CVTSI2SD = latFPAdd+1 (x86 integer-to-FP bypass path).
@@ -1591,34 +1782,50 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.name = "apple-m2";
     p.isa = ISAFamily::AArch64;
     p.decodeWidth = 8;
-    p.issueWidth = 8;           // 8-wide OoO dispatch (up from 6 on M1)
+    p.issueWidth = 8; // 8-wide OoO dispatch (up from 6 on M1)
     p.pipelineDepth = 13;
-    p.intALUs = 6;              // 6 integer pipes (up from 4 on M1)
-    p.vecUnits = 4;             // 4× 128-bit NEON/FP units (up from 3)
-    p.fmaUnits = 4;             // 4 FMA units (up from 3 on M1)
-    p.loadPorts = 3;            // 3 load pipes (up from 2)
+    p.intALUs = 6;   // 6 integer pipes (up from 4 on M1)
+    p.vecUnits = 4;  // 4× 128-bit NEON/FP units (up from 3)
+    p.fmaUnits = 4;  // 4 FMA units (up from 3 on M1)
+    p.loadPorts = 3; // 3 load pipes (up from 2)
     p.storePorts = 2;
     p.branchUnits = 2;
     p.agus = 3;
     p.dividers = 2;
     p.mulPortCount = 4;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 12;
-    p.latFPAdd = 3; p.latFPMul = 3; p.latFPDiv = 9; p.latFMA = 3;
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 12;
+    p.latFPAdd = 3;
+    p.latFPMul = 3;
+    p.latFPDiv = 9;
+    p.latFMA = 3;
     // M2 L1D: 128 KB; L2: 16 MB shared with E-cores; load latency 3 cycles.
-    p.latLoad = 3; p.latStore = 3; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.17; p.tputIntMul = 0.25;
-    p.tputFPAdd = 0.25; p.tputFPMul = 0.25;
-    p.tputLoad = 0.33; p.tputStore = 0.5;
-    p.l1DSize = 128; p.l1DLatency = 3;
-    p.l2Size = 16384; p.l2Latency = 8;
-    p.l3Size = 0;    p.l3Latency = 12;  // SLC (System Level Cache) as L3 proxy
-    p.cacheLineSize = 128;              // Apple Silicon uses 128-byte cache lines
-    p.vectorWidth = 128;                // NEON 128-bit (AMX for matrix, separate)
-    p.intRegisters = 30; p.vecRegisters = 32; p.fpRegisters = 32;
-    p.branchMispredictPenalty = 11.0;   // deep OoO pipeline, good predictor
+    p.latLoad = 3;
+    p.latStore = 3;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.17;
+    p.tputIntMul = 0.25;
+    p.tputFPAdd = 0.25;
+    p.tputFPMul = 0.25;
+    p.tputLoad = 0.33;
+    p.tputStore = 0.5;
+    p.l1DSize = 128;
+    p.l1DLatency = 3;
+    p.l2Size = 16384;
+    p.l2Latency = 8;
+    p.l3Size = 0;
+    p.l3Latency = 12;      // SLC (System Level Cache) as L3 proxy
+    p.cacheLineSize = 128; // Apple Silicon uses 128-byte cache lines
+    p.vectorWidth = 128;   // NEON 128-bit (AMX for matrix, separate)
+    p.intRegisters = 30;
+    p.vecRegisters = 32;
+    p.fpRegisters = 32;
+    p.branchMispredictPenalty = 11.0; // deep OoO pipeline, good predictor
     p.btbEntries = 16384;
-    p.memoryLatency = 100;              // LPDDR5 — lower latency than x86 DRAM
-    p.robSize = 250;                    // Larger ROB than M1 (M1≈192)
+    p.memoryLatency = 100; // LPDDR5 — lower latency than x86 DRAM
+    p.robSize = 250;       // Larger ROB than M1 (M1≈192)
     // M2 store-to-load forwarding: 4 cycles (same as L1D hit).
     // Store buffer address comparison adds 1 cycle vs raw load → 4 > latStore=3.
     p.latStoLForward = 4;
@@ -1629,8 +1836,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 320;
     p.storeBufferEntries = 168;
     p.l1DBandwidthBytesPerCycle = 192;
-    p.l2BandwidthBytesPerCycle  = 96;
-    p.l3BandwidthBytesPerCycle  = 48;
+    p.l2BandwidthBytesPerCycle = 96;
+    p.l3BandwidthBytesPerCycle = 48;
     p.memBandwidthBytesPerCycle = 32;
     p.hasHyperthreading = false;
     return p;
@@ -1641,44 +1848,60 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     MicroarchProfile p;
     p.name = "arrow-lake";
     p.isa = ISAFamily::X86_64;
-    p.decodeWidth = 6;          // 6-wide µop cache delivery
-    p.issueWidth = 6;           // 6-wide dispatch to backend
+    p.decodeWidth = 6; // 6-wide µop cache delivery
+    p.issueWidth = 6;  // 6-wide dispatch to backend
     p.pipelineDepth = 14;
-    p.intALUs = 6;              // 6 integer execution ports (P0-P5)
-    p.vecUnits = 3;             // 3 vector ALU ports (no AVX-512)
-    p.fmaUnits = 2;             // 2 FMA units on P0/P1
-    p.loadPorts = 3;            // 3 load ports
+    p.intALUs = 6;   // 6 integer execution ports (P0-P5)
+    p.vecUnits = 3;  // 3 vector ALU ports (no AVX-512)
+    p.fmaUnits = 2;  // 2 FMA units on P0/P1
+    p.loadPorts = 3; // 3 load ports
     p.storePorts = 2;
     p.branchUnits = 2;
     p.agus = 3;
     p.dividers = 1;
     p.mulPortCount = 2;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 20;
-    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 12; p.latFMA = 4;
-    p.latLoad = 4; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.17; p.tputIntMul = 0.5;
-    p.tputFPAdd = 0.33; p.tputFPMul = 0.33;
-    p.tputLoad = 0.33; p.tputStore = 0.5;
-    p.l1DSize = 48;  p.l1DLatency = 4;
-    p.l2Size = 2048; p.l2Latency = 14;     // Arrow Lake P-core: 2 MB L2
-    p.l3Size = 36864; p.l3Latency = 42;    // 36 MB shared L3
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 20;
+    p.latFPAdd = 4;
+    p.latFPMul = 4;
+    p.latFPDiv = 12;
+    p.latFMA = 4;
+    p.latLoad = 4;
+    p.latStore = 5;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.17;
+    p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.33;
+    p.tputFPMul = 0.33;
+    p.tputLoad = 0.33;
+    p.tputStore = 0.5;
+    p.l1DSize = 48;
+    p.l1DLatency = 4;
+    p.l2Size = 2048;
+    p.l2Latency = 14; // Arrow Lake P-core: 2 MB L2
+    p.l3Size = 36864;
+    p.l3Latency = 42; // 36 MB shared L3
     p.cacheLineSize = 64;
-    p.vectorWidth = 256;        // AVX2 (AVX-512 removed vs Raptor Lake)
-    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.vectorWidth = 256; // AVX2 (AVX-512 removed vs Raptor Lake)
+    p.intRegisters = 16;
+    p.vecRegisters = 16;
+    p.fpRegisters = 16;
     p.branchMispredictPenalty = 12.0;
     p.btbEntries = 16384;
     p.memoryLatency = 180;
-    p.robSize = 256;            // Improved vs Raptor Lake (192)
+    p.robSize = 256; // Improved vs Raptor Lake (192)
     p.latStoLForward = 4;
-    p.vec512Penalty = 1;        // No AVX-512
+    p.vec512Penalty = 1; // No AVX-512
     p.tputFPDiv = 1.0 / 12.0;
     p.tputIntDiv = 1.0 / 20.0;
     p.schedulerSize = 160;
     p.loadBufferEntries = 256;
     p.storeBufferEntries = 120;
     p.l1DBandwidthBytesPerCycle = 96; // 3 load ports × 32 B
-    p.l2BandwidthBytesPerCycle  = 48;
-    p.l3BandwidthBytesPerCycle  = 20;
+    p.l2BandwidthBytesPerCycle = 48;
+    p.l3BandwidthBytesPerCycle = 20;
     p.memBandwidthBytesPerCycle = 10;
     p.hasHyperthreading = false; // Arrow Lake: no Hyperthreading on Lion Cove
     // Arrow Lake (Lion Cove P-core): CVTSI2SD = latFPAdd+1 (x86 CVT bypass).
@@ -1693,11 +1916,11 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.name = "epyc-turin";
     // Turin uses the same Zen 5 pipeline but with much larger L3 cache
     // spread across chiplets.  Per-core L3 share is smaller than desktop.
-    p.l2Size = 1024;            // 1 MB L2 per core (same as Zen 5)
-    p.l3Size = 65536;           // 64 MB per CCD (shared across 16 cores)
-    p.l3Latency = 55;           // Slightly higher due to chiplet interconnect
-    p.memoryLatency = 220;      // DDR5-6400, longer NUMA hops on big configs
-    p.robSize = 448;            // Same ROB as desktop Zen 5
+    p.l2Size = 1024;       // 1 MB L2 per core (same as Zen 5)
+    p.l3Size = 65536;      // 64 MB per CCD (shared across 16 cores)
+    p.l3Latency = 55;      // Slightly higher due to chiplet interconnect
+    p.memoryLatency = 220; // DDR5-6400, longer NUMA hops on big configs
+    p.robSize = 448;       // Same ROB as desktop Zen 5
     return p;
 }
 
@@ -1707,22 +1930,31 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.name = "granite-rapids";
     // Granite Rapids: 8-wide dispatch (up from 6 in Sapphire Rapids).
     p.issueWidth = 8;
-    p.decodeWidth = 6;           // µop cache still 6-wide legacy decode
-    p.intALUs = 6;               // 6 integer execution ports (up from 5)
-    p.vecUnits = 4;              // 4 vector ALU ports (up from 3)
-    p.fmaUnits = 2;              // 2 native 512-bit FMA units
+    p.decodeWidth = 6; // µop cache still 6-wide legacy decode
+    p.intALUs = 6;     // 6 integer execution ports (up from 5)
+    p.vecUnits = 4;    // 4 vector ALU ports (up from 3)
+    p.fmaUnits = 2;    // 2 native 512-bit FMA units
     p.loadPorts = 3;
     p.storePorts = 3;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 16;
-    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 14; p.latFMA = 4;
-    p.latLoad = 5; p.latStore = 5;
-    p.l1DSize = 48;   p.l1DLatency = 5;
-    p.l2Size = 2048;  p.l2Latency = 14;
-    p.l3Size = 131072; p.l3Latency = 55;  // up to 128 MB shared L3
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 16;
+    p.latFPAdd = 4;
+    p.latFPMul = 4;
+    p.latFPDiv = 14;
+    p.latFMA = 4;
+    p.latLoad = 5;
+    p.latStore = 5;
+    p.l1DSize = 48;
+    p.l1DLatency = 5;
+    p.l2Size = 2048;
+    p.l2Latency = 14;
+    p.l3Size = 131072;
+    p.l3Latency = 55; // up to 128 MB shared L3
     p.robSize = 512;
     p.btbEntries = 16384;
     p.memoryLatency = 200;
-    p.vec512Penalty = 1;  // native 512-bit (same as Sapphire Rapids)
+    p.vec512Penalty = 1; // native 512-bit (same as Sapphire Rapids)
     p.latStoLForward = 4;
     p.tputFPDiv = 1.0 / 14.0;
     p.tputIntDiv = 1.0 / 16.0;
@@ -1730,8 +1962,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 192;
     p.storeBufferEntries = 128;
     p.l1DBandwidthBytesPerCycle = 96;
-    p.l2BandwidthBytesPerCycle  = 64;
-    p.l3BandwidthBytesPerCycle  = 32;
+    p.l2BandwidthBytesPerCycle = 64;
+    p.l3BandwidthBytesPerCycle = 32;
     p.memBandwidthBytesPerCycle = 14;
     p.hasHyperthreading = true;
     return p;
@@ -1743,8 +1975,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.name = "znver4c";
     // Bergamo: same pipeline as Zen 4 but denser packing.
     // L3 shared more aggressively: effective per-core L3 is smaller.
-    p.l3Size = 16384;   // 16 MB shared (vs 32 MB on standard Zen 4)
-    p.l3Latency = 54;   // slightly higher due to larger NUMA distance
+    p.l3Size = 16384; // 16 MB shared (vs 32 MB on standard Zen 4)
+    p.l3Latency = 54; // slightly higher due to larger NUMA distance
     p.memoryLatency = 200;
     return p;
 }
@@ -1767,18 +1999,34 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.agus = 2;
     p.dividers = 1;
     p.mulPortCount = 2;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 20;
-    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 16; p.latFMA = 5;
-    p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.33; p.tputIntMul = 1.0;
-    p.tputFPAdd = 0.5; p.tputFPMul = 0.5;
-    p.tputLoad = 0.5; p.tputStore = 1.0;
-    p.l1DSize = 32; p.l1DLatency = 4;
-    p.l2Size = 1024; p.l2Latency = 12;
-    p.l3Size = 4096; p.l3Latency = 35;
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 20;
+    p.latFPAdd = 4;
+    p.latFPMul = 4;
+    p.latFPDiv = 16;
+    p.latFMA = 5;
+    p.latLoad = 4;
+    p.latStore = 4;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.33;
+    p.tputIntMul = 1.0;
+    p.tputFPAdd = 0.5;
+    p.tputFPMul = 0.5;
+    p.tputLoad = 0.5;
+    p.tputStore = 1.0;
+    p.l1DSize = 32;
+    p.l1DLatency = 4;
+    p.l2Size = 1024;
+    p.l2Latency = 12;
+    p.l3Size = 4096;
+    p.l3Latency = 35;
     p.cacheLineSize = 64;
-    p.vectorWidth = 128;  // RVV at 128-bit VLEN
-    p.intRegisters = 31; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.vectorWidth = 128; // RVV at 128-bit VLEN
+    p.intRegisters = 31;
+    p.vecRegisters = 32;
+    p.fpRegisters = 32;
     p.branchMispredictPenalty = 8.0;
     p.btbEntries = 2048;
     p.memoryLatency = 200;
@@ -1791,8 +2039,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 32;
     p.storeBufferEntries = 24;
     p.l1DBandwidthBytesPerCycle = 16;
-    p.l2BandwidthBytesPerCycle  = 12;
-    p.l3BandwidthBytesPerCycle  = 8;
+    p.l2BandwidthBytesPerCycle = 12;
+    p.l3BandwidthBytesPerCycle = 8;
     p.memBandwidthBytesPerCycle = 4;
     p.hasHyperthreading = false;
     return p;
@@ -1803,44 +2051,60 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     MicroarchProfile p;
     p.name = "oryon";
     p.isa = ISAFamily::AArch64;
-    p.decodeWidth = 6;          // 6-wide fetch and decode
-    p.issueWidth = 6;           // 6-wide dispatch to execution units
+    p.decodeWidth = 6; // 6-wide fetch and decode
+    p.issueWidth = 6;  // 6-wide dispatch to execution units
     p.pipelineDepth = 12;
-    p.intALUs = 5;              // 5 integer execution pipes
-    p.vecUnits = 4;             // 4 NEON/FP 128-bit units
-    p.fmaUnits = 4;             // 4 FMA units (VFMA.2D, VFMA.4S)
-    p.loadPorts = 3;            // 3 load pipes
+    p.intALUs = 5;   // 5 integer execution pipes
+    p.vecUnits = 4;  // 4 NEON/FP 128-bit units
+    p.fmaUnits = 4;  // 4 FMA units (VFMA.2D, VFMA.4S)
+    p.loadPorts = 3; // 3 load pipes
     p.storePorts = 2;
     p.branchUnits = 2;
     p.agus = 3;
     p.dividers = 2;
     p.mulPortCount = 4;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 12;
-    p.latFPAdd = 3; p.latFPMul = 3; p.latFPDiv = 9; p.latFMA = 3;
-    p.latLoad = 4; p.latStore = 3; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.20; p.tputIntMul = 0.25;
-    p.tputFPAdd = 0.25; p.tputFPMul = 0.25;
-    p.tputLoad = 0.33; p.tputStore = 0.5;
-    p.l1DSize = 64;  p.l1DLatency = 4;
-    p.l2Size = 1024; p.l2Latency = 10;  // 1 MB L2 per 4-core cluster
-    p.l3Size = 6144; p.l3Latency = 35;  // 6 MB shared L3
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 12;
+    p.latFPAdd = 3;
+    p.latFPMul = 3;
+    p.latFPDiv = 9;
+    p.latFMA = 3;
+    p.latLoad = 4;
+    p.latStore = 3;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.20;
+    p.tputIntMul = 0.25;
+    p.tputFPAdd = 0.25;
+    p.tputFPMul = 0.25;
+    p.tputLoad = 0.33;
+    p.tputStore = 0.5;
+    p.l1DSize = 64;
+    p.l1DLatency = 4;
+    p.l2Size = 1024;
+    p.l2Latency = 10; // 1 MB L2 per 4-core cluster
+    p.l3Size = 6144;
+    p.l3Latency = 35; // 6 MB shared L3
     p.cacheLineSize = 64;
-    p.vectorWidth = 128;        // NEON 128-bit (SVE2 optional)
-    p.intRegisters = 30; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.vectorWidth = 128; // NEON 128-bit (SVE2 optional)
+    p.intRegisters = 30;
+    p.vecRegisters = 32;
+    p.fpRegisters = 32;
     p.branchMispredictPenalty = 14.0;
     p.btbEntries = 8192;
-    p.memoryLatency = 100;      // LPDDR5x — fast
+    p.memoryLatency = 100; // LPDDR5x — fast
     p.robSize = 320;
     p.latStoLForward = 4;
-    p.vec512Penalty = 1;        // NEON 128-bit native
+    p.vec512Penalty = 1; // NEON 128-bit native
     p.tputFPDiv = 1.0 / 9.0;
     p.tputIntDiv = 1.0 / 12.0;
     p.schedulerSize = 320;
     p.loadBufferEntries = 256;
     p.storeBufferEntries = 128;
     p.l1DBandwidthBytesPerCycle = 192;
-    p.l2BandwidthBytesPerCycle  = 96;
-    p.l3BandwidthBytesPerCycle  = 48;
+    p.l2BandwidthBytesPerCycle = 96;
+    p.l3BandwidthBytesPerCycle = 48;
     p.memBandwidthBytesPerCycle = 32;
     p.hasHyperthreading = false;
     return p;
@@ -1851,44 +2115,60 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     MicroarchProfile p;
     p.name = "sierra-forest";
     p.isa = ISAFamily::X86_64;
-    p.decodeWidth = 3;          // 3-wide decode per E-core cluster
-    p.issueWidth = 4;           // 4-wide dispatch (narrower than P-cores)
-    p.pipelineDepth = 10;       // shallower pipeline than P-cores
-    p.intALUs = 4;              // 4 integer execution pipes
-    p.vecUnits = 2;             // 2 vector ALU pipes (256-bit AVX2)
-    p.fmaUnits = 1;             // 1 FMA unit per core
+    p.decodeWidth = 3;    // 3-wide decode per E-core cluster
+    p.issueWidth = 4;     // 4-wide dispatch (narrower than P-cores)
+    p.pipelineDepth = 10; // shallower pipeline than P-cores
+    p.intALUs = 4;        // 4 integer execution pipes
+    p.vecUnits = 2;       // 2 vector ALU pipes (256-bit AVX2)
+    p.fmaUnits = 1;       // 1 FMA unit per core
     p.loadPorts = 2;
     p.storePorts = 1;
     p.branchUnits = 1;
     p.agus = 2;
     p.dividers = 1;
     p.mulPortCount = 2;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 20;
-    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 14; p.latFMA = 5;
-    p.latLoad = 5; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.25; p.tputIntMul = 0.5;
-    p.tputFPAdd = 0.5;  p.tputFPMul = 0.5;
-    p.tputLoad = 0.5;   p.tputStore = 1.0;
-    p.l1DSize = 32;  p.l1DLatency = 5;
-    p.l2Size = 2048; p.l2Latency = 14;  // 2 MB per 4-core cluster
-    p.l3Size = 57344; p.l3Latency = 50; // up to 56 MB shared L3
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 20;
+    p.latFPAdd = 4;
+    p.latFPMul = 4;
+    p.latFPDiv = 14;
+    p.latFMA = 5;
+    p.latLoad = 5;
+    p.latStore = 5;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.25;
+    p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.5;
+    p.tputFPMul = 0.5;
+    p.tputLoad = 0.5;
+    p.tputStore = 1.0;
+    p.l1DSize = 32;
+    p.l1DLatency = 5;
+    p.l2Size = 2048;
+    p.l2Latency = 14; // 2 MB per 4-core cluster
+    p.l3Size = 57344;
+    p.l3Latency = 50; // up to 56 MB shared L3
     p.cacheLineSize = 64;
-    p.vectorWidth = 256;        // AVX2 (no AVX-512)
-    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.vectorWidth = 256; // AVX2 (no AVX-512)
+    p.intRegisters = 16;
+    p.vecRegisters = 16;
+    p.fpRegisters = 16;
     p.branchMispredictPenalty = 9.0; // shorter pipeline → smaller penalty
     p.btbEntries = 4096;
     p.memoryLatency = 190;
-    p.robSize = 160;            // Crestmont ROB is ~160 (smaller than P-cores)
+    p.robSize = 160; // Crestmont ROB is ~160 (smaller than P-cores)
     p.latStoLForward = 4;
-    p.vec512Penalty = 1;        // No AVX-512
+    p.vec512Penalty = 1; // No AVX-512
     p.tputFPDiv = 1.0 / 14.0;
     p.tputIntDiv = 1.0 / 20.0;
     p.schedulerSize = 64;
     p.loadBufferEntries = 72;
     p.storeBufferEntries = 48;
     p.l1DBandwidthBytesPerCycle = 64; // 2 load ports × 32 B
-    p.l2BandwidthBytesPerCycle  = 32;
-    p.l3BandwidthBytesPerCycle  = 14;
+    p.l2BandwidthBytesPerCycle = 32;
+    p.l3BandwidthBytesPerCycle = 14;
     p.memBandwidthBytesPerCycle = 6;
     p.hasHyperthreading = false; // Sierra Forest E-cores: no SMT
     // Sierra Forest (Crestmont): x86 CVT bypass adds 1 cycle vs FP-add.
@@ -1901,30 +2181,46 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     MicroarchProfile p;
     p.name = "gracemont";
     p.isa = ISAFamily::X86_64;
-    p.decodeWidth = 3;          // 3-wide decode (clustered E-core)
-    p.issueWidth = 4;           // 4 µops dispatched per cycle
-    p.pipelineDepth = 8;        // shallow pipeline
-    p.intALUs = 3;              // 3 integer execution pipes
-    p.vecUnits = 2;             // 2 vector ALU pipes
-    p.fmaUnits = 1;             // 1 FMA unit
+    p.decodeWidth = 3;   // 3-wide decode (clustered E-core)
+    p.issueWidth = 4;    // 4 µops dispatched per cycle
+    p.pipelineDepth = 8; // shallow pipeline
+    p.intALUs = 3;       // 3 integer execution pipes
+    p.vecUnits = 2;      // 2 vector ALU pipes
+    p.fmaUnits = 1;      // 1 FMA unit
     p.loadPorts = 2;
     p.storePorts = 1;
     p.branchUnits = 1;
     p.agus = 2;
     p.dividers = 1;
     p.mulPortCount = 1;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 20;
-    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 14; p.latFMA = 5;
-    p.latLoad = 5; p.latStore = 5; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.33; p.tputIntMul = 1.0;
-    p.tputFPAdd = 0.5;  p.tputFPMul = 0.5;
-    p.tputLoad = 0.5;   p.tputStore = 1.0;
-    p.l1DSize = 32;  p.l1DLatency = 5;
-    p.l2Size = 4096; p.l2Latency = 14;   // 4 MB shared per cluster
-    p.l3Size = 20480; p.l3Latency = 44;  // 20 MB shared L3 (Alder Lake die)
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 20;
+    p.latFPAdd = 4;
+    p.latFPMul = 4;
+    p.latFPDiv = 14;
+    p.latFMA = 5;
+    p.latLoad = 5;
+    p.latStore = 5;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.33;
+    p.tputIntMul = 1.0;
+    p.tputFPAdd = 0.5;
+    p.tputFPMul = 0.5;
+    p.tputLoad = 0.5;
+    p.tputStore = 1.0;
+    p.l1DSize = 32;
+    p.l1DLatency = 5;
+    p.l2Size = 4096;
+    p.l2Latency = 14; // 4 MB shared per cluster
+    p.l3Size = 20480;
+    p.l3Latency = 44; // 20 MB shared L3 (Alder Lake die)
     p.cacheLineSize = 64;
-    p.vectorWidth = 256;        // AVX2 (no AVX-512)
-    p.intRegisters = 16; p.vecRegisters = 16; p.fpRegisters = 16;
+    p.vectorWidth = 256; // AVX2 (no AVX-512)
+    p.intRegisters = 16;
+    p.vecRegisters = 16;
+    p.fpRegisters = 16;
     p.branchMispredictPenalty = 8.0;
     p.btbEntries = 1024;
     p.memoryLatency = 200;
@@ -1937,8 +2233,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 64;
     p.storeBufferEntries = 32;
     p.l1DBandwidthBytesPerCycle = 64;
-    p.l2BandwidthBytesPerCycle  = 28;
-    p.l3BandwidthBytesPerCycle  = 12;
+    p.l2BandwidthBytesPerCycle = 28;
+    p.l3BandwidthBytesPerCycle = 12;
     p.memBandwidthBytesPerCycle = 6;
     p.hasHyperthreading = false;
     // Gracemont: x86 E-core, CVTSI2SD = latFPAdd+1 (CVT bypass path).
@@ -1954,8 +2250,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.decodeWidth = 4;
     p.issueWidth = 4;
     p.pipelineDepth = 13;
-    p.intALUs = 3;              // 3 integer execution pipes (B, M, S)
-    p.vecUnits = 2;             // 2 NEON/FP 128-bit pipes
+    p.intALUs = 3;  // 3 integer execution pipes (B, M, S)
+    p.vecUnits = 2; // 2 NEON/FP 128-bit pipes
     p.fmaUnits = 2;
     p.loadPorts = 2;
     p.storePorts = 1;
@@ -1963,18 +2259,34 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.agus = 2;
     p.dividers = 1;
     p.mulPortCount = 2;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 10;
-    p.latFPAdd = 3; p.latFPMul = 4; p.latFPDiv = 12; p.latFMA = 4;
-    p.latLoad = 4; p.latStore = 4; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.33; p.tputIntMul = 0.5;
-    p.tputFPAdd = 0.5;  p.tputFPMul = 0.5;
-    p.tputLoad = 0.5;   p.tputStore = 1.0;
-    p.l1DSize = 64;  p.l1DLatency = 4;
-    p.l2Size = 512;  p.l2Latency = 10;
-    p.l3Size = 4096; p.l3Latency = 32;
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 10;
+    p.latFPAdd = 3;
+    p.latFPMul = 4;
+    p.latFPDiv = 12;
+    p.latFMA = 4;
+    p.latLoad = 4;
+    p.latStore = 4;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.33;
+    p.tputIntMul = 0.5;
+    p.tputFPAdd = 0.5;
+    p.tputFPMul = 0.5;
+    p.tputLoad = 0.5;
+    p.tputStore = 1.0;
+    p.l1DSize = 64;
+    p.l1DLatency = 4;
+    p.l2Size = 512;
+    p.l2Latency = 10;
+    p.l3Size = 4096;
+    p.l3Latency = 32;
     p.cacheLineSize = 64;
-    p.vectorWidth = 128;        // NEON 128-bit
-    p.intRegisters = 31; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.vectorWidth = 128; // NEON 128-bit
+    p.intRegisters = 31;
+    p.vecRegisters = 32;
+    p.fpRegisters = 32;
     p.branchMispredictPenalty = 11.0;
     p.btbEntries = 4096;
     p.memoryLatency = 120;
@@ -1987,8 +2299,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 56;
     p.storeBufferEntries = 32;
     p.l1DBandwidthBytesPerCycle = 32; // 2 load pipes × 16 B
-    p.l2BandwidthBytesPerCycle  = 16;
-    p.l3BandwidthBytesPerCycle  = 10;
+    p.l2BandwidthBytesPerCycle = 16;
+    p.l3BandwidthBytesPerCycle = 10;
     p.memBandwidthBytesPerCycle = 6;
     p.hasHyperthreading = false;
     return p;
@@ -2000,7 +2312,7 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.name = "cortex-a55";
     p.isa = ISAFamily::AArch64;
     p.decodeWidth = 2;
-    p.issueWidth = 2;           // dual-issue in-order
+    p.issueWidth = 2; // dual-issue in-order
     p.pipelineDepth = 8;
     p.intALUs = 2;
     p.vecUnits = 1;
@@ -2011,22 +2323,38 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.agus = 1;
     p.dividers = 1;
     p.mulPortCount = 1;
-    p.latIntAdd = 1; p.latIntMul = 3; p.latIntDiv = 12;
-    p.latFPAdd = 4; p.latFPMul = 4; p.latFPDiv = 14; p.latFMA = 5;
-    p.latLoad = 3; p.latStore = 3; p.latBranch = 1; p.latShift = 1;
-    p.tputIntAdd = 0.5; p.tputIntMul = 1.0;
-    p.tputFPAdd = 1.0;  p.tputFPMul = 1.0;
-    p.tputLoad = 1.0;   p.tputStore = 1.0;
-    p.l1DSize = 32;  p.l1DLatency = 3;
-    p.l2Size = 256;  p.l2Latency = 8;
-    p.l3Size = 2048; p.l3Latency = 28;  // shared LLC
+    p.latIntAdd = 1;
+    p.latIntMul = 3;
+    p.latIntDiv = 12;
+    p.latFPAdd = 4;
+    p.latFPMul = 4;
+    p.latFPDiv = 14;
+    p.latFMA = 5;
+    p.latLoad = 3;
+    p.latStore = 3;
+    p.latBranch = 1;
+    p.latShift = 1;
+    p.tputIntAdd = 0.5;
+    p.tputIntMul = 1.0;
+    p.tputFPAdd = 1.0;
+    p.tputFPMul = 1.0;
+    p.tputLoad = 1.0;
+    p.tputStore = 1.0;
+    p.l1DSize = 32;
+    p.l1DLatency = 3;
+    p.l2Size = 256;
+    p.l2Latency = 8;
+    p.l3Size = 2048;
+    p.l3Latency = 28; // shared LLC
     p.cacheLineSize = 64;
     p.vectorWidth = 128;
-    p.intRegisters = 31; p.vecRegisters = 32; p.fpRegisters = 32;
+    p.intRegisters = 31;
+    p.vecRegisters = 32;
+    p.fpRegisters = 32;
     p.branchMispredictPenalty = 8.0;
     p.btbEntries = 1024;
     p.memoryLatency = 100;
-    p.robSize = 64;             // effectively in-order; small window
+    p.robSize = 64; // effectively in-order; small window
     p.latStoLForward = 3;
     p.vec512Penalty = 1;
     p.tputFPDiv = 1.0 / 14.0;
@@ -2035,8 +2363,8 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     p.loadBufferEntries = 16;
     p.storeBufferEntries = 8;
     p.l1DBandwidthBytesPerCycle = 16;
-    p.l2BandwidthBytesPerCycle  = 8;
-    p.l3BandwidthBytesPerCycle  = 6;
+    p.l2BandwidthBytesPerCycle = 8;
+    p.l3BandwidthBytesPerCycle = 6;
     p.memBandwidthBytesPerCycle = 4;
     p.hasHyperthreading = false;
     return p;
@@ -2047,10 +2375,10 @@ double HardwareCostModel::portContentionPenalty(const ProgramGraph& pg) const {
     MicroarchProfile p = neoverseV2Profile();
     p.name = "nvidia-grace";
     // Same Neoverse V2 execution pipeline.  Key difference: HBM2e memory.
-    p.memoryLatency = 80;       // HBM2e: ~80 ns at 3.1 GHz → ~250 cycles; 
-                                 // effective with hardware prefetcher: ~80 cyc
+    p.memoryLatency = 80;             // HBM2e: ~80 ns at 3.1 GHz → ~250 cycles;
+                                      // effective with hardware prefetcher: ~80 cyc
     p.memBandwidthBytesPerCycle = 20; // higher than DDR5; HBM delivers well
-    p.l3Size = 114688;          // 117 MB Last-Level Cache (system level cache)
+    p.l3Size = 114688;                // 117 MB Last-Level Cache (system level cache)
     p.l3Latency = 45;
     p.hasHyperthreading = false;
     return p;
@@ -2061,40 +2389,38 @@ static std::string normalizeCpuName(const std::string& name) {
     std::string result;
     result.reserve(name.size());
     for (char c : name) {
-        if (c == '-' || c == '_') continue;
+        if (c == '-' || c == '_')
+            continue;
         result += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
     return result;
 }
 
 std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
-    if (cpuName.empty()) return std::nullopt;
+    if (cpuName.empty())
+        return std::nullopt;
 
     const std::string normalized = normalizeCpuName(cpuName);
 
     // x86-64 microarchitectures
-    if (normalized == "skylake" || normalized == "skylakeserver" ||
-        normalized == "skylakeavx512" || normalized == "cascadelake" ||
-        normalized == "cooperlake" || normalized == "cannonlake")
+    if (normalized == "skylake" || normalized == "skylakeserver" || normalized == "skylakeavx512" ||
+        normalized == "cascadelake" || normalized == "cooperlake" || normalized == "cannonlake")
         return skylakeProfile();
 
     if (normalized == "haswell" || normalized == "broadwell")
         return haswellProfile();
 
-    if (normalized == "sandybridge" || normalized == "sandybridgep" ||
-        normalized == "ivybridge" || normalized == "ivybridgep" ||
-        normalized == "ivytown" || normalized == "jaketown" ||
-        normalized == "westmere" || normalized == "nehalem") {
+    if (normalized == "sandybridge" || normalized == "sandybridgep" || normalized == "ivybridge" ||
+        normalized == "ivybridgep" || normalized == "ivytown" || normalized == "jaketown" || normalized == "westmere" ||
+        normalized == "nehalem") {
         auto p = sandyBridgeProfile();
         p.name = normalized;
-        if (normalized == "ivybridge" || normalized == "ivybridgep" ||
-            normalized == "ivytown")
+        if (normalized == "ivybridge" || normalized == "ivybridgep" || normalized == "ivytown")
             p.name = "ivybridge";
         return p;
     }
 
-    if (normalized == "alderlake" || normalized == "raptorlake" ||
-        normalized == "meteorlake")
+    if (normalized == "alderlake" || normalized == "raptorlake" || normalized == "meteorlake")
         return alderlakeProfile();
 
     if (normalized == "arrowlake" || normalized == "arrowlakes")
@@ -2104,19 +2430,17 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         return lunarLakeProfile();
 
     // Intel Gracemont / Crestmont E-core (standalone or as secondary cluster).
-    if (normalized == "gracemont" || normalized == "atomx7000" ||
-        normalized == "elkhart" || normalized == "jasper")
+    if (normalized == "gracemont" || normalized == "atomx7000" || normalized == "elkhart" || normalized == "jasper")
         return gracemontProfile();
 
-    if (normalized == "icelakeserver" || normalized == "icelakeclient" ||
-        normalized == "tigerlake") {
+    if (normalized == "icelakeserver" || normalized == "icelakeclient" || normalized == "tigerlake") {
         auto p = skylakeProfile();
         p.name = cpuName;
         p.vectorWidth = 512; // AVX-512
         p.vecRegisters = 32;
-        p.loadPorts = 3;     // Ice Lake: 3 load ports
+        p.loadPorts = 3; // Ice Lake: 3 load ports
         p.storePorts = 2;
-        p.robSize = 352;     // Ice Lake ROB is 352
+        p.robSize = 352; // Ice Lake ROB is 352
         // Ice Lake / Tiger Lake run 512-bit SIMD by double-pumping the 256-bit
         p.vec512Penalty = 2;
         return p;
@@ -2126,13 +2450,11 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     // AVX-512 native, 3 load + 3 store ports.
     if (normalized == "sapphirerapids" || normalized == "emeraldrapids")
         return sapphireRapidsProfile();
-    if (normalized == "graniterapids" || normalized == "graniteerapids" ||
-        normalized == "xeon6p")
+    if (normalized == "graniterapids" || normalized == "graniteerapids" || normalized == "xeon6p")
         return graniteRapidsProfile();
     // Sierra Forest: Crestmont E-core server (Xeon 6 E-series).
     // Completely different pipeline from P-core Granite Rapids.
-    if (normalized == "sierraforest" || normalized == "xeon6e" ||
-        normalized == "clearwaterforest")
+    if (normalized == "sierraforest" || normalized == "xeon6e" || normalized == "clearwaterforest")
         return sierraForestProfile();
 
     // AMD Zen family
@@ -2146,7 +2468,7 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         auto p = zen3Profile();
         p.name = "znver2";
         p.pipelineDepth = 19;
-        p.loadPorts = 2;   // Zen 2 has 2 load/store AGU units (Zen 3 added a 3rd)
+        p.loadPorts = 2; // Zen 2 has 2 load/store AGU units (Zen 3 added a 3rd)
         p.l2Size = 512;
         p.l3Latency = 42;
         return p;
@@ -2168,18 +2490,16 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     // ARM64 — Apple Silicon
     if (normalized == "applem1" || normalized == "applema14")
         return appleMProfile();
-    if (normalized == "applem2" || normalized == "applem2pro" ||
-        normalized == "applem2max" || normalized == "applem2ultra" ||
-        normalized == "applem2base") {
+    if (normalized == "applem2" || normalized == "applem2pro" || normalized == "applem2max" ||
+        normalized == "applem2ultra" || normalized == "applem2base") {
         return appleM2Profile();
     }
-    if (normalized == "applem3" || normalized == "applem3pro" ||
-        normalized == "applem3max" || normalized == "applem3ultra" ||
-        normalized == "applem4") {
+    if (normalized == "applem3" || normalized == "applem3pro" || normalized == "applem3max" ||
+        normalized == "applem3ultra" || normalized == "applem4") {
         auto p = appleM2Profile();
         p.name = cpuName;
         p.decodeWidth = 8;
-        p.issueWidth = 10;        // M3/M4: wider backend
+        p.issueWidth = 10; // M3/M4: wider backend
         p.intALUs = 6;
         p.vecUnits = 4;
         p.fmaUnits = 4;
@@ -2209,8 +2529,8 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     }
 
     // NVIDIA Grace CPU (Neoverse V2-based, HBM2e memory).
-    if (normalized == "nvidiagrace" || normalized == "grace" ||
-        normalized == "gracehopper" || normalized == "neoversev2grace")
+    if (normalized == "nvidiagrace" || normalized == "grace" || normalized == "gracehopper" ||
+        normalized == "neoversev2grace")
         return nvidiaGraceProfile();
 
     // ARM64 — AWS Graviton (server)
@@ -2220,8 +2540,7 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         return graviton4Profile();
 
     // ARM64 — Cortex
-    if (normalized == "cortexa78" || normalized == "cortexa78c" ||
-        normalized == "cortexa77") {
+    if (normalized == "cortexa78" || normalized == "cortexa78c" || normalized == "cortexa77") {
         auto p = cortexA76Profile();
         p.name = cpuName;
         p.issueWidth = 4;
@@ -2229,22 +2548,20 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     }
     if (normalized == "cortexa76" || normalized == "cortexa76ae")
         return cortexA76Profile();
-    if (normalized == "cortexa55" || normalized == "cortexa53" ||
-        normalized == "cortexa35") {
+    if (normalized == "cortexa55" || normalized == "cortexa53" || normalized == "cortexa35") {
         auto p = cortexA55Profile();
         p.name = cpuName;
         return p;
     }
-    if (normalized == "cortexall" || normalized == "cortexx3" ||
-        normalized == "cortexx4") {
+    if (normalized == "cortexall" || normalized == "cortexx3" || normalized == "cortexx4") {
         auto p = neoverseV2Profile();
         p.name = cpuName;
         return p;
     }
 
     // ARM64 — Qualcomm Oryon (Snapdragon X Elite)
-    if (normalized == "oryon" || normalized == "snapdragonxelite" ||
-        normalized == "snapdragonxplus" || normalized == "snapdragonx")
+    if (normalized == "oryon" || normalized == "snapdragonxelite" || normalized == "snapdragonxplus" ||
+        normalized == "snapdragonx")
         return oryonProfile();
 
     // RISC-V
@@ -2256,12 +2573,13 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
         return sifiveP670Profile();
 
     // Generic / x86-64 baseline
-    if (normalized == "x8664" || normalized == "x8664v2" ||
-        normalized == "x8664v3" || normalized == "x8664v4") {
+    if (normalized == "x8664" || normalized == "x8664v2" || normalized == "x8664v3" || normalized == "x8664v4") {
         auto p = haswellProfile();
         p.name = cpuName;
-        if (normalized == "x8664v4") p.vectorWidth = 512;
-        else if (normalized == "x8664v3") p.vectorWidth = 256;
+        if (normalized == "x8664v4")
+            p.vectorWidth = 512;
+        else if (normalized == "x8664v3")
+            p.vectorWidth = 256;
         return p;
     }
 
@@ -2269,47 +2587,47 @@ std::optional<MicroarchProfile> lookupMicroarch(const std::string& cpuName) {
     return std::nullopt;
 }
 
-MicroarchProfile calibrateProfile(const MicroarchProfile& base,
-                                   const CalibrationHints& hints) {
+MicroarchProfile calibrateProfile(const MicroarchProfile& base, const CalibrationHints& hints) {
     MicroarchProfile p = base;
 
     // Helper: scale an unsigned value and clamp to [1, UINT_MAX].
     auto scaleU = [](unsigned v, double s) -> unsigned {
-        if (s <= 0.0) return 1u;
+        if (s <= 0.0)
+            return 1u;
         unsigned r = static_cast<unsigned>(std::round(static_cast<double>(v) * s));
         return std::max(r, 1u);
     };
 
     // Integer-add latency group (add, sub, shift, branch, compare).
     if (hints.intAddScale != 1.0) {
-        p.latIntAdd  = scaleU(p.latIntAdd,  hints.intAddScale);
-        p.latShift   = scaleU(p.latShift,   hints.intAddScale);
-        p.latBranch  = scaleU(p.latBranch,  hints.intAddScale);
+        p.latIntAdd = scaleU(p.latIntAdd, hints.intAddScale);
+        p.latShift = scaleU(p.latShift, hints.intAddScale);
+        p.latBranch = scaleU(p.latBranch, hints.intAddScale);
     }
 
     // FP latency group (fadd, fmul, fma).
     if (hints.fpAddScale != 1.0) {
         p.latFPAdd = scaleU(p.latFPAdd, hints.fpAddScale);
         p.latFPMul = scaleU(p.latFPMul, hints.fpAddScale);
-        p.latFMA   = scaleU(p.latFMA,   hints.fpAddScale);
+        p.latFMA = scaleU(p.latFMA, hints.fpAddScale);
     }
 
     // Load / store-to-load forwarding latency.
     if (hints.loadScale != 1.0) {
-        p.latLoad        = scaleU(p.latLoad,        hints.loadScale);
-        p.latStore       = scaleU(p.latStore,        hints.loadScale);
-        p.latStoLForward = scaleU(p.latStoLForward,  hints.loadScale);
+        p.latLoad = scaleU(p.latLoad, hints.loadScale);
+        p.latStore = scaleU(p.latStore, hints.loadScale);
+        p.latStoLForward = scaleU(p.latStoLForward, hints.loadScale);
     }
 
     // Division latency (integer and FP).
     if (hints.divScale != 1.0) {
         p.latIntDiv = scaleU(p.latIntDiv, hints.divScale);
-        p.latFPDiv  = scaleU(p.latFPDiv,  hints.divScale);
+        p.latFPDiv = scaleU(p.latFPDiv, hints.divScale);
         // Throughput (ops/cycle) is the reciprocal of latency.  When latency
         if (p.tputIntDiv > 0.0 && hints.divScale > 0.0)
             p.tputIntDiv /= hints.divScale;
         if (p.tputFPDiv > 0.0 && hints.divScale > 0.0)
-            p.tputFPDiv  /= hints.divScale;
+            p.tputFPDiv /= hints.divScale;
     }
 
     // Reorder buffer size (e.g., 0.5 when the CPU is running with SMT contention).
@@ -2323,7 +2641,7 @@ MicroarchProfile calibrateProfile(const MicroarchProfile& base,
     // Effective issue width (e.g., 0.5 for an SMT-shared front-end).
     if (hints.issueScale != 1.0) {
         unsigned newIssue = scaleU(p.issueWidth, hints.issueScale);
-        p.issueWidth  = std::max(newIssue, 1u);
+        p.issueWidth = std::max(newIssue, 1u);
         p.decodeWidth = std::max(scaleU(p.decodeWidth, hints.issueScale), 1u);
     }
 
@@ -2334,118 +2652,83 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     HardwareGraph g;
 
     // Front-end: dispatch stage
-    unsigned dispatch = g.addNode(ResourceType::Dispatch, "dispatch",
-                                   1, 1.0, static_cast<double>(profile.issueWidth),
-                                   profile.pipelineDepth);
+    unsigned dispatch = g.addNode(ResourceType::Dispatch, "dispatch", 1, 1.0, static_cast<double>(profile.issueWidth),
+                                  profile.pipelineDepth);
 
     // Execution units
-    unsigned intALU = g.addNode(ResourceType::IntegerALU, "int_alu",
-                                 profile.intALUs,
-                                 static_cast<double>(profile.latIntAdd),
-                                 1.0 / profile.tputIntAdd, 1);
+    unsigned intALU = g.addNode(ResourceType::IntegerALU, "int_alu", profile.intALUs,
+                                static_cast<double>(profile.latIntAdd), 1.0 / profile.tputIntAdd, 1);
 
-    unsigned vecALU = g.addNode(ResourceType::VectorALU, "vec_alu",
-                                 profile.vecUnits,
-                                 static_cast<double>(profile.latFPAdd),
-                                 1.0 / profile.tputFPAdd,
-                                 profile.vectorWidth / 64); // pipeline depth ≈ elements
+    unsigned vecALU = g.addNode(ResourceType::VectorALU, "vec_alu", profile.vecUnits,
+                                static_cast<double>(profile.latFPAdd), 1.0 / profile.tputFPAdd,
+                                profile.vectorWidth / 64); // pipeline depth ≈ elements
 
-    unsigned fmaUnit = g.addNode(ResourceType::FMAUnit, "fma_unit",
-                                  profile.fmaUnits,
-                                  static_cast<double>(profile.latFMA),
-                                  1.0 / profile.tputFPMul, 1);
+    unsigned fmaUnit = g.addNode(ResourceType::FMAUnit, "fma_unit", profile.fmaUnits,
+                                 static_cast<double>(profile.latFMA), 1.0 / profile.tputFPMul, 1);
 
-    unsigned loadUnit = g.addNode(ResourceType::LoadUnit, "load_unit",
-                                   profile.loadPorts,
-                                   static_cast<double>(profile.latLoad),
-                                   1.0 / profile.tputLoad, 1);
+    unsigned loadUnit = g.addNode(ResourceType::LoadUnit, "load_unit", profile.loadPorts,
+                                  static_cast<double>(profile.latLoad), 1.0 / profile.tputLoad, 1);
 
-    unsigned storeUnit = g.addNode(ResourceType::StoreUnit, "store_unit",
-                                    profile.storePorts,
-                                    static_cast<double>(profile.latStore),
-                                    1.0 / profile.tputStore, 1);
+    unsigned storeUnit = g.addNode(ResourceType::StoreUnit, "store_unit", profile.storePorts,
+                                   static_cast<double>(profile.latStore), 1.0 / profile.tputStore, 1);
 
-    unsigned branchUnit = g.addNode(ResourceType::BranchUnit, "branch_unit",
-                                     profile.branchUnits,
-                                     static_cast<double>(profile.latBranch),
-                                     1.0, 1);
+    unsigned branchUnit = g.addNode(ResourceType::BranchUnit, "branch_unit", profile.branchUnits,
+                                    static_cast<double>(profile.latBranch), 1.0, 1);
 
-    unsigned agu = g.addNode(ResourceType::AGU, "agu",
-                              profile.agus, 1.0, 1.0, 1);
+    unsigned agu = g.addNode(ResourceType::AGU, "agu", profile.agus, 1.0, 1.0, 1);
 
     // Divider port throughput: use tputIntDiv if measured (non-zero), otherwise
-    double divTput = (profile.tputIntDiv > 0.0)
-        ? profile.tputIntDiv
-        : 1.0 / static_cast<double>(std::max(profile.latIntDiv, 1u));
+    double divTput =
+        (profile.tputIntDiv > 0.0) ? profile.tputIntDiv : 1.0 / static_cast<double>(std::max(profile.latIntDiv, 1u));
 
-    unsigned divider = g.addNode(ResourceType::DividerUnit, "divider",
-                                  profile.dividers,
-                                  static_cast<double>(profile.latIntDiv),
-                                  divTput, 1);
+    unsigned divider = g.addNode(ResourceType::DividerUnit, "divider", profile.dividers,
+                                 static_cast<double>(profile.latIntDiv), divTput, 1);
 
     // Cache hierarchy
-    unsigned l1d = g.addNode(ResourceType::L1DCache, "l1d_cache",
-                              1, static_cast<double>(profile.l1DLatency),
-                              1.0, 1);
+    unsigned l1d = g.addNode(ResourceType::L1DCache, "l1d_cache", 1, static_cast<double>(profile.l1DLatency), 1.0, 1);
 
-    unsigned l2 = g.addNode(ResourceType::L2Cache, "l2_cache",
-                             1, static_cast<double>(profile.l2Latency),
-                             1.0, 1);
+    unsigned l2 = g.addNode(ResourceType::L2Cache, "l2_cache", 1, static_cast<double>(profile.l2Latency), 1.0, 1);
 
-    unsigned l3 = g.addNode(ResourceType::L3Cache, "l3_cache",
-                             1, static_cast<double>(profile.l3Latency),
-                             1.0, 1);
+    unsigned l3 = g.addNode(ResourceType::L3Cache, "l3_cache", 1, static_cast<double>(profile.l3Latency), 1.0, 1);
 
-    unsigned mem = g.addNode(ResourceType::MainMemory, "main_memory",
-                              1, static_cast<double>(profile.memoryLatency),
-                              1.0, 1);
+    unsigned mem =
+        g.addNode(ResourceType::MainMemory, "main_memory", 1, static_cast<double>(profile.memoryLatency), 1.0, 1);
 
     // Register files
-    unsigned intRegs = g.addNode(ResourceType::IntRegisterFile, "int_regs",
-                                  profile.intRegisters, 0.0, 1.0, 1);
+    unsigned intRegs = g.addNode(ResourceType::IntRegisterFile, "int_regs", profile.intRegisters, 0.0, 1.0, 1);
 
-    unsigned vecRegs = g.addNode(ResourceType::VecRegisterFile, "vec_regs",
-                                  profile.vecRegisters, 0.0, 1.0, 1);
+    unsigned vecRegs = g.addNode(ResourceType::VecRegisterFile, "vec_regs", profile.vecRegisters, 0.0, 1.0, 1);
 
     // Retirement stage
-    unsigned retire = g.addNode(ResourceType::Retire, "retire",
-                                 1, 1.0, static_cast<double>(profile.issueWidth), 1);
+    unsigned retire = g.addNode(ResourceType::Retire, "retire", 1, 1.0, static_cast<double>(profile.issueWidth), 1);
 
     // Reservation station (scheduler queue).
-    unsigned rs = g.addNode(ResourceType::SchedulerQueue, "sched_queue",
-                             profile.schedulerSize > 0 ? profile.schedulerSize : 64u,
-                             1.0,
-                             static_cast<double>(profile.issueWidth), 1);
+    unsigned rs =
+        g.addNode(ResourceType::SchedulerQueue, "sched_queue", profile.schedulerSize > 0 ? profile.schedulerSize : 64u,
+                  1.0, static_cast<double>(profile.issueWidth), 1);
 
     // Load buffer and store buffer.
     // count = number of entries; throughput = number of loads/stores per cycle.
-    unsigned lb = g.addNode(ResourceType::LoadBuffer, "load_buf",
-                             profile.loadBufferEntries > 0 ? profile.loadBufferEntries : 64u,
-                             static_cast<double>(profile.latLoad),
-                             static_cast<double>(profile.loadPorts), 1);
+    unsigned lb =
+        g.addNode(ResourceType::LoadBuffer, "load_buf", profile.loadBufferEntries > 0 ? profile.loadBufferEntries : 64u,
+                  static_cast<double>(profile.latLoad), static_cast<double>(profile.loadPorts), 1);
 
     unsigned sb = g.addNode(ResourceType::StoreBuffer, "store_buf",
-                             profile.storeBufferEntries > 0 ? profile.storeBufferEntries : 36u,
-                             static_cast<double>(profile.latStore),
-                             static_cast<double>(profile.storePorts), 1);
+                            profile.storeBufferEntries > 0 ? profile.storeBufferEntries : 36u,
+                            static_cast<double>(profile.latStore), static_cast<double>(profile.storePorts), 1);
 
-    (void)rs; (void)lb; (void)sb; // referenced for structural completeness
+    (void)rs;
+    (void)lb;
+    (void)sb; // referenced for structural completeness
 
     // Dispatch → execution unit edges
-    g.addEdge(dispatch, intALU, 0.0, static_cast<double>(profile.intALUs),
-              "dispatch→int_alu");
-    g.addEdge(dispatch, vecALU, 0.0, static_cast<double>(profile.vecUnits),
-              "dispatch→vec_alu");
-    g.addEdge(dispatch, fmaUnit, 0.0, static_cast<double>(profile.fmaUnits),
-              "dispatch→fma");
-    g.addEdge(dispatch, loadUnit, 0.0, static_cast<double>(profile.loadPorts),
-              "dispatch→load");
-    g.addEdge(dispatch, storeUnit, 0.0, static_cast<double>(profile.storePorts),
-              "dispatch→store");
-    g.addEdge(dispatch, branchUnit, 0.0, static_cast<double>(profile.branchUnits),
-              "dispatch→branch");
-    g.addEdge(dispatch, divider, 0.0, static_cast<double>(profile.dividers),
-              "dispatch→divider");
+    g.addEdge(dispatch, intALU, 0.0, static_cast<double>(profile.intALUs), "dispatch→int_alu");
+    g.addEdge(dispatch, vecALU, 0.0, static_cast<double>(profile.vecUnits), "dispatch→vec_alu");
+    g.addEdge(dispatch, fmaUnit, 0.0, static_cast<double>(profile.fmaUnits), "dispatch→fma");
+    g.addEdge(dispatch, loadUnit, 0.0, static_cast<double>(profile.loadPorts), "dispatch→load");
+    g.addEdge(dispatch, storeUnit, 0.0, static_cast<double>(profile.storePorts), "dispatch→store");
+    g.addEdge(dispatch, branchUnit, 0.0, static_cast<double>(profile.branchUnits), "dispatch→branch");
+    g.addEdge(dispatch, divider, 0.0, static_cast<double>(profile.dividers), "dispatch→divider");
 
     // Execution unit → register file / writeback edges
     g.addEdge(intALU, intRegs, 0.0, 1.0, "int_alu→int_regs");
@@ -2464,12 +2747,9 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     g.addEdge(agu, l1d, 0.0, 1.0, "agu→l1d");
 
     // Cache hierarchy chain
-    g.addEdge(l1d, l2, static_cast<double>(profile.l2Latency - profile.l1DLatency),
-              1.0, "l1d→l2 (miss)");
-    g.addEdge(l2, l3, static_cast<double>(profile.l3Latency - profile.l2Latency),
-              1.0, "l2→l3 (miss)");
-    g.addEdge(l3, mem, static_cast<double>(profile.memoryLatency - profile.l3Latency),
-              1.0, "l3→mem (miss)");
+    g.addEdge(l1d, l2, static_cast<double>(profile.l2Latency - profile.l1DLatency), 1.0, "l1d→l2 (miss)");
+    g.addEdge(l2, l3, static_cast<double>(profile.l3Latency - profile.l2Latency), 1.0, "l2→l3 (miss)");
+    g.addEdge(l3, mem, static_cast<double>(profile.memoryLatency - profile.l3Latency), 1.0, "l3→mem (miss)");
 
     // Load writeback
     g.addEdge(loadUnit, intRegs, 0.0, 1.0, "load→int_regs");
@@ -2519,42 +2799,61 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     case OpClass::Comparison:
     case OpClass::Conversion:
         return profile.latIntAdd;
-    case OpClass::IntMul:   return profile.latIntMul;
-    case OpClass::IntDiv:   return profile.latIntDiv;
-    case OpClass::FPArith:  return profile.latFPAdd;
-    case OpClass::FPMul:    return profile.latFPMul;
-    case OpClass::FPDiv:    return profile.latFPDiv;
-    case OpClass::FMA:      return profile.latFMA;
-    case OpClass::Load:     return profile.latLoad;
-    case OpClass::Store:    return profile.latStore;
-    case OpClass::Branch:   return profile.latBranch;
-    case OpClass::Phi:      return 0;
-    default:                return 1;
+    case OpClass::IntMul:
+        return profile.latIntMul;
+    case OpClass::IntDiv:
+        return profile.latIntDiv;
+    case OpClass::FPArith:
+        return profile.latFPAdd;
+    case OpClass::FPMul:
+        return profile.latFPMul;
+    case OpClass::FPDiv:
+        return profile.latFPDiv;
+    case OpClass::FMA:
+        return profile.latFMA;
+    case OpClass::Load:
+        return profile.latLoad;
+    case OpClass::Store:
+        return profile.latStore;
+    case OpClass::Branch:
+        return profile.latBranch;
+    case OpClass::Phi:
+        return 0;
+    default:
+        return 1;
     }
 }
 
 /// Return the available ports for a ResourceType from the profile.
 [[nodiscard]] static unsigned getPortCount(ResourceType rt, const MicroarchProfile& profile) {
     switch (rt) {
-    case ResourceType::IntegerALU:  return profile.intALUs;
-    case ResourceType::VectorALU:   return profile.vecUnits;
-    case ResourceType::FMAUnit:     return profile.fmaUnits;
-    case ResourceType::LoadUnit:    return profile.loadPorts;
-    case ResourceType::StoreUnit:   return profile.storePorts;
-    case ResourceType::BranchUnit:  return profile.branchUnits;
-    case ResourceType::DividerUnit: return profile.dividers;
-    default:                        return 1;
+    case ResourceType::IntegerALU:
+        return profile.intALUs;
+    case ResourceType::VectorALU:
+        return profile.vecUnits;
+    case ResourceType::FMAUnit:
+        return profile.fmaUnits;
+    case ResourceType::LoadUnit:
+        return profile.loadPorts;
+    case ResourceType::StoreUnit:
+        return profile.storePorts;
+    case ResourceType::BranchUnit:
+        return profile.branchUnits;
+    case ResourceType::DividerUnit:
+        return profile.dividers;
+    default:
+        return 1;
     }
 }
 
 /// Return the precise instruction latency in cycles using the exact LLVM
-[[nodiscard]] static unsigned getOpcodeLatency(const llvm::Instruction* inst,
-                                  const MicroarchProfile& profile) {
+[[nodiscard]] static unsigned getOpcodeLatency(const llvm::Instruction* inst, const MicroarchProfile& profile) {
     // Conservative latency constants used when we cannot determine exact timing.
-    constexpr unsigned kUnknownCallLatency = 10;      ///< Non-intrinsic call (ABI overhead)
-    constexpr unsigned kUnknownIntrinsicLatency = 5;  ///< Unknown intrinsic (FP-ish pipeline)
+    constexpr unsigned kUnknownCallLatency = 10;     ///< Non-intrinsic call (ABI overhead)
+    constexpr unsigned kUnknownIntrinsicLatency = 5; ///< Unknown intrinsic (FP-ish pipeline)
 
-    if (!inst) return 1;
+    if (!inst)
+        return 1;
     switch (inst->getOpcode()) {
     // ── Integer arithmetic ──────────────────────────────────────────────────
     case llvm::Instruction::Add:
@@ -2565,9 +2864,8 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
         return profile.latIntAdd;
     case llvm::Instruction::Select:
         // FP or vector result: uses FCSEL/BLENDVPD which go through the FP
-        return (inst->getType()->isFloatingPointTy() ||
-                inst->getType()->isVectorTy())
-               ? profile.latFPAdd : profile.latIntAdd;
+        return (inst->getType()->isFloatingPointTy() || inst->getType()->isVectorTy()) ? profile.latFPAdd
+                                                                                       : profile.latIntAdd;
     case llvm::Instruction::Mul:
         return profile.latIntMul;
     case llvm::Instruction::SDiv:
@@ -2618,7 +2916,7 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     // ── Zero-latency structural / bookkeeping ops ────────────────────────────
     case llvm::Instruction::ExtractValue:
     case llvm::Instruction::InsertValue:
-    case llvm::Instruction::Alloca:   // stack allocation done in function prolog
+    case llvm::Instruction::Alloca: // stack allocation done in function prolog
         return 0u;
 
     // ── Control flow ────────────────────────────────────────────────────────
@@ -2653,25 +2951,33 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     // ── Calls / intrinsics ───────────────────────────────────────────────────
     case llvm::Instruction::Call: {
         const auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(inst);
-        if (!ii) return kUnknownCallLatency;
+        if (!ii)
+            return kUnknownCallLatency;
         const llvm::Intrinsic::ID id = ii->getIntrinsicID();
         switch (id) {
         case llvm::Intrinsic::fma:
-        case llvm::Intrinsic::fmuladd:  return profile.latFMA;
-        case llvm::Intrinsic::sqrt:     return profile.latFPDiv;
+        case llvm::Intrinsic::fmuladd:
+            return profile.latFMA;
+        case llvm::Intrinsic::sqrt:
+            return profile.latFPDiv;
         case llvm::Intrinsic::powi:
-        case llvm::Intrinsic::pow:      return profile.latFPDiv * 3; // iterative
+        case llvm::Intrinsic::pow:
+            return profile.latFPDiv * 3; // iterative
         case llvm::Intrinsic::abs:
         case llvm::Intrinsic::smin:
         case llvm::Intrinsic::smax:
         case llvm::Intrinsic::umin:
-        case llvm::Intrinsic::umax:     return profile.latIntAdd;
+        case llvm::Intrinsic::umax:
+            return profile.latIntAdd;
         case llvm::Intrinsic::minnum:
-        case llvm::Intrinsic::maxnum:   return profile.latFPAdd;
+        case llvm::Intrinsic::maxnum:
+            return profile.latFPAdd;
         case llvm::Intrinsic::ctpop:
         case llvm::Intrinsic::ctlz:
-        case llvm::Intrinsic::cttz:     return profile.latIntAdd;
-        case llvm::Intrinsic::prefetch: return 0; // hint, no result latency
+        case llvm::Intrinsic::cttz:
+            return profile.latIntAdd;
+        case llvm::Intrinsic::prefetch:
+            return 0; // hint, no result latency
         // ── Transcendental / math intrinsics ───────────────────────────────
         case llvm::Intrinsic::floor:
         case llvm::Intrinsic::ceil:
@@ -2703,7 +3009,8 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
         case llvm::Intrinsic::copysign:
             // Single cycle: isolate sign + OR into mantissa.
             return 1u;
-        default:                        return kUnknownIntrinsicLatency;
+        default:
+            return kUnknownIntrinsicLatency;
         }
     }
 
@@ -2712,15 +3019,14 @@ HardwareGraph buildHardwareGraph(const MicroarchProfile& profile) {
     }
 }
 
-double instrCostFromProfile(const llvm::Instruction* inst,
-                            const MicroarchProfile& profile) {
+double instrCostFromProfile(const llvm::Instruction* inst, const MicroarchProfile& profile) {
     return static_cast<double>(getOpcodeLatency(inst, profile));
 }
 
-MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
-                                    const MicroarchProfile& profile) {
+MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw, const MicroarchProfile& profile) {
     MappingResult result;
-    if (pg.nodeCount() == 0) return result;
+    if (pg.nodeCount() == 0)
+        return result;
 
     (void)hw; // Graph structure used for validation in debug builds
 
@@ -2729,15 +3035,14 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     // ── Annotate nodes with per-opcode latencies ──────────────────────────────
     for (unsigned i = 0; i < n; ++i) {
         ProgramNode* node = pg.getNodeMut(i);
-        if (!node) continue;
-        unsigned lat = node->inst
-            ? getOpcodeLatency(node->inst, profile)
-            : getLatency(node->opClass, profile);
+        if (!node)
+            continue;
+        unsigned lat = node->inst ? getOpcodeLatency(node->inst, profile) : getLatency(node->opClass, profile);
         node->estimatedLatency = static_cast<double>(lat);
     }
 
     // ── Build adjacency lists for O(N+E) operations ───────────────────────────
-    std::vector<std::vector<std::pair<unsigned,unsigned>>> succList(n), predList(n);
+    std::vector<std::vector<std::pair<unsigned, unsigned>>> succList(n), predList(n);
     std::vector<unsigned> inDeg(n, 0);
     for (const auto& e : pg.edges()) {
         if (e.srcId < n && e.dstId < n) {
@@ -2753,25 +3058,28 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
         // Kahn's algorithm to get topological order.
         std::vector<unsigned> topoOrder;
         topoOrder.reserve(n);
-        std::vector<unsigned> deg(inDeg);  // copy
+        std::vector<unsigned> deg(inDeg); // copy
         std::queue<unsigned> q;
         for (unsigned i = 0; i < n; ++i)
-            if (deg[i] == 0) q.push(i);
+            if (deg[i] == 0)
+                q.push(i);
         while (!q.empty()) {
-            unsigned u = q.front(); q.pop();
+            unsigned u = q.front();
+            q.pop();
             topoOrder.push_back(u);
             for (auto& [v, lat] : succList[u])
-                if (--deg[v] == 0) q.push(v);
+                if (--deg[v] == 0)
+                    q.push(v);
         }
         // Process in reverse topological order (sinks → sources).
         for (auto it = topoOrder.rbegin(); it != topoOrder.rend(); ++it) {
             unsigned u = *it;
-            unsigned nodeLat = static_cast<unsigned>(
-                pg.getNode(u) ? pg.getNode(u)->estimatedLatency : 1);
+            unsigned nodeLat = static_cast<unsigned>(pg.getNode(u) ? pg.getNode(u)->estimatedLatency : 1);
             unsigned maxSuccDist = 0;
             for (auto& [v, edgeLat] : succList[u]) {
                 unsigned dist = priority[v] + edgeLat;
-                if (dist > maxSuccDist) maxSuccDist = dist;
+                if (dist > maxSuccDist)
+                    maxSuccDist = dist;
             }
             priority[u] = nodeLat + maxSuccDist;
         }
@@ -2780,17 +3088,24 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     // ── Per-port-type throughput budget ──────────────────────────────────────
     auto portBusyCycles = [&](ResourceType rt) -> unsigned {
         switch (rt) {
-        case ResourceType::IntegerALU:  return 1;
-        case ResourceType::VectorALU:   return 1;
-        case ResourceType::FMAUnit:     return 1;
-        case ResourceType::LoadUnit:    return 1;
-        case ResourceType::StoreUnit:   return 1;
-        case ResourceType::BranchUnit:  return 1;
+        case ResourceType::IntegerALU:
+            return 1;
+        case ResourceType::VectorALU:
+            return 1;
+        case ResourceType::FMAUnit:
+            return 1;
+        case ResourceType::LoadUnit:
+            return 1;
+        case ResourceType::StoreUnit:
+            return 1;
+        case ResourceType::BranchUnit:
+            return 1;
         case ResourceType::DividerUnit:
             // Divider is typically non-pipelined; occupy it for the full latency
             // divided by the number of divider units.
             return profile.latIntDiv;
-        default:                        return 1;
+        default:
+            return 1;
         }
     };
 
@@ -2816,7 +3131,8 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     std::vector<unsigned> workInDeg(inDeg);
     std::queue<unsigned> readyQ;
     for (unsigned i = 0; i < n; ++i)
-        if (workInDeg[i] == 0) readyQ.push(i);
+        if (workInDeg[i] == 0)
+            readyQ.push(i);
 
     unsigned totalScheduled = 0;
     unsigned maxCycle = 0;
@@ -2833,46 +3149,53 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
         if (ready.empty()) {
             // Deadlock guard: should not happen for valid DAGs.
             for (unsigned i = 0; i < n; ++i)
-                if (!scheduled[i]) { ready.push_back(i); break; }
-            if (ready.empty()) break;
+                if (!scheduled[i]) {
+                    ready.push_back(i);
+                    break;
+                }
+            if (ready.empty())
+                break;
         }
 
-        std::sort(ready.begin(), ready.end(), [&](unsigned a, unsigned b) {
-            return priority[a] > priority[b];
-        });
+        std::sort(ready.begin(), ready.end(), [&](unsigned a, unsigned b) { return priority[a] > priority[b]; });
 
         unsigned issued = 0;
         for (unsigned nodeId : ready) {
-            if (issued >= profile.issueWidth) break;
-            if (scheduled[nodeId]) continue;
+            if (issued >= profile.issueWidth)
+                break;
+            if (scheduled[nodeId])
+                continue;
 
             // Earliest start: max over all predecessors of (sched_cycle + latency).
             unsigned earliest = 0;
             for (auto& [pred, edgeLat] : predList[nodeId]) {
                 if (scheduled[pred]) {
-                    unsigned predLat = static_cast<unsigned>(
-                        pg.getNode(pred) ? pg.getNode(pred)->estimatedLatency : 1);
+                    unsigned predLat = static_cast<unsigned>(pg.getNode(pred) ? pg.getNode(pred)->estimatedLatency : 1);
                     unsigned predEnd = scheduledCycle[pred] + predLat;
-                    if (predEnd > earliest) earliest = predEnd;
+                    if (predEnd > earliest)
+                        earliest = predEnd;
                 }
             }
 
             // Find earliest-free port for this operation.
-            ResourceType rt = mapOpToResource(
-                pg.getNode(nodeId) ? pg.getNode(nodeId)->opClass : OpClass::Other);
+            ResourceType rt = mapOpToResource(pg.getNode(nodeId) ? pg.getNode(nodeId)->opClass : OpClass::Other);
             auto& ports = portAvail[static_cast<int>(rt)];
             unsigned startCycle = earliest;
             unsigned bestPort = 0;
             if (!ports.empty()) {
                 unsigned bestTime = ports[0];
                 for (unsigned p = 1; p < ports.size(); ++p) {
-                    if (ports[p] < bestTime) { bestTime = ports[p]; bestPort = p; }
+                    if (ports[p] < bestTime) {
+                        bestTime = ports[p];
+                        bestPort = p;
+                    }
                 }
                 startCycle = std::max(earliest, bestTime);
                 unsigned busy = portBusyCycles(rt);
                 ports[bestPort] = startCycle + busy;
             }
-            if (startCycle > earliest) stallCycles += (startCycle - earliest);
+            if (startCycle > earliest)
+                stallCycles += (startCycle - earliest);
 
             scheduledCycle[nodeId] = startCycle;
 
@@ -2891,9 +3214,10 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
                 result.schedule.push_back(entry);
             }
 
-            unsigned endCycle = startCycle + static_cast<unsigned>(
-                pg.getNode(nodeId) ? pg.getNode(nodeId)->estimatedLatency : 1);
-            if (endCycle > maxCycle) maxCycle = endCycle;
+            unsigned endCycle =
+                startCycle + static_cast<unsigned>(pg.getNode(nodeId) ? pg.getNode(nodeId)->estimatedLatency : 1);
+            if (endCycle > maxCycle)
+                maxCycle = endCycle;
 
             scheduled[nodeId] = true;
             ++totalScheduled;
@@ -2911,8 +3235,8 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     result.stallCycles = stallCycles;
 
     if (maxCycle > 0 && profile.issueWidth > 0)
-        result.portUtilization = static_cast<double>(totalScheduled) /
-            (static_cast<double>(maxCycle) * profile.issueWidth);
+        result.portUtilization =
+            static_cast<double>(totalScheduled) / (static_cast<double>(maxCycle) * profile.issueWidth);
 
     return result;
 }
@@ -2921,7 +3245,8 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
 
 /// Detect and generate FMA: a*b + c → fma(a, b, c).
 [[gnu::hot]] static unsigned generateFMA(llvm::Function& func, const MicroarchProfile& profile) {
-    if (profile.fmaUnits == 0) return 0;
+    if (profile.fmaUnits == 0)
+        return 0;
 
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -2932,7 +3257,8 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
             if (inst.getOpcode() == llvm::Instruction::FAdd) {
                 // IEEE 754-2008 §5.4.1: fused operations require `contract` permission.
                 auto* fpAdd = llvm::cast<llvm::FPMathOperator>(&inst);
-                if (!fpAdd->hasAllowContract()) continue;
+                if (!fpAdd->hasAllowContract())
+                    continue;
 
                 llvm::Value* op0 = inst.getOperand(0);
                 llvm::Value* op1 = inst.getOperand(1);
@@ -2943,17 +3269,14 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
                     llvm::Value* addend = (swap == 0) ? op1 : op0;
 
                     auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(mulCandidate);
-                    if (fmul && fmul->getOpcode() == llvm::Instruction::FMul &&
-                        fmul->hasOneUse()) {
+                    if (fmul && fmul->getOpcode() == llvm::Instruction::FMul && fmul->hasOneUse()) {
                         llvm::IRBuilder<> builder(&inst);
                         llvm::Module* mod = func.getParent();
                         llvm::Type* ty = inst.getType();
 
-                        llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
-                            mod, llvm::Intrinsic::fma, {ty});
-                        llvm::Value* result = builder.CreateCall(
-                            fmaFn, {fmul->getOperand(0), fmul->getOperand(1), addend},
-                            "fma");
+                        llvm::Function* fmaFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fma, {ty});
+                        llvm::Value* result =
+                            builder.CreateCall(fmaFn, {fmul->getOperand(0), fmul->getOperand(1), addend}, "fma");
                         inst.replaceAllUsesWith(result);
                         toErase.push_back(&inst);
                         toErase.push_back(fmul);
@@ -2972,18 +3295,14 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
                 auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(op1);
                 auto* lhsMul = llvm::dyn_cast<llvm::BinaryOperator>(op0);
                 bool lhsIsFmul = lhsMul && lhsMul->getOpcode() == llvm::Instruction::FMul;
-                if (!lhsIsFmul && fmul && fmul->getOpcode() == llvm::Instruction::FMul &&
-                    fmul->hasOneUse()) {
+                if (!lhsIsFmul && fmul && fmul->getOpcode() == llvm::Instruction::FMul && fmul->hasOneUse()) {
                     // fsub(c, fmul(a,b)) = fma(-a, b, c)
                     llvm::IRBuilder<> builder(&inst);
                     llvm::Module* mod = func.getParent();
                     llvm::Type* ty = inst.getType();
-                    llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
-                        mod, llvm::Intrinsic::fma, {ty});
+                    llvm::Function* fmaFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fma, {ty});
                     llvm::Value* negA = builder.CreateFNeg(fmul->getOperand(0), "fnmadd.neg");
-                    llvm::Value* result = builder.CreateCall(
-                        fmaFn, {negA, fmul->getOperand(1), op0},
-                        "fnmadd");
+                    llvm::Value* result = builder.CreateCall(fmaFn, {negA, fmul->getOperand(1), op0}, "fnmadd");
                     inst.replaceAllUsesWith(result);
                     toErase.push_back(&inst);
                     toErase.push_back(fmul);
@@ -2995,27 +3314,21 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
             // Pattern: fneg(fma_result) where fma_result = fadd(fmul(a,b), c)
             if (inst.getOpcode() == llvm::Instruction::FNeg) {
                 auto* inner = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
-                if (inner && inner->getOpcode() == llvm::Instruction::FAdd &&
-                    inner->hasOneUse()) {
+                if (inner && inner->getOpcode() == llvm::Instruction::FAdd && inner->hasOneUse()) {
                     auto* fpAdd = llvm::cast<llvm::FPMathOperator>(inner);
                     if (fpAdd->hasAllowContract()) {
                         for (int swap = 0; swap < 2; ++swap) {
-                            auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(
-                                inner->getOperand(swap));
+                            auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(inner->getOperand(swap));
                             llvm::Value* addend = inner->getOperand(1 - swap);
-                            if (fmul && fmul->getOpcode() == llvm::Instruction::FMul &&
-                                fmul->hasOneUse()) {
+                            if (fmul && fmul->getOpcode() == llvm::Instruction::FMul && fmul->hasOneUse()) {
                                 llvm::IRBuilder<> builder(&inst);
                                 llvm::Module* mod = func.getParent();
                                 llvm::Type* ty = inst.getType();
-                                llvm::Function* fmaFn = OMSC_GET_INTRINSIC(
-                                    mod, llvm::Intrinsic::fma, {ty});
-                                llvm::Value* negA = builder.CreateFNeg(
-                                    fmul->getOperand(0), "fnmsub.neg_a");
-                                llvm::Value* negC = builder.CreateFNeg(
-                                    addend, "fnmsub.neg_c");
-                                llvm::Value* result = builder.CreateCall(
-                                    fmaFn, {negA, fmul->getOperand(1), negC}, "fnmsub");
+                                llvm::Function* fmaFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fma, {ty});
+                                llvm::Value* negA = builder.CreateFNeg(fmul->getOperand(0), "fnmsub.neg_a");
+                                llvm::Value* negC = builder.CreateFNeg(addend, "fnmsub.neg_c");
+                                llvm::Value* result =
+                                    builder.CreateCall(fmaFn, {negA, fmul->getOperand(1), negC}, "fnmsub");
                                 inst.replaceAllUsesWith(result);
                                 toErase.push_back(&inst);
                                 toErase.push_back(inner);
@@ -3031,14 +3344,16 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     }
 
     for (auto* inst : toErase) {
-        if (inst->use_empty()) inst->eraseFromParent();
+        if (inst->use_empty())
+            inst->eraseFromParent();
     }
     return count;
 }
 
 /// Generate chained FMA for:
 [[gnu::hot]] static unsigned generateFMAChain(llvm::Function& func, const MicroarchProfile& profile) {
-    if (profile.fmaUnits < 2) return 0;  // Need 2+ FMA units to benefit
+    if (profile.fmaUnits < 2)
+        return 0; // Need 2+ FMA units to benefit
 
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -3053,22 +3368,20 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
                 auto* lhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
                 auto* rhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
 
-                if (lhsMul && rhsMul &&
-                    lhsMul->getOpcode() == llvm::Instruction::FMul &&
-                    rhsMul->getOpcode() == llvm::Instruction::FMul &&
-                    lhsMul->hasOneUse() && rhsMul->hasOneUse()) {
+                if (lhsMul && rhsMul && lhsMul->getOpcode() == llvm::Instruction::FMul &&
+                    rhsMul->getOpcode() == llvm::Instruction::FMul && lhsMul->hasOneUse() && rhsMul->hasOneUse()) {
 
                     llvm::IRBuilder<> builder(&inst);
                     llvm::Function* fmaFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fma, {ty});
 
                     // First FMA: fma(a, b, 0.0)
                     llvm::Value* zero = llvm::ConstantFP::get(ty, 0.0);
-                    llvm::Value* fma1 = builder.CreateCall(fmaFn,
-                        {lhsMul->getOperand(0), lhsMul->getOperand(1), zero}, "fma_chain1");
+                    llvm::Value* fma1 =
+                        builder.CreateCall(fmaFn, {lhsMul->getOperand(0), lhsMul->getOperand(1), zero}, "fma_chain1");
 
                     // Second FMA: fma(c, d, fma1)
-                    llvm::Value* fma2 = builder.CreateCall(fmaFn,
-                        {rhsMul->getOperand(0), rhsMul->getOperand(1), fma1}, "fma_chain2");
+                    llvm::Value* fma2 =
+                        builder.CreateCall(fmaFn, {rhsMul->getOperand(0), rhsMul->getOperand(1), fma1}, "fma_chain2");
 
                     inst.replaceAllUsesWith(fma2);
                     toErase.push_back(&inst);
@@ -3084,10 +3397,8 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
                 auto* lhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
                 auto* rhsMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
 
-                if (lhsMul && rhsMul &&
-                    lhsMul->getOpcode() == llvm::Instruction::FMul &&
-                    rhsMul->getOpcode() == llvm::Instruction::FMul &&
-                    lhsMul->hasOneUse() && rhsMul->hasOneUse()) {
+                if (lhsMul && rhsMul && lhsMul->getOpcode() == llvm::Instruction::FMul &&
+                    rhsMul->getOpcode() == llvm::Instruction::FMul && lhsMul->hasOneUse() && rhsMul->hasOneUse()) {
 
                     llvm::IRBuilder<> builder(&inst);
                     llvm::Function* fmaFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fma, {ty});
@@ -3095,12 +3406,11 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
                     // Inner FMA: fma(-c, d, 0.0)  [= -c*d]
                     llvm::Value* zero = llvm::ConstantFP::get(ty, 0.0);
                     llvm::Value* negC = builder.CreateFNeg(rhsMul->getOperand(0), "fmsub_chain.neg");
-                    llvm::Value* fma1 = builder.CreateCall(fmaFn,
-                        {negC, rhsMul->getOperand(1), zero}, "fmsub_chain1");
+                    llvm::Value* fma1 = builder.CreateCall(fmaFn, {negC, rhsMul->getOperand(1), zero}, "fmsub_chain1");
 
                     // Outer FMA: fma(a, b, -c*d) = a*b - c*d
-                    llvm::Value* fma2 = builder.CreateCall(fmaFn,
-                        {lhsMul->getOperand(0), lhsMul->getOperand(1), fma1}, "fmsub_chain2");
+                    llvm::Value* fma2 =
+                        builder.CreateCall(fmaFn, {lhsMul->getOperand(0), lhsMul->getOperand(1), fma1}, "fmsub_chain2");
 
                     inst.replaceAllUsesWith(fma2);
                     toErase.push_back(&inst);
@@ -3114,7 +3424,8 @@ MappingResult mapProgramToHardware(ProgramGraph& pg, const HardwareGraph& hw,
     }
 
     for (auto* inst : toErase) {
-        if (inst->use_empty()) inst->eraseFromParent();
+        if (inst->use_empty())
+            inst->eraseFromParent();
     }
     return count;
 }
@@ -3125,17 +3436,18 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
     unsigned count = 0;
 
     // Compute a latency-driven prefetch distance.  To hide a full memory-
-    unsigned prefetchLines = (profile.l3Latency > 0)
-        ? std::max(2u, std::min(64u, profile.l3Latency / (2 * profile.pipelineDepth + 1)))
-        : 8u;
+    unsigned prefetchLines =
+        (profile.l3Latency > 0) ? std::max(2u, std::min(64u, profile.l3Latency / (2 * profile.pipelineDepth + 1))) : 8u;
     unsigned prefetchBytes = prefetchLines * profile.cacheLineSize;
 
     for (auto& bb : func) {
         // Look for basic blocks that are likely loop bodies (have a backedge).
         auto* term = bb.getTerminator();
-        if (!term) continue;
+        if (!term)
+            continue;
         auto* br = llvm::dyn_cast<llvm::BranchInst>(term);
-        if (!br) continue;
+        if (!br)
+            continue;
 
         bool isLoopBody = false;
         for (unsigned i = 0; i < br->getNumSuccessors(); ++i) {
@@ -3144,7 +3456,8 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
                 break;
             }
         }
-        if (!isLoopBody) continue;
+        if (!isLoopBody)
+            continue;
 
         // Find loads in this loop body.
         std::vector<llvm::LoadInst*> loads;
@@ -3157,7 +3470,8 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
         // Cap prefetches per function to avoid significant instruction-count
         // overhead (each prefetch is a call-like instruction).
         for (auto* load : loads) {
-            if (count >= 8) break;
+            if (count >= 8)
+                break;
 
             llvm::Value* ptr = load->getPointerOperand();
             llvm::Type* ptrTy = ptr->getType();
@@ -3177,11 +3491,9 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
                             // prefetch_offset = prefetchLines cache lines
                             // expressed in element units.
                             unsigned elemLinesPerPrefetch =
-                                (prefetchLines * profile.cacheLineSize
-                                 + static_cast<unsigned>(elemBytes) - 1)
-                                / static_cast<unsigned>(elemBytes);
-                            offsetBytes = elemLinesPerPrefetch
-                                          * static_cast<unsigned>(elemBytes);
+                                (prefetchLines * profile.cacheLineSize + static_cast<unsigned>(elemBytes) - 1) /
+                                static_cast<unsigned>(elemBytes);
+                            offsetBytes = elemLinesPerPrefetch * static_cast<unsigned>(elemBytes);
                         }
                     }
                 }
@@ -3190,22 +3502,19 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
             llvm::IRBuilder<> builder(load);
             llvm::Module* mod = func.getParent();
 
-            llvm::Value* offset = llvm::ConstantInt::get(
-                builder.getInt64Ty(), offsetBytes);
-            llvm::Value* prefetchAddr = builder.CreateGEP(
-                builder.getInt8Ty(), ptr, offset, "prefetch_addr");
+            llvm::Value* offset = llvm::ConstantInt::get(builder.getInt64Ty(), offsetBytes);
+            llvm::Value* prefetchAddr = builder.CreateGEP(builder.getInt8Ty(), ptr, offset, "prefetch_addr");
 
             // Insert llvm.prefetch intrinsic.
-            llvm::Function* prefetchFn = OMSC_GET_INTRINSIC(
-                mod, llvm::Intrinsic::prefetch, {ptrTy});
+            llvm::Function* prefetchFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::prefetch, {ptrTy});
 
             // Args: ptr, rw (0=read), locality (2=medium — L2/L3, not L1),
             builder.CreateCall(prefetchFn, {
-                prefetchAddr,
-                builder.getInt32(0),  // read
-                builder.getInt32(2),  // medium locality (L2/L3)
-                builder.getInt32(1)   // data cache
-            });
+                                               prefetchAddr,
+                                               builder.getInt32(0), // read
+                                               builder.getInt32(2), // medium locality (L2/L3)
+                                               builder.getInt32(1)  // data cache
+                                           });
             count++;
         }
     }
@@ -3214,21 +3523,23 @@ static unsigned insertPrefetches(llvm::Function& func, const MicroarchProfile& p
 }
 
 /// Optimise branch layout for the hardware's branch predictor.
-static unsigned optimizeBranchLayout(llvm::Function& func,
-                                      const MicroarchProfile& /*profile*/) {
+static unsigned optimizeBranchLayout(llvm::Function& func, const MicroarchProfile& /*profile*/) {
     unsigned count = 0;
 
     // Pre-compute a linear order for back-edge detection.
     std::unordered_map<const llvm::BasicBlock*, unsigned> bbOrder;
     {
         unsigned ord = 0;
-        for (auto& bb : func) bbOrder[&bb] = ord++;
+        for (auto& bb : func)
+            bbOrder[&bb] = ord++;
     }
 
     for (auto& bb : func) {
         auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator());
-        if (!br || !br->isConditional()) continue;
-        if (br->getNumSuccessors() < 2) continue;
+        if (!br || !br->isConditional())
+            continue;
+        if (br->getNumSuccessors() < 2)
+            continue;
 
         llvm::BasicBlock* trueBB = br->getSuccessor(0);
         llvm::BasicBlock* falseBB = br->getSuccessor(1);
@@ -3276,8 +3587,7 @@ static unsigned optimizeBranchLayout(llvm::Function& func,
                 llvm::Value* op1 = icmp->getOperand(1);
                 bool isNullCheck =
                     (op0->getType()->isPointerTy() || op1->getType()->isPointerTy()) &&
-                    (llvm::isa<llvm::ConstantPointerNull>(op1) ||
-                     llvm::isa<llvm::ConstantPointerNull>(op0));
+                    (llvm::isa<llvm::ConstantPointerNull>(op1) || llvm::isa<llvm::ConstantPointerNull>(op0));
                 if (isNullCheck) {
                     llvm::MDBuilder mdBuilder(func.getContext());
                     llvm::MDNode* weights;
@@ -3301,24 +3611,21 @@ static unsigned optimizeBranchLayout(llvm::Function& func,
 
         // ── Loop-closing back-edge: branch target precedes current BB ────────
         if (!br->getMetadata(llvm::LLVMContext::MD_prof)) {
-            auto itCur  = bbOrder.find(&bb);
+            auto itCur = bbOrder.find(&bb);
             auto itTrue = bbOrder.find(trueBB);
-            auto itFalse= bbOrder.find(falseBB);
-            if (itCur != bbOrder.end() && itTrue != bbOrder.end()
-                    && itFalse != bbOrder.end()) {
-                bool trueIsBackEdge  = (itTrue->second  < itCur->second);
+            auto itFalse = bbOrder.find(falseBB);
+            if (itCur != bbOrder.end() && itTrue != bbOrder.end() && itFalse != bbOrder.end()) {
+                bool trueIsBackEdge = (itTrue->second < itCur->second);
                 bool falseIsBackEdge = (itFalse->second < itCur->second);
                 if (trueIsBackEdge && !falseIsBackEdge) {
                     // true = loop continue (hot), false = loop exit (cold)
                     llvm::MDBuilder mdBuilder(func.getContext());
-                    br->setMetadata(llvm::LLVMContext::MD_prof,
-                        mdBuilder.createBranchWeights(9, 1));
+                    br->setMetadata(llvm::LLVMContext::MD_prof, mdBuilder.createBranchWeights(9, 1));
                     count++;
                 } else if (falseIsBackEdge && !trueIsBackEdge) {
                     // false = loop continue (hot), true = loop exit (cold)
                     llvm::MDBuilder mdBuilder(func.getContext());
-                    br->setMetadata(llvm::LLVMContext::MD_prof,
-                        mdBuilder.createBranchWeights(1, 9));
+                    br->setMetadata(llvm::LLVMContext::MD_prof, mdBuilder.createBranchWeights(1, 9));
                     count++;
                 }
             }
@@ -3330,7 +3637,8 @@ static unsigned optimizeBranchLayout(llvm::Function& func,
 
 /// Expand FMA generation to also cover fsub(fmul(a,b), c) → fma(a, b, -c).
 static unsigned generateFMASub(llvm::Function& func, const MicroarchProfile& profile) {
-    if (profile.fmaUnits == 0) return 0;
+    if (profile.fmaUnits == 0)
+        return 0;
 
     unsigned count = 0;
     std::vector<llvm::Instruction*> toErase;
@@ -3341,14 +3649,14 @@ static unsigned generateFMASub(llvm::Function& func, const MicroarchProfile& pro
             if (inst.getOpcode() == llvm::Instruction::FSub) {
                 // Require `contract` permission for FMA fusion (IEEE §5.4.1).
                 auto* fpSub = llvm::cast<llvm::FPMathOperator>(&inst);
-                if (!fpSub->hasAllowContract()) continue;
+                if (!fpSub->hasAllowContract())
+                    continue;
 
                 llvm::Value* op0 = inst.getOperand(0);
                 llvm::Value* op1 = inst.getOperand(1);
 
                 auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(op0);
-                if (fmul && fmul->getOpcode() == llvm::Instruction::FMul &&
-                    fmul->hasOneUse()) {
+                if (fmul && fmul->getOpcode() == llvm::Instruction::FMul && fmul->hasOneUse()) {
                     llvm::IRBuilder<> builder(&inst);
                     llvm::Module* mod = func.getParent();
                     llvm::Type* ty = inst.getType();
@@ -3356,8 +3664,8 @@ static unsigned generateFMASub(llvm::Function& func, const MicroarchProfile& pro
                     // fma(a, b, -c)
                     llvm::Value* negC = builder.CreateFNeg(op1, "fneg_c");
                     llvm::Function* fmaFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fma, {ty});
-                    llvm::Value* result = builder.CreateCall(
-                        fmaFn, {fmul->getOperand(0), fmul->getOperand(1), negC}, "fma_sub");
+                    llvm::Value* result =
+                        builder.CreateCall(fmaFn, {fmul->getOperand(0), fmul->getOperand(1), negC}, "fma_sub");
                     inst.replaceAllUsesWith(result);
                     toErase.push_back(&inst);
                     toErase.push_back(fmul);
@@ -3368,25 +3676,26 @@ static unsigned generateFMASub(llvm::Function& func, const MicroarchProfile& pro
     }
 
     for (auto* inst : toErase) {
-        if (inst->use_empty()) inst->eraseFromParent();
+        if (inst->use_empty())
+            inst->eraseFromParent();
     }
     return count;
 }
 
 /// Try to synthesize |absCV| as a 1- or 2-instruction shift+add/sub sequence.
-[[nodiscard]] static llvm::Value*
-tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
-                llvm::Type* ty, uint64_t absCV, unsigned bitWidth) {
-    if (absCV == 0 || bitWidth == 0) return nullptr;
+[[nodiscard]] static llvm::Value* tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv, llvm::Type* ty,
+                                                  uint64_t absCV, unsigned bitWidth) {
+    if (absCV == 0 || bitWidth == 0)
+        return nullptr;
     // Clamp bitWidth first so the absCV bounds check below uses the
     // same (clamped) width and cannot trigger UB via 1<<64.
-    if (bitWidth > 64) bitWidth = 64;
+    if (bitWidth > 64)
+        bitWidth = 64;
     // Reject constants that cannot be represented in the (clamped) integer type.
-    if (bitWidth < 64 && absCV >= (uint64_t(1) << bitWidth)) return nullptr;
+    if (bitWidth < 64 && absCV >= (uint64_t(1) << bitWidth))
+        return nullptr;
 
-    auto mk  = [&](unsigned sh) -> llvm::Value* {
-        return llvm::ConstantInt::get(ty, static_cast<uint64_t>(sh));
-    };
+    auto mk = [&](unsigned sh) -> llvm::Value* { return llvm::ConstantInt::get(ty, static_cast<uint64_t>(sh)); };
     auto shl = [&](llvm::Value* v, unsigned sh) -> llvm::Value* {
         return (sh == 0) ? v : builder.CreateShl(v, mk(sh), "sr.shl");
     };
@@ -3394,7 +3703,8 @@ tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
     // ── Form 1: power of 2 ─────────────────────────────────────────────────
     if ((absCV & (absCV - 1)) == 0) {
         unsigned sh = static_cast<unsigned>(__builtin_ctzll(absCV));
-        if (sh < bitWidth) return shl(xv, sh);
+        if (sh < bitWidth)
+            return shl(xv, sh);
         return nullptr;
     }
 
@@ -3441,18 +3751,20 @@ tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
 }
 
 /// Integer strength reduction: replace multiply-by-small-constant with
-[[gnu::hot]] static unsigned integerStrengthReduce(llvm::Function& func,
-                                       const MicroarchProfile& profile) {
+[[gnu::hot]] static unsigned integerStrengthReduce(llvm::Function& func, const MicroarchProfile& profile) {
     // Only profitable when we have more ALU ports than multiply units.
-    if (profile.intALUs < 2) return 0;
+    if (profile.intALUs < 2)
+        return 0;
 
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::Mul) continue;
-            if (!inst.getType()->isIntegerTy()) continue;
+            if (inst.getOpcode() != llvm::Instruction::Mul)
+                continue;
+            if (!inst.getType()->isIntegerTy())
+                continue;
 
             // Identify (x, constant) — try both orderings.
             llvm::Value* xv = nullptr;
@@ -3465,7 +3777,8 @@ tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
                     break;
                 }
             }
-            if (!xv || cv == 0 || cv == 1 || cv == -1) continue;
+            if (!xv || cv == 0 || cv == 1 || cv == -1)
+                continue;
 
             llvm::IRBuilder<> builder(&inst);
             llvm::Type* ty = inst.getType();
@@ -3473,14 +3786,12 @@ tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
 
             // Work with the absolute value; negate the result if cv was negative.
             bool negate = (cv < 0);
-            uint64_t absCV = negate ? static_cast<uint64_t>(-cv)
-                                    : static_cast<uint64_t>(cv);
+            uint64_t absCV = negate ? static_cast<uint64_t>(-cv) : static_cast<uint64_t>(cv);
 
             llvm::Value* rep = tryShiftAddForm(builder, xv, ty, absCV, bitWidth);
 
             // ── 3-instruction form: 3 set bits → 2 shifts + 2 adds ──────────
-            if (!rep && profile.mulPortCount < profile.intALUs &&
-                __builtin_popcountll(absCV) == 3) {
+            if (!rep && profile.mulPortCount < profile.intALUs && __builtin_popcountll(absCV) == 3) {
                 unsigned b0 = static_cast<unsigned>(__builtin_ctzll(absCV));
                 uint64_t rest = absCV ^ (uint64_t(1) << b0);
                 unsigned b1 = static_cast<unsigned>(__builtin_ctzll(rest));
@@ -3490,8 +3801,7 @@ tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
                         return llvm::ConstantInt::get(ty, static_cast<uint64_t>(sh));
                     };
                     auto sh2 = [&](llvm::Value* v, unsigned sh) -> llvm::Value* {
-                        return (sh == 0) ? v
-                             : builder.CreateShl(v, mk2(sh), "sr.shl3");
+                        return (sh == 0) ? v : builder.CreateShl(v, mk2(sh), "sr.shl3");
                     };
                     auto* t = builder.CreateAdd(sh2(xv, b2), sh2(xv, b1), "sr.add3a");
                     rep = builder.CreateAdd(t, sh2(xv, b0), "sr.add3b");
@@ -3516,19 +3826,21 @@ tryShiftAddForm(llvm::IRBuilder<>& builder, llvm::Value* xv,
 }
 
 /// Detect adjacent scalar load pairs that can be annotated for hardware
-static unsigned markLoadStorePairs(llvm::Function& func,
-                                    const MicroarchProfile& profile) {
-    if (profile.loadPorts < 2) return 0;
+static unsigned markLoadStorePairs(llvm::Function& func, const MicroarchProfile& profile) {
+    if (profile.loadPorts < 2)
+        return 0;
 
     unsigned count = 0;
     const llvm::DataLayout* dl = nullptr;
-    if (auto* mod = func.getParent()) dl = &mod->getDataLayout();
+    if (auto* mod = func.getParent())
+        dl = &mod->getDataLayout();
 
     for (auto& bb : func) {
         std::vector<llvm::LoadInst*> loads;
         for (auto& inst : bb) {
             if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(&inst)) {
-                if (!ld->isVolatile()) loads.push_back(ld);
+                if (!ld->isVolatile())
+                    loads.push_back(ld);
             }
         }
 
@@ -3541,16 +3853,21 @@ static unsigned markLoadStorePairs(llvm::Function& func,
             // Both loads must be from GEP instructions off the same base.
             auto* gep0 = llvm::dyn_cast<llvm::GetElementPtrInst>(ld0->getPointerOperand());
             auto* gep1 = llvm::dyn_cast<llvm::GetElementPtrInst>(ld1->getPointerOperand());
-            if (!gep0 || !gep1) continue;
-            if (gep0->getPointerOperand() != gep1->getPointerOperand()) continue;
-            if (gep0->getNumIndices() != 1 || gep1->getNumIndices() != 1) continue;
+            if (!gep0 || !gep1)
+                continue;
+            if (gep0->getPointerOperand() != gep1->getPointerOperand())
+                continue;
+            if (gep0->getNumIndices() != 1 || gep1->getNumIndices() != 1)
+                continue;
 
             auto* idx0 = llvm::dyn_cast<llvm::ConstantInt>(gep0->getOperand(1));
             auto* idx1 = llvm::dyn_cast<llvm::ConstantInt>(gep1->getOperand(1));
-            if (!idx0 || !idx1) continue;
+            if (!idx0 || !idx1)
+                continue;
 
             int64_t idxDiff = idx1->getSExtValue() - idx0->getSExtValue();
-            if (idxDiff < 0) idxDiff = -idxDiff; // absolute difference
+            if (idxDiff < 0)
+                idxDiff = -idxDiff; // absolute difference
 
             // Compute the byte-offset difference using the GEP element type
             // and the data layout.  Fall back to index difference if no DL.
@@ -3570,11 +3887,13 @@ static unsigned markLoadStorePairs(llvm::Function& func,
                 pairOk = (idxDiff == 1);
             }
 
-            if (!pairOk) continue;
+            if (!pairOk)
+                continue;
 
             // Both loads must have the same result type for the backend to
             // treat them as a coalescing candidate.
-            if (ld0->getType() != ld1->getType()) continue;
+            if (ld0->getType() != ld1->getType())
+                continue;
 
             // Annotate with access.group metadata to hint the backend.
             llvm::LLVMContext& ctx = func.getContext();
@@ -3589,15 +3908,16 @@ static unsigned markLoadStorePairs(llvm::Function& func,
 }
 
 /// Detect natural loops and annotate their back-edge terminators with
-static unsigned softwarePipelineLoops(llvm::Function& func,
-                                       const MicroarchProfile& profile) {
-    if (func.isDeclaration()) return 0;
+static unsigned softwarePipelineLoops(llvm::Function& func, const MicroarchProfile& profile) {
+    if (func.isDeclaration())
+        return 0;
 
     // ── Assign linear order to each basic block ───────────────────────────────
     std::unordered_map<llvm::BasicBlock*, unsigned> bbOrder;
     {
         unsigned ord = 0;
-        for (auto& bb : func) bbOrder[&bb] = ord++;
+        for (auto& bb : func)
+            bbOrder[&bb] = ord++;
     }
 
     unsigned count = 0;
@@ -3607,31 +3927,40 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
         // Determine if this BB is a loop header.
         llvm::BasicBlock* latch = nullptr;
         for (auto* pred : llvm::predecessors(&bb)) {
-            if (bbOrder[pred] >= bbOrder[&bb]) { latch = pred; break; }
+            if (bbOrder[pred] >= bbOrder[&bb]) {
+                latch = pred;
+                break;
+            }
         }
-        if (!latch) continue; // not a loop header
+        if (!latch)
+            continue; // not a loop header
 
         // Use the latch's terminator to attach loop metadata.
         auto* latchTerm = latch->getTerminator();
-        if (!latchTerm) continue;
+        if (!latchTerm)
+            continue;
 
         // Skip if this loop already has loop metadata (user-annotated or
         // set by a previous pass — don't override explicit user hints).
-        if (latchTerm->getMetadata(llvm::LLVMContext::MD_loop)) continue;
+        if (latchTerm->getMetadata(llvm::LLVMContext::MD_loop))
+            continue;
 
         // Skip if the latch has non-intrinsic calls (unknown side-effects).
         bool hasUnsafeCall = false;
         for (auto& inst : *latch) {
             if (llvm::isa<llvm::CallInst>(inst) && !llvm::isa<llvm::IntrinsicInst>(inst)) {
-                hasUnsafeCall = true; break;
+                hasUnsafeCall = true;
+                break;
             }
         }
-        if (hasUnsafeCall) continue;
+        if (hasUnsafeCall)
+            continue;
 
         // ── Compute Resource MII (minimum initiation interval) ──────────────
         std::unordered_map<int, unsigned> resWork;
         for (auto& inst : bb) {
-            if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator()) continue;
+            if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator())
+                continue;
             int key = static_cast<int>(mapOpToResource(classifyOp(&inst)));
             resWork[key]++;
         }
@@ -3639,11 +3968,14 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
         unsigned resMII = 1;
         auto checkRT = [&](ResourceType rt) {
             auto it = resWork.find(static_cast<int>(rt));
-            if (it == resWork.end() || it->second == 0) return;
+            if (it == resWork.end() || it->second == 0)
+                return;
             unsigned ports = getPortCount(rt, profile);
-            if (ports == 0) return;
+            if (ports == 0)
+                return;
             unsigned mii = (it->second + ports - 1) / ports;
-            if (mii > resMII) resMII = mii;
+            if (mii > resMII)
+                resMII = mii;
         };
         checkRT(ResourceType::IntegerALU);
         checkRT(ResourceType::VectorALU);
@@ -3658,13 +3990,16 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
             // Build a local index of instructions in this BB and the latch.
             std::unordered_map<const llvm::Instruction*, unsigned> bbInstIdx;
             unsigned ord = 0;
-            for (auto& inst : bb)    bbInstIdx[&inst] = ord++;
+            for (auto& inst : bb)
+                bbInstIdx[&inst] = ord++;
             if (latch != &bb)
-                for (auto& inst : *latch) bbInstIdx[&inst] = ord++;
+                for (auto& inst : *latch)
+                    bbInstIdx[&inst] = ord++;
 
             for (auto& phiInst : bb) {
                 auto* phi = llvm::dyn_cast<llvm::PHINode>(&phiInst);
-                if (!phi) break; // PHIs are always first in a BB
+                if (!phi)
+                    break; // PHIs are always first in a BB
 
                 // Find the back-edge incoming value (value coming from the latch).
                 llvm::Value* backVal = nullptr;
@@ -3674,7 +4009,8 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
                         break;
                     }
                 }
-                if (!backVal) continue;
+                if (!backVal)
+                    continue;
 
                 // Step 1: Forward BFS from phi to mark all instructions in
                 std::unordered_set<const llvm::Instruction*> onChain;
@@ -3687,9 +4023,12 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
                         wl.pop();
                         for (auto* usr : cur->users()) {
                             auto* uInst = llvm::dyn_cast<llvm::Instruction>(usr);
-                            if (!uInst) continue;
-                            if (bbInstIdx.find(uInst) == bbInstIdx.end()) continue;
-                            if (onChain.insert(uInst).second) wl.push(uInst);
+                            if (!uInst)
+                                continue;
+                            if (bbInstIdx.find(uInst) == bbInstIdx.end())
+                                continue;
+                            if (onChain.insert(uInst).second)
+                                wl.push(uInst);
                         }
                     }
                 }
@@ -3701,10 +4040,14 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
                 std::unordered_set<const llvm::Value*> visited;
                 while (true) {
                     auto* curInst = llvm::dyn_cast<llvm::Instruction>(cur);
-                    if (!curInst) break;
-                    if (curInst == phi) break;  // closed the cycle
-                    if (!visited.insert(curInst).second) break;  // cycle guard
-                    if (bbInstIdx.find(curInst) == bbInstIdx.end()) break;
+                    if (!curInst)
+                        break;
+                    if (curInst == phi)
+                        break; // closed the cycle
+                    if (!visited.insert(curInst).second)
+                        break; // cycle guard
+                    if (bbInstIdx.find(curInst) == bbInstIdx.end())
+                        break;
 
                     chainLat += getOpcodeLatency(curInst, profile);
 
@@ -3712,17 +4055,20 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
                     llvm::Value* next = nullptr;
                     for (auto& op : curInst->operands()) {
                         auto* opInst = llvm::dyn_cast<llvm::Instruction>(op.get());
-                        if (!opInst) continue;
+                        if (!opInst)
+                            continue;
                         // phi itself or any onChain member is a valid next hop.
                         if (opInst == phi || onChain.count(opInst)) {
                             next = opInst;
                             break;
                         }
                     }
-                    if (!next) break;
+                    if (!next)
+                        break;
                     cur = next;
                 }
-                if (chainLat > recMII) recMII = chainLat;
+                if (chainLat > recMII)
+                    recMII = chainLat;
             }
         }
 
@@ -3749,16 +4095,24 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
                     continue;
                 llvm::Type* ty = loopInst.getType();
                 unsigned bits = 0;
-                if (ty->isIntegerTy())       bits = ty->getIntegerBitWidth();
-                else if (ty->isFloatTy())    bits = 32;
-                else if (ty->isDoubleTy())   bits = 64;
-                else if (ty->isHalfTy())     bits = 16;
-                if (bits >= 8 && bits <= 64) widthFreq[bits]++;
+                if (ty->isIntegerTy())
+                    bits = ty->getIntegerBitWidth();
+                else if (ty->isFloatTy())
+                    bits = 32;
+                else if (ty->isDoubleTy())
+                    bits = 64;
+                else if (ty->isHalfTy())
+                    bits = 16;
+                if (bits >= 8 && bits <= 64)
+                    widthFreq[bits]++;
             }
             unsigned domBits = 64; // default: OmScript's native int is i64
             unsigned domCount = 0;
             for (auto& [bits, cnt] : widthFreq) {
-                if (cnt > domCount) { domBits = bits; domCount = cnt; }
+                if (cnt > domCount) {
+                    domBits = bits;
+                    domCount = cnt;
+                }
             }
             // Compute lane count and clamp: at least 2, at most 16.
             unsigned lanes = profile.vectorWidth / domBits;
@@ -3771,28 +4125,20 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
         llvm::SmallVector<llvm::Metadata*, 6> mds;
         mds.push_back(nullptr); // placeholder for self-reference
 
-        mds.push_back(llvm::MDNode::get(ctx, {
-            llvm::MDString::get(ctx, "llvm.loop.unroll.count"),
-            llvm::ConstantAsMetadata::get(
-                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), unroll))
-        }));
+        mds.push_back(llvm::MDNode::get(
+            ctx, {llvm::MDString::get(ctx, "llvm.loop.unroll.count"),
+                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), unroll))}));
 
-        mds.push_back(llvm::MDNode::get(ctx, {
-            llvm::MDString::get(ctx, "llvm.loop.interleave.count"),
-            llvm::ConstantAsMetadata::get(
-                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), interleave))
-        }));
+        mds.push_back(llvm::MDNode::get(
+            ctx, {llvm::MDString::get(ctx, "llvm.loop.interleave.count"),
+                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), interleave))}));
 
         if (vecWidth > 0) {
-            mds.push_back(llvm::MDNode::get(ctx, {
-                llvm::MDString::get(ctx, "llvm.loop.vectorize.enable"),
-                llvm::ConstantAsMetadata::get(llvm::ConstantInt::getTrue(ctx))
-            }));
-            mds.push_back(llvm::MDNode::get(ctx, {
-                llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
-                llvm::ConstantAsMetadata::get(
-                    llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), vecWidth))
-            }));
+            mds.push_back(llvm::MDNode::get(ctx, {llvm::MDString::get(ctx, "llvm.loop.vectorize.enable"),
+                                                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::getTrue(ctx))}));
+            mds.push_back(llvm::MDNode::get(
+                ctx, {llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
+                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), vecWidth))}));
         }
 
         llvm::MDNode* loopID = llvm::MDNode::get(ctx, mds);
@@ -3805,21 +4151,22 @@ static unsigned softwarePipelineLoops(llvm::Function& func,
 }
 
 /// Set LLVM target-cpu and target-features function attributes so the backend
-static void applyTargetAttributes(llvm::Function& func,
-                                   const std::string& cpuName,
-                                   const MicroarchProfile& profile) {
-    if (cpuName.empty() || func.isDeclaration()) return;
+static void applyTargetAttributes(llvm::Function& func, const std::string& cpuName, const MicroarchProfile& profile) {
+    if (cpuName.empty() || func.isDeclaration())
+        return;
 
     // Set target-cpu only if not already specified.
     if (!func.hasFnAttribute("target-cpu"))
         func.addFnAttr("target-cpu", cpuName);
 
     // Build a feature string from the profile's ISA and vector width.
-    if (func.hasFnAttribute("target-features")) return; // respect explicit user setting
+    if (func.hasFnAttribute("target-features"))
+        return; // respect explicit user setting
 
     std::string features;
     auto addF = [&](const char* f) {
-        if (!features.empty()) features += ',';
+        if (!features.empty())
+            features += ',';
         features += f;
     };
 
@@ -3835,10 +4182,10 @@ static void applyTargetAttributes(llvm::Function& func,
             addF("+bmi");
             addF("+bmi2");
             addF("+lzcnt");
-            addF("+fma");    // FMA3 instructions (VFMADD132/213/231)
-            addF("+f16c");   // half-float conversion (VCVTPH2PS, VCVTPS2PH)
-            addF("+cx16");   // CMPXCHG16B
-            addF("+sahf");   // LAHF/SAHF in 64-bit mode (needed by some libms)
+            addF("+fma");  // FMA3 instructions (VFMADD132/213/231)
+            addF("+f16c"); // half-float conversion (VCVTPH2PS, VCVTPS2PH)
+            addF("+cx16"); // CMPXCHG16B
+            addF("+sahf"); // LAHF/SAHF in 64-bit mode (needed by some libms)
         }
         if (profile.vectorWidth >= 256) {
             addF("+avx");
@@ -3863,11 +4210,11 @@ static void applyTargetAttributes(llvm::Function& func,
     case ISAFamily::AArch64:
         addF("+neon");
         addF("+fp-armv8");
-        addF("+fp16");       // half-precision FP arithmetic (ARMv8.2+)
-        addF("+dotprod");    // 8-bit dot product (ARMv8.2-dotprod, all modern ARM)
-        addF("+crypto");     // AES + SHA (ARMv8.0-crypto, ubiquitous in AArch64)
-        addF("+zcm");        // zero cycle move (register renaming hint)
-        addF("+zcz");        // zero cycle zeroing
+        addF("+fp16");    // half-precision FP arithmetic (ARMv8.2+)
+        addF("+dotprod"); // 8-bit dot product (ARMv8.2-dotprod, all modern ARM)
+        addF("+crypto");  // AES + SHA (ARMv8.0-crypto, ubiquitous in AArch64)
+        addF("+zcm");     // zero cycle move (register renaming hint)
+        addF("+zcz");     // zero cycle zeroing
         if (profile.vectorWidth >= 256) {
             addF("+sve");
             addF("+sve2");
@@ -3877,16 +4224,17 @@ static void applyTargetAttributes(llvm::Function& func,
         break;
 
     case ISAFamily::RISCV64:
-        addF("+m");  // multiply/divide
-        addF("+a");  // atomics
-        addF("+f");  // single-precision FP
-        addF("+d");  // double-precision FP
-        addF("+c");  // compressed instructions
+        addF("+m");   // multiply/divide
+        addF("+a");   // atomics
+        addF("+f");   // single-precision FP
+        addF("+d");   // double-precision FP
+        addF("+c");   // compressed instructions
         addF("+zba"); // address generation bitmanip (SH1ADD, SH2ADD, SH3ADD)
         addF("+zbb"); // basic bitmanip (ANDN, CLZ, CTZ, ORC.B, REV8, etc.)
         addF("+zbc"); // carry-less multiplication
         addF("+zbs"); // single-bit instructions
-        if (profile.vecUnits > 0 && profile.vectorWidth >= 128) addF("+v");
+        if (profile.vecUnits > 0 && profile.vectorWidth >= 128)
+            addF("+v");
         break;
 
     default:
@@ -3898,10 +4246,10 @@ static void applyTargetAttributes(llvm::Function& func,
 }
 
 /// Detect `select(icmp slt x 0, sub(0, x), x)` and similar patterns and
-static unsigned generateIntegerAbs(llvm::Function& func,
-                                    const MicroarchProfile& profile) {
+static unsigned generateIntegerAbs(llvm::Function& func, const MicroarchProfile& profile) {
     // llvm.abs is beneficial on all architectures that have a native abs-like
-    if (profile.intALUs == 0) return 0;
+    if (profile.intALUs == 0)
+        return 0;
 
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
@@ -3909,13 +4257,16 @@ static unsigned generateIntegerAbs(llvm::Function& func,
     for (auto& bb : func) {
         for (auto& inst : bb) {
             auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
-            if (!sel) continue;
-            if (!sel->getType()->isIntegerTy()) continue;
+            if (!sel)
+                continue;
+            if (!sel->getType()->isIntegerTy())
+                continue;
 
             // Pattern: select(icmp_slt(x, 0), sub(0, x), x)
             //    or:   select(icmp_sgt(x, 0), x, sub(0, x))
             auto* cond = llvm::dyn_cast<llvm::ICmpInst>(sel->getCondition());
-            if (!cond) continue;
+            if (!cond)
+                continue;
 
             llvm::Value* x = nullptr;
             llvm::Value* negX = nullptr;
@@ -3936,7 +4287,7 @@ static unsigned generateIntegerAbs(llvm::Function& func,
                 // select(icmp slt x 0, neg(x), x)  →  abs(x)
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(cond->getOperand(1))) {
                     if (ci->isZero()) {
-                        x    = cond->getOperand(0);
+                        x = cond->getOperand(0);
                         negX = sel->getTrueValue();
                         if (!matchNeg(negX, x) || sel->getFalseValue() != x)
                             x = nullptr;
@@ -3946,7 +4297,7 @@ static unsigned generateIntegerAbs(llvm::Function& func,
                 // select(icmp sgt x 0, x, neg(x))  →  abs(x)
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(cond->getOperand(1))) {
                     if (ci->isZero()) {
-                        x    = cond->getOperand(0);
+                        x = cond->getOperand(0);
                         negX = sel->getFalseValue();
                         if (!matchNeg(negX, x) || sel->getTrueValue() != x)
                             x = nullptr;
@@ -3954,7 +4305,8 @@ static unsigned generateIntegerAbs(llvm::Function& func,
                 }
             }
 
-            if (!x) continue;
+            if (!x)
+                continue;
 
             llvm::IRBuilder<> builder(sel);
             llvm::Module* mod = func.getParent();
@@ -3962,8 +4314,7 @@ static unsigned generateIntegerAbs(llvm::Function& func,
             llvm::Function* absFn = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::abs, {ty});
             // `false` = result may NOT be poison if the input is INT_MIN
             // (the safe/conservative version).
-            llvm::Value* absVal = builder.CreateCall(
-                absFn, {x, builder.getInt1(false)}, "abs");
+            llvm::Value* absVal = builder.CreateCall(absFn, {x, builder.getInt1(false)}, "abs");
             replacements.emplace_back(sel, absVal);
             ++count;
         }
@@ -3983,20 +4334,24 @@ static unsigned canonicalizeFaddFneg(llvm::Function& func) {
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::FAdd) continue;
+            if (inst.getOpcode() != llvm::Instruction::FAdd)
+                continue;
             auto* fadd = llvm::cast<llvm::BinaryOperator>(&inst);
 
             // Only canonicalize when the fadd is "fast" (no strict FP semantics).
             // This guards against changing NaN/Inf behaviour.
-            if (!fadd->isFast() && !fadd->hasNoNaNs()) continue;
+            if (!fadd->isFast() && !fadd->hasNoNaNs())
+                continue;
 
             // Try both operands: fadd(x, fneg(y)) or fadd(fneg(y), x).
             for (int side = 0; side < 2; ++side) {
                 llvm::Value* candidate = fadd->getOperand(side);
                 auto* fneg = llvm::dyn_cast<llvm::UnaryOperator>(candidate);
-                if (!fneg || fneg->getOpcode() != llvm::Instruction::FNeg) continue;
+                if (!fneg || fneg->getOpcode() != llvm::Instruction::FNeg)
+                    continue;
                 // Only fold when the fneg result is used solely by this fadd,
-                if (!fneg->hasOneUse() && !fadd->hasAllowReassoc()) continue;
+                if (!fneg->hasOneUse() && !fadd->hasAllowReassoc())
+                    continue;
 
                 work.emplace_back(fadd, fneg);
                 break;
@@ -4006,46 +4361,47 @@ static unsigned canonicalizeFaddFneg(llvm::Function& func) {
 
     for (auto& [fadd, fneg] : work) {
         // Determine which operand is the fneg and which is the other addend.
-        llvm::Value* other = (fadd->getOperand(0) == fneg)
-                             ? fadd->getOperand(1) : fadd->getOperand(0);
+        llvm::Value* other = (fadd->getOperand(0) == fneg) ? fadd->getOperand(1) : fadd->getOperand(0);
         llvm::Value* negated = fneg->getOperand(0);
 
         llvm::IRBuilder<> builder(fadd);
         llvm::Value* fsub = builder.CreateFSubFMF(other, negated, fadd, "fsub_canon");
         fadd->replaceAllUsesWith(fsub);
         fadd->eraseFromParent();
-        if (fneg->use_empty()) fneg->eraseFromParent();
+        if (fneg->use_empty())
+            fneg->eraseFromParent();
         ++count;
     }
     return count;
 }
 
 /// Replace FP division by a compile-time constant with a reciprocal multiply.
-static unsigned foldFPDivByConstant(llvm::Function& func,
-                                     const MicroarchProfile& profile) {
+static unsigned foldFPDivByConstant(llvm::Function& func, const MicroarchProfile& profile) {
     // Guard: only worth doing when div is materially slower than mul.
-    if (profile.latFPDiv <= profile.latFPMul + 1) return 0;
+    if (profile.latFPDiv <= profile.latFPMul + 1)
+        return 0;
 
     unsigned count = 0;
     std::vector<std::pair<llvm::Instruction*, llvm::Value*>> replacements;
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::FDiv) continue;
+            if (inst.getOpcode() != llvm::Instruction::FDiv)
+                continue;
             // Check the per-instruction `arcp` fast-math flag.
             auto* fpOp = llvm::cast<llvm::FPMathOperator>(&inst);
-            if (!fpOp->hasAllowReciprocal()) continue;
+            if (!fpOp->hasAllowReciprocal())
+                continue;
 
             llvm::Value* dividend = inst.getOperand(0);
-            llvm::Value* divisor  = inst.getOperand(1);
-            llvm::Type*  ty       = inst.getType();
+            llvm::Value* divisor = inst.getOperand(1);
+            llvm::Type* ty = inst.getType();
 
             // Only fold when the divisor is a compile-time FP constant (scalar or
             // splat vector).  Skip division by 0 or denormals.
             llvm::ConstantFP* cFP = nullptr;
             if (auto* cfp = llvm::dyn_cast<llvm::ConstantFP>(divisor)) {
-                if (!cfp->isZero() && cfp->getValueAPF().isFiniteNonZero() &&
-                    !cfp->getValueAPF().isDenormal())
+                if (!cfp->isZero() && cfp->getValueAPF().isFiniteNonZero() && !cfp->getValueAPF().isDenormal())
                     cFP = cfp;
             }
             // Handle splat vector constant: <4 x float> <C, C, C, C>.
@@ -4059,13 +4415,13 @@ static unsigned foldFPDivByConstant(llvm::Function& func,
                         cFP = llvm::dyn_cast<llvm::ConstantFP>(cdv->getSplatValue());
                 }
             }
-            if (!cFP) continue;
+            if (!cFP)
+                continue;
 
             // Compute 1.0 / C in the same FP semantics as the operation.
             llvm::APFloat recip(1.0); // start as double 1.0
             bool lossy = false;
-            recip.convert(cFP->getValueAPF().getSemantics(),
-                          llvm::APFloat::rmNearestTiesToEven, &lossy);
+            recip.convert(cFP->getValueAPF().getSemantics(), llvm::APFloat::rmNearestTiesToEven, &lossy);
             llvm::APFloat divisorVal = cFP->getValueAPF();
             auto status = recip.divide(divisorVal, llvm::APFloat::rmNearestTiesToEven);
             // Reject if division produced an inexact result that would change
@@ -4075,11 +4431,9 @@ static unsigned foldFPDivByConstant(llvm::Function& func,
             llvm::Value* recipConst;
             if (ty->isVectorTy()) {
                 // Splat the scalar reciprocal into a vector constant.
-                llvm::Constant* scalarRecip = llvm::ConstantFP::get(
-                    ty->getScalarType(), recip);
-                recipConst = llvm::ConstantVector::getSplat(
-                    llvm::cast<llvm::VectorType>(ty)->getElementCount(),
-                    scalarRecip);
+                llvm::Constant* scalarRecip = llvm::ConstantFP::get(ty->getScalarType(), recip);
+                recipConst =
+                    llvm::ConstantVector::getSplat(llvm::cast<llvm::VectorType>(ty)->getElementCount(), scalarRecip);
             } else {
                 recipConst = llvm::ConstantFP::get(ty, recip);
             }
@@ -4113,11 +4467,14 @@ static unsigned foldDivByPow2(llvm::Function& func) {
             bool isUDiv = (op == llvm::Instruction::UDiv);
             bool isURem = (op == llvm::Instruction::URem);
             bool isSDiv = (op == llvm::Instruction::SDiv);
-            if (!isUDiv && !isURem && !isSDiv) continue;
-            if (!inst.getType()->isIntegerTy()) continue;
+            if (!isUDiv && !isURem && !isSDiv)
+                continue;
+            if (!inst.getType()->isIntegerTy())
+                continue;
 
             auto* ci = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1));
-            if (!ci) continue;
+            if (!ci)
+                continue;
 
             llvm::Value* x = inst.getOperand(0);
             llvm::IRBuilder<> builder(&inst);
@@ -4132,20 +4489,15 @@ static unsigned foldDivByPow2(llvm::Function& func) {
             } else if (divisor.isPowerOf2()) {
                 unsigned k = divisor.logBase2();
                 if (isUDiv) {
-                    rep = builder.CreateLShr(x,
-                        llvm::ConstantInt::get(ty, k), "udiv.shr");
+                    rep = builder.CreateLShr(x, llvm::ConstantInt::get(ty, k), "udiv.shr");
                 } else if (isURem) {
-                    rep = builder.CreateAnd(x,
-                        llvm::ConstantInt::get(ty, divisor - 1), "urem.and");
+                    rep = builder.CreateAnd(x, llvm::ConstantInt::get(ty, divisor - 1), "urem.and");
                 } else { // SDiv by positive power-of-2
                     // Signed division by 2^k rounds toward zero.
-                    llvm::Value* signBit = builder.CreateAShr(x,
-                        llvm::ConstantInt::get(ty, bitWidth - 1), "sdiv.sign");
-                    llvm::Value* adj = builder.CreateAnd(signBit,
-                        llvm::ConstantInt::get(ty, divisor - 1), "sdiv.adj");
+                    llvm::Value* signBit = builder.CreateAShr(x, llvm::ConstantInt::get(ty, bitWidth - 1), "sdiv.sign");
+                    llvm::Value* adj = builder.CreateAnd(signBit, llvm::ConstantInt::get(ty, divisor - 1), "sdiv.adj");
                     llvm::Value* adjusted = builder.CreateAdd(x, adj, "sdiv.adj_x");
-                    rep = builder.CreateAShr(adjusted,
-                        llvm::ConstantInt::get(ty, k), "sdiv.shr");
+                    rep = builder.CreateAShr(adjusted, llvm::ConstantInt::get(ty, k), "sdiv.shr");
                 }
             }
 
@@ -4173,61 +4525,76 @@ static unsigned foldMinMaxPatterns(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
-            if (!sel) continue;
+            if (!sel)
+                continue;
 
-            llvm::Value* cond    = sel->getCondition();
+            llvm::Value* cond = sel->getCondition();
             llvm::Value* trueVal = sel->getTrueValue();
-            llvm::Value* falseVal= sel->getFalseValue();
-            llvm::Type*  ty      = sel->getType();
+            llvm::Value* falseVal = sel->getFalseValue();
+            llvm::Type* ty = sel->getType();
 
             // ── Integer min/max ──────────────────────────────────────────────
             if (ty->isIntegerTy() || (ty->isVectorTy() && ty->getScalarType()->isIntegerTy())) {
                 auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(cond);
-                if (!icmp) continue;
+                if (!icmp)
+                    continue;
 
                 llvm::Value* a = icmp->getOperand(0);
                 llvm::Value* b = icmp->getOperand(1);
                 llvm::CmpInst::Predicate pred = icmp->getPredicate();
 
                 llvm::Intrinsic::ID intrID = llvm::Intrinsic::not_intrinsic;
-                llvm::Value* minA = nullptr, *minB = nullptr;
+                llvm::Value *minA = nullptr, *minB = nullptr;
 
                 // select(a < b, a, b)  →  smin(a, b)
-                if ((pred == llvm::CmpInst::ICMP_SLT || pred == llvm::CmpInst::ICMP_SLE) &&
-                    trueVal == a && falseVal == b) {
-                    intrID = llvm::Intrinsic::smin; minA = a; minB = b;
+                if ((pred == llvm::CmpInst::ICMP_SLT || pred == llvm::CmpInst::ICMP_SLE) && trueVal == a &&
+                    falseVal == b) {
+                    intrID = llvm::Intrinsic::smin;
+                    minA = a;
+                    minB = b;
                 }
                 // select(a > b, a, b)  →  smax(a, b)
-                else if ((pred == llvm::CmpInst::ICMP_SGT || pred == llvm::CmpInst::ICMP_SGE) &&
-                         trueVal == a && falseVal == b) {
-                    intrID = llvm::Intrinsic::smax; minA = a; minB = b;
+                else if ((pred == llvm::CmpInst::ICMP_SGT || pred == llvm::CmpInst::ICMP_SGE) && trueVal == a &&
+                         falseVal == b) {
+                    intrID = llvm::Intrinsic::smax;
+                    minA = a;
+                    minB = b;
                 }
                 // select(a < b, b, a) → smax(a, b)  [inverted select]
-                else if ((pred == llvm::CmpInst::ICMP_SLT || pred == llvm::CmpInst::ICMP_SLE) &&
-                         trueVal == b && falseVal == a) {
-                    intrID = llvm::Intrinsic::smax; minA = a; minB = b;
+                else if ((pred == llvm::CmpInst::ICMP_SLT || pred == llvm::CmpInst::ICMP_SLE) && trueVal == b &&
+                         falseVal == a) {
+                    intrID = llvm::Intrinsic::smax;
+                    minA = a;
+                    minB = b;
                 }
                 // select(a > b, b, a) → smin(a, b)  [inverted select]
-                else if ((pred == llvm::CmpInst::ICMP_SGT || pred == llvm::CmpInst::ICMP_SGE) &&
-                         trueVal == b && falseVal == a) {
-                    intrID = llvm::Intrinsic::smin; minA = a; minB = b;
+                else if ((pred == llvm::CmpInst::ICMP_SGT || pred == llvm::CmpInst::ICMP_SGE) && trueVal == b &&
+                         falseVal == a) {
+                    intrID = llvm::Intrinsic::smin;
+                    minA = a;
+                    minB = b;
                 }
                 // Unsigned variants.
-                else if ((pred == llvm::CmpInst::ICMP_ULT || pred == llvm::CmpInst::ICMP_ULE) &&
-                         trueVal == a && falseVal == b) {
-                    intrID = llvm::Intrinsic::umin; minA = a; minB = b;
-                }
-                else if ((pred == llvm::CmpInst::ICMP_UGT || pred == llvm::CmpInst::ICMP_UGE) &&
-                         trueVal == a && falseVal == b) {
-                    intrID = llvm::Intrinsic::umax; minA = a; minB = b;
-                }
-                else if ((pred == llvm::CmpInst::ICMP_ULT || pred == llvm::CmpInst::ICMP_ULE) &&
-                         trueVal == b && falseVal == a) {
-                    intrID = llvm::Intrinsic::umax; minA = a; minB = b;
-                }
-                else if ((pred == llvm::CmpInst::ICMP_UGT || pred == llvm::CmpInst::ICMP_UGE) &&
-                         trueVal == b && falseVal == a) {
-                    intrID = llvm::Intrinsic::umin; minA = a; minB = b;
+                else if ((pred == llvm::CmpInst::ICMP_ULT || pred == llvm::CmpInst::ICMP_ULE) && trueVal == a &&
+                         falseVal == b) {
+                    intrID = llvm::Intrinsic::umin;
+                    minA = a;
+                    minB = b;
+                } else if ((pred == llvm::CmpInst::ICMP_UGT || pred == llvm::CmpInst::ICMP_UGE) && trueVal == a &&
+                           falseVal == b) {
+                    intrID = llvm::Intrinsic::umax;
+                    minA = a;
+                    minB = b;
+                } else if ((pred == llvm::CmpInst::ICMP_ULT || pred == llvm::CmpInst::ICMP_ULE) && trueVal == b &&
+                           falseVal == a) {
+                    intrID = llvm::Intrinsic::umax;
+                    minA = a;
+                    minB = b;
+                } else if ((pred == llvm::CmpInst::ICMP_UGT || pred == llvm::CmpInst::ICMP_UGE) && trueVal == b &&
+                           falseVal == a) {
+                    intrID = llvm::Intrinsic::umin;
+                    minA = a;
+                    minB = b;
                 }
 
                 if (intrID != llvm::Intrinsic::not_intrinsic && minA && minB) {
@@ -4243,7 +4610,8 @@ static unsigned foldMinMaxPatterns(llvm::Function& func) {
             // ── FP min/max ───────────────────────────────────────────────────
             if (ty->isFPOrFPVectorTy()) {
                 auto* fcmp = llvm::dyn_cast<llvm::FCmpInst>(cond);
-                if (!fcmp) continue;
+                if (!fcmp)
+                    continue;
 
                 // For FP min/max, require `nnan` flag on the select (or the cmp).
                 bool noNaN = false;
@@ -4253,35 +4621,42 @@ static unsigned foldMinMaxPatterns(llvm::Function& func) {
                     if (auto* fpCmp = llvm::dyn_cast<llvm::FPMathOperator>(fcmp))
                         noNaN = fpCmp->hasNoNaNs();
                 }
-                if (!noNaN) continue;
+                if (!noNaN)
+                    continue;
 
                 llvm::Value* a = fcmp->getOperand(0);
                 llvm::Value* b = fcmp->getOperand(1);
                 llvm::CmpInst::Predicate pred = fcmp->getPredicate();
 
                 llvm::Intrinsic::ID intrID = llvm::Intrinsic::not_intrinsic;
-                llvm::Value* minA = nullptr, *minB = nullptr;
+                llvm::Value *minA = nullptr, *minB = nullptr;
 
                 if ((pred == llvm::CmpInst::FCMP_OLT || pred == llvm::CmpInst::FCMP_OLE ||
                      pred == llvm::CmpInst::FCMP_ULT || pred == llvm::CmpInst::FCMP_ULE) &&
                     trueVal == a && falseVal == b) {
-                    intrID = llvm::Intrinsic::minnum; minA = a; minB = b;
-                }
-                else if ((pred == llvm::CmpInst::FCMP_OGT || pred == llvm::CmpInst::FCMP_OGE ||
-                          pred == llvm::CmpInst::FCMP_UGT || pred == llvm::CmpInst::FCMP_UGE) &&
-                         trueVal == a && falseVal == b) {
-                    intrID = llvm::Intrinsic::maxnum; minA = a; minB = b;
+                    intrID = llvm::Intrinsic::minnum;
+                    minA = a;
+                    minB = b;
+                } else if ((pred == llvm::CmpInst::FCMP_OGT || pred == llvm::CmpInst::FCMP_OGE ||
+                            pred == llvm::CmpInst::FCMP_UGT || pred == llvm::CmpInst::FCMP_UGE) &&
+                           trueVal == a && falseVal == b) {
+                    intrID = llvm::Intrinsic::maxnum;
+                    minA = a;
+                    minB = b;
                 }
                 // Inverted selects.
                 else if ((pred == llvm::CmpInst::FCMP_OLT || pred == llvm::CmpInst::FCMP_OLE ||
                           pred == llvm::CmpInst::FCMP_ULT || pred == llvm::CmpInst::FCMP_ULE) &&
                          trueVal == b && falseVal == a) {
-                    intrID = llvm::Intrinsic::maxnum; minA = a; minB = b;
-                }
-                else if ((pred == llvm::CmpInst::FCMP_OGT || pred == llvm::CmpInst::FCMP_OGE ||
-                          pred == llvm::CmpInst::FCMP_UGT || pred == llvm::CmpInst::FCMP_UGE) &&
-                         trueVal == b && falseVal == a) {
-                    intrID = llvm::Intrinsic::minnum; minA = a; minB = b;
+                    intrID = llvm::Intrinsic::maxnum;
+                    minA = a;
+                    minB = b;
+                } else if ((pred == llvm::CmpInst::FCMP_OGT || pred == llvm::CmpInst::FCMP_OGE ||
+                            pred == llvm::CmpInst::FCMP_UGT || pred == llvm::CmpInst::FCMP_UGE) &&
+                           trueVal == b && falseVal == a) {
+                    intrID = llvm::Intrinsic::minnum;
+                    minA = a;
+                    minB = b;
                 }
 
                 if (intrID != llvm::Intrinsic::not_intrinsic && minA && minB) {
@@ -4315,37 +4690,47 @@ static unsigned foldFPMulByNeg1(llvm::Function& func) {
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::FMul) continue;
+            if (inst.getOpcode() != llvm::Instruction::FMul)
+                continue;
             llvm::Value* op0 = inst.getOperand(0);
             llvm::Value* op1 = inst.getOperand(1);
-            llvm::Type*  ty  = inst.getType();
+            llvm::Type* ty = inst.getType();
 
             // Determine which operand is -1.0 (try both orderings).
             llvm::Value* other = nullptr;
             for (int s = 0; s < 2; ++s) {
                 llvm::Value* candidate = (s == 0) ? op0 : op1;
-                llvm::Value* partner   = (s == 0) ? op1 : op0;
+                llvm::Value* partner = (s == 0) ? op1 : op0;
 
                 // Scalar -1.0 constant.
                 if (auto* cfp = llvm::dyn_cast<llvm::ConstantFP>(candidate)) {
-                    if (cfp->isExactlyValue(-1.0)) { other = partner; break; }
+                    if (cfp->isExactlyValue(-1.0)) {
+                        other = partner;
+                        break;
+                    }
                 }
                 // Splat vector -1.0.
                 if (auto* cv = llvm::dyn_cast<llvm::ConstantVector>(candidate)) {
                     if (auto* sp = cv->getSplatValue()) {
                         auto* spc = llvm::dyn_cast<llvm::ConstantFP>(sp);
-                        if (spc && spc->isExactlyValue(-1.0)) { other = partner; break; }
+                        if (spc && spc->isExactlyValue(-1.0)) {
+                            other = partner;
+                            break;
+                        }
                     }
                 }
                 if (auto* cdv = llvm::dyn_cast<llvm::ConstantDataVector>(candidate)) {
-                    if (auto* sp = llvm::dyn_cast_or_null<llvm::ConstantFP>(
-                            cdv->getSplatValue())) {
-                        if (sp->isExactlyValue(-1.0)) { other = partner; break; }
+                    if (auto* sp = llvm::dyn_cast_or_null<llvm::ConstantFP>(cdv->getSplatValue())) {
+                        if (sp->isExactlyValue(-1.0)) {
+                            other = partner;
+                            break;
+                        }
                     }
                 }
                 (void)ty; // used for type check below if needed
             }
-            if (!other) continue;
+            if (!other)
+                continue;
 
             llvm::IRBuilder<> builder(&inst);
             llvm::Value* neg = builder.CreateFNeg(other, "fneg1");
@@ -4376,18 +4761,20 @@ static unsigned foldPowBySmallInt(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(&inst);
-            if (!ii) continue;
-            if (ii->getIntrinsicID() != llvm::Intrinsic::pow &&
-                ii->getIntrinsicID() != llvm::Intrinsic::powi) continue;
+            if (!ii)
+                continue;
+            if (ii->getIntrinsicID() != llvm::Intrinsic::pow && ii->getIntrinsicID() != llvm::Intrinsic::powi)
+                continue;
 
             // Check for `afn` or `reassoc` fast-math flag.
             auto* fpOp = llvm::cast<llvm::FPMathOperator>(ii);
             bool canApprox = fpOp->hasApproxFunc() || fpOp->hasAllowReassoc();
-            bool hasArcp   = fpOp->hasAllowReciprocal();
-            if (!canApprox && !hasArcp) continue;
+            bool hasArcp = fpOp->hasAllowReciprocal();
+            if (!canApprox && !hasArcp)
+                continue;
 
             llvm::Value* base = ii->getArgOperand(0);
-            llvm::Type*  ty   = ii->getType();
+            llvm::Type* ty = ii->getType();
             llvm::IRBuilder<> builder(ii);
             llvm::FastMathFlags fmf = fpOp->getFastMathFlags();
 
@@ -4396,31 +4783,36 @@ static unsigned foldPowBySmallInt(llvm::Function& func) {
             // For powi, exponent is an i32 integer.
             if (ii->getIntrinsicID() == llvm::Intrinsic::powi) {
                 auto* ci = llvm::dyn_cast<llvm::ConstantInt>(ii->getArgOperand(1));
-                if (!ci) continue;
+                if (!ci)
+                    continue;
                 int64_t exp = ci->getSExtValue();
 
                 auto mul = [&](llvm::Value* a, llvm::Value* b) -> llvm::Value* {
-                    auto* r = llvm::cast<llvm::Instruction>(
-                        builder.CreateFMul(a, b, "pow.mul"));
+                    auto* r = llvm::cast<llvm::Instruction>(builder.CreateFMul(a, b, "pow.mul"));
                     r->setFastMathFlags(fmf);
                     return r;
                 };
-                llvm::Value* x2 = nullptr, *x4 = nullptr;
+                llvm::Value *x2 = nullptr, *x4 = nullptr;
                 auto getX2 = [&]() -> llvm::Value* {
-                    if (!x2) x2 = mul(base, base);
+                    if (!x2)
+                        x2 = mul(base, base);
                     return x2;
                 };
                 auto getX4 = [&]() -> llvm::Value* {
-                    if (!x4) x4 = mul(getX2(), getX2());
+                    if (!x4)
+                        x4 = mul(getX2(), getX2());
                     return x4;
                 };
 
                 switch (exp) {
-                case -4: { auto d = getX4();
+                case -4: {
+                    auto d = getX4();
                     auto* fd = llvm::cast<llvm::Instruction>(
                         builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), d, "pow.recip"));
                     fd->setFastMathFlags(fmf);
-                    result = fd; break; }
+                    result = fd;
+                    break;
+                }
                 case -3:
                     // pow(x, -3) = 1/(x²·x): requires three multiplies + one divide.
                     break;
@@ -4428,43 +4820,66 @@ static unsigned foldPowBySmallInt(llvm::Function& func) {
                     auto* fd = llvm::cast<llvm::Instruction>(
                         builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), getX2(), "pow.recip"));
                     fd->setFastMathFlags(fmf);
-                    result = fd; break; }
+                    result = fd;
+                    break;
+                }
                 case -1: {
                     auto* fd = llvm::cast<llvm::Instruction>(
                         builder.CreateFDiv(llvm::ConstantFP::get(ty, 1.0), base, "pow.recip"));
                     fd->setFastMathFlags(fmf);
-                    result = fd; break; }
-                case 0:  result = llvm::ConstantFP::get(ty, 1.0); break;
-                case 1:  result = base; break;
-                case 2:  result = getX2(); break;
-                case 3:  result = mul(getX2(), base); break;
-                case 4:  result = getX4(); break;
-                case 5:  result = mul(getX4(), base); break;
-                case 6:  result = mul(getX4(), getX2()); break;
-                case 8:  result = mul(getX4(), getX4()); break;
-                default: break;
+                    result = fd;
+                    break;
+                }
+                case 0:
+                    result = llvm::ConstantFP::get(ty, 1.0);
+                    break;
+                case 1:
+                    result = base;
+                    break;
+                case 2:
+                    result = getX2();
+                    break;
+                case 3:
+                    result = mul(getX2(), base);
+                    break;
+                case 4:
+                    result = getX4();
+                    break;
+                case 5:
+                    result = mul(getX4(), base);
+                    break;
+                case 6:
+                    result = mul(getX4(), getX2());
+                    break;
+                case 8:
+                    result = mul(getX4(), getX4());
+                    break;
+                default:
+                    break;
                 }
             } else {
                 // llvm.pow with a constant FP exponent.
                 llvm::ConstantFP* cexp = nullptr;
                 if (auto* c = llvm::dyn_cast<llvm::ConstantFP>(ii->getArgOperand(1)))
                     cexp = c;
-                if (!cexp) continue;
+                if (!cexp)
+                    continue;
                 double expVal = cexp->getValueAPF().convertToDouble();
 
                 auto mul = [&](llvm::Value* a, llvm::Value* b) -> llvm::Value* {
-                    auto* r = llvm::cast<llvm::Instruction>(
-                        builder.CreateFMul(a, b, "pow.mul"));
+                    auto* r = llvm::cast<llvm::Instruction>(builder.CreateFMul(a, b, "pow.mul"));
                     r->setFastMathFlags(fmf);
                     return r;
                 };
-                llvm::Value* x2 = nullptr, *x4 = nullptr;
+                llvm::Value *x2 = nullptr, *x4 = nullptr;
                 auto getX2 = [&]() -> llvm::Value* {
-                    if (!x2) x2 = mul(base, base);
+                    if (!x2)
+                        x2 = mul(base, base);
                     return x2;
                 };
                 auto getX4 = [&]() -> llvm::Value* {
-                    if (!x4) x4 = mul(getX2(), getX2());
+                    if (!x4)
+                        x4 = mul(getX2(), getX2());
                     return x4;
                 };
 
@@ -4510,7 +4925,8 @@ static unsigned foldPowBySmallInt(llvm::Function& func) {
                 }
             }
 
-            if (!result) continue;
+            if (!result)
+                continue;
             replacements.emplace_back(ii, result);
             ++count;
         }
@@ -4533,20 +4949,25 @@ static unsigned foldSqrtSquare(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             auto* ii = llvm::dyn_cast<llvm::IntrinsicInst>(&inst);
-            if (!ii || ii->getIntrinsicID() != llvm::Intrinsic::sqrt) continue;
+            if (!ii || ii->getIntrinsicID() != llvm::Intrinsic::sqrt)
+                continue;
 
             // Require nnan + ninf (or `fast`) on the sqrt.
             auto* fpSqrt = llvm::cast<llvm::FPMathOperator>(ii);
-            if (!fpSqrt->hasNoNaNs() || !fpSqrt->hasNoInfs()) continue;
+            if (!fpSqrt->hasNoNaNs() || !fpSqrt->hasNoInfs())
+                continue;
 
             llvm::Value* arg = ii->getArgOperand(0);
-            llvm::Type*  ty  = ii->getType();
+            llvm::Type* ty = ii->getType();
 
             // Pattern: sqrt(fmul(x, x)) where the fmul has exactly one use (this sqrt).
             auto* fmul = llvm::dyn_cast<llvm::BinaryOperator>(arg);
-            if (!fmul || fmul->getOpcode() != llvm::Instruction::FMul) continue;
-            if (!fmul->hasOneUse()) continue;
-            if (fmul->getOperand(0) != fmul->getOperand(1)) continue;
+            if (!fmul || fmul->getOpcode() != llvm::Instruction::FMul)
+                continue;
+            if (!fmul->hasOneUse())
+                continue;
+            if (fmul->getOperand(0) != fmul->getOperand(1))
+                continue;
 
             llvm::Value* x = fmul->getOperand(0);
             llvm::IRBuilder<> builder(ii);
@@ -4565,7 +4986,8 @@ static unsigned foldSqrtSquare(llvm::Function& func) {
         inst->replaceAllUsesWith(rep);
         inst->eraseFromParent();
         if (auto* dead = llvm::dyn_cast<llvm::Instruction>(arg))
-            if (dead->use_empty()) dead->eraseFromParent();
+            if (dead->use_empty())
+                dead->eraseFromParent();
     }
     return count;
 }
@@ -4578,20 +5000,24 @@ static unsigned foldSelectToBoolCast(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
-            if (!sel) continue;
+            if (!sel)
+                continue;
 
             // Condition must be i1 (bit-width 1).
             llvm::Value* cond = sel->getCondition();
-            if (!cond->getType()->isIntegerTy(1)) continue;
+            if (!cond->getType()->isIntegerTy(1))
+                continue;
 
             llvm::Value* tv = sel->getTrueValue();
             llvm::Value* fv = sel->getFalseValue();
-            llvm::Type*  ty = sel->getType();
-            if (!ty->isIntegerTy()) continue;
+            llvm::Type* ty = sel->getType();
+            if (!ty->isIntegerTy())
+                continue;
 
             auto* tCI = llvm::dyn_cast<llvm::ConstantInt>(tv);
             auto* fCI = llvm::dyn_cast<llvm::ConstantInt>(fv);
-            if (!tCI || !fCI) continue;
+            if (!tCI || !fCI)
+                continue;
 
             llvm::IRBuilder<> builder(sel);
             llvm::Value* result = nullptr;
@@ -4605,17 +5031,18 @@ static unsigned foldSelectToBoolCast(llvm::Function& func) {
             } else if (tCI->isZero() && fCI->isOne()) {
                 // select(cond, 0, 1) → zext(not cond)
                 // Emit: xor cond, 1 → zext
-                llvm::Value* notCond = builder.CreateXor(
-                    cond, llvm::ConstantInt::getTrue(cond->getContext()), "bool.not");
+                llvm::Value* notCond =
+                    builder.CreateXor(cond, llvm::ConstantInt::getTrue(cond->getContext()), "bool.not");
                 result = builder.CreateZExt(notCond, ty, "bool.notzext");
             } else if (tCI->isZero() && fCI->isMinusOne()) {
                 // select(cond, 0, -1) → sext(not cond)
-                llvm::Value* notCond = builder.CreateXor(
-                    cond, llvm::ConstantInt::getTrue(cond->getContext()), "bool.not");
+                llvm::Value* notCond =
+                    builder.CreateXor(cond, llvm::ConstantInt::getTrue(cond->getContext()), "bool.not");
                 result = builder.CreateSExt(notCond, ty, "bool.notsext");
             }
 
-            if (!result) continue;
+            if (!result)
+                continue;
             replacements.emplace_back(sel, result);
             ++count;
         }
@@ -4630,13 +5057,18 @@ static unsigned foldSelectToBoolCast(llvm::Function& func) {
 
 /// Hoist loop-invariant GEP instructions out of loop bodies into the loop's
 static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
-    if (func.isDeclaration()) return 0;
+    if (func.isDeclaration())
+        return 0;
 
     unsigned count = 0;
 
     // Assign linear order to BBs for back-edge detection.
     std::unordered_map<const llvm::BasicBlock*, unsigned> bbOrder;
-    { unsigned ord = 0; for (auto& bb : func) bbOrder[&bb] = ord++; }
+    {
+        unsigned ord = 0;
+        for (auto& bb : func)
+            bbOrder[&bb] = ord++;
+    }
 
     // Process each basic block as a potential loop header.
     for (auto& header : func) {
@@ -4649,7 +5081,8 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
                 break;
             }
         }
-        if (!latch) continue; // not a loop header
+        if (!latch)
+            continue; // not a loop header
 
         // Find the pre-header: unique predecessor of header that is NOT the latch.
         llvm::BasicBlock* preHeader = nullptr;
@@ -4660,11 +5093,12 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
                 ++nonLatchPreds;
             }
         }
-        if (nonLatchPreds != 1 || !preHeader) continue;
+        if (nonLatchPreds != 1 || !preHeader)
+            continue;
 
         // Collect all basic blocks in the loop body using a BFS from the header
         unsigned headerOrd = bbOrder.at(&header);
-        unsigned latchOrd  = bbOrder.at(latch);
+        unsigned latchOrd = bbOrder.at(latch);
         std::unordered_set<const llvm::BasicBlock*> loopBBs;
         for (auto& bb : func) {
             unsigned ord = bbOrder.at(&bb);
@@ -4676,24 +5110,35 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
         std::vector<llvm::GetElementPtrInst*> toHoist;
 
         for (auto& bb : func) {
-            if (!loopBBs.count(&bb)) continue;
+            if (!loopBBs.count(&bb))
+                continue;
             for (auto& inst : bb) {
                 auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&inst);
-                if (!gep) continue;
+                if (!gep)
+                    continue;
 
                 // Check all operands.
                 bool invariant = true;
                 for (unsigned i = 0; i < gep->getNumOperands(); ++i) {
                     llvm::Value* op = gep->getOperand(i);
-                    if (llvm::isa<llvm::Constant>(op)) continue;
+                    if (llvm::isa<llvm::Constant>(op))
+                        continue;
                     auto* defInst = llvm::dyn_cast<llvm::Instruction>(op);
-                    if (!defInst) { invariant = false; break; }
+                    if (!defInst) {
+                        invariant = false;
+                        break;
+                    }
                     // Loop-invariant if defined outside the loop.
-                    if (loopBBs.count(defInst->getParent())) { invariant = false; break; }
+                    if (loopBBs.count(defInst->getParent())) {
+                        invariant = false;
+                        break;
+                    }
                 }
-                if (!invariant) continue;
+                if (!invariant)
+                    continue;
                 // Don't hoist if already in the pre-header.
-                if (gep->getParent() == preHeader) continue;
+                if (gep->getParent() == preHeader)
+                    continue;
                 // Skip GEPs with side effects (shouldn't exist, but be safe).
                 toHoist.push_back(gep);
             }
@@ -4710,12 +5155,12 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
 }
 
 /// Rebalance linear chains of commutative+associative binary operations into
-[[gnu::hot]] static unsigned rebalanceChainForILP(llvm::Function& func,
-                                                    const MicroarchProfile& profile) {
+[[gnu::hot]] static unsigned rebalanceChainForILP(llvm::Function& func, const MicroarchProfile& profile) {
     // Need spare execution units to benefit.
     bool hasIntILP = profile.intALUs >= 2;
-    bool hasFpILP  = profile.fmaUnits >= 2 || profile.vecUnits >= 2;
-    if (!hasIntILP && !hasFpILP) return 0;
+    bool hasFpILP = profile.fmaUnits >= 2 || profile.vecUnits >= 2;
+    if (!hasIntILP && !hasFpILP)
+        return 0;
 
     unsigned count = 0;
 
@@ -4725,7 +5170,8 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
         // isChainOp: true if the opcode is commutative+associative and we
         // are allowed to rebalance it (fast-math for FP, always for int).
         auto isChainOp = [](const llvm::Instruction* inst) -> bool {
-            if (!inst) return false;
+            if (!inst)
+                return false;
             switch (inst->getOpcode()) {
             case llvm::Instruction::Add:
             case llvm::Instruction::Mul:
@@ -4747,8 +5193,10 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
         std::unordered_set<llvm::Instruction*> processed;
 
         for (auto& rootInst : bb) {
-            if (!isChainOp(&rootInst)) continue;
-            if (processed.count(&rootInst)) continue;
+            if (!isChainOp(&rootInst))
+                continue;
+            if (processed.count(&rootInst))
+                continue;
 
             // Walk UP from the root to collect all instructions in the chain
 
@@ -4756,11 +5204,11 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
             bool isRoot = true;
             if (rootInst.hasOneUse()) {
                 auto* user = llvm::dyn_cast<llvm::Instruction>(*rootInst.user_begin());
-                if (user && user->getOpcode() == rootInst.getOpcode() &&
-                    user->getParent() == &bb)
+                if (user && user->getOpcode() == rootInst.getOpcode() && user->getParent() == &bb)
                     isRoot = false; // there's a parent in the chain
             }
-            if (!isRoot) continue;
+            if (!isRoot)
+                continue;
 
             // Collect leaf operands via DFS: traverse all chain members.
             std::vector<llvm::Instruction*> chainMembers;
@@ -4768,35 +5216,34 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
             unsigned opcode = rootInst.getOpcode();
 
             // Use a worklist of (instruction, operand_index).
-            std::function<void(llvm::Instruction*)> collect =
-                [&](llvm::Instruction* inst) {
-                    for (unsigned i = 0; i < inst->getNumOperands(); ++i) {
-                        llvm::Value* op = inst->getOperand(i);
-                        auto* opInst = llvm::dyn_cast<llvm::Instruction>(op);
-                        if (opInst && opInst->getOpcode() == opcode &&
-                            opInst->getParent() == &bb &&
-                            opInst->hasOneUse() &&
-                            !processed.count(opInst)) {
-                            chainMembers.push_back(opInst);
-                            processed.insert(opInst);
-                            collect(opInst);
-                        } else {
-                            leaves.push_back(op);
-                        }
+            std::function<void(llvm::Instruction*)> collect = [&](llvm::Instruction* inst) {
+                for (unsigned i = 0; i < inst->getNumOperands(); ++i) {
+                    llvm::Value* op = inst->getOperand(i);
+                    auto* opInst = llvm::dyn_cast<llvm::Instruction>(op);
+                    if (opInst && opInst->getOpcode() == opcode && opInst->getParent() == &bb && opInst->hasOneUse() &&
+                        !processed.count(opInst)) {
+                        chainMembers.push_back(opInst);
+                        processed.insert(opInst);
+                        collect(opInst);
+                    } else {
+                        leaves.push_back(op);
                     }
-                };
+                }
+            };
 
             processed.insert(&rootInst);
             collect(&rootInst);
 
             // Need at least 4 leaves to benefit (depth 3 linear → depth 2 tree).
-            if (leaves.size() < 4) continue;
+            if (leaves.size() < 4)
+                continue;
 
             // Check parallel execution capacity:
-            bool isFP = (opcode == llvm::Instruction::FAdd ||
-                         opcode == llvm::Instruction::FMul);
-            if (isFP && !hasFpILP)  continue;
-            if (!isFP && !hasIntILP) continue;
+            bool isFP = (opcode == llvm::Instruction::FAdd || opcode == llvm::Instruction::FMul);
+            if (isFP && !hasFpILP)
+                continue;
+            if (!isFP && !hasIntILP)
+                continue;
 
             // Build balanced binary tree from leaves.
             // Use IRBuilder positioned just before the root instruction.
@@ -4815,29 +5262,29 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
                     llvm::Value* combined;
                     switch (opcode) {
                     case llvm::Instruction::Add:
-                        combined = builder.CreateAdd(work[i], work[i+1], "rlp.add");
+                        combined = builder.CreateAdd(work[i], work[i + 1], "rlp.add");
                         break;
                     case llvm::Instruction::Mul:
-                        combined = builder.CreateMul(work[i], work[i+1], "rlp.mul");
+                        combined = builder.CreateMul(work[i], work[i + 1], "rlp.mul");
                         break;
                     case llvm::Instruction::And:
-                        combined = builder.CreateAnd(work[i], work[i+1], "rlp.and");
+                        combined = builder.CreateAnd(work[i], work[i + 1], "rlp.and");
                         break;
                     case llvm::Instruction::Or:
-                        combined = builder.CreateOr(work[i], work[i+1], "rlp.or");
+                        combined = builder.CreateOr(work[i], work[i + 1], "rlp.or");
                         break;
                     case llvm::Instruction::Xor:
-                        combined = builder.CreateXor(work[i], work[i+1], "rlp.xor");
+                        combined = builder.CreateXor(work[i], work[i + 1], "rlp.xor");
                         break;
                     case llvm::Instruction::FAdd: {
-                        auto* fa = builder.CreateFAdd(work[i], work[i+1], "rlp.fadd");
+                        auto* fa = builder.CreateFAdd(work[i], work[i + 1], "rlp.fadd");
                         if (auto* fi = llvm::dyn_cast<llvm::Instruction>(fa))
                             fi->setFastMathFlags(fmf);
                         combined = fa;
                         break;
                     }
                     case llvm::Instruction::FMul: {
-                        auto* fm = builder.CreateFMul(work[i], work[i+1], "rlp.fmul");
+                        auto* fm = builder.CreateFMul(work[i], work[i + 1], "rlp.fmul");
                         if (auto* fi = llvm::dyn_cast<llvm::Instruction>(fm))
                             fi->setFastMathFlags(fmf);
                         combined = fm;
@@ -4868,12 +5315,12 @@ static unsigned hoistLoopInvariantGEP(llvm::Function& func) {
 }
 
 /// Convert simple if-then-else diamonds to select instructions when the
-static unsigned convertIfElseToSelect(llvm::Function& func,
-                                       const MicroarchProfile& profile) {
+static unsigned convertIfElseToSelect(llvm::Function& func, const MicroarchProfile& profile) {
     constexpr double kMissRate = 0.10;
     // Minimum misprediction penalty (in cycles) to justify conversion.
     double mispredictCycles = profile.branchMispredictPenalty * kMissRate;
-    if (mispredictCycles <= static_cast<double>(2 * profile.latIntAdd)) return 0;
+    if (mispredictCycles <= static_cast<double>(2 * profile.latIntAdd))
+        return 0;
 
     unsigned count = 0;
     // Collect conversions to apply (avoid invalidating iterators).
@@ -4890,41 +5337,49 @@ static unsigned convertIfElseToSelect(llvm::Function& func,
 
     for (auto& bb : func) {
         auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator());
-        if (!br || !br->isConditional() || br->getNumSuccessors() != 2) continue;
+        if (!br || !br->isConditional() || br->getNumSuccessors() != 2)
+            continue;
 
-        llvm::BasicBlock* succTrue  = br->getSuccessor(0);
+        llvm::BasicBlock* succTrue = br->getSuccessor(0);
         llvm::BasicBlock* succFalse = br->getSuccessor(1);
 
         // Try both orientations: thenBB = succTrue or thenBB = succFalse.
         for (int orientation = 0; orientation < 2; ++orientation) {
-            llvm::BasicBlock* thenBB  = (orientation == 0) ? succTrue  : succFalse;
+            llvm::BasicBlock* thenBB = (orientation == 0) ? succTrue : succFalse;
             llvm::BasicBlock* mergeBB = (orientation == 0) ? succFalse : succTrue;
 
             // thenBB must have exactly one predecessor (our header).
-            if (thenBB->getSinglePredecessor() != &bb) continue;
+            if (thenBB->getSinglePredecessor() != &bb)
+                continue;
 
             // thenBB must jump unconditionally to mergeBB.
             auto* thenTerm = llvm::dyn_cast<llvm::BranchInst>(thenBB->getTerminator());
-            if (!thenTerm || thenTerm->isConditional()) continue;
-            if (thenTerm->getSuccessor(0) != mergeBB) continue;
+            if (!thenTerm || thenTerm->isConditional())
+                continue;
+            if (thenTerm->getSuccessor(0) != mergeBB)
+                continue;
 
             // Count non-PHI, non-branch instructions in thenBB.
             std::vector<llvm::Instruction*> thenInsts;
             for (auto& inst : *thenBB) {
-                if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator()) continue;
+                if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator())
+                    continue;
                 thenInsts.push_back(&inst);
             }
             // Allow at most 2 pure instructions (e.g., a load + cast or a single compute).
-            if (thenInsts.size() > 2) continue;
+            if (thenInsts.size() > 2)
+                continue;
 
             // Check all thenBB instructions are pure (no side effects).
             bool pure = true;
             for (auto* inst : thenInsts) {
                 if (inst->mayHaveSideEffects() || inst->mayReadOrWriteMemory()) {
-                    pure = false; break;
+                    pure = false;
+                    break;
                 }
             }
-            if (!pure) continue;
+            if (!pure)
+                continue;
 
             // Find a PHI in mergeBB that merges a value from thenBB with a
             // value from &bb (the header / else path).
@@ -4934,17 +5389,19 @@ static unsigned convertIfElseToSelect(llvm::Function& func,
 
             for (auto& mergeInst : *mergeBB) {
                 auto* phi = llvm::dyn_cast<llvm::PHINode>(&mergeInst);
-                if (!phi) break;
+                if (!phi)
+                    break;
 
                 llvm::Value* fromThen = phi->getIncomingValueForBlock(thenBB);
                 llvm::Value* fromElse = phi->getIncomingValueForBlock(&bb);
-                if (!fromThen || !fromElse) continue;
+                if (!fromThen || !fromElse)
+                    continue;
 
                 // The "from then" value must originate in thenBB (or be a constant).
                 auto* fromThenInst = llvm::dyn_cast<llvm::Instruction>(fromThen);
-                bool thenValIsLocal = !fromThenInst ||
-                                      fromThenInst->getParent() == thenBB;
-                if (!thenValIsLocal) continue;
+                bool thenValIsLocal = !fromThenInst || fromThenInst->getParent() == thenBB;
+                if (!thenValIsLocal)
+                    continue;
 
                 // Check that all operands of the thenBB instructions are
                 // available in the header (defined before the branch).
@@ -4952,44 +5409,49 @@ static unsigned convertIfElseToSelect(llvm::Function& func,
                 for (auto* inst : thenInsts) {
                     for (auto& op : inst->operands()) {
                         auto* opInst = llvm::dyn_cast<llvm::Instruction>(op.get());
-                        if (opInst && opInst->getParent() == thenBB) continue; // def in thenBB
+                        if (opInst && opInst->getParent() == thenBB)
+                            continue; // def in thenBB
                         if (opInst && opInst->getParent() != &bb) {
                             // Must dominate header — conservative: only allow
-                            operandsOk = false; break;
+                            operandsOk = false;
+                            break;
                         }
                         // If op is not an instruction (e.g., a function Argument or
                         // Constant), it always dominates every block — allow it.
                     }
-                    if (!operandsOk) break;
+                    if (!operandsOk)
+                        break;
                 }
-                if (!operandsOk) continue;
+                if (!operandsOk)
+                    continue;
 
                 foundPhi = phi;
-                thenVal  = fromThenInst; // may be null if constant
-                elseVal  = fromElse;
+                thenVal = fromThenInst; // may be null if constant
+                elseVal = fromElse;
                 break;
             }
-            if (!foundPhi) continue;
+            if (!foundPhi)
+                continue;
 
             // Check profitability one more time with the actual hoisted inst cost.
             unsigned hoistCost = 0;
             for (auto* inst : thenInsts)
                 hoistCost += getOpcodeLatency(inst, profile);
             // Profitable if: mispredict cost > select cost (1) + hoist cost
-            if (mispredictCycles <= static_cast<double>(1 + hoistCost)) continue;
+            if (mispredictCycles <= static_cast<double>(1 + hoistCost))
+                continue;
 
-            conversions.push_back({br, thenBB, mergeBB, foundPhi, thenVal, elseVal,
-                                   orientation == 0});
+            conversions.push_back({br, thenBB, mergeBB, foundPhi, thenVal, elseVal, orientation == 0});
             break; // found a valid orientation for this BB
         }
     }
 
     // Apply conversions in reverse order to avoid invalidating BBs.
     for (auto& cv : conversions) {
-        llvm::BranchInst* br     = cv.br;
+        llvm::BranchInst* br = cv.br;
         llvm::BasicBlock* thenBB = cv.thenBB;
         llvm::BasicBlock* header = br->getParent();
-        llvm::PHINode*    phi    = cv.phi;
+        llvm::PHINode* phi = cv.phi;
 
         // Hoist thenBB's instructions into the header (before the branch).
         std::vector<llvm::Instruction*> toHoist;
@@ -5004,11 +5466,11 @@ static unsigned convertIfElseToSelect(llvm::Function& func,
         llvm::IRBuilder<> builder(br);
         llvm::Value* sel;
         if (cv.thenIsTrue)
-            sel = builder.CreateSelect(br->getCondition(), phi->getIncomingValueForBlock(thenBB),
-                                       cv.elseVal, "sel.if2sel");
+            sel = builder.CreateSelect(br->getCondition(), phi->getIncomingValueForBlock(thenBB), cv.elseVal,
+                                       "sel.if2sel");
         else
-            sel = builder.CreateSelect(br->getCondition(), cv.elseVal,
-                                       phi->getIncomingValueForBlock(thenBB), "sel.if2sel");
+            sel = builder.CreateSelect(br->getCondition(), cv.elseVal, phi->getIncomingValueForBlock(thenBB),
+                                       "sel.if2sel");
 
         phi->replaceAllUsesWith(sel);
         phi->eraseFromParent();
@@ -5019,9 +5481,11 @@ static unsigned convertIfElseToSelect(llvm::Function& func,
         // Update any remaining PHIs in mergeBB that reference thenBB.
         for (auto& inst : *mergeBB) {
             auto* remainingPhi = llvm::dyn_cast<llvm::PHINode>(&inst);
-            if (!remainingPhi) break;
+            if (!remainingPhi)
+                break;
             int idx = remainingPhi->getBasicBlockIndex(thenBB);
-            if (idx >= 0) remainingPhi->removeIncomingValue(idx, false);
+            if (idx >= 0)
+                remainingPhi->removeIncomingValue(idx, false);
         }
 
         // Replace the conditional branch with an unconditional one to mergeBB.
@@ -5039,31 +5503,39 @@ static unsigned convertIfElseToSelect(llvm::Function& func,
 }
 
 /// Add `!nontemporal` metadata to streaming stores whose estimated working set
-static unsigned insertNonTemporalHints(llvm::Function& func,
-                                        const MicroarchProfile& profile) {
-    if (func.isDeclaration()) return 0;
+static unsigned insertNonTemporalHints(llvm::Function& func, const MicroarchProfile& profile) {
+    if (func.isDeclaration())
+        return 0;
     // Only beneficial for CPUs with a decent L1D (≥ 16 KB).
-    if (profile.l1DSize < 16) return 0;
+    if (profile.l1DSize < 16)
+        return 0;
 
     unsigned count = 0;
     llvm::LLVMContext& ctx = func.getContext();
 
     // Assign linear order to detect loop bodies.
     std::unordered_map<const llvm::BasicBlock*, unsigned> bbOrder;
-    { unsigned ord = 0; for (auto& bb : func) bbOrder[&bb] = ord++; }
+    {
+        unsigned ord = 0;
+        for (auto& bb : func)
+            bbOrder[&bb] = ord++;
+    }
 
     const llvm::DataLayout* dl = nullptr;
-    if (auto* mod = func.getParent()) dl = &mod->getDataLayout();
+    if (auto* mod = func.getParent())
+        dl = &mod->getDataLayout();
 
     for (auto& bb : func) {
         // Determine if this BB is a loop body (has a backedge from any successor).
         bool isLoop = false;
         for (auto* succ : llvm::successors(&bb)) {
             if (bbOrder.count(succ) && bbOrder[succ] <= bbOrder[&bb]) {
-                isLoop = true; break;
+                isLoop = true;
+                break;
             }
         }
-        if (!isLoop) continue;
+        if (!isLoop)
+            continue;
 
         // Collect store and load pointers in this BB to detect read-back.
         std::unordered_set<llvm::Value*> loadedPtrs;
@@ -5073,15 +5545,18 @@ static unsigned insertNonTemporalHints(llvm::Function& func,
 
         for (auto& inst : bb) {
             auto* st = llvm::dyn_cast<llvm::StoreInst>(&inst);
-            if (!st || st->isVolatile()) continue;
+            if (!st || st->isVolatile())
+                continue;
 
             // Already annotated.
-            if (st->getMetadata(llvm::LLVMContext::MD_nontemporal)) continue;
+            if (st->getMetadata(llvm::LLVMContext::MD_nontemporal))
+                continue;
 
             llvm::Value* ptr = st->getPointerOperand();
 
             // Skip if this pointer is also loaded in the same BB (read-back risk).
-            if (loadedPtrs.count(ptr)) continue;
+            if (loadedPtrs.count(ptr))
+                continue;
 
             // Check for large-stride or large-working-set access.
             bool shouldAnnotate = false;
@@ -5098,8 +5573,7 @@ static unsigned insertNonTemporalHints(llvm::Function& func,
                         // Working set heuristic: if element count × elemBytes
                         // plausibly exceeds L1D (assume ≥ 256 iterations).
                         unsigned estimatedElements = 256;
-                        if (elemBytes * estimatedElements >
-                                static_cast<uint64_t>(profile.l1DSize) * 1024)
+                        if (elemBytes * estimatedElements > static_cast<uint64_t>(profile.l1DSize) * 1024)
                             shouldAnnotate = true;
                     }
                 }
@@ -5107,10 +5581,8 @@ static unsigned insertNonTemporalHints(llvm::Function& func,
 
             if (shouldAnnotate) {
                 // Add !nontemporal metadata (value = i32 1).
-                llvm::MDNode* ntMD = llvm::MDNode::get(ctx, {
-                    llvm::ConstantAsMetadata::get(
-                        llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 1))
-                });
+                llvm::MDNode* ntMD = llvm::MDNode::get(
+                    ctx, {llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), 1))});
                 st->setMetadata(llvm::LLVMContext::MD_nontemporal, ntMD);
                 ++count;
             }
@@ -5126,10 +5598,12 @@ static unsigned foldIntMulByNeg1(llvm::Function& func) {
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::Mul) continue;
+            if (inst.getOpcode() != llvm::Instruction::Mul)
+                continue;
             llvm::Type* ty = inst.getType();
             // Integer or integer-vector only.
-            if (!ty->isIntOrIntVectorTy()) continue;
+            if (!ty->isIntOrIntVectorTy())
+                continue;
 
             llvm::Value* op0 = inst.getOperand(0);
             llvm::Value* op1 = inst.getOperand(1);
@@ -5138,30 +5612,39 @@ static unsigned foldIntMulByNeg1(llvm::Function& func) {
             llvm::Value* other = nullptr;
             for (int s = 0; s < 2; ++s) {
                 llvm::Value* candidate = (s == 0) ? op0 : op1;
-                llvm::Value* partner   = (s == 0) ? op1 : op0;
+                llvm::Value* partner = (s == 0) ? op1 : op0;
 
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(candidate)) {
-                    if (ci->isMinusOne()) { other = partner; break; }
+                    if (ci->isMinusOne()) {
+                        other = partner;
+                        break;
+                    }
                 }
                 if (auto* cv = llvm::dyn_cast<llvm::ConstantVector>(candidate)) {
                     if (auto* sp = cv->getSplatValue()) {
                         auto* sci = llvm::dyn_cast<llvm::ConstantInt>(sp);
-                        if (sci && sci->isMinusOne()) { other = partner; break; }
+                        if (sci && sci->isMinusOne()) {
+                            other = partner;
+                            break;
+                        }
                     }
                 }
                 if (auto* cdv = llvm::dyn_cast<llvm::ConstantDataVector>(candidate)) {
-                    if (auto* sp = llvm::dyn_cast_or_null<llvm::ConstantInt>(
-                            cdv->getSplatValue())) {
-                        if (sp->isMinusOne()) { other = partner; break; }
+                    if (auto* sp = llvm::dyn_cast_or_null<llvm::ConstantInt>(cdv->getSplatValue())) {
+                        if (sp->isMinusOne()) {
+                            other = partner;
+                            break;
+                        }
                     }
                 }
             }
-            if (!other) continue;
+            if (!other)
+                continue;
 
             // Emit sub(0, x): LLVM selects NEG on all supported architectures.
             llvm::IRBuilder<> builder(&inst);
             llvm::Value* zero = llvm::Constant::getNullValue(ty);
-            llvm::Value* neg  = builder.CreateSub(zero, other, "neg1");
+            llvm::Value* neg = builder.CreateSub(zero, other, "neg1");
             // Propagate nsw/nuw flags conservatively (only nsw if the original
             // mul had nsw, meaning the negation cannot overflow either).
             if (auto* subInst = llvm::dyn_cast<llvm::BinaryOperator>(neg)) {
@@ -5188,9 +5671,11 @@ static unsigned foldIntAddNeg(llvm::Function& func) {
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::Add) continue;
+            if (inst.getOpcode() != llvm::Instruction::Add)
+                continue;
             llvm::Type* ty = inst.getType();
-            if (!ty->isIntOrIntVectorTy()) continue;
+            if (!ty->isIntOrIntVectorTy())
+                continue;
 
             llvm::Value* op0 = inst.getOperand(0);
             llvm::Value* op1 = inst.getOperand(1);
@@ -5198,17 +5683,22 @@ static unsigned foldIntAddNeg(llvm::Function& func) {
             // Try both orderings: add(x, neg) and add(neg, x).
             for (int s = 0; s < 2; ++s) {
                 llvm::Value* negCandidate = (s == 0) ? op1 : op0;
-                llvm::Value* other        = (s == 0) ? op0 : op1;
+                llvm::Value* other = (s == 0) ? op0 : op1;
 
                 auto* negInst = llvm::dyn_cast<llvm::BinaryOperator>(negCandidate);
-                if (!negInst) continue;
-                if (negInst->getOpcode() != llvm::Instruction::Sub) continue;
+                if (!negInst)
+                    continue;
+                if (negInst->getOpcode() != llvm::Instruction::Sub)
+                    continue;
                 // Require sub(0, y) — the LHS must be the zero constant.
-                if (!llvm::isa<llvm::Constant>(negInst->getOperand(0))) continue;
+                if (!llvm::isa<llvm::Constant>(negInst->getOperand(0)))
+                    continue;
                 auto* lhsC = llvm::dyn_cast<llvm::Constant>(negInst->getOperand(0));
-                if (!lhsC || !lhsC->isNullValue()) continue;
+                if (!lhsC || !lhsC->isNullValue())
+                    continue;
                 // Only fold when the neg is used only by this add.
-                if (!negInst->hasOneUse()) continue;
+                if (!negInst->hasOneUse())
+                    continue;
 
                 llvm::Value* y = negInst->getOperand(1);
                 llvm::IRBuilder<> builder(&inst);
@@ -5225,17 +5715,20 @@ static unsigned foldIntAddNeg(llvm::Function& func) {
         llvm::Value* negArg = nullptr;
         for (int s = 0; s < 2; ++s) {
             auto* neg = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(s));
-            if (neg && neg->getOpcode() == llvm::Instruction::Sub &&
-                llvm::isa<llvm::Constant>(neg->getOperand(0))) {
+            if (neg && neg->getOpcode() == llvm::Instruction::Sub && llvm::isa<llvm::Constant>(neg->getOperand(0))) {
                 auto* lhsC = llvm::dyn_cast<llvm::Constant>(neg->getOperand(0));
-                if (lhsC && lhsC->isNullValue()) { negArg = neg; break; }
+                if (lhsC && lhsC->isNullValue()) {
+                    negArg = neg;
+                    break;
+                }
             }
         }
         inst->replaceAllUsesWith(rep);
         inst->eraseFromParent();
         if (negArg) {
             if (auto* dead = llvm::dyn_cast<llvm::Instruction>(negArg))
-                if (dead->use_empty()) dead->eraseFromParent();
+                if (dead->use_empty())
+                    dead->eraseFromParent();
         }
     }
     return count;
@@ -5249,8 +5742,10 @@ static unsigned foldSelectSameValue(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
-            if (!sel) continue;
-            if (sel->getTrueValue() != sel->getFalseValue()) continue;
+            if (!sel)
+                continue;
+            if (sel->getTrueValue() != sel->getFalseValue())
+                continue;
             sel->replaceAllUsesWith(sel->getTrueValue());
             toErase.push_back(sel);
             ++count;
@@ -5269,13 +5764,16 @@ static unsigned foldFAddSelf(llvm::Function& func) {
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::FAdd) continue;
+            if (inst.getOpcode() != llvm::Instruction::FAdd)
+                continue;
             llvm::Value* op0 = inst.getOperand(0);
             llvm::Value* op1 = inst.getOperand(1);
-            if (op0 != op1) continue; // must be exact same SSA value
+            if (op0 != op1)
+                continue; // must be exact same SSA value
 
             auto* fpOp = llvm::cast<llvm::FPMathOperator>(&inst);
-            if (!fpOp->hasAllowReassoc()) continue;
+            if (!fpOp->hasAllowReassoc())
+                continue;
 
             llvm::IRBuilder<> builder(&inst);
             llvm::Type* ty = inst.getType();
@@ -5304,12 +5802,15 @@ static unsigned foldFNegDouble(llvm::Function& func) {
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::FNeg) continue;
+            if (inst.getOpcode() != llvm::Instruction::FNeg)
+                continue;
             llvm::Value* arg = inst.getOperand(0);
             auto* inner = llvm::dyn_cast<llvm::UnaryOperator>(arg);
-            if (!inner || inner->getOpcode() != llvm::Instruction::FNeg) continue;
+            if (!inner || inner->getOpcode() != llvm::Instruction::FNeg)
+                continue;
             // Only fold when the inner fneg is used solely by this outer fneg.
-            if (!inner->hasOneUse()) continue;
+            if (!inner->hasOneUse())
+                continue;
 
             // Replace outer fneg with the inner fneg's operand (the original value).
             replacements.emplace_back(&inst, inner->getOperand(0));
@@ -5323,7 +5824,8 @@ static unsigned foldFNegDouble(llvm::Function& func) {
         outer->replaceAllUsesWith(orig);
         outer->eraseFromParent();
         if (auto* dead = llvm::dyn_cast<llvm::Instruction>(innerArg))
-            if (dead->use_empty()) dead->eraseFromParent();
+            if (dead->use_empty())
+                dead->eraseFromParent();
     }
     return count;
 }
@@ -5336,16 +5838,16 @@ static unsigned foldShiftOfZero(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             unsigned op = inst.getOpcode();
-            if (op != llvm::Instruction::Shl &&
-                op != llvm::Instruction::LShr &&
-                op != llvm::Instruction::AShr)
+            if (op != llvm::Instruction::Shl && op != llvm::Instruction::LShr && op != llvm::Instruction::AShr)
                 continue;
             llvm::Type* ty = inst.getType();
-            if (!ty->isIntOrIntVectorTy()) continue;
+            if (!ty->isIntOrIntVectorTy())
+                continue;
 
             // Check if the value being shifted (operand 0) is a zero constant.
             auto* lhs = llvm::dyn_cast<llvm::Constant>(inst.getOperand(0));
-            if (!lhs || !lhs->isNullValue()) continue;
+            if (!lhs || !lhs->isNullValue())
+                continue;
 
             inst.replaceAllUsesWith(llvm::Constant::getNullValue(ty));
             toErase.push_back(&inst);
@@ -5368,7 +5870,8 @@ static unsigned foldBitwiseIdempotent(llvm::Function& func) {
             unsigned op = inst.getOpcode();
             if (op != llvm::Instruction::Or && op != llvm::Instruction::And)
                 continue;
-            if (inst.getOperand(0) != inst.getOperand(1)) continue;
+            if (inst.getOperand(0) != inst.getOperand(1))
+                continue;
 
             inst.replaceAllUsesWith(inst.getOperand(0));
             toErase.push_back(&inst);
@@ -5388,10 +5891,13 @@ static unsigned foldXorSelf(llvm::Function& func) {
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::Xor) continue;
-            if (inst.getOperand(0) != inst.getOperand(1)) continue;
+            if (inst.getOpcode() != llvm::Instruction::Xor)
+                continue;
+            if (inst.getOperand(0) != inst.getOperand(1))
+                continue;
             llvm::Type* ty = inst.getType();
-            if (!ty->isIntOrIntVectorTy()) continue;
+            if (!ty->isIntOrIntVectorTy())
+                continue;
 
             inst.replaceAllUsesWith(llvm::Constant::getNullValue(ty));
             toErase.push_back(&inst);
@@ -5411,12 +5917,15 @@ static unsigned foldFSubSelf(llvm::Function& func) {
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::FSub) continue;
-            if (inst.getOperand(0) != inst.getOperand(1)) continue;
+            if (inst.getOpcode() != llvm::Instruction::FSub)
+                continue;
+            if (inst.getOperand(0) != inst.getOperand(1))
+                continue;
 
             auto* fpOp = llvm::cast<llvm::FPMathOperator>(&inst);
             // Require nnan (or nsz) to safely fold.
-            if (!fpOp->hasNoNaNs() && !fpOp->hasNoSignedZeros()) continue;
+            if (!fpOp->hasNoNaNs() && !fpOp->hasNoSignedZeros())
+                continue;
 
             llvm::Type* ty = inst.getType();
             inst.replaceAllUsesWith(llvm::ConstantFP::get(ty, 0.0));
@@ -5437,7 +5946,8 @@ static unsigned foldBitwiseWithConstants(llvm::Function& func) {
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (!inst.getType()->isIntOrIntVectorTy()) continue;
+            if (!inst.getType()->isIntOrIntVectorTy())
+                continue;
             unsigned op = inst.getOpcode();
 
             if (op == llvm::Instruction::And) {
@@ -5507,7 +6017,8 @@ static unsigned foldTrivialICmp(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             auto* icmp = llvm::dyn_cast<llvm::ICmpInst>(&inst);
-            if (!icmp) continue;
+            if (!icmp)
+                continue;
 
             llvm::Value* lhs = icmp->getOperand(0);
             llvm::Value* rhs = icmp->getOperand(1);
@@ -5533,8 +6044,7 @@ static unsigned foldTrivialICmp(llvm::Function& func) {
                 default:
                     continue;
                 }
-                llvm::Value* rep = llvm::ConstantInt::get(
-                    llvm::Type::getInt1Ty(func.getContext()), result ? 1 : 0);
+                llvm::Value* rep = llvm::ConstantInt::get(llvm::Type::getInt1Ty(func.getContext()), result ? 1 : 0);
                 icmp->replaceAllUsesWith(rep);
                 toErase.push_back(icmp);
                 ++count;
@@ -5545,10 +6055,8 @@ static unsigned foldTrivialICmp(llvm::Function& func) {
             auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(lhs);
             auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(rhs);
             if (c1 && c2) {
-                bool result = llvm::ICmpInst::compare(c1->getValue(), c2->getValue(),
-                                                       icmp->getPredicate());
-                llvm::Value* rep = llvm::ConstantInt::get(
-                    llvm::Type::getInt1Ty(func.getContext()), result ? 1 : 0);
+                bool result = llvm::ICmpInst::compare(c1->getValue(), c2->getValue(), icmp->getPredicate());
+                llvm::Value* rep = llvm::ConstantInt::get(llvm::Type::getInt1Ty(func.getContext()), result ? 1 : 0);
                 icmp->replaceAllUsesWith(rep);
                 toErase.push_back(icmp);
                 ++count;
@@ -5569,16 +6077,22 @@ static unsigned foldGEPArithmetic(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             auto* outer = llvm::dyn_cast<llvm::GetElementPtrInst>(&inst);
-            if (!outer) continue;
-            if (outer->getNumIndices() != 1) continue;
+            if (!outer)
+                continue;
+            if (outer->getNumIndices() != 1)
+                continue;
 
             auto* inner = llvm::dyn_cast<llvm::GetElementPtrInst>(outer->getPointerOperand());
-            if (!inner) continue;
-            if (!inner->hasOneUse()) continue;
-            if (inner->getNumIndices() != 1) continue;
+            if (!inner)
+                continue;
+            if (!inner->hasOneUse())
+                continue;
+            if (inner->getNumIndices() != 1)
+                continue;
 
             // Both must index the same element type.
-            if (inner->getSourceElementType() != outer->getSourceElementType()) continue;
+            if (inner->getSourceElementType() != outer->getSourceElementType())
+                continue;
 
             llvm::Value* idxInner = *inner->idx_begin();
             llvm::Value* idxOuter = *outer->idx_begin();
@@ -5590,9 +6104,8 @@ static unsigned foldGEPArithmetic(llvm::Function& func) {
                 llvm::APInt sum = ci->getValue() + co->getValue();
                 llvm::Constant* merged = llvm::ConstantInt::get(ci->getType(), sum);
                 llvm::IRBuilder<> builder(&inst);
-                auto* rep = builder.CreateGEP(
-                    inner->getSourceElementType(), inner->getPointerOperand(),
-                    merged, "gep.merged");
+                auto* rep =
+                    builder.CreateGEP(inner->getSourceElementType(), inner->getPointerOperand(), merged, "gep.merged");
                 if (auto* gepRep = llvm::dyn_cast<llvm::GetElementPtrInst>(rep))
                     gepRep->setIsInBounds(outer->isInBounds() && inner->isInBounds());
                 replacements.emplace_back(&inst, rep);
@@ -5604,9 +6117,8 @@ static unsigned foldGEPArithmetic(llvm::Function& func) {
             if (idxInner->getType() == idxOuter->getType()) {
                 llvm::IRBuilder<> builder(&inst);
                 llvm::Value* sum = builder.CreateAdd(idxInner, idxOuter, "gep.idx.add");
-                auto* rep = builder.CreateGEP(
-                    inner->getSourceElementType(), inner->getPointerOperand(),
-                    sum, "gep.merged");
+                auto* rep =
+                    builder.CreateGEP(inner->getSourceElementType(), inner->getPointerOperand(), sum, "gep.merged");
                 if (auto* gepRep = llvm::dyn_cast<llvm::GetElementPtrInst>(rep))
                     gepRep->setIsInBounds(outer->isInBounds() && inner->isInBounds());
                 replacements.emplace_back(&inst, rep);
@@ -5616,8 +6128,8 @@ static unsigned foldGEPArithmetic(llvm::Function& func) {
     }
 
     for (auto& [inst, rep] : replacements) {
-        auto* innerGEP = llvm::dyn_cast<llvm::GetElementPtrInst>(
-            llvm::cast<llvm::GetElementPtrInst>(inst)->getPointerOperand());
+        auto* innerGEP =
+            llvm::dyn_cast<llvm::GetElementPtrInst>(llvm::cast<llvm::GetElementPtrInst>(inst)->getPointerOperand());
         inst->replaceAllUsesWith(rep);
         inst->eraseFromParent();
         if (innerGEP && innerGEP->use_empty())
@@ -5634,9 +6146,11 @@ static unsigned foldConstantSelect(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
-            if (!sel) continue;
+            if (!sel)
+                continue;
             auto* cond = llvm::dyn_cast<llvm::ConstantInt>(sel->getCondition());
-            if (!cond) continue;
+            if (!cond)
+                continue;
             llvm::Value* rep = cond->isOne() ? sel->getTrueValue() : sel->getFalseValue();
             sel->replaceAllUsesWith(rep);
             toErase.push_back(sel);
@@ -5656,8 +6170,10 @@ static unsigned foldDoubleNot(llvm::Function& func) {
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::Xor) continue;
-            if (!inst.getType()->isIntOrIntVectorTy()) continue;
+            if (inst.getOpcode() != llvm::Instruction::Xor)
+                continue;
+            if (!inst.getType()->isIntOrIntVectorTy())
+                continue;
 
             // Check if this is xor(x, -1)
             llvm::Value* inner = nullptr;
@@ -5669,12 +6185,15 @@ static unsigned foldDoubleNot(llvm::Function& func) {
                     }
                 }
             }
-            if (!inner) continue;
+            if (!inner)
+                continue;
 
             // Check if inner is also xor(y, -1)
             auto* innerInst = llvm::dyn_cast<llvm::BinaryOperator>(inner);
-            if (!innerInst || innerInst->getOpcode() != llvm::Instruction::Xor) continue;
-            if (!innerInst->hasOneUse()) continue;
+            if (!innerInst || innerInst->getOpcode() != llvm::Instruction::Xor)
+                continue;
+            if (!innerInst->hasOneUse())
+                continue;
 
             llvm::Value* source = nullptr;
             for (int s = 0; s < 2; ++s) {
@@ -5685,7 +6204,8 @@ static unsigned foldDoubleNot(llvm::Function& func) {
                     }
                 }
             }
-            if (!source) continue;
+            if (!source)
+                continue;
 
             inst.replaceAllUsesWith(source);
             toErase.push_back(&inst);
@@ -5700,7 +6220,8 @@ static unsigned foldDoubleNot(llvm::Function& func) {
             innerVal = inst->getOperand(1);
         inst->eraseFromParent();
         if (auto* dead = llvm::dyn_cast<llvm::Instruction>(innerVal))
-            if (dead->use_empty()) dead->eraseFromParent();
+            if (dead->use_empty())
+                dead->eraseFromParent();
     }
     return count;
 }
@@ -5716,29 +6237,34 @@ static unsigned foldTruncExt(llvm::Function& func) {
             // trunc(zext(x)) or trunc(sext(x))
             if (op == llvm::Instruction::Trunc) {
                 auto* inner = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
-                if (!inner) continue;
+                if (!inner)
+                    continue;
                 unsigned innerOp = inner->getOpcode();
-                if (innerOp != llvm::Instruction::ZExt &&
-                    innerOp != llvm::Instruction::SExt)
+                if (innerOp != llvm::Instruction::ZExt && innerOp != llvm::Instruction::SExt)
                     continue;
                 llvm::Value* src = inner->getOperand(0);
-                if (src->getType() != inst.getType()) continue;
+                if (src->getType() != inst.getType())
+                    continue;
                 // Only fold if inner has one use (this trunc) to avoid
                 // keeping the ext alive.
-                if (!inner->hasOneUse()) continue;
+                if (!inner->hasOneUse())
+                    continue;
                 inst.replaceAllUsesWith(src);
                 toErase.push_back(&inst);
                 ++count;
             }
             // zext(trunc(x)) or sext(trunc(x))
-            else if (op == llvm::Instruction::ZExt ||
-                     op == llvm::Instruction::SExt) {
+            else if (op == llvm::Instruction::ZExt || op == llvm::Instruction::SExt) {
                 auto* inner = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
-                if (!inner) continue;
-                if (inner->getOpcode() != llvm::Instruction::Trunc) continue;
+                if (!inner)
+                    continue;
+                if (inner->getOpcode() != llvm::Instruction::Trunc)
+                    continue;
                 llvm::Value* src = inner->getOperand(0);
-                if (src->getType() != inst.getType()) continue;
-                if (!inner->hasOneUse()) continue;
+                if (src->getType() != inst.getType())
+                    continue;
+                if (!inner->hasOneUse())
+                    continue;
                 inst.replaceAllUsesWith(src);
                 toErase.push_back(&inst);
                 ++count;
@@ -5756,7 +6282,8 @@ static unsigned foldTruncExt(llvm::Function& func) {
         inst->eraseFromParent();
         if (innerVal) {
             if (auto* dead = llvm::dyn_cast<llvm::Instruction>(innerVal))
-                if (dead->use_empty()) dead->eraseFromParent();
+                if (dead->use_empty())
+                    dead->eraseFromParent();
         }
     }
     return count;
@@ -5769,8 +6296,10 @@ static unsigned foldMulPow2(llvm::Function& func) {
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::Mul) continue;
-            if (!inst.getType()->isIntegerTy()) continue;
+            if (inst.getOpcode() != llvm::Instruction::Mul)
+                continue;
+            if (!inst.getType()->isIntegerTy())
+                continue;
 
             llvm::Value* xv = nullptr;
             uint64_t cv = 0;
@@ -5786,15 +6315,18 @@ static unsigned foldMulPow2(llvm::Function& func) {
                     }
                 }
             }
-            if (!xv || cv == 0) continue;
+            if (!xv || cv == 0)
+                continue;
 
             unsigned shift = 0;
             uint64_t tmp = cv;
-            while (tmp > 1) { tmp >>= 1; ++shift; }
+            while (tmp > 1) {
+                tmp >>= 1;
+                ++shift;
+            }
 
             llvm::IRBuilder<> builder(&inst);
-            llvm::Value* rep = builder.CreateShl(
-                xv, llvm::ConstantInt::get(inst.getType(), shift), "mulpow2.shl");
+            llvm::Value* rep = builder.CreateShl(xv, llvm::ConstantInt::get(inst.getType(), shift), "mulpow2.shl");
             replacements.emplace_back(&inst, rep);
             ++count;
         }
@@ -5815,7 +6347,8 @@ static unsigned foldIdentityOps(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             unsigned op = inst.getOpcode();
-            if (!inst.getType()->isIntOrIntVectorTy()) continue;
+            if (!inst.getType()->isIntOrIntVectorTy())
+                continue;
 
             // add(x, 0) → x, sub(x, 0) → x
             if (op == llvm::Instruction::Add || op == llvm::Instruction::Sub) {
@@ -5883,22 +6416,24 @@ static unsigned foldConsecutiveShifts(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             unsigned op = inst.getOpcode();
-            if (op != llvm::Instruction::Shl &&
-                op != llvm::Instruction::LShr &&
-                op != llvm::Instruction::AShr)
+            if (op != llvm::Instruction::Shl && op != llvm::Instruction::LShr && op != llvm::Instruction::AShr)
                 continue;
 
             auto* inner = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
-            if (!inner || inner->getOpcode() != op) continue;
-            if (!inner->hasOneUse()) continue;
+            if (!inner || inner->getOpcode() != op)
+                continue;
+            if (!inner->hasOneUse())
+                continue;
 
             auto* outerAmt = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1));
             auto* innerAmt = llvm::dyn_cast<llvm::ConstantInt>(inner->getOperand(1));
-            if (!outerAmt || !innerAmt) continue;
+            if (!outerAmt || !innerAmt)
+                continue;
 
             unsigned bitWidth = inst.getType()->getIntegerBitWidth();
             uint64_t total = outerAmt->getZExtValue() + innerAmt->getZExtValue();
-            if (total >= bitWidth) total = bitWidth - 1; // clamp to avoid UB
+            if (total >= bitWidth)
+                total = bitWidth - 1; // clamp to avoid UB
 
             llvm::IRBuilder<> builder(&inst);
             llvm::Value* rep = nullptr;
@@ -5917,7 +6452,8 @@ static unsigned foldConsecutiveShifts(llvm::Function& func) {
             default:
                 break;
             }
-            if (!rep) continue;
+            if (!rep)
+                continue;
 
             replacements.emplace_back(&inst, rep);
             ++count;
@@ -5942,10 +6478,13 @@ static unsigned foldBitcastChain(llvm::Function& func) {
 
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::BitCast) continue;
+            if (inst.getOpcode() != llvm::Instruction::BitCast)
+                continue;
             auto* inner = llvm::dyn_cast<llvm::BitCastInst>(inst.getOperand(0));
-            if (!inner) continue;
-            if (!inner->hasOneUse()) continue;
+            if (!inner)
+                continue;
+            if (!inner->hasOneUse())
+                continue;
 
             llvm::Value* src = inner->getOperand(0);
             llvm::Type* srcTy = src->getType();
@@ -5972,7 +6511,8 @@ static unsigned foldBitcastChain(llvm::Function& func) {
         llvm::Value* innerVal = inst->getOperand(0);
         inst->eraseFromParent();
         if (auto* dead = llvm::dyn_cast<llvm::Instruction>(innerVal))
-            if (dead->use_empty()) dead->eraseFromParent();
+            if (dead->use_empty())
+                dead->eraseFromParent();
     }
     return count;
 }
@@ -6045,8 +6585,10 @@ static unsigned foldRedundantExtensions(llvm::Function& func) {
             // sext(sext(x)) → sext(x)
             if (op == llvm::Instruction::SExt) {
                 auto* inner = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
-                if (!inner || inner->getOpcode() != llvm::Instruction::SExt) continue;
-                if (!inner->hasOneUse()) continue;
+                if (!inner || inner->getOpcode() != llvm::Instruction::SExt)
+                    continue;
+                if (!inner->hasOneUse())
+                    continue;
                 llvm::IRBuilder<> builder(&inst);
                 auto* rep = builder.CreateSExt(inner->getOperand(0), inst.getType(), "sext.chain");
                 inst.replaceAllUsesWith(rep);
@@ -6056,8 +6598,10 @@ static unsigned foldRedundantExtensions(llvm::Function& func) {
             // zext(zext(x)) → zext(x)
             else if (op == llvm::Instruction::ZExt) {
                 auto* inner = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
-                if (!inner || inner->getOpcode() != llvm::Instruction::ZExt) continue;
-                if (!inner->hasOneUse()) continue;
+                if (!inner || inner->getOpcode() != llvm::Instruction::ZExt)
+                    continue;
+                if (!inner->hasOneUse())
+                    continue;
                 llvm::IRBuilder<> builder(&inst);
                 auto* rep = builder.CreateZExt(inner->getOperand(0), inst.getType(), "zext.chain");
                 inst.replaceAllUsesWith(rep);
@@ -6072,7 +6616,8 @@ static unsigned foldRedundantExtensions(llvm::Function& func) {
         llvm::Value* innerVal = inst->getOperand(0);
         inst->eraseFromParent();
         if (auto* dead = llvm::dyn_cast<llvm::Instruction>(innerVal))
-            if (dead->use_empty()) dead->eraseFromParent();
+            if (dead->use_empty())
+                dead->eraseFromParent();
     }
     return count;
 }
@@ -6086,7 +6631,8 @@ static unsigned sinkDeadStores(llvm::Function& func) {
         // Walk instructions in reverse: for each store, look backward for
         std::vector<llvm::Instruction*> insts;
         insts.reserve(bb.size());
-        for (auto& inst : bb) insts.push_back(&inst);
+        for (auto& inst : bb)
+            insts.push_back(&inst);
 
         // Map: pointer → index of the last store to that pointer.
         std::unordered_map<const llvm::Value*, unsigned> lastStoreIdx;
@@ -6108,8 +6654,7 @@ static unsigned sinkDeadStores(llvm::Function& func) {
                 // memory reads.  The prior store is dead.
                 auto* deadStore = llvm::cast<llvm::StoreInst>(insts[it->second]);
                 // Verify same stored type (full overwrite).
-                if (deadStore->getValueOperand()->getType() ==
-                    st->getValueOperand()->getType()) {
+                if (deadStore->getValueOperand()->getType() == st->getValueOperand()->getType()) {
                     toErase.push_back(deadStore);
                     ++count;
                 }
@@ -6118,7 +6663,8 @@ static unsigned sinkDeadStores(llvm::Function& func) {
 
             // A store also acts as a memory write; if there's also a fence
             // or atomic ordering, invalidate everything (conservative).
-            if (st->isAtomic()) lastStoreIdx.clear();
+            if (st->isAtomic())
+                lastStoreIdx.clear();
         }
     }
 
@@ -6129,13 +6675,18 @@ static unsigned sinkDeadStores(llvm::Function& func) {
 
 /// Multi-level loop-invariant code motion.
 static unsigned hoistLoopInvariantInst(llvm::Function& func) {
-    if (func.isDeclaration()) return 0;
+    if (func.isDeclaration())
+        return 0;
 
     unsigned count = 0;
 
     // Assign linear order to BBs for back-edge detection.
     std::unordered_map<const llvm::BasicBlock*, unsigned> bbOrder;
-    { unsigned ord = 0; for (auto& bb : func) bbOrder[&bb] = ord++; }
+    {
+        unsigned ord = 0;
+        for (auto& bb : func)
+            bbOrder[&bb] = ord++;
+    }
 
     for (auto& header : func) {
         // Find the latch (back-edge source): a predecessor of header with
@@ -6147,19 +6698,24 @@ static unsigned hoistLoopInvariantInst(llvm::Function& func) {
                 break;
             }
         }
-        if (!latch) continue;
+        if (!latch)
+            continue;
 
         // Require exactly one non-latch predecessor as the pre-header.
         llvm::BasicBlock* preHeader = nullptr;
         unsigned nonLatchPreds = 0;
         for (auto* pred : llvm::predecessors(&header)) {
-            if (pred != latch) { preHeader = pred; ++nonLatchPreds; }
+            if (pred != latch) {
+                preHeader = pred;
+                ++nonLatchPreds;
+            }
         }
-        if (nonLatchPreds != 1 || !preHeader) continue;
+        if (nonLatchPreds != 1 || !preHeader)
+            continue;
 
         // Collect loop body BBs (linear order between header and latch).
         unsigned headerOrd = bbOrder.at(&header);
-        unsigned latchOrd  = bbOrder.at(latch);
+        unsigned latchOrd = bbOrder.at(latch);
         std::unordered_set<const llvm::BasicBlock*> loopBBs;
         for (auto& bb : func) {
             unsigned ord = bbOrder.at(&bb);
@@ -6175,31 +6731,45 @@ static unsigned hoistLoopInvariantInst(llvm::Function& func) {
         for (unsigned iter = 0; iter < kMaxIters && changed; ++iter) {
             changed = false;
             for (auto& bb : func) {
-                if (!loopBBs.count(&bb)) continue;
+                if (!loopBBs.count(&bb))
+                    continue;
                 for (auto& inst : bb) {
-                    if (invariantSet.count(&inst)) continue;
+                    if (invariantSet.count(&inst))
+                        continue;
                     // Skip PHIs, terminators.
-                    if (llvm::isa<llvm::PHINode>(inst)) continue;
-                    if (inst.isTerminator()) continue;
+                    if (llvm::isa<llvm::PHINode>(inst))
+                        continue;
+                    if (inst.isTerminator())
+                        continue;
                     // Skip instructions with side effects or memory accesses.
-                    if (inst.mayHaveSideEffects()) continue;
-                    if (inst.mayReadOrWriteMemory()) continue;
+                    if (inst.mayHaveSideEffects())
+                        continue;
+                    if (inst.mayReadOrWriteMemory())
+                        continue;
                     // Already in pre-header — nothing to move.
-                    if (inst.getParent() == preHeader) continue;
+                    if (inst.getParent() == preHeader)
+                        continue;
 
                     // All operands must be either:
                     bool isInvariant = true;
                     for (unsigned i = 0; i < inst.getNumOperands(); ++i) {
                         llvm::Value* op = inst.getOperand(i);
-                        if (llvm::isa<llvm::Constant>(op)) continue;
+                        if (llvm::isa<llvm::Constant>(op))
+                            continue;
                         auto* defInst = llvm::dyn_cast<llvm::Instruction>(op);
-                        if (!defInst) { isInvariant = false; break; }
-                        if (!loopBBs.count(defInst->getParent())) continue; // external
-                        if (invariantSet.count(defInst)) continue; // already invariant
+                        if (!defInst) {
+                            isInvariant = false;
+                            break;
+                        }
+                        if (!loopBBs.count(defInst->getParent()))
+                            continue; // external
+                        if (invariantSet.count(defInst))
+                            continue; // already invariant
                         isInvariant = false;
                         break;
                     }
-                    if (!isInvariant) continue;
+                    if (!isInvariant)
+                        continue;
                     invariantSet.insert(&inst);
                     changed = true;
                 }
@@ -6209,7 +6779,8 @@ static unsigned hoistLoopInvariantInst(llvm::Function& func) {
         // Collect invariant instructions in forward program order.
         std::vector<llvm::Instruction*> toHoist;
         for (auto& bb : func) {
-            if (!loopBBs.count(&bb)) continue;
+            if (!loopBBs.count(&bb))
+                continue;
             for (auto& inst : bb) {
                 if (invariantSet.count(&inst))
                     toHoist.push_back(&inst);
@@ -6239,8 +6810,10 @@ static unsigned foldRedundantPHIs(llvm::Function& func) {
         for (auto& bb : func) {
             for (auto& inst : bb) {
                 auto* phi = llvm::dyn_cast<llvm::PHINode>(&inst);
-                if (!phi) break; // PHIs are at the start of the BB
-                if (phi->getNumIncomingValues() == 0) continue;
+                if (!phi)
+                    break; // PHIs are at the start of the BB
+                if (phi->getNumIncomingValues() == 0)
+                    continue;
                 llvm::Value* common = phi->getIncomingValue(0);
                 bool allSame = true;
                 for (unsigned i = 1; i < phi->getNumIncomingValues(); ++i) {
@@ -6257,7 +6830,8 @@ static unsigned foldRedundantPHIs(llvm::Function& func) {
                 }
             }
         }
-        for (auto* phi : toErase) phi->eraseFromParent();
+        for (auto* phi : toErase)
+            phi->eraseFromParent();
     }
     return count;
 }
@@ -6268,18 +6842,23 @@ static unsigned foldChainedAdds(llvm::Function& func) {
     std::vector<llvm::Instruction*> toErase;
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::Add) continue;
+            if (inst.getOpcode() != llvm::Instruction::Add)
+                continue;
             // Match: add(add(x, C1), C2)
             bool folded = false;
             for (int outerSide = 0; outerSide < 2 && !folded; ++outerSide) {
                 auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(outerSide));
-                if (!c2) continue;
+                if (!c2)
+                    continue;
                 auto* innerAdd = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1 - outerSide));
-                if (!innerAdd || innerAdd->getOpcode() != llvm::Instruction::Add) continue;
-                if (!innerAdd->hasOneUse()) continue; // don't break other users
+                if (!innerAdd || innerAdd->getOpcode() != llvm::Instruction::Add)
+                    continue;
+                if (!innerAdd->hasOneUse())
+                    continue; // don't break other users
                 for (int innerSide = 0; innerSide < 2 && !folded; ++innerSide) {
                     auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(innerAdd->getOperand(innerSide));
-                    if (!c1) continue;
+                    if (!c1)
+                        continue;
                     llvm::Value* x = innerAdd->getOperand(1 - innerSide);
                     // Create add(x, C1+C2)
                     llvm::APInt merged = c1->getValue() + c2->getValue();
@@ -6302,7 +6881,8 @@ static unsigned foldChainedAdds(llvm::Function& func) {
             }
         }
     }
-    for (auto* i : toErase) i->eraseFromParent();
+    for (auto* i : toErase)
+        i->eraseFromParent();
     return count;
 }
 
@@ -6313,13 +6893,17 @@ static unsigned foldAddNegToSub(llvm::Function& func) {
     std::vector<llvm::Instruction*> toErase;
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::Add) continue;
+            if (inst.getOpcode() != llvm::Instruction::Add)
+                continue;
             for (int side = 0; side < 2; ++side) {
                 auto* negSub = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(side));
-                if (!negSub || negSub->getOpcode() != llvm::Instruction::Sub) continue;
+                if (!negSub || negSub->getOpcode() != llvm::Instruction::Sub)
+                    continue;
                 auto* zero = llvm::dyn_cast<llvm::ConstantInt>(negSub->getOperand(0));
-                if (!zero || !zero->isZero()) continue;
-                if (!negSub->hasOneUse()) continue;
+                if (!zero || !zero->isZero())
+                    continue;
+                if (!negSub->hasOneUse())
+                    continue;
                 llvm::Value* x = negSub->getOperand(1);
                 llvm::Value* y = inst.getOperand(1 - side);
                 auto* newSub = llvm::BinaryOperator::CreateSub(y, x, "", &inst);
@@ -6332,7 +6916,8 @@ static unsigned foldAddNegToSub(llvm::Function& func) {
             }
         }
     }
-    for (auto* i : toErase) i->eraseFromParent();
+    for (auto* i : toErase)
+        i->eraseFromParent();
     return count;
 }
 
@@ -6343,7 +6928,8 @@ static unsigned foldSubSelf(llvm::Function& func) {
     std::vector<llvm::Instruction*> toErase;
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::Sub) continue;
+            if (inst.getOpcode() != llvm::Instruction::Sub)
+                continue;
             if (inst.getOperand(0) == inst.getOperand(1)) {
                 inst.replaceAllUsesWith(llvm::ConstantInt::get(inst.getType(), 0));
                 toErase.push_back(&inst);
@@ -6351,7 +6937,8 @@ static unsigned foldSubSelf(llvm::Function& func) {
             }
         }
     }
-    for (auto* i : toErase) i->eraseFromParent();
+    for (auto* i : toErase)
+        i->eraseFromParent();
     return count;
 }
 
@@ -6361,14 +6948,17 @@ static unsigned foldNarrowExtTrunc(llvm::Function& func) {
     std::vector<llvm::Instruction*> toErase;
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::Trunc) continue;
+            if (inst.getOpcode() != llvm::Instruction::Trunc)
+                continue;
             auto* ext = llvm::dyn_cast<llvm::Instruction>(inst.getOperand(0));
-            if (!ext) continue;
-            bool isExt = (ext->getOpcode() == llvm::Instruction::ZExt ||
-                          ext->getOpcode() == llvm::Instruction::SExt);
-            if (!isExt) continue;
+            if (!ext)
+                continue;
+            bool isExt = (ext->getOpcode() == llvm::Instruction::ZExt || ext->getOpcode() == llvm::Instruction::SExt);
+            if (!isExt)
+                continue;
             llvm::Value* orig = ext->getOperand(0);
-            if (orig->getType() != inst.getType()) continue;
+            if (orig->getType() != inst.getType())
+                continue;
             inst.replaceAllUsesWith(orig);
             toErase.push_back(&inst);
             if (ext->hasOneUse() || ext->use_empty())
@@ -6376,7 +6966,8 @@ static unsigned foldNarrowExtTrunc(llvm::Function& func) {
             ++count;
         }
     }
-    for (auto* i : toErase) i->eraseFromParent();
+    for (auto* i : toErase)
+        i->eraseFromParent();
     return count;
 }
 
@@ -6386,30 +6977,29 @@ static unsigned reassociateFPChains(llvm::Function& func) {
     // Collect linear FP chains (fadd or fmul with reassoc).
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::FAdd &&
-                inst.getOpcode() != llvm::Instruction::FMul)
+            if (inst.getOpcode() != llvm::Instruction::FAdd && inst.getOpcode() != llvm::Instruction::FMul)
                 continue;
-            if (!inst.hasAllowReassoc()) continue;
+            if (!inst.hasAllowReassoc())
+                continue;
             // Only process the root (last use of the chain — instruction with no
             // single-use chain consumer of the same opcode).
             bool isRoot = true;
             for (auto* user : inst.users()) {
                 auto* userInst = llvm::dyn_cast<llvm::Instruction>(user);
-                if (userInst && userInst->getOpcode() == inst.getOpcode() &&
-                    userInst->hasAllowReassoc()) {
+                if (userInst && userInst->getOpcode() == inst.getOpcode() && userInst->hasAllowReassoc()) {
                     isRoot = false;
                     break;
                 }
             }
-            if (!isRoot) continue;
+            if (!isRoot)
+                continue;
 
             // Walk the chain and collect leaf values.
             std::vector<llvm::Value*> leaves;
             std::vector<llvm::Instruction*> chainInsts;
             std::function<void(llvm::Value*)> collect = [&](llvm::Value* v) {
                 auto* binOp = llvm::dyn_cast<llvm::BinaryOperator>(v);
-                if (binOp && binOp->getOpcode() == inst.getOpcode() &&
-                    binOp->hasAllowReassoc() && binOp->hasOneUse()) {
+                if (binOp && binOp->getOpcode() == inst.getOpcode() && binOp->hasAllowReassoc() && binOp->hasOneUse()) {
                     chainInsts.push_back(binOp);
                     collect(binOp->getOperand(0));
                     collect(binOp->getOperand(1));
@@ -6419,7 +7009,8 @@ static unsigned reassociateFPChains(llvm::Function& func) {
             };
             collect(&inst);
 
-            if (leaves.size() < 4) continue; // not worth rebalancing
+            if (leaves.size() < 4)
+                continue; // not worth rebalancing
 
             // Build a balanced reduction tree.
             llvm::IRBuilder<> builder(&inst);
@@ -6461,50 +7052,60 @@ static unsigned foldRotateIdiom(llvm::Function& func) {
     std::vector<llvm::Instruction*> toErase;
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::Or) continue;
-            if (!inst.getType()->isIntegerTy()) continue;
+            if (inst.getOpcode() != llvm::Instruction::Or)
+                continue;
+            if (!inst.getType()->isIntegerTy())
+                continue;
             unsigned bitWidth = inst.getType()->getIntegerBitWidth();
-            if (bitWidth == 0) continue;
+            if (bitWidth == 0)
+                continue;
 
             auto* op0 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(0));
             auto* op1 = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(1));
-            if (!op0 || !op1) continue;
+            if (!op0 || !op1)
+                continue;
 
             // Match shl+lshr pair (either order)
             llvm::BinaryOperator* shlOp = nullptr;
             llvm::BinaryOperator* shrOp = nullptr;
-            if (op0->getOpcode() == llvm::Instruction::Shl &&
-                op1->getOpcode() == llvm::Instruction::LShr) {
-                shlOp = op0; shrOp = op1;
-            } else if (op1->getOpcode() == llvm::Instruction::Shl &&
-                       op0->getOpcode() == llvm::Instruction::LShr) {
-                shlOp = op1; shrOp = op0;
-            } else continue;
+            if (op0->getOpcode() == llvm::Instruction::Shl && op1->getOpcode() == llvm::Instruction::LShr) {
+                shlOp = op0;
+                shrOp = op1;
+            } else if (op1->getOpcode() == llvm::Instruction::Shl && op0->getOpcode() == llvm::Instruction::LShr) {
+                shlOp = op1;
+                shrOp = op0;
+            } else
+                continue;
 
             // Both must operate on the same value
-            if (shlOp->getOperand(0) != shrOp->getOperand(0)) continue;
+            if (shlOp->getOperand(0) != shrOp->getOperand(0))
+                continue;
             llvm::Value* x = shlOp->getOperand(0);
 
             // Check for constant shift amounts that sum to bitwidth
             auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(shlOp->getOperand(1));
             auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(shrOp->getOperand(1));
-            if (!c1 || !c2) continue;
-            if (c1->getZExtValue() + c2->getZExtValue() != bitWidth) continue;
+            if (!c1 || !c2)
+                continue;
+            if (c1->getZExtValue() + c2->getZExtValue() != bitWidth)
+                continue;
 
             // Create fshl(x, x, C1) — funnel shift left
             llvm::Module* mod = func.getParent();
-            llvm::Function* fshl = OMSC_GET_INTRINSIC(
-                mod, llvm::Intrinsic::fshl, {inst.getType()});
+            llvm::Function* fshl = OMSC_GET_INTRINSIC(mod, llvm::Intrinsic::fshl, {inst.getType()});
             llvm::IRBuilder<> builder(&inst);
             llvm::Value* result = builder.CreateCall(fshl, {x, x, c1});
             inst.replaceAllUsesWith(result);
             toErase.push_back(&inst);
-            if (shlOp->hasOneUse() || shlOp->use_empty()) toErase.push_back(shlOp);
-            if (shrOp->hasOneUse() || shrOp->use_empty()) toErase.push_back(shrOp);
+            if (shlOp->hasOneUse() || shlOp->use_empty())
+                toErase.push_back(shlOp);
+            if (shrOp->hasOneUse() || shrOp->use_empty())
+                toErase.push_back(shrOp);
             ++count;
         }
     }
-    for (auto* i : toErase) i->eraseFromParent();
+    for (auto* i : toErase)
+        i->eraseFromParent();
     return count;
 }
 
@@ -6515,9 +7116,11 @@ static unsigned foldExtractInsert(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             auto* ev = llvm::dyn_cast<llvm::ExtractValueInst>(&inst);
-            if (!ev) continue;
+            if (!ev)
+                continue;
             auto* iv = llvm::dyn_cast<llvm::InsertValueInst>(ev->getAggregateOperand());
-            if (!iv) continue;
+            if (!iv)
+                continue;
             // Check indices match exactly
             if (ev->getIndices() == iv->getIndices()) {
                 ev->replaceAllUsesWith(iv->getInsertedValueOperand());
@@ -6526,7 +7129,8 @@ static unsigned foldExtractInsert(llvm::Function& func) {
             }
         }
     }
-    for (auto* i : toErase) i->eraseFromParent();
+    for (auto* i : toErase)
+        i->eraseFromParent();
     return count;
 }
 
@@ -6537,10 +7141,12 @@ static unsigned foldSelectConsecutiveConsts(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             auto* sel = llvm::dyn_cast<llvm::SelectInst>(&inst);
-            if (!sel) continue;
+            if (!sel)
+                continue;
             auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(sel->getTrueValue());
             auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(sel->getFalseValue());
-            if (!c1 || !c2) continue;
+            if (!c1 || !c2)
+                continue;
             llvm::APInt diff = c2->getValue() - c1->getValue();
             if (diff == 1) {
                 // select(c, C1, C1+1) → add(zext(!c), C1)
@@ -6562,7 +7168,8 @@ static unsigned foldSelectConsecutiveConsts(llvm::Function& func) {
             }
         }
     }
-    for (auto* i : toErase) i->eraseFromParent();
+    for (auto* i : toErase)
+        i->eraseFromParent();
     return count;
 }
 
@@ -6572,21 +7179,26 @@ static unsigned foldShlOneConst(llvm::Function& func) {
     std::vector<llvm::Instruction*> toErase;
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::Shl) continue;
+            if (inst.getOpcode() != llvm::Instruction::Shl)
+                continue;
             auto* one = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(0));
-            if (!one || !one->isOne()) continue;
+            if (!one || !one->isOne())
+                continue;
             auto* shift = llvm::dyn_cast<llvm::ConstantInt>(inst.getOperand(1));
-            if (!shift) continue;
+            if (!shift)
+                continue;
             unsigned bw = inst.getType()->getIntegerBitWidth();
             uint64_t sv = shift->getZExtValue();
-            if (sv >= bw) continue;
+            if (sv >= bw)
+                continue;
             llvm::APInt result = llvm::APInt(bw, 1) << sv;
             inst.replaceAllUsesWith(llvm::ConstantInt::get(inst.getType(), result));
             toErase.push_back(&inst);
             ++count;
         }
     }
-    for (auto* i : toErase) i->eraseFromParent();
+    for (auto* i : toErase)
+        i->eraseFromParent();
     return count;
 }
 
@@ -6596,21 +7208,24 @@ static unsigned foldMulAssocPow2(llvm::Function& func) {
     std::vector<llvm::Instruction*> toErase;
     for (auto& bb : func) {
         for (auto& inst : bb) {
-            if (inst.getOpcode() != llvm::Instruction::Mul) continue;
+            if (inst.getOpcode() != llvm::Instruction::Mul)
+                continue;
             for (int side = 0; side < 2; ++side) {
                 auto* innerMul = llvm::dyn_cast<llvm::BinaryOperator>(inst.getOperand(side));
-                if (!innerMul || innerMul->getOpcode() != llvm::Instruction::Mul) continue;
-                if (!innerMul->hasOneUse()) continue;
+                if (!innerMul || innerMul->getOpcode() != llvm::Instruction::Mul)
+                    continue;
+                if (!innerMul->hasOneUse())
+                    continue;
                 auto* ci = llvm::dyn_cast<llvm::ConstantInt>(innerMul->getOperand(1));
-                if (!ci || !ci->getValue().isPowerOf2()) continue;
+                if (!ci || !ci->getValue().isPowerOf2())
+                    continue;
                 // mul(x, mul(y, 2^n)) → shl(mul(x, y), n)
                 llvm::Value* x = inst.getOperand(1 - side);
                 llvm::Value* y = innerMul->getOperand(0);
                 llvm::IRBuilder<> builder(&inst);
                 llvm::Value* prod = builder.CreateMul(x, y, "mul_assoc");
                 unsigned shift = ci->getValue().exactLogBase2();
-                llvm::Value* result = builder.CreateShl(prod,
-                    llvm::ConstantInt::get(inst.getType(), shift), "mul_shl");
+                llvm::Value* result = builder.CreateShl(prod, llvm::ConstantInt::get(inst.getType(), shift), "mul_shl");
                 inst.replaceAllUsesWith(result);
                 toErase.push_back(&inst);
                 ++count;
@@ -6618,7 +7233,8 @@ static unsigned foldMulAssocPow2(llvm::Function& func) {
             }
         }
     }
-    for (auto* i : toErase) i->eraseFromParent();
+    for (auto* i : toErase)
+        i->eraseFromParent();
     return count;
 }
 
@@ -6628,26 +7244,27 @@ static unsigned foldCmpAddConst(llvm::Function& func) {
     for (auto& bb : func) {
         for (auto& inst : bb) {
             auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(&inst);
-            if (!cmp) continue;
+            if (!cmp)
+                continue;
             auto* add = llvm::dyn_cast<llvm::BinaryOperator>(cmp->getOperand(0));
-            if (!add || add->getOpcode() != llvm::Instruction::Add) continue;
-            if (!add->hasOneUse()) continue;
+            if (!add || add->getOpcode() != llvm::Instruction::Add)
+                continue;
+            if (!add->hasOneUse())
+                continue;
             auto* c1 = llvm::dyn_cast<llvm::ConstantInt>(add->getOperand(1));
             auto* c2 = llvm::dyn_cast<llvm::ConstantInt>(cmp->getOperand(1));
-            if (!c1 || !c2) continue;
+            if (!c1 || !c2)
+                continue;
             // Check for overflow safety: only fold for unsigned predicates
             // or when we can prove no overflow.
             auto pred = cmp->getPredicate();
-            if (pred != llvm::CmpInst::ICMP_ULT &&
-                pred != llvm::CmpInst::ICMP_ULE &&
-                pred != llvm::CmpInst::ICMP_UGT &&
-                pred != llvm::CmpInst::ICMP_UGE &&
-                pred != llvm::CmpInst::ICMP_EQ &&
-                pred != llvm::CmpInst::ICMP_NE)
+            if (pred != llvm::CmpInst::ICMP_ULT && pred != llvm::CmpInst::ICMP_ULE && pred != llvm::CmpInst::ICMP_UGT &&
+                pred != llvm::CmpInst::ICMP_UGE && pred != llvm::CmpInst::ICMP_EQ && pred != llvm::CmpInst::ICMP_NE)
                 continue;
             // Only fold when c1 is non-negative and c2 >= c1 (no underflow)
             if (pred == llvm::CmpInst::ICMP_ULT || pred == llvm::CmpInst::ICMP_ULE) {
-                if (c2->getValue().ult(c1->getValue())) continue; // would underflow
+                if (c2->getValue().ult(c1->getValue()))
+                    continue; // would underflow
             }
             llvm::APInt newC2 = c2->getValue() - c1->getValue();
             cmp->setOperand(0, add->getOperand(0));
@@ -6669,10 +7286,14 @@ static unsigned eliminateDeadInstructions(llvm::Function& func) {
             llvm::SmallVector<llvm::Instruction*, 16> dead;
             for (auto it = bb.rbegin(); it != bb.rend(); ++it) {
                 llvm::Instruction* inst = &*it;
-                if (inst->isTerminator()) continue;
-                if (llvm::isa<llvm::PHINode>(inst)) continue;
-                if (!inst->use_empty()) continue;
-                if (inst->mayHaveSideEffects()) continue;
+                if (inst->isTerminator())
+                    continue;
+                if (llvm::isa<llvm::PHINode>(inst))
+                    continue;
+                if (!inst->use_empty())
+                    continue;
+                if (inst->mayHaveSideEffects())
+                    continue;
                 dead.push_back(inst);
             }
             for (auto* d : dead) {
@@ -6685,40 +7306,39 @@ static unsigned eliminateDeadInstructions(llvm::Function& func) {
     return count;
 }
 
-TransformStats applyHardwareTransforms(llvm::Function& func,
-                                        const MicroarchProfile& profile,
-                                        bool enableLoopAnnotation) {
+TransformStats applyHardwareTransforms(llvm::Function& func, const MicroarchProfile& profile,
+                                       bool enableLoopAnnotation) {
     TransformStats stats;
 
 
-    stats.fmaGenerated     = generateFMA(func, profile);
-    stats.fmaGenerated    += generateFMASub(func, profile);
-    stats.fmaGenerated    += generateFMAChain(func, profile);
+    stats.fmaGenerated = generateFMA(func, profile);
+    stats.fmaGenerated += generateFMASub(func, profile);
+    stats.fmaGenerated += generateFMAChain(func, profile);
     // Canonicalize fadd(x, fneg(y)) → fsub(x, y) before FMA scan so the
     // FMA pass can recognise the resulting fsub patterns.
-    stats.fmaGenerated    += canonicalizeFaddFneg(func);
+    stats.fmaGenerated += canonicalizeFaddFneg(func);
     // fmul(x, -1.0) → fneg(x): 1 cycle bit-flip vs 4-cycle multiply.
     // Run before FMA scan so the eliminated fmul doesn't confuse FMA matching.
-    stats.fmaGenerated    += foldFPMulByNeg1(func);
+    stats.fmaGenerated += foldFPMulByNeg1(func);
     // fneg(fneg(x)) → x: double negation elimination.
-    stats.fmaGenerated    += foldFNegDouble(func);
+    stats.fmaGenerated += foldFNegDouble(func);
     // fsub nnan x, x → 0.0: self-cancel for FP subtraction.
     // Run after fneg folding so any newly-exposed self-subtracts are caught.
-    stats.fmaGenerated    += foldFSubSelf(func);
+    stats.fmaGenerated += foldFSubSelf(func);
     // fadd(x, x) → fmul(x, 2.0) with reassoc: exposes FMA fusion opportunities.
-    stats.fmaGenerated    += foldFAddSelf(func);
+    stats.fmaGenerated += foldFAddSelf(func);
     // Re-run FMA passes once more so fmul(x,2.0) introduced by foldFAddSelf
     // can be immediately fused with adjacent fadd/fsub operations.
-    stats.fmaGenerated    += generateFMA(func, profile);
-    stats.fmaGenerated    += generateFMASub(func, profile);
+    stats.fmaGenerated += generateFMA(func, profile);
+    stats.fmaGenerated += generateFMASub(func, profile);
     // FP division by constant → reciprocal multiply (fdiv → fmul when `arcp` flag).
     // Run before FMA scan so that the resulting fmul may be fused in a later pass.
-    stats.fmaGenerated    += foldFPDivByConstant(func, profile);
+    stats.fmaGenerated += foldFPDivByConstant(func, profile);
     // pow(x, N) for small constant N → multiply chain (avoids 50-100cy lib call).
     // Run after fneg/fdiv folds so the resulting fmuls can be seen by FMA passes.
-    stats.fmaGenerated    += foldPowBySmallInt(func);
+    stats.fmaGenerated += foldPowBySmallInt(func);
     // sqrt(x * x) → fabs(x) with nnan+ninf: avoids ~10-cycle sqrt.
-    stats.fmaGenerated    += foldSqrtSquare(func);
+    stats.fmaGenerated += foldSqrtSquare(func);
     // Integer div/rem by power-of-2 → shift/and (any that slipped past InstCombine).
     stats.intStrengthReduced = foldDivByPow2(func);
     // Min/max pattern: icmp/fcmp + select → smin/smax/minnum/maxnum intrinsics.
@@ -6727,12 +7347,10 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // Enables SETCC/MOVZX backend lowering (1 µop vs. multi-µop select sequence).
     stats.intStrengthReduced += foldSelectToBoolCast(func);
     stats.prefetchesInserted = insertPrefetches(func, profile);
-    stats.branchesOptimized  = optimizeBranchLayout(func, profile);
-    stats.loadsStorePaired   = markLoadStorePairs(func, profile);
+    stats.branchesOptimized = optimizeBranchLayout(func, profile);
+    stats.loadsStorePaired = markLoadStorePairs(func, profile);
     // Skip loop annotation when LTO is active — the LTO linker runs its own
-    stats.vectorExpanded     = enableLoopAnnotation
-                                 ? softwarePipelineLoops(func, profile)
-                                 : 0;
+    stats.vectorExpanded = enableLoopAnnotation ? softwarePipelineLoops(func, profile) : 0;
     // Integer strength reduction runs last so mul→shift replacements do not
     // interfere with the FMA scan above (which looks at FMul, not int Mul).
     stats.intStrengthReduced += integerStrengthReduce(func, profile);
@@ -6773,14 +7391,14 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     // Runs after strength reduction so we don't accidentally undo any reductions.
     stats.intStrengthReduced += generateIntegerAbs(func, profile);
     stats.intStrengthReduced += rebalanceChainForILP(func, profile);
-    stats.branchesOptimized  += convertIfElseToSelect(func, profile);
-    stats.loadsStorePaired   += insertNonTemporalHints(func, profile);
+    stats.branchesOptimized += convertIfElseToSelect(func, profile);
+    stats.loadsStorePaired += insertNonTemporalHints(func, profile);
     // Eliminate dead stores: when two stores write to the same pointer
     // with no intervening read, the first is dead.
-    stats.loadsStorePaired   += sinkDeadStores(func);
+    stats.loadsStorePaired += sinkDeadStores(func);
     // Eliminate redundant loads: forward stored values and eliminate
     // repeated loads from the same pointer (local GVN-like).
-    stats.loadsStorePaired   += eliminateRedundantLoads(func);
+    stats.loadsStorePaired += eliminateRedundantLoads(func);
 
     // ── New HGOE overhaul transforms ────────────────────────────────────────
     // These additional transforms close remaining gaps vs LLVM InstCombine.
@@ -6804,11 +7422,11 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     stats.intStrengthReduced += foldExtractInsert(func);
     // FP reassociation: turn linear fadd/fmul chains into balanced trees
     // when reassoc flag is present (cuts critical path from O(n) to O(log n)).
-    stats.fmaGenerated       += reassociateFPChains(func);
+    stats.fmaGenerated += reassociateFPChains(func);
 
     // ── Phase 2 HGOE overhaul transforms ────────────────────────────────────
     // select(cond, C1, C1+1) → add(zext(!cond), C1): branchless consecutive const.
-    stats.branchesOptimized  += foldSelectConsecutiveConsts(func);
+    stats.branchesOptimized += foldSelectConsecutiveConsts(func);
     // shl(1, C) → constant: fold missed constant shifts.
     stats.intStrengthReduced += foldShlOneConst(func);
     // mul(x, mul(y, 2^k)) → shl(mul(x, y), k): associative pow2 factoring.
@@ -6820,9 +7438,9 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
     stats.intStrengthReduced += foldSelectSameValue(func);
 
     // Hoist loop-invariant GEP address calculations to the loop pre-header.
-    stats.loadsStorePaired   += hoistLoopInvariantGEP(func);
+    stats.loadsStorePaired += hoistLoopInvariantGEP(func);
     // Hoist ALL remaining pure loop-invariant instructions to the pre-header.
-    stats.loadsStorePaired   += hoistLoopInvariantInst(func);
+    stats.loadsStorePaired += hoistLoopInvariantInst(func);
 
     // ── Phase K convergence sweep ───────────────────────────────────────────
     stats.intStrengthReduced += foldIdentityOps(func);
@@ -6844,21 +7462,20 @@ TransformStats applyHardwareTransforms(llvm::Function& func,
 /// Fusion opportunity: two instructions that the CPU can execute as a single
 /// micro-op (or in a reduced number of cycles via macro-op fusion).
 struct FusionPair {
-    unsigned first;   ///< Index of the first instruction in the pair
-    unsigned second;  ///< Index of the second instruction in the pair
+    unsigned first;  ///< Index of the first instruction in the pair
+    unsigned second; ///< Index of the second instruction in the pair
     enum Kind {
-        CmpBranch,     ///< Compare + conditional branch → macro-op fusion
-        LoadOp,        ///< Load + ALU op using the loaded value → micro-op fusion
-        AddrFold,      ///< GEP + load/store → address calculation folding
-        IncBranch,     ///< Increment + compare + branch (loop counter pattern)
+        CmpBranch, ///< Compare + conditional branch → macro-op fusion
+        LoadOp,    ///< Load + ALU op using the loaded value → micro-op fusion
+        AddrFold,  ///< GEP + load/store → address calculation folding
+        IncBranch, ///< Increment + compare + branch (loop counter pattern)
     } kind;
 };
 
 /// Detect instruction fusion opportunities within a basic block.
-static std::vector<FusionPair> detectFusionPairs(
-        const std::vector<llvm::Instruction*>& moveable,
-        const std::unordered_map<llvm::Instruction*, unsigned>& idx,
-        const MicroarchProfile& /*profile*/) {
+static std::vector<FusionPair> detectFusionPairs(const std::vector<llvm::Instruction*>& moveable,
+                                                 const std::unordered_map<llvm::Instruction*, unsigned>& idx,
+                                                 const MicroarchProfile& /*profile*/) {
     std::vector<FusionPair> pairs;
 
     for (unsigned i = 0; i < moveable.size(); ++i) {
@@ -6869,10 +7486,10 @@ static std::vector<FusionPair> detectFusionPairs(
             // Check if the comparison result feeds a branch in this BB
             for (auto* user : inst->users()) {
                 auto* br = llvm::dyn_cast<llvm::BranchInst>(user);
-                if (!br || !br->isConditional()) continue;
+                if (!br || !br->isConditional())
+                    continue;
                 // The branch is the terminator, so it's not in moveable[],
-                pairs.push_back({i, static_cast<unsigned>(moveable.size()),
-                                 FusionPair::CmpBranch});
+                pairs.push_back({i, static_cast<unsigned>(moveable.size()), FusionPair::CmpBranch});
             }
         }
 
@@ -6886,14 +7503,10 @@ static std::vector<FusionPair> detectFusionPairs(
                     if (it != idx.end()) {
                         unsigned userOpc = userInst->getOpcode();
                         // ALU ops that can fold a memory operand
-                        if (userOpc == llvm::Instruction::Add ||
-                            userOpc == llvm::Instruction::Sub ||
-                            userOpc == llvm::Instruction::And ||
-                            userOpc == llvm::Instruction::Or ||
-                            userOpc == llvm::Instruction::Xor ||
-                            userOpc == llvm::Instruction::Mul ||
-                            userOpc == llvm::Instruction::FAdd ||
-                            userOpc == llvm::Instruction::FMul) {
+                        if (userOpc == llvm::Instruction::Add || userOpc == llvm::Instruction::Sub ||
+                            userOpc == llvm::Instruction::And || userOpc == llvm::Instruction::Or ||
+                            userOpc == llvm::Instruction::Xor || userOpc == llvm::Instruction::Mul ||
+                            userOpc == llvm::Instruction::FAdd || userOpc == llvm::Instruction::FMul) {
                             pairs.push_back({i, it->second, FusionPair::LoadOp});
                         }
                     }
@@ -6908,8 +7521,7 @@ static std::vector<FusionPair> detectFusionPairs(
                 if (auto* userInst = llvm::dyn_cast<llvm::Instruction>(user)) {
                     auto it = idx.find(userInst);
                     if (it != idx.end() &&
-                        (llvm::isa<llvm::LoadInst>(userInst) ||
-                         llvm::isa<llvm::StoreInst>(userInst))) {
+                        (llvm::isa<llvm::LoadInst>(userInst) || llvm::isa<llvm::StoreInst>(userInst))) {
                         pairs.push_back({i, it->second, FusionPair::AddrFold});
                     }
                 }
@@ -6938,30 +7550,26 @@ static std::vector<FusionPair> detectFusionPairs(
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Dump the scheduling dependency DAG to stderr for debugging.
-static void dumpScheduleDAG(
-        const std::vector<llvm::Instruction*>& moveable,
-        const std::vector<std::vector<std::pair<unsigned,unsigned>>>& succ,
-        const std::vector<std::vector<std::pair<unsigned,unsigned>>>& pred,
-        const std::vector<unsigned>& critPath,
-        const std::vector<unsigned>& lat,
-        const MicroarchProfile& profile,
-        llvm::raw_ostream& os = llvm::errs()) {
-    os << "=== HGOE Schedule DAG (" << moveable.size() << " instructions, "
-       << profile.name << ") ===\n";
+static void dumpScheduleDAG(const std::vector<llvm::Instruction*>& moveable,
+                            const std::vector<std::vector<std::pair<unsigned, unsigned>>>& succ,
+                            const std::vector<std::vector<std::pair<unsigned, unsigned>>>& pred,
+                            const std::vector<unsigned>& critPath, const std::vector<unsigned>& lat,
+                            const MicroarchProfile& profile, llvm::raw_ostream& os = llvm::errs()) {
+    os << "=== HGOE Schedule DAG (" << moveable.size() << " instructions, " << profile.name << ") ===\n";
 
     for (unsigned i = 0; i < moveable.size(); ++i) {
         os << "  [" << i << "] ";
         moveable[i]->print(os, /*IsForDebug=*/true);
         os << "\n";
-        os << "       lat=" << lat[i]
-           << " crit=" << critPath[i]
+        os << "       lat=" << lat[i] << " crit=" << critPath[i]
            << " class=" << static_cast<int>(classifyOp(moveable[i]))
            << " res=" << static_cast<int>(mapOpToResource(classifyOp(moveable[i])));
 
         if (!pred[i].empty()) {
             os << " pred={";
             for (unsigned j = 0; j < pred[i].size(); ++j) {
-                if (j > 0) os << ",";
+                if (j > 0)
+                    os << ",";
                 os << pred[i][j].first << "(lat=" << pred[i][j].second << ")";
             }
             os << "}";
@@ -6969,7 +7577,8 @@ static void dumpScheduleDAG(
         if (!succ[i].empty()) {
             os << " succ={";
             for (unsigned j = 0; j < succ[i].size(); ++j) {
-                if (j > 0) os << ",";
+                if (j > 0)
+                    os << ",";
                 os << succ[i][j].first << "(lat=" << succ[i][j].second << ")";
             }
             os << "}";
@@ -6980,14 +7589,10 @@ static void dumpScheduleDAG(
 }
 
 /// Dump the final schedule order with cycle assignments.
-static void dumpScheduleResult(
-        const std::vector<llvm::Instruction*>& scheduled,
-        const std::vector<unsigned>& avail,
-        const std::unordered_map<llvm::Instruction*, unsigned>& idx,
-        unsigned totalCycles,
-        llvm::raw_ostream& os = llvm::errs()) {
-    os << "=== HGOE Schedule Result (" << scheduled.size()
-       << " instructions, " << totalCycles << " cycles) ===\n";
+static void dumpScheduleResult(const std::vector<llvm::Instruction*>& scheduled, const std::vector<unsigned>& avail,
+                               const std::unordered_map<llvm::Instruction*, unsigned>& idx, unsigned totalCycles,
+                               llvm::raw_ostream& os = llvm::errs()) {
+    os << "=== HGOE Schedule Result (" << scheduled.size() << " instructions, " << totalCycles << " cycles) ===\n";
     for (unsigned i = 0; i < scheduled.size(); ++i) {
         auto it = idx.find(scheduled[i]);
         unsigned origIdx = (it != idx.end()) ? it->second : 0;
@@ -7009,10 +7614,8 @@ static bool shouldDumpSchedule() {
 }
 
 static bool hasMemoryEffect(const llvm::Instruction* inst) {
-    if (llvm::isa<llvm::LoadInst>(inst) || llvm::isa<llvm::StoreInst>(inst) ||
-        llvm::isa<llvm::AtomicRMWInst>(inst) ||
-        llvm::isa<llvm::AtomicCmpXchgInst>(inst) ||
-        llvm::isa<llvm::FenceInst>(inst))
+    if (llvm::isa<llvm::LoadInst>(inst) || llvm::isa<llvm::StoreInst>(inst) || llvm::isa<llvm::AtomicRMWInst>(inst) ||
+        llvm::isa<llvm::AtomicCmpXchgInst>(inst) || llvm::isa<llvm::FenceInst>(inst))
         return true;
     if (const auto* ci = llvm::dyn_cast<llvm::CallInst>(inst))
         return !ci->doesNotAccessMemory();
@@ -7021,9 +7624,11 @@ static bool hasMemoryEffect(const llvm::Instruction* inst) {
 
 /// Returns true when the instruction's result lives in the vector/FP register
 static bool producesVecOrFP(const llvm::Instruction* inst) {
-    if (!inst) return false;
+    if (!inst)
+        return false;
     llvm::Type* ty = inst->getType();
-    if (ty->isFloatingPointTy() || ty->isVectorTy()) return true;
+    if (ty->isFloatingPointTy() || ty->isVectorTy())
+        return true;
     // FP conversions: int→FP or FP→int consume the FP register file.
     switch (inst->getOpcode()) {
     case llvm::Instruction::UIToFP:
@@ -7052,20 +7657,21 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 
 /// Per-basic-block list scheduler driven by the detailed hardware graph.
 [[nodiscard]] static bool isWideVectorOp(const llvm::Instruction* inst) {
-    if (!inst) return false;
+    if (!inst)
+        return false;
     llvm::Type* ty = inst->getType();
-    if (!ty->isVectorTy()) return false;
+    if (!ty->isVectorTy())
+        return false;
     auto* vt = llvm::dyn_cast<llvm::FixedVectorType>(ty);
-    if (!vt) return false;
+    if (!vt)
+        return false;
     return vt->getPrimitiveSizeInBits().getFixedValue() >= 512;
 }
 
 ///   6. List-schedule: at each logical cycle, pick up to issueWidth ready
-[[gnu::hot]] static unsigned scheduleBasicBlock(llvm::BasicBlock& bb,
-                                    const HardwareGraph& hw,
-                                    const MicroarchProfile& profile,
-                                    const SchedulerPolicy& policy,
-                                    SchedulerQuality* quality) {
+[[gnu::hot]] static unsigned scheduleBasicBlock(llvm::BasicBlock& bb, const HardwareGraph& hw,
+                                                const MicroarchProfile& profile, const SchedulerPolicy& policy,
+                                                SchedulerQuality* quality) {
     const llvm::DataLayout& dl = bb.getModule()->getDataLayout();
     // ── 1. Collect moveable instructions ─────────────────────────────────────
     std::vector<llvm::Instruction*> moveable;
@@ -7075,17 +7681,20 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             moveable.push_back(&inst);
 
     auto n = static_cast<unsigned>(moveable.size());
-    if (n < 2) return n;
+    if (n < 2)
+        return n;
 
     // ── 2. Build index map ────────────────────────────────────────────────────
     std::unordered_map<llvm::Instruction*, unsigned> idx;
     idx.reserve(n);
-    for (unsigned i = 0; i < n; ++i) idx[moveable[i]] = i;
+    for (unsigned i = 0; i < n; ++i)
+        idx[moveable[i]] = i;
 
     // ── 3. Per-opcode instruction latencies ──────────────────────────────────
     auto estimateLoadLatency = [&](const llvm::Instruction* inst) -> unsigned {
         auto* ld = llvm::dyn_cast<llvm::LoadInst>(inst);
-        if (!ld) return getOpcodeLatency(inst, profile);
+        if (!ld)
+            return getOpcodeLatency(inst, profile);
 
         const llvm::Value* ptr = ld->getPointerOperand();
 
@@ -7134,7 +7743,10 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 if (edgeLat > sl) {
                     sl = edgeLat;
                     for (auto& [f, fl] : pred[to])
-                        if (f == from) { fl = edgeLat; break; }
+                        if (f == from) {
+                            fl = edgeLat;
+                            break;
+                        }
                 }
                 return;
             }
@@ -7149,11 +7761,14 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     for (unsigned j = 0; j < n; ++j) {
         for (auto& use : moveable[j]->operands()) {
             auto* def = llvm::dyn_cast<llvm::Instruction>(use.get());
-            if (!def) continue;
+            if (!def)
+                continue;
             auto it = idx.find(def);
-            if (it == idx.end()) continue; // defined outside this BB
+            if (it == idx.end())
+                continue; // defined outside this BB
             unsigned i = it->second;
-            if (i != j) addEdge(i, j, lat[i]);
+            if (i != j)
+                addEdge(i, j, lat[i]);
         }
     }
 
@@ -7170,16 +7785,17 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 
         // Alias query: returns false when two pointers are provably
         // non-aliasing, allowing the dependency to be elided.
-        auto mayAlias = [&](const llvm::Instruction* a,
-                            const llvm::Instruction* b) -> bool {
-            if (!getMemPtr(a) || !getMemPtr(b)) return true;
+        auto mayAlias = [&](const llvm::Instruction* a, const llvm::Instruction* b) -> bool {
+            if (!getMemPtr(a) || !getMemPtr(b))
+                return true;
             return hgoeMayAlias(a, b, dl);
         };
 
         // Collect memory instruction indices by type.
         std::vector<unsigned> stores, loads, otherMem;
         for (unsigned i = 0; i < n; ++i) {
-            if (!hasMemoryEffect(moveable[i])) continue;
+            if (!hasMemoryEffect(moveable[i]))
+                continue;
             if (llvm::isa<llvm::StoreInst>(moveable[i]))
                 stores.push_back(i);
             else if (llvm::isa<llvm::LoadInst>(moveable[i]))
@@ -7210,23 +7826,26 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         // Atomics / fences / calls are serialisation barriers — chain them
         int lastBarrier = -1;
         for (unsigned i = 0; i < n; ++i) {
-            if (!hasMemoryEffect(moveable[i])) continue;
-            bool isBarrier = !llvm::isa<llvm::LoadInst>(moveable[i]) &&
-                             !llvm::isa<llvm::StoreInst>(moveable[i]);
+            if (!hasMemoryEffect(moveable[i]))
+                continue;
+            bool isBarrier = !llvm::isa<llvm::LoadInst>(moveable[i]) && !llvm::isa<llvm::StoreInst>(moveable[i]);
             if (isBarrier) {
                 // All prior memory ops must complete before this barrier.
                 for (unsigned si : stores)
-                    if (si < i) addEdge(si, i, lat[si]);
+                    if (si < i)
+                        addEdge(si, i, lat[si]);
                 for (unsigned li : loads)
-                    if (li < i) addEdge(li, i, lat[li]);
+                    if (li < i)
+                        addEdge(li, i, lat[li]);
                 // This barrier must complete before later memory ops.
                 for (unsigned si : stores)
-                    if (si > i) addEdge(i, si, lat[i]);
+                    if (si > i)
+                        addEdge(i, si, lat[i]);
                 for (unsigned li : loads)
-                    if (li > i) addEdge(i, li, lat[i]);
+                    if (li > i)
+                        addEdge(i, li, lat[i]);
                 if (lastBarrier >= 0)
-                    addEdge(static_cast<unsigned>(lastBarrier), i,
-                            lat[static_cast<unsigned>(lastBarrier)]);
+                    addEdge(static_cast<unsigned>(lastBarrier), i, lat[static_cast<unsigned>(lastBarrier)]);
                 lastBarrier = static_cast<int>(i);
             }
         }
@@ -7247,20 +7866,24 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         unsigned nextChain = 0;
         std::vector<bool> visited(n, false);
         for (unsigned root = 0; root < n; ++root) {
-            if (visited[root]) continue;
+            if (visited[root])
+                continue;
             // DFS from this root to mark its connected component
             std::vector<unsigned> worklist = {root};
             while (!worklist.empty()) {
                 unsigned cur = worklist.back();
                 worklist.pop_back();
-                if (visited[cur]) continue;
+                if (visited[cur])
+                    continue;
                 visited[cur] = true;
                 chainId[cur] = nextChain;
                 // Follow both successors and predecessors
                 for (auto [s, _] : succ[cur])
-                    if (!visited[s]) worklist.push_back(s);
+                    if (!visited[s])
+                        worklist.push_back(s);
                 for (auto [p, _] : pred[cur])
-                    if (!visited[p]) worklist.push_back(p);
+                    if (!visited[p])
+                        worklist.push_back(p);
             }
             ++nextChain;
         }
@@ -7271,8 +7894,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     // Forward pass: earliest start = max(pred earliestStart + edgeLat).
     for (unsigned i = 0; i < n; ++i) {
         for (auto [p, edgeLat] : pred[i])
-            earliestStart[i] = std::max(earliestStart[i],
-                                        earliestStart[p] + edgeLat);
+            earliestStart[i] = std::max(earliestStart[i], earliestStart[p] + edgeLat);
     }
     unsigned criticalLength = 0;
     for (unsigned i = 0; i < n; ++i)
@@ -7285,7 +7907,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 
     // ── 6. Hardware port model from the actual HardwareGraph ──────────────────
     struct PortSlot {
-        unsigned nextFree   = 0;
+        unsigned nextFree = 0;
         unsigned busyCycles = 1; ///< cycles this port is occupied per instruction
     };
     // Special key for integer multiply, which can only use a subset of the
@@ -7298,9 +7920,8 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         auto nodes = hw.findNodes(rt);
         std::vector<PortSlot> slots;
         for (const auto* node : nodes) {
-            unsigned busy = (node->throughput > 0.0)
-                ? std::max(1u, static_cast<unsigned>(std::ceil(1.0 / node->throughput)))
-                : 1u;
+            unsigned busy =
+                (node->throughput > 0.0) ? std::max(1u, static_cast<unsigned>(std::ceil(1.0 / node->throughput))) : 1u;
             // Create one slot per port INSTANCE (node->count ports per node).
             for (unsigned c = 0; c < std::max(node->count, 1u); ++c)
                 slots.push_back({0u, busy});
@@ -7327,8 +7948,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         unsigned mulBusy = 1u;
         auto aluNodes = hw.findNodes(ResourceType::IntegerALU);
         if (!aluNodes.empty() && aluNodes[0]->throughput > 0.0)
-            mulBusy = std::max(1u,
-                static_cast<unsigned>(std::ceil(1.0 / aluNodes[0]->throughput)));
+            mulBusy = std::max(1u, static_cast<unsigned>(std::ceil(1.0 / aluNodes[0]->throughput)));
         unsigned mulPorts = std::max(profile.mulPortCount, 1u);
         hwPorts[kIntMulPortKey].assign(mulPorts, {0u, mulBusy});
     }
@@ -7337,22 +7957,18 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     std::unordered_map<int, unsigned> portPressure;
     for (unsigned i = 0; i < n; ++i) {
         OpClass op = classifyOp(moveable[i]);
-        int key = (op == OpClass::IntMul)
-            ? kIntMulPortKey
-            : static_cast<int>(mapOpToResource(op));
+        int key = (op == OpClass::IntMul) ? kIntMulPortKey : static_cast<int>(mapOpToResource(op));
         portPressure[key]++;
     }
 
     // ── 6a-bis. One-time precomputed per-instruction arrays ──────────────────
-    std::vector<bool>     isLongLatencyCache(n, false);
-    std::vector<int>      rtKeyCache(n, 0);
+    std::vector<bool> isLongLatencyCache(n, false);
+    std::vector<int> rtKeyCache(n, 0);
     std::vector<unsigned> missRiskCache(n, 0);
     for (unsigned i = 0; i < n; ++i) {
         OpClass op = classifyOp(moveable[i]);
         isLongLatencyCache[i] = (op == OpClass::IntDiv || op == OpClass::FPDiv);
-        rtKeyCache[i] = (op == OpClass::IntMul)
-            ? kIntMulPortKey
-            : static_cast<int>(mapOpToResource(op));
+        rtKeyCache[i] = (op == OpClass::IntMul) ? kIntMulPortKey : static_cast<int>(mapOpToResource(op));
         if (llvm::isa<llvm::LoadInst>(moveable[i])) {
             missRiskCache[i] = 1; // assume L1 hit unless proven otherwise
             auto* ptr = llvm::cast<llvm::LoadInst>(moveable[i])->getPointerOperand();
@@ -7383,7 +7999,8 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     portLoadCache.reserve(hwPorts.size());
     for (auto& [key, slots] : hwPorts) {
         unsigned load = 0;
-        for (const auto& s : slots) load += s.nextFree;
+        for (const auto& s : slots)
+            load += s.nextFree;
         portLoadCache[key] = load;
     }
 
@@ -7398,7 +8015,8 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             return nullptr;
         };
         auto getBaseObject = [](const llvm::Value* ptr) -> const llvm::Value* {
-            if (!ptr) return nullptr;
+            if (!ptr)
+                return nullptr;
             // Strip GEP layers to find the underlying allocation.
             while (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(ptr))
                 ptr = gep->getPointerOperand()->stripPointerCasts();
@@ -7406,13 +8024,14 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         };
         for (unsigned i = 0; i < n; ++i) {
             auto* basePtr = getBasePtr(moveable[i]);
-            if (!basePtr) continue;
+            if (!basePtr)
+                continue;
             auto* baseObj = getBaseObject(basePtr);
-            if (!baseObj) continue;
+            if (!baseObj)
+                continue;
             // Use pointer identity hash for clustering: same allocation =
             // same cluster.  This is approximate but very cheap.
-            clusterGroup[i] = static_cast<unsigned>(
-                std::hash<const llvm::Value*>{}(baseObj) & 0xFFFFFFFFu);
+            clusterGroup[i] = static_cast<unsigned>(std::hash<const llvm::Value*>{}(baseObj) & 0xFFFFFFFFu);
         }
     }
 
@@ -7438,19 +8057,17 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     }
 
     // ── 6c. Register pressure model ──────────────────────────────────────────
-    unsigned intRegBudget = (profile.intRegisters > 2)
-        ? profile.intRegisters - 2 : 14u;
+    unsigned intRegBudget = (profile.intRegisters > 2) ? profile.intRegisters - 2 : 14u;
     // Vector/FP register budget: total SIMD/FP registers (no SP/FP equiv.).
-    unsigned vecRegBudget = (profile.vecRegisters > 0)
-        ? profile.vecRegisters : 16u;
+    unsigned vecRegBudget = (profile.vecRegisters > 0) ? profile.vecRegisters : 16u;
 
     // Register renaming model: compute after intRegBudget/vecRegBudget are known.
     unsigned renameBudget = profile.robSize / 2;
     bool canRenameFreely = (renameBudget > intRegBudget + vecRegBudget);
     (void)canRenameFreely; // used implicitly by the scheduler via reduced WAR/WAW edge latencies
 
-    unsigned intLive = 0;   // current live integer register values
-    unsigned vecLive = 0;   // current live vector/FP register values
+    unsigned intLive = 0; // current live integer register values
+    unsigned vecLive = 0; // current live vector/FP register values
 
     // Count how many not-yet-scheduled users each producer has.
     std::vector<unsigned> remainingUsers(n, 0);
@@ -7466,9 +8083,9 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         for (unsigned i = 0; i < n; ++i) {
             for (auto& use : moveable[i]->operands()) {
                 auto* val = use.get();
-                if (llvm::isa<llvm::Constant>(val)) continue;
-                bool isVec = val->getType()->isFloatingPointTy()
-                          || val->getType()->isVectorTy();
+                if (llvm::isa<llvm::Constant>(val))
+                    continue;
+                bool isVec = val->getType()->isFloatingPointTy() || val->getType()->isVectorTy();
                 if (auto* arg = llvm::dyn_cast<llvm::Argument>(val)) {
                     (isVec ? externalVecDefs : externalIntDefs).insert(arg);
                 } else if (auto* defInst = llvm::dyn_cast<llvm::Instruction>(val)) {
@@ -7489,7 +8106,8 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         std::unordered_set<const llvm::BasicBlock*> predBBs;
         for (auto& inst : bb) {
             auto* phi = llvm::dyn_cast<llvm::PHINode>(&inst);
-            if (!phi) break;
+            if (!phi)
+                break;
             for (unsigned i = 0; i < phi->getNumIncomingValues(); ++i)
                 predBBs.insert(phi->getIncomingBlock(i));
         }
@@ -7505,8 +8123,10 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         if (predCount > 1) {
             unsigned phiCount = 0;
             for (auto& inst : bb)
-                if (llvm::isa<llvm::PHINode>(inst)) ++phiCount;
-                else break;
+                if (llvm::isa<llvm::PHINode>(inst))
+                    ++phiCount;
+                else
+                    break;
             unsigned extraLive = std::min(phiCount, predCount - 1);
             intLive += extraLive / 2;
             vecLive += (extraLive + 1) / 2;
@@ -7528,7 +8148,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     // ── 6g. Load buffer and store buffer capacity tracking ────────────────────
     unsigned lbCapacity = profile.loadBufferEntries > 0 ? profile.loadBufferEntries : 64u;
     unsigned sbCapacity = profile.storeBufferEntries > 0 ? profile.storeBufferEntries : 36u;
-    unsigned outstandingLoads  = 0;
+    unsigned outstandingLoads = 0;
     unsigned outstandingStores = 0;
 
     // ── 6h. Front-end decode-width gating ─────────────────────────────────────
@@ -7542,8 +8162,8 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     }
 
     // ── 6i. Memory bandwidth tracking ─────────────────────────────────────────
-    unsigned l1BW = profile.l1DBandwidthBytesPerCycle > 0
-                  ? profile.l1DBandwidthBytesPerCycle : 64u;  // default: 1 cache line/cycle
+    unsigned l1BW =
+        profile.l1DBandwidthBytesPerCycle > 0 ? profile.l1DBandwidthBytesPerCycle : 64u; // default: 1 cache line/cycle
     unsigned loadsThisCycle = 0;
     unsigned storesThisCycle = 0;
 
@@ -7566,13 +8186,14 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     std::unordered_set<unsigned> readySet;
     readySet.reserve(std::max(n / 4u, 8u));
     for (unsigned i = 0; i < n; ++i)
-        if (inDeg[i] == 0) readySet.insert(i);
+        if (inDeg[i] == 0)
+            readySet.insert(i);
 
     // Sort-cache vectors: hoisted outside the while loop so we allocate
-    std::vector<unsigned> rfsCache(n, 0);           // register-freeing score
-    std::vector<unsigned> sdCache(n, 0);            // stall distance
-    std::vector<bool>     fusCache(n, false);       // fusion affinity
-    std::vector<unsigned> rpCache(n, 0);            // register-pressure penalty
+    std::vector<unsigned> rfsCache(n, 0);              // register-freeing score
+    std::vector<unsigned> sdCache(n, 0);               // stall distance
+    std::vector<bool> fusCache(n, false);              // fusion affinity
+    std::vector<unsigned> rpCache(n, 0);               // register-pressure penalty
     std::vector<unsigned> dynEarliestStartCache(n, 0); // actual data-ready cycle
 
     // Track recently-issued memory clusters for cluster affinity scheduling.
@@ -7586,30 +8207,40 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         // Guard: a non-empty ready list is guaranteed for DAGs (SSA form).
         if (ready.empty()) {
             for (unsigned i = 0; i < n; ++i)
-                if (!done[i]) { ready.push_back(i); break; }
-            if (ready.empty()) break;
+                if (!done[i]) {
+                    ready.push_back(i);
+                    break;
+                }
+            if (ready.empty())
+                break;
         }
 
         // Single O(n) scan: compute all stall-check quantities in one pass.
-        inflightCount     = 0;
-        outstandingLoads  = 0;
+        inflightCount = 0;
+        outstandingLoads = 0;
         outstandingStores = 0;
-        unsigned nextRetire  = std::numeric_limits<unsigned>::max();
+        unsigned nextRetire = std::numeric_limits<unsigned>::max();
         unsigned nextMemAvail = std::numeric_limits<unsigned>::max();
         for (unsigned id = 0; id < n; ++id) {
-            if (!done[id] || avail[id] <= currentCycle) continue;
+            if (!done[id] || avail[id] <= currentCycle)
+                continue;
             ++inflightCount;
-            if (avail[id] < nextRetire) nextRetire = avail[id];
+            if (avail[id] < nextRetire)
+                nextRetire = avail[id];
             if (llvm::isa<llvm::LoadInst>(moveable[id])) {
                 ++outstandingLoads;
-                if (avail[id] < nextMemAvail) nextMemAvail = avail[id];
+                if (avail[id] < nextMemAvail)
+                    nextMemAvail = avail[id];
             } else if (llvm::isa<llvm::StoreInst>(moveable[id])) {
                 ++outstandingStores;
-                if (avail[id] < nextMemAvail) nextMemAvail = avail[id];
+                if (avail[id] < nextMemAvail)
+                    nextMemAvail = avail[id];
             }
         }
-        if (nextRetire  == std::numeric_limits<unsigned>::max()) nextRetire  = currentCycle + 1;
-        if (nextMemAvail == std::numeric_limits<unsigned>::max()) nextMemAvail = currentCycle + 1;
+        if (nextRetire == std::numeric_limits<unsigned>::max())
+            nextRetire = currentCycle + 1;
+        if (nextMemAvail == std::numeric_limits<unsigned>::max())
+            nextMemAvail = currentCycle + 1;
 
         // ROB full stall: on a real out-of-order CPU, dispatch is completely
         if (inflightCount >= robCapacity) {
@@ -7631,8 +8262,10 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 
         // Sort ready instructions for maximum throughput — 10-tier priority:
         for (unsigned id : ready) {
-            rfsCache[id] = 0; sdCache[id] = 0;
-            fusCache[id] = false; rpCache[id] = 0;
+            rfsCache[id] = 0;
+            sdCache[id] = 0;
+            fusCache[id] = false;
+            rpCache[id] = 0;
             dynEarliestStartCache[id] = 0;
         }
         for (unsigned id : ready) {
@@ -7647,18 +8280,24 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             // is this instruction — scheduling it will free those registers.
             unsigned rfs = 0;
             for (auto [p, _x] : pred[id]) {
-                if (!done[p]) continue;
+                if (!done[p])
+                    continue;
                 bool lastUser = true;
                 for (auto [s, _y] : succ[p])
-                    if (s != id && !done[s]) { lastUser = false; break; }
-                if (lastUser) ++rfs;
+                    if (s != id && !done[s]) {
+                        lastUser = false;
+                        break;
+                    }
+                if (lastUser)
+                    ++rfs;
             }
             rfsCache[id] = rfs;
 
             // Stall distance: max critPath of undone successors.
             unsigned sd = 0;
             for (auto [s, _z] : succ[id])
-                if (!done[s]) sd = std::max(sd, critPath[s]);
+                if (!done[s])
+                    sd = std::max(sd, critPath[s]);
             sdCache[id] = sd;
 
             // Fusion affinity: partner already scheduled → true.
@@ -7669,16 +8308,17 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         }
         // Register pressure penalty (separate pass — depends on rfsCache).
         for (unsigned id : ready) {
-            if (moveable[id]->getType()->isVoidTy() || lat[id] == 0) continue;
+            if (moveable[id]->getType()->isVoidTy() || lat[id] == 0)
+                continue;
             bool isVec = producesVecOrFP(moveable[id]);
-            unsigned live   = isVec ? vecLive   : intLive;
+            unsigned live = isVec ? vecLive : intLive;
             unsigned budget = isVec ? vecRegBudget : intRegBudget;
-            unsigned rfs    = rfsCache[id];
+            unsigned rfs = rfsCache[id];
             if (live + 1 > budget + rfs) {
                 unsigned penalty = (live + 1 - rfs > budget) ? (live + 1 - rfs - budget) : 0;
                 if (slack[id] > 0)
                     penalty = std::max(1u, static_cast<unsigned>(
-                        penalty / (1.0 + static_cast<double>(slack[id]) / policy.slackDamping)));
+                                               penalty / (1.0 + static_cast<double>(slack[id]) / policy.slackDamping)));
                 rpCache[id] = penalty;
             }
         }
@@ -7708,12 +8348,14 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 
             // Tier 4: stall distance — prefer instructions whose consumers have
             // the most remaining work (more opportunity to hide latency).
-            if (sdCache[a] != sdCache[b]) return sdCache[a] > sdCache[b];
+            if (sdCache[a] != sdCache[b])
+                return sdCache[a] > sdCache[b];
 
             // Tier 5: fusion affinity — prefer instructions whose fusion partner
             // was just scheduled, enabling macro-op / micro-op fusion.
             if (policy.enableFusionHeuristic) {
-                if (fusCache[a] != fusCache[b]) return static_cast<bool>(fusCache[a]);
+                if (fusCache[a] != fusCache[b])
+                    return static_cast<bool>(fusCache[a]);
             }
 
             // Tier 6: port pressure — schedule the most-contended resource first.
@@ -7732,25 +8374,25 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 unsigned crossA = loadA * sizeB;
                 unsigned crossB = loadB * sizeA;
                 if (crossA != crossB)
-                    return crossA < crossB;  // prefer less-loaded port
+                    return crossA < crossB; // prefer less-loaded port
             }
 
             // Tier 7: register pressure — penalise instructions that would
             // cause spills (cached, O(1) lookup).
             if (policy.enableRegPressure) {
-                if (rpCache[a] != rpCache[b]) return rpCache[a] < rpCache[b];
+                if (rpCache[a] != rpCache[b])
+                    return rpCache[a] < rpCache[b];
             }
 
             // Tier 8: register-freeing score — prefer instructions that release
             // dead predecessor values, reducing live-value count (O(1) lookup).
-            if (rfsCache[a] != rfsCache[b]) return rfsCache[a] > rfsCache[b];
+            if (rfsCache[a] != rfsCache[b])
+                return rfsCache[a] > rfsCache[b];
 
             // Tier 9: ROB pressure — when many instructions are inflight,
-            if (policy.enableROBPressure &&
-                (inflightCount > robCapacity * 3 / 4 ||
-                 inflightCount > robCapacity / 2)) {
+            if (policy.enableROBPressure && (inflightCount > robCapacity * 3 / 4 || inflightCount > robCapacity / 2)) {
                 if (lat[a] != lat[b])
-                    return lat[a] < lat[b];  // shorter latency first
+                    return lat[a] < lat[b]; // shorter latency first
             }
 
             // Tier 9.5: Load/store cluster affinity — prefer memory instructions
@@ -7760,10 +8402,13 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     // recently issued memory op.
                     bool aInLast = false, bInLast = false;
                     for (unsigned prev : lastClusterMemOps) {
-                        if (clusterGroup[a] == prev) aInLast = true;
-                        if (clusterGroup[b] == prev) bInLast = true;
+                        if (clusterGroup[a] == prev)
+                            aInLast = true;
+                        if (clusterGroup[b] == prev)
+                            bInLast = true;
                     }
-                    if (aInLast != bInLast) return aInLast;
+                    if (aInLast != bInLast)
+                        return aInLast;
                 }
             }
 
@@ -7787,11 +8432,14 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
         // Two-pass issue: first pass schedules instructions that use port
         for (int pass = 0; pass < 2; ++pass) {
             for (unsigned id : ready) {
-                if (issued >= profile.issueWidth) break;
+                if (issued >= profile.issueWidth)
+                    break;
                 // ── Decode-width gating ──────────────────────────────────────
                 unsigned decodeCost = isFusionSecond[id] ? 0u : 1u;
-                if (decodedThisCycle + decodeCost > decodeWidth) continue;
-                if (done[id]) continue;
+                if (decodedThisCycle + decodeCost > decodeWidth)
+                    continue;
+                if (done[id])
+                    continue;
 
                 // rtKeyCache precomputed once; avoids classifyOp + mapOpToResource.
                 int rtKey = rtKeyCache[id];
@@ -7802,24 +8450,26 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     unsigned loadBytes = 8; // default 64-bit load
                     if (auto* ty = moveable[id]->getType())
                         if (ty->isSized())
-                            loadBytes = std::max(1u,
-                                static_cast<unsigned>(dl.getTypeStoreSize(ty)));
-                    if (loadsThisCycle + loadBytes > l1BW) continue;
+                            loadBytes = std::max(1u, static_cast<unsigned>(dl.getTypeStoreSize(ty)));
+                    if (loadsThisCycle + loadBytes > l1BW)
+                        continue;
                 }
 
                 // Pass 0: only issue to a port type not yet used this cycle.
                 // Pass 1: issue to any port type (fill remaining slots).
-                if (pass == 0 && issuedPortsThisCycle.count(rtKey)) continue;
+                if (pass == 0 && issuedPortsThisCycle.count(rtKey))
+                    continue;
                 // Pass 0: also prefer chain diversity for ILP.
-                if (pass == 0 && policy.enableChainDiversity &&
-                    issuedChainsThisCycle.count(chainId[id])) continue;
+                if (pass == 0 && policy.enableChainDiversity && issuedChainsThisCycle.count(chainId[id]))
+                    continue;
 
                 // Earliest start: max(currentCycle, predecessor availability).
                 unsigned earliest = currentCycle;
                 for (auto [p, edgeLat] : pred[id]) {
                     if (done[p]) {
                         unsigned waitUntil = issuedAt[p] + edgeLat;
-                        if (waitUntil > earliest) earliest = waitUntil;
+                        if (waitUntil > earliest)
+                            earliest = waitUntil;
                     }
                 }
 
@@ -7831,7 +8481,10 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     unsigned bestTime = std::numeric_limits<unsigned>::max();
                     for (unsigned s = 0; s < slots.size(); ++s) {
                         unsigned t = std::max(earliest, slots[s].nextFree);
-                        if (t < bestTime) { bestTime = t; chosenSlot = s; }
+                        if (t < bestTime) {
+                            bestTime = t;
+                            chosenSlot = s;
+                        }
                     }
                     startCycle = bestTime;
                     // Occupy the port for busyCycles (= reciprocal throughput).
@@ -7843,14 +8496,14 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     }
                     // Update portLoadCache incrementally: subtract the old
                     unsigned oldNextFree = slots[chosenSlot].nextFree;
-                    slots[chosenSlot].nextFree =
-                        startCycle + slots[chosenSlot].busyCycles * pumpFactor;
+                    slots[chosenSlot].nextFree = startCycle + slots[chosenSlot].busyCycles * pumpFactor;
                     portLoadCache[rtKey] += slots[chosenSlot].nextFree - oldNextFree;
                 }
 
                 issuedAt[id] = startCycle;
                 avail[id] = startCycle + lat[id];
-                if (avail[id] > maxCycle) maxCycle = avail[id];
+                if (avail[id] > maxCycle)
+                    maxCycle = avail[id];
 
                 done[id] = true;
                 ++totalScheduled;
@@ -7863,8 +8516,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                     unsigned loadBytes = 8;
                     if (auto* ty = moveable[id]->getType())
                         if (ty->isSized())
-                            loadBytes = std::max(1u,
-                                static_cast<unsigned>(dl.getTypeStoreSize(ty)));
+                            loadBytes = std::max(1u, static_cast<unsigned>(dl.getTypeStoreSize(ty)));
                     loadsThisCycle += loadBytes;
                 }
                 if (llvm::isa<llvm::StoreInst>(moveable[id]))
@@ -7879,7 +8531,10 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                         unsigned bestAGU = 0, bestAGUTime = std::numeric_limits<unsigned>::max();
                         for (unsigned s = 0; s < aguSlots.size(); ++s) {
                             unsigned t = std::max(startCycle, aguSlots[s].nextFree);
-                            if (t < bestAGUTime) { bestAGUTime = t; bestAGU = s; }
+                            if (t < bestAGUTime) {
+                                bestAGUTime = t;
+                                bestAGU = s;
+                            }
                         }
                         unsigned oldAGU = aguSlots[bestAGU].nextFree;
                         aguSlots[bestAGU].nextFree = bestAGUTime + aguSlots[bestAGU].busyCycles;
@@ -7903,20 +8558,27 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 
                 // ── Register pressure tracking (per register file) ──────────
                 if (!moveable[id]->getType()->isVoidTy() && lat[id] > 0) {
-                    if (producesVecOrFP(moveable[id])) ++vecLive;
-                    else ++intLive;
+                    if (producesVecOrFP(moveable[id]))
+                        ++vecLive;
+                    else
+                        ++intLive;
                 }
                 // Check if scheduling this instruction kills any predecessor's
                 // last use, decreasing the live count in the correct file.
                 for (auto [p, _] : pred[id]) {
-                    if (!done[p]) continue;
-                    if (moveable[p]->getType()->isVoidTy()) continue;
-                    if (remainingUsers[p] > 0) --remainingUsers[p];
+                    if (!done[p])
+                        continue;
+                    if (moveable[p]->getType()->isVoidTy())
+                        continue;
+                    if (remainingUsers[p] > 0)
+                        --remainingUsers[p];
                     if (remainingUsers[p] == 0) {
                         if (producesVecOrFP(moveable[p])) {
-                            if (vecLive > 0) --vecLive;
+                            if (vecLive > 0)
+                                --vecLive;
                         } else {
-                            if (intLive > 0) --intLive;
+                            if (intLive > 0)
+                                --intLive;
                         }
                     }
                 }
@@ -7928,7 +8590,8 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                 }
 
                 // Update port pressure.
-                if (portPressure[rtKey] > 0) --portPressure[rtKey];
+                if (portPressure[rtKey] > 0)
+                    --portPressure[rtKey];
             }
         }
 
@@ -7950,8 +8613,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 
     // ── 8. Debug: dump schedule result if requested ─────────────────────────
     if (shouldDumpSchedule())
-        dumpScheduleResult(scheduled, avail, idx,
-                           maxCycle > 0 ? maxCycle : currentCycle);
+        dumpScheduleResult(scheduled, avail, idx, maxCycle > 0 ? maxCycle : currentCycle);
 
     // ── 8b. Bidirectional scheduling: bottom-up comparison ──────────────────
     unsigned topDownCycles = maxCycle > 0 ? maxCycle : currentCycle;
@@ -7972,11 +8634,14 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             // Primary: schedule sinks first (no or few successors)
             bool sinkA = succ[a].empty();
             bool sinkB = succ[b].empty();
-            if (sinkA != sinkB) return sinkA;
+            if (sinkA != sinkB)
+                return sinkA;
             // Secondary: height (reverse crit-path from roots)
-            if (height[a] != height[b]) return height[a] > height[b];
+            if (height[a] != height[b])
+                return height[a] > height[b];
             // Tertiary: same as top-down for consistency
-            if (critPath[a] != critPath[b]) return critPath[a] > critPath[b];
+            if (critPath[a] != critPath[b])
+                return critPath[a] > critPath[b];
             return a > b; // reverse order for bottom-up
         });
 
@@ -8000,7 +8665,8 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             }
             buIssued[id] = earliest;
             buAvail[id] = earliest + lat[id];
-            if (buAvail[id] > buMax) buMax = buAvail[id];
+            if (buAvail[id] > buMax)
+                buMax = buAvail[id];
             buDone[id] = true;
         }
 
@@ -8027,7 +8693,7 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 
     // ── 10. Accumulate quality metrics ──────────────────────────────────────
     if (quality && n > 0) {
-        quality->scheduledCycles   += bbCycles;
+        quality->scheduledCycles += bbCycles;
         quality->instructionsTotal += n;
         ++quality->basicBlocksScheduled;
 
@@ -8041,9 +8707,9 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             for (unsigned i = 0; i < n; ++i) {
                 for (auto& use : moveable[i]->operands()) {
                     auto* val = use.get();
-                    if (llvm::isa<llvm::Constant>(val)) continue;
-                    bool isVec = val->getType()->isFloatingPointTy() ||
-                                 val->getType()->isVectorTy();
+                    if (llvm::isa<llvm::Constant>(val))
+                        continue;
+                    bool isVec = val->getType()->isFloatingPointTy() || val->getType()->isVectorTy();
                     if (llvm::dyn_cast<llvm::Argument>(val) ||
                         (llvm::dyn_cast<llvm::Instruction>(val) &&
                          idx.find(llvm::dyn_cast<llvm::Instruction>(val)) == idx.end()))
@@ -8059,12 +8725,15 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
 
             for (auto* inst : scheduled) {
                 auto it2 = idx.find(inst);
-                if (it2 == idx.end()) continue;
+                if (it2 == idx.end())
+                    continue;
                 unsigned id2 = it2->second;
 
                 if (!moveable[id2]->getType()->isVoidTy() && lat[id2] > 0) {
-                    if (producesVecOrFP(moveable[id2])) ++simVec;
-                    else ++simInt;
+                    if (producesVecOrFP(moveable[id2]))
+                        ++simVec;
+                    else
+                        ++simInt;
                 }
                 for (auto [p2, _2] : pred[id2]) {
                     if (remUsers2[p2] > 0 && --remUsers2[p2] == 0) {
@@ -8077,18 +8746,23 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
                         }
                     }
                 }
-                if (simInt > peakInt) peakInt = simInt;
-                if (simVec > peakVec) peakVec = simVec;
+                if (simInt > peakInt)
+                    peakInt = simInt;
+                if (simVec > peakVec)
+                    peakVec = simVec;
             }
         }
-        if (peakInt > quality->peakIntLive) quality->peakIntLive = peakInt;
-        if (peakVec > quality->peakVecLive) quality->peakVecLive = peakVec;
+        if (peakInt > quality->peakIntLive)
+            quality->peakIntLive = peakInt;
+        if (peakVec > quality->peakVecLive)
+            quality->peakVecLive = peakVec;
 
         // Compute critical-path efficiency: maxCritPath / scheduledCycles.
         // A value of 1.0 means we scheduled at the theoretical minimum.
         unsigned maxCrit = 0;
         for (unsigned i = 0; i < n; ++i)
-            if (critPath[i] > maxCrit) maxCrit = critPath[i];
+            if (critPath[i] > maxCrit)
+                maxCrit = critPath[i];
         if (bbCycles > 0 && maxCrit > 0) {
             double bbEff = static_cast<double>(maxCrit) / static_cast<double>(bbCycles);
             // Weighted running average across BBs.
@@ -8096,9 +8770,8 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
             if (prevBBs == 0) {
                 quality->efficiency = bbEff;
             } else {
-                quality->efficiency =
-                    (quality->efficiency * static_cast<double>(prevBBs) + bbEff) /
-                    static_cast<double>(quality->basicBlocksScheduled);
+                quality->efficiency = (quality->efficiency * static_cast<double>(prevBBs) + bbEff) /
+                                      static_cast<double>(quality->basicBlocksScheduled);
             }
         }
     }
@@ -8106,18 +8779,16 @@ static bool producesVecOrFP(const llvm::Instruction* inst) {
     return bbCycles;
 }
 
-unsigned scheduleInstructions(llvm::Function& func, const HardwareGraph& hw,
-                               const MicroarchProfile& profile,
-                               const SchedulerPolicy& policy,
-                               SchedulerQuality* quality) {
+unsigned scheduleInstructions(llvm::Function& func, const HardwareGraph& hw, const MicroarchProfile& profile,
+                              const SchedulerPolicy& policy, SchedulerQuality* quality) {
     unsigned totalCycles = 0;
     for (auto& bb : func)
         totalCycles += scheduleBasicBlock(bb, hw, profile, policy, quality);
 
     // Compute IPC estimate: instructions / cycles.
     if (quality && quality->scheduledCycles > 0) {
-        quality->estimatedIPC = static_cast<double>(quality->instructionsTotal) /
-                                static_cast<double>(quality->scheduledCycles);
+        quality->estimatedIPC =
+            static_cast<double>(quality->instructionsTotal) / static_cast<double>(quality->scheduledCycles);
     }
     return totalCycles;
 }
@@ -8131,7 +8802,8 @@ bool shouldActivate(const HGOEConfig& config) {
 
 HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
     HGOEStats stats;
-    if (func.isDeclaration()) return stats;
+    if (func.isDeclaration())
+        return stats;
 
     // HGOE is designed for individual hot-kernel functions.  Very large
     // functions — e.g. a top-level dispatcher that has had many callees
@@ -8174,7 +8846,8 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
     ProgramGraph pg;
     pg.buildFromFunction(func);
 
-    if (pg.nodeCount() == 0) return stats;
+    if (pg.nodeCount() == 0)
+        return stats;
 
     // Step 2b — Set target-cpu / target-features on the function so that
     if (config.enableTransforms)
@@ -8191,16 +8864,15 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
                 unsigned latency = getOpcodeLatency(&inst, profile);
                 if (profile.vec512Penalty > 1 && isWideVectorOp(&inst)) {
                     OpClass cls = classifyOp(&inst);
-                    if (cls == OpClass::FMA || cls == OpClass::FPMul ||
-                        cls == OpClass::FPArith || cls == OpClass::VectorOp)
+                    if (cls == OpClass::FMA || cls == OpClass::FPMul || cls == OpClass::FPArith ||
+                        cls == OpClass::VectorOp)
                         latency *= profile.vec512Penalty;
                 }
                 cost += latency;
             }
             if (auto* br = llvm::dyn_cast<llvm::BranchInst>(bb.getTerminator())) {
                 if (br->isConditional()) {
-                    cost += static_cast<unsigned>(
-                        profile.branchMispredictPenalty * kBranchMissRate + 0.5);
+                    cost += static_cast<unsigned>(profile.branchMispredictPenalty * kBranchMissRate + 0.5);
                 }
             }
         }
@@ -8221,45 +8893,43 @@ HGOEStats optimizeFunction(llvm::Function& func, const HGOEConfig& config) {
             if (bbSize >= 2)
                 ++stats.basicBlocksScheduled;
         }
-        scheduleInstructions(func, hw, profile, config.schedulerPolicy,
-                             &stats.schedulerQuality);
+        scheduleInstructions(func, hw, profile, config.schedulerPolicy, &stats.schedulerQuality);
     }
 
     // Step 4 — Iterative transform-schedule pipeline.
     if (config.enableTransforms) {
         unsigned bestCost = estimateFuncCost(func);
-        unsigned maxIters = config.schedulerPolicy.enableIterativeRefine
-                           ? config.schedulerPolicy.maxRefineIters : 1;
+        unsigned maxIters = config.schedulerPolicy.enableIterativeRefine ? config.schedulerPolicy.maxRefineIters : 1;
 
         for (unsigned iter = 0; iter < maxIters; ++iter) {
             unsigned costBefore = estimateFuncCost(func);
             TransformStats iterStats = applyHardwareTransforms(func, profile,
-                                                                // Only annotate loops on first pass
-                                                                config.enableLoopAnnotation && (iter == 0));
+                                                               // Only annotate loops on first pass
+                                                               config.enableLoopAnnotation && (iter == 0));
             unsigned costAfterTransform = estimateFuncCost(func);
 
             // Accumulate transform statistics.
             if (iter == 0) {
                 stats.transforms = iterStats;
             } else {
-                stats.transforms.fmaGenerated      += iterStats.fmaGenerated;
-                stats.transforms.loadsStorePaired   += iterStats.loadsStorePaired;
+                stats.transforms.fmaGenerated += iterStats.fmaGenerated;
+                stats.transforms.loadsStorePaired += iterStats.loadsStorePaired;
                 stats.transforms.prefetchesInserted += iterStats.prefetchesInserted;
-                stats.transforms.branchesOptimized  += iterStats.branchesOptimized;
-                stats.transforms.vectorExpanded     += iterStats.vectorExpanded;
+                stats.transforms.branchesOptimized += iterStats.branchesOptimized;
+                stats.transforms.vectorExpanded += iterStats.vectorExpanded;
                 stats.transforms.intStrengthReduced += iterStats.intStrengthReduced;
             }
 
             // Re-schedule after transforms to exploit new opportunities.
             if (config.enableScheduling && costAfterTransform < costBefore) {
-                scheduleInstructions(func, hw, profile, config.schedulerPolicy,
-                                     &stats.schedulerQuality);
+                scheduleInstructions(func, hw, profile, config.schedulerPolicy, &stats.schedulerQuality);
             }
 
             unsigned costAfter = estimateFuncCost(func);
 
             // Stop iterating if no improvement (fixed point reached).
-            if (costAfter >= bestCost) break;
+            if (costAfter >= bestCost)
+                break;
             bestCost = costAfter;
         }
 
@@ -8334,14 +9004,13 @@ HGOEStats optimizeModule(llvm::Module& module, const HGOEConfig& config) {
 
 /// Estimate the native instruction cost of a single LLVM IR instruction,
 struct NativeCostInfo {
-    unsigned nativeOps;      // Number of backend micro-ops
-    unsigned regsProduced;   // Number of output registers consumed
-    unsigned latency;        // Estimated latency in cycles
-    bool     usesDivider;    // Uses the divider execution unit
+    unsigned nativeOps;    // Number of backend micro-ops
+    unsigned regsProduced; // Number of output registers consumed
+    unsigned latency;      // Estimated latency in cycles
+    bool usesDivider;      // Uses the divider execution unit
 };
 
-static NativeCostInfo estimateNativeCostDetailed(const llvm::Instruction& inst,
-                                                   const MicroarchProfile& profile) {
+static NativeCostInfo estimateNativeCostDetailed(const llvm::Instruction& inst, const MicroarchProfile& profile) {
     NativeCostInfo info{1, 1, 1, false};
     switch (inst.getOpcode()) {
     case llvm::Instruction::URem:
@@ -8422,15 +9091,16 @@ static NativeCostInfo estimateNativeCostDetailed(const llvm::Instruction& inst,
 }
 
 /// Annotate loops in a single function with target-optimal metadata.
-static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
-                                              const MicroarchProfile& profile) {
-    if (func.isDeclaration()) return 0;
+static unsigned annotateLoopsForTargetInFunc(llvm::Function& func, const MicroarchProfile& profile) {
+    if (func.isDeclaration())
+        return 0;
 
     // Assign linear order to each basic block for loop detection.
     std::unordered_map<llvm::BasicBlock*, unsigned> bbOrder;
     {
         unsigned ord = 0;
-        for (auto& bb : func) bbOrder[&bb] = ord++;
+        for (auto& bb : func)
+            bbOrder[&bb] = ord++;
     }
 
     unsigned count = 0;
@@ -8440,12 +9110,17 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
         // Detect loop headers via back-edges.
         llvm::BasicBlock* latch = nullptr;
         for (auto* pred : llvm::predecessors(&bb)) {
-            if (bbOrder[pred] >= bbOrder[&bb]) { latch = pred; break; }
+            if (bbOrder[pred] >= bbOrder[&bb]) {
+                latch = pred;
+                break;
+            }
         }
-        if (!latch) continue;
+        if (!latch)
+            continue;
 
         auto* latchTerm = latch->getTerminator();
-        if (!latchTerm) continue;
+        if (!latchTerm)
+            continue;
 
         // Skip if existing metadata already has an unroll count (user-specified).
         if (auto* existingMD = latchTerm->getMetadata(llvm::LLVMContext::MD_loop)) {
@@ -8462,7 +9137,8 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
                     }
                 }
             }
-            if (hasUnrollCount) continue;
+            if (hasUnrollCount)
+                continue;
         }
 
         // ── Analyse the loop body's resource demands ──────────────────────
@@ -8475,49 +9151,51 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
         // Helper to accumulate cost from a basic block.
         auto accumulateBB = [&](llvm::BasicBlock& blk) {
             for (auto& inst : blk) {
-                if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator()) continue;
+                if (llvm::isa<llvm::PHINode>(inst) || inst.isTerminator())
+                    continue;
                 auto ci = estimateNativeCostDetailed(inst, profile);
                 totalNativeOps += ci.nativeOps;
                 totalRegsProduced += ci.regsProduced;
-                if (ci.latency > maxLatency) maxLatency = ci.latency;
-                if (ci.usesDivider) usesDivider = true;
+                if (ci.latency > maxLatency)
+                    maxLatency = ci.latency;
+                if (ci.usesDivider)
+                    usesDivider = true;
                 if (llvm::isa<llvm::CallInst>(inst) && !llvm::isa<llvm::IntrinsicInst>(inst))
                     hasCall = true;
             }
         };
 
         accumulateBB(bb);
-        if (latch != &bb) accumulateBB(*latch);
+        if (latch != &bb)
+            accumulateBB(*latch);
 
-        if (totalNativeOps == 0) continue;
+        if (totalNativeOps == 0)
+            continue;
 
         // ── Constraint 1: Register pressure ──────────────────────────────
         unsigned rawRegs = (profile.isa == ISAFamily::AArch64)
-            ? (profile.intRegisters > 2 ? profile.intRegisters - 2 : 16)
-            : (profile.intRegisters > 2 ? profile.intRegisters - 2 : 14);
+                               ? (profile.intRegisters > 2 ? profile.intRegisters - 2 : 16)
+                               : (profile.intRegisters > 2 ? profile.intRegisters - 2 : 14);
 
         unsigned phiCount = 0;
         for (auto& inst : bb) {
-            if (llvm::isa<llvm::PHINode>(inst)) ++phiCount;
-            else break; // PHIs are always at the start
+            if (llvm::isa<llvm::PHINode>(inst))
+                ++phiCount;
+            else
+                break; // PHIs are always at the start
         }
         // Each PHI occupies a register across the loop.  Add 2 for the
         unsigned baselineRegs = phiCount + 2;
-        unsigned usableRegs = rawRegs > baselineRegs
-            ? rawRegs - baselineRegs : 2;
+        unsigned usableRegs = rawRegs > baselineRegs ? rawRegs - baselineRegs : 2;
 
         // Each unrolled iteration adds regsProduced live values.  The limit
         // is the largest N such that N * regsPerIter ≤ usableRegs.
-        unsigned regUnroll = totalRegsProduced > 0
-            ? usableRegs / totalRegsProduced
-            : 8;
+        unsigned regUnroll = totalRegsProduced > 0 ? usableRegs / totalRegsProduced : 8;
 
         // ── Constraint 2: L1 I-cache footprint ───────────────────────────
-        unsigned l1iBytes = profile.l1DSize * 1024; // approximate L1I ≈ L1D
+        unsigned l1iBytes = profile.l1DSize * 1024;         // approximate L1I ≈ L1D
         unsigned iCacheBudget = (l1iBytes * 5) / (100 * 5); // 5% / 5 bytes per op
-        unsigned iCacheUnroll = totalNativeOps > 0
-            ? iCacheBudget / totalNativeOps
-            : 8;
+        unsigned iCacheUnroll = totalNativeOps > 0 ? iCacheBudget / totalNativeOps : 8;
 
         // ── Constraint 3: Pipeline saturation ────────────────────────────
         unsigned pipelineMin = std::min((profile.pipelineDepth + 7) / 8, 4u);
@@ -8527,28 +9205,29 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
         unsigned unroll = std::min(regUnroll, iCacheUnroll);
         unroll = std::max(unroll, pipelineMin);
         unroll = std::max(unroll, 2u);
-        unroll = std::min(unroll, 8u);  // cap at 8 (GCC's typical max)
+        unroll = std::min(unroll, 8u); // cap at 8 (GCC's typical max)
 
         // Loops with remainder/division by constant: LLVM expands these
         bool hasRemByConst = false;
         for (auto& inst : bb) {
-            if ((inst.getOpcode() == llvm::Instruction::SRem ||
-                 inst.getOpcode() == llvm::Instruction::URem ||
-                 inst.getOpcode() == llvm::Instruction::SDiv ||
-                 inst.getOpcode() == llvm::Instruction::UDiv) &&
+            if ((inst.getOpcode() == llvm::Instruction::SRem || inst.getOpcode() == llvm::Instruction::URem ||
+                 inst.getOpcode() == llvm::Instruction::SDiv || inst.getOpcode() == llvm::Instruction::UDiv) &&
                 llvm::isa<llvm::ConstantInt>(inst.getOperand(1))) {
                 hasRemByConst = true;
                 break;
             }
         }
-        if (hasRemByConst) unroll = std::min(unroll, 4u);
+        if (hasRemByConst)
+            unroll = std::min(unroll, 4u);
 
         // Loops with divider instructions: the divider is a scarce resource
-        if (usesDivider) unroll = std::min(unroll, 4u);
+        if (usesDivider)
+            unroll = std::min(unroll, 4u);
 
         // Loops with function calls: don't over-unroll because each call
         // saves/restores many registers, negating the unroll benefit.
-        if (hasCall) unroll = std::min(unroll, 2u);
+        if (hasCall)
+            unroll = std::min(unroll, 2u);
 
         // Interleave count: for wide-issue OOO cores (issueWidth > 2),
         unsigned interleave = (profile.issueWidth > 2) ? unroll : 2u;
@@ -8564,17 +9243,13 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
             }
         }
 
-        mds.push_back(llvm::MDNode::get(ctx, {
-            llvm::MDString::get(ctx, "llvm.loop.unroll.count"),
-            llvm::ConstantAsMetadata::get(
-                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), unroll))
-        }));
+        mds.push_back(llvm::MDNode::get(
+            ctx, {llvm::MDString::get(ctx, "llvm.loop.unroll.count"),
+                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), unroll))}));
 
-        mds.push_back(llvm::MDNode::get(ctx, {
-            llvm::MDString::get(ctx, "llvm.loop.interleave.count"),
-            llvm::ConstantAsMetadata::get(
-                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), interleave))
-        }));
+        mds.push_back(llvm::MDNode::get(
+            ctx, {llvm::MDString::get(ctx, "llvm.loop.interleave.count"),
+                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), interleave))}));
 
         // Add a target-aware vectorization width hint based on the CPU's SIMD
         {
@@ -8601,25 +9276,31 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
                         continue;
                     llvm::Type* ty = loopInst.getType();
                     unsigned bits = 0;
-                    if (ty->isIntegerTy())       bits = ty->getIntegerBitWidth();
-                    else if (ty->isFloatTy())    bits = 32;
-                    else if (ty->isDoubleTy())   bits = 64;
-                    else if (ty->isHalfTy())     bits = 16;
-                    if (bits >= 8 && bits <= 64) widthFreq[bits]++;
+                    if (ty->isIntegerTy())
+                        bits = ty->getIntegerBitWidth();
+                    else if (ty->isFloatTy())
+                        bits = 32;
+                    else if (ty->isDoubleTy())
+                        bits = 64;
+                    else if (ty->isHalfTy())
+                        bits = 16;
+                    if (bits >= 8 && bits <= 64)
+                        widthFreq[bits]++;
                 }
                 unsigned domBits = 64; // default: OmScript's native int is i64
                 unsigned domCount = 0;
                 for (auto& [bits, cnt] : widthFreq)
-                    if (cnt > domCount) { domBits = bits; domCount = cnt; }
+                    if (cnt > domCount) {
+                        domBits = bits;
+                        domCount = cnt;
+                    }
 
                 unsigned lanes = profile.vectorWidth / domBits;
                 if (lanes >= 2) {
                     unsigned vecWidth = std::min(lanes, 16u);
-                    mds.push_back(llvm::MDNode::get(ctx, {
-                        llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
-                        llvm::ConstantAsMetadata::get(
-                            llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), vecWidth))
-                    }));
+                    mds.push_back(llvm::MDNode::get(ctx, {llvm::MDString::get(ctx, "llvm.loop.vectorize.width"),
+                                                          llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                                              llvm::Type::getInt32Ty(ctx), vecWidth))}));
                 }
             }
         }
@@ -8634,13 +9315,15 @@ static unsigned annotateLoopsForTargetInFunc(llvm::Function& func,
 }
 
 unsigned annotateLoopsForTarget(llvm::Module& module, const HGOEConfig& config) {
-    if (!shouldActivate(config)) return 0;
+    if (!shouldActivate(config))
+        return 0;
 
     std::string marchResolved = resolveNativeCpu(config.marchCpu);
     std::string mtuneResolved = resolveNativeCpu(config.mtuneCpu);
     std::string cpuName = mtuneResolved.empty() ? marchResolved : mtuneResolved;
     auto profileOpt = lookupMicroarch(cpuName);
-    if (!profileOpt) return 0;
+    if (!profileOpt)
+        return 0;
 
     unsigned total = 0;
     for (auto& func : module) {
@@ -8650,29 +9333,32 @@ unsigned annotateLoopsForTarget(llvm::Module& module, const HGOEConfig& config) 
 }
 
 
-
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Metadata kind name used to store FP precision on individual instructions.
 static constexpr const char* kFPPrecisionMDName = "omsc.fp.precision";
 
 FPPrecision getInstructionPrecision(const llvm::Instruction* inst) {
-    if (!inst) return FPPrecision::Medium;
+    if (!inst)
+        return FPPrecision::Medium;
     auto* md = inst->getMetadata(kFPPrecisionMDName);
-    if (!md || md->getNumOperands() == 0) return FPPrecision::Medium;
+    if (!md || md->getNumOperands() == 0)
+        return FPPrecision::Medium;
     if (auto* str = llvm::dyn_cast<llvm::MDString>(md->getOperand(0))) {
         llvm::StringRef s = str->getString();
-        if (s == "strict") return FPPrecision::Strict;
-        if (s == "fast")   return FPPrecision::Fast;
+        if (s == "strict")
+            return FPPrecision::Strict;
+        if (s == "fast")
+            return FPPrecision::Fast;
     }
     return FPPrecision::Medium;
 }
 
 void setInstructionPrecision(llvm::Instruction* inst, FPPrecision prec) {
-    if (!inst) return;
+    if (!inst)
+        return;
     llvm::LLVMContext& ctx = inst->getContext();
-    llvm::MDNode* md = llvm::MDNode::get(
-        ctx, {llvm::MDString::get(ctx, fpPrecisionName(prec))});
+    llvm::MDNode* md = llvm::MDNode::get(ctx, {llvm::MDString::get(ctx, fpPrecisionName(prec))});
     inst->setMetadata(kFPPrecisionMDName, md);
 }
 
@@ -8689,7 +9375,8 @@ void propagatePrecision(llvm::Function& func) {
                     (!inst.getType()->isIntegerTy() || inst.getOpcode() != llvm::Instruction::FPToSI))
                     continue;
                 // Skip instructions that already have explicit precision metadata.
-                if (inst.getMetadata(kFPPrecisionMDName)) continue;
+                if (inst.getMetadata(kFPPrecisionMDName))
+                    continue;
 
                 // Compute the meet of all operand precisions.
                 FPPrecision meet = FPPrecision::Fast; // start optimistic
@@ -8725,9 +9412,7 @@ CacheModel buildCacheModel(const MicroarchProfile& profile) {
     cm.memLatency = profile.memoryLatency;
     // Rough bandwidth estimate: higher for wider memory buses.
     // This is approximate — real bandwidth depends on many factors.
-    cm.memBandwidth = (profile.vectorWidth >= 512) ? 60.0
-                    : (profile.vectorWidth >= 256) ? 40.0
-                    : 25.0;
+    cm.memBandwidth = (profile.vectorWidth >= 512) ? 60.0 : (profile.vectorWidth >= 256) ? 40.0 : 25.0;
     return cm;
 }
 
@@ -8735,7 +9420,8 @@ CacheModel buildCacheModel(const MicroarchProfile& profile) {
 
 /// Classify a memory access pattern from a GEP + loop structure.
 static AccessPattern classifyAccess(llvm::GetElementPtrInst* gep) {
-    if (!gep) return AccessPattern::Unknown;
+    if (!gep)
+        return AccessPattern::Unknown;
 
     // Check if the last index is an induction variable (AddRec / simple add).
     llvm::Value* lastIdx = gep->getOperand(gep->getNumOperands() - 1);
@@ -8744,11 +9430,9 @@ static AccessPattern classifyAccess(llvm::GetElementPtrInst* gep) {
     if (llvm::isa<llvm::PHINode>(lastIdx))
         return AccessPattern::Sequential;
     if (auto* binOp = llvm::dyn_cast<llvm::BinaryOperator>(lastIdx)) {
-        if (binOp->getOpcode() == llvm::Instruction::Add ||
-            binOp->getOpcode() == llvm::Instruction::Mul) {
+        if (binOp->getOpcode() == llvm::Instruction::Add || binOp->getOpcode() == llvm::Instruction::Mul) {
             // If multiplied by a constant, it's strided.
-            if (binOp->getOpcode() == llvm::Instruction::Mul &&
-                llvm::isa<llvm::ConstantInt>(binOp->getOperand(1)))
+            if (binOp->getOpcode() == llvm::Instruction::Mul && llvm::isa<llvm::ConstantInt>(binOp->getOperand(1)))
                 return AccessPattern::Strided;
             return AccessPattern::Sequential;
         }
@@ -8770,16 +9454,16 @@ static unsigned estimateWorkingSet(llvm::BasicBlock& bb, unsigned elementSize) {
 }
 
 /// Insert cache-aware prefetch hints for strided loads in loop bodies.
-static unsigned insertCacheAwarePrefetches(llvm::Function& func,
-                                            const MicroarchProfile& /*profile*/,
-                                            const CacheModel& cache) {
+static unsigned insertCacheAwarePrefetches(llvm::Function& func, const MicroarchProfile& /*profile*/,
+                                           const CacheModel& cache) {
     unsigned count = 0;
 
     // Assign linear order to each basic block.
     std::unordered_map<llvm::BasicBlock*, unsigned> bbOrder;
     {
         unsigned ord = 0;
-        for (auto& bb : func) bbOrder[&bb] = ord++;
+        for (auto& bb : func)
+            bbOrder[&bb] = ord++;
     }
 
     for (auto& bb : func) {
@@ -8791,14 +9475,17 @@ static unsigned insertCacheAwarePrefetches(llvm::Function& func,
                 break;
             }
         }
-        if (!isLoopHeader) continue;
+        if (!isLoopHeader)
+            continue;
 
         for (auto& inst : bb) {
             auto* load = llvm::dyn_cast<llvm::LoadInst>(&inst);
-            if (!load) continue;
+            if (!load)
+                continue;
 
             auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(load->getPointerOperand());
-            if (!gep) continue;
+            if (!gep)
+                continue;
 
             AccessPattern pattern = classifyAccess(gep);
             if (pattern == AccessPattern::Unknown || pattern == AccessPattern::Random)
@@ -8825,19 +9512,17 @@ static unsigned insertCacheAwarePrefetches(llvm::Function& func,
             // Build prefetch: __builtin_prefetch(ptr + distance, 0/*read*/, 3/*L1*/)
             llvm::IRBuilder<> builder(load);
             llvm::Value* ptr = load->getPointerOperand();
-            llvm::Value* prefAddr = builder.CreateGEP(
-                builder.getInt8Ty(), ptr,
-                builder.getInt64(distance), "prefetch.addr");
+            llvm::Value* prefAddr =
+                builder.CreateGEP(builder.getInt8Ty(), ptr, builder.getInt64(distance), "prefetch.addr");
 
-            llvm::Function* prefetchFn = OMSC_GET_INTRINSIC(
-                func.getParent(), llvm::Intrinsic::prefetch,
-                {llvm::PointerType::getUnqual(func.getContext())});
+            llvm::Function* prefetchFn = OMSC_GET_INTRINSIC(func.getParent(), llvm::Intrinsic::prefetch,
+                                                            {llvm::PointerType::getUnqual(func.getContext())});
             builder.CreateCall(prefetchFn, {
-                prefAddr,
-                builder.getInt32(0),  // read
-                builder.getInt32(3),  // high temporal locality
-                builder.getInt32(1)   // data cache
-            });
+                                               prefAddr,
+                                               builder.getInt32(0), // read
+                                               builder.getInt32(3), // high temporal locality
+                                               builder.getInt32(1)  // data cache
+                                           });
             count++;
         }
     }
@@ -8846,8 +9531,7 @@ static unsigned insertCacheAwarePrefetches(llvm::Function& func,
 }
 
 /// Add loop tiling metadata hints for loops whose working set exceeds L1.
-static unsigned addTilingHints(llvm::Function& func,
-                                const CacheModel& cache) {
+static unsigned addTilingHints(llvm::Function& func, const CacheModel& cache) {
     unsigned count = 0;
     llvm::LLVMContext& ctx = func.getContext();
 
@@ -8855,7 +9539,8 @@ static unsigned addTilingHints(llvm::Function& func,
     std::unordered_map<llvm::BasicBlock*, unsigned> bbOrder;
     {
         unsigned ord = 0;
-        for (auto& bb : func) bbOrder[&bb] = ord++;
+        for (auto& bb : func)
+            bbOrder[&bb] = ord++;
     }
 
     for (auto& bb : func) {
@@ -8867,7 +9552,8 @@ static unsigned addTilingHints(llvm::Function& func,
                 break;
             }
         }
-        if (!latch) continue;
+        if (!latch)
+            continue;
 
         // Skip if the loop already has metadata.
         auto* latchTerm = latch->getTerminator();
@@ -8879,29 +9565,28 @@ static unsigned addTilingHints(llvm::Function& func,
         unsigned l1Bytes = cache.l1Size * 1024;
 
         // Only add tiling hint if working set exceeds L1.
-        if (ws <= l1Bytes) continue;
+        if (ws <= l1Bytes)
+            continue;
 
         // Compute tile size: aim to fit working set in L1.
         // tileSize ≈ sqrt(l1Bytes / elementSize) for 2D arrays.
         unsigned tileSize = 1;
         for (unsigned t = 2; t <= 256; t *= 2) {
-            if (t * t * 8 <= l1Bytes) tileSize = t;
-            else break;
+            if (t * t * 8 <= l1Bytes)
+                tileSize = t;
+            else
+                break;
         }
 
         // Attach tiling metadata.
         llvm::SmallVector<llvm::Metadata*, 4> mds;
         mds.push_back(nullptr); // placeholder for self-reference
-        mds.push_back(llvm::MDNode::get(ctx, {
-            llvm::MDString::get(ctx, "omsc.cache.tile_size"),
-            llvm::ConstantAsMetadata::get(
-                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), tileSize))
-        }));
-        mds.push_back(llvm::MDNode::get(ctx, {
-            llvm::MDString::get(ctx, "omsc.cache.working_set"),
-            llvm::ConstantAsMetadata::get(
-                llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), ws))
-        }));
+        mds.push_back(llvm::MDNode::get(
+            ctx, {llvm::MDString::get(ctx, "omsc.cache.tile_size"),
+                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), tileSize))}));
+        mds.push_back(llvm::MDNode::get(
+            ctx, {llvm::MDString::get(ctx, "omsc.cache.working_set"),
+                  llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), ws))}));
 
         llvm::MDNode* loopID = llvm::MDNode::get(ctx, mds);
         loopID->replaceOperandWith(0, loopID);
@@ -8911,11 +9596,10 @@ static unsigned addTilingHints(llvm::Function& func,
     return count;
 }
 
-CacheOptStats optimizeCacheLocality(llvm::Function& func,
-                                     const MicroarchProfile& profile,
-                                     const CacheModel& cache) {
+CacheOptStats optimizeCacheLocality(llvm::Function& func, const MicroarchProfile& profile, const CacheModel& cache) {
     CacheOptStats stats;
-    if (func.isDeclaration()) return stats;
+    if (func.isDeclaration())
+        return stats;
 
     // Phase 1: Propagate precision metadata through the function.
     propagatePrecision(func);

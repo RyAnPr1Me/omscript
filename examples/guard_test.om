@@ -1,3 +1,4 @@
+import std;
 // Test: guard statement
 // guard (condition) else { ... } — early exit pattern
 

@@ -1,3 +1,4 @@
+import std;
 // Test @speculatable annotation.
 // Marks the function as having no observable side effects so LLVM may
 // hoist or speculate calls across branches and into loop preheaders.

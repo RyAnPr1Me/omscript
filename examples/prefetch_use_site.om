@@ -1,3 +1,4 @@
+import std;
 fn compute(x: int) -> int {
     prefetch var val:i32 = x;
     var result = val + 10;

@@ -1,3 +1,4 @@
+import std;
 // Test hex bytes literal: 0x"AABBCC" -> array of byte values
 fn main() {
     var data = 0x"DEADBEEF";

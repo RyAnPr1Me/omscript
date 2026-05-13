@@ -1,3 +1,4 @@
+import std;
 // string_index_test.om
 //
 // Regression test: s[i] previously applied array layout semantics to strings,

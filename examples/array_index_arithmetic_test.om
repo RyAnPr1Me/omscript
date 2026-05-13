@@ -1,3 +1,4 @@
+import std;
 // Array bounds and indexing: last-element indexing, reverse indexing via
 // (len - 1 - i), and in-place assignment at a computed index.  Result
 // fits inside an 8-bit exit code (< 256).

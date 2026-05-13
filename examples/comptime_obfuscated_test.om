@@ -1,3 +1,4 @@
+import std;
 @pure @inline
 fn rotl(x:int, k:int) -> int {
     return (x << k) | (x >> (32 - k));

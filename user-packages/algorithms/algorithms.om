@@ -1,3 +1,4 @@
+import std;
 // algorithms package - common algorithms for arrays
 
 fn algo_sum(arr) {

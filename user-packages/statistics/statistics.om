@@ -1,3 +1,4 @@
+import std;
 // statistics package - statistical functions for arrays of integers
 
 fn stat_mean(arr) {

@@ -1,3 +1,4 @@
+import std;
 // Test &x address-of operator: var p:ptr = &x
 // The & operator takes the address of a stack variable, returning a raw ptr.
 fn main() {

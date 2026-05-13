@@ -1,3 +1,4 @@
+import std;
 // Modernized preprocessor: bitwise ops, shifts, ternary, hex literals,
 // `#elifdef` / `#elifndef`, `__DATE__`, `__TIME__`, `__BASE_FILE__`,
 // `__VECTOR_WIDTH__`.  Each conditional contributes 1 to `total` when the

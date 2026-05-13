@@ -1,3 +1,4 @@
+import std;
 // Test @align(N) and @align() annotations.
 // @align(N)  — aligns function entry to exactly N bytes.
 // @align()   — auto-optimal: aligns to cache-line boundary (64 bytes) for

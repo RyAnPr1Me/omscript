@@ -1,3 +1,4 @@
+import std;
 // Factorial example - demonstrates recursion
 fn factorial(n) {
     if (n <= 1) {

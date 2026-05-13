@@ -1,3 +1,4 @@
+import std;
 // Test prefix/postfix increment/decrement on array elements
 fn main() {
     var result = 0;

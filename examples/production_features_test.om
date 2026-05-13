@@ -1,3 +1,4 @@
+import std;
 // Test new production features: catch/throw, println, write,
 // exit_program, random, time, sleep, str_split, str_to_int, str_to_float,
 // str_chars

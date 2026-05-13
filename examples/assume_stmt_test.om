@@ -1,3 +1,4 @@
+import std;
 fn main() -> int {
     var n = 5;
     assume(n > 0);

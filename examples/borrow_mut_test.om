@@ -1,3 +1,4 @@
+import std;
 // borrow_mut_test.om — test `borrow mut ref = x;` single mutable reference
 // Expected exit code: 7
 

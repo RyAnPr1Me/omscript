@@ -1,3 +1,4 @@
+import std;
 // Test predefined integer range constants: I{N}_MAX/MIN, U{N}_MAX/MIN,
 // INT_MAX/MIN, UINT_MAX, BOOL_MAX/MIN.
 fn main() {

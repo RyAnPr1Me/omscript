@@ -1,3 +1,4 @@
+import std;
 // This program should fail to compile:
 // variable 'z' is not defined
 fn main() {

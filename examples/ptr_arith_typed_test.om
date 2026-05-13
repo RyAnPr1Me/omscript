@@ -1,3 +1,4 @@
+import std;
 // ptr_arith_typed_test.om — verify type-aware pointer arithmetic (Ω spec §4.4)
 // ptr<T> + n advances by n * sizeof(T)
 // Expected exit code: 77

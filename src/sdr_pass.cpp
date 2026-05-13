@@ -2,17 +2,17 @@
 
 #include "sdr_pass.h"
 
+#include <llvm/Analysis/TargetTransformInfo.h>
+#include <llvm/Config/llvm-config.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstIterator.h>
-#include <llvm/IR/IntrinsicsX86.h>
 #include <llvm/IR/Intrinsics.h>
+#include <llvm/IR/IntrinsicsX86.h>
 #include <llvm/IR/Type.h>
 #include <llvm/IR/Value.h>
 #include <llvm/IR/Verifier.h>
-#include <llvm/Analysis/TargetTransformInfo.h>
-#include <llvm/Config/llvm-config.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include <algorithm>
@@ -30,39 +30,37 @@ namespace {
 
 /// True when @p inst is an arithmetic or bitwise binary operator on a vector type.
 static bool isVectorArith(const llvm::Instruction* inst) noexcept {
-    if (!inst->getType()->isVectorTy()) return false;
+    if (!inst->getType()->isVectorTy())
+        return false;
     switch (inst->getOpcode()) {
-        case llvm::Instruction::Add:
-        case llvm::Instruction::FAdd:
-        case llvm::Instruction::Sub:
-        case llvm::Instruction::FSub:
-        case llvm::Instruction::Mul:
-        case llvm::Instruction::FMul:
-        case llvm::Instruction::SDiv:
-        case llvm::Instruction::UDiv:
-        case llvm::Instruction::FDiv:
-        case llvm::Instruction::SRem:
-        case llvm::Instruction::URem:
-        case llvm::Instruction::FRem:
-        case llvm::Instruction::And:
-        case llvm::Instruction::Or:
-        case llvm::Instruction::Xor:
-        case llvm::Instruction::Shl:
-        case llvm::Instruction::LShr:
-        case llvm::Instruction::AShr:
-            return true;
-        default:
-            return false;
+    case llvm::Instruction::Add:
+    case llvm::Instruction::FAdd:
+    case llvm::Instruction::Sub:
+    case llvm::Instruction::FSub:
+    case llvm::Instruction::Mul:
+    case llvm::Instruction::FMul:
+    case llvm::Instruction::SDiv:
+    case llvm::Instruction::UDiv:
+    case llvm::Instruction::FDiv:
+    case llvm::Instruction::SRem:
+    case llvm::Instruction::URem:
+    case llvm::Instruction::FRem:
+    case llvm::Instruction::And:
+    case llvm::Instruction::Or:
+    case llvm::Instruction::Xor:
+    case llvm::Instruction::Shl:
+    case llvm::Instruction::LShr:
+    case llvm::Instruction::AShr:
+        return true;
+    default:
+        return false;
     }
 }
 
 /// Compute a TTI arithmetic cost for a binary opcode on a given vector type.
-static double vecArithCost(llvm::TargetTransformInfo& TTI,
-                            unsigned opcode,
-                            llvm::VectorType* vt) {
-    auto cost = TTI.getArithmeticInstrCost(
-        opcode, vt->getElementType(),
-        llvm::TargetTransformInfo::TCK_RecipThroughput);
+static double vecArithCost(llvm::TargetTransformInfo& TTI, unsigned opcode, llvm::VectorType* vt) {
+    auto cost =
+        TTI.getArithmeticInstrCost(opcode, vt->getElementType(), llvm::TargetTransformInfo::TCK_RecipThroughput);
     return static_cast<double>(
 #if LLVM_VERSION_MAJOR >= 20
         cost.getValue()
@@ -118,42 +116,45 @@ static bool detectReduction(llvm::Instruction* vecInst) {
     std::vector<llvm::ExtractElementInst*> extracts;
     for (llvm::User* u : vecInst->users()) {
         auto* ee = llvm::dyn_cast<llvm::ExtractElementInst>(u);
-        if (!ee) return false; // Non-extract use → not a pure reduction.
-        if (extractLaneIndex(ee) < 0) return false;
+        if (!ee)
+            return false; // Non-extract use → not a pure reduction.
+        if (extractLaneIndex(ee) < 0)
+            return false;
         extracts.push_back(ee);
     }
-    if (extracts.size() != totalLanes) return false;
+    if (extracts.size() != totalLanes)
+        return false;
 
     // Verify that every extract feeds only arithmetic users and that
     for (auto* ee : extracts) {
         for (llvm::User* eu : ee->users()) {
             auto* inst = llvm::dyn_cast<llvm::Instruction>(eu);
-            if (!inst) return false;
+            if (!inst)
+                return false;
             const unsigned op = inst->getOpcode();
             const bool isArith =
-                op == llvm::Instruction::Add  || op == llvm::Instruction::FAdd ||
-                op == llvm::Instruction::Sub  || op == llvm::Instruction::FSub ||
-                op == llvm::Instruction::Mul  || op == llvm::Instruction::FMul ||
-                op == llvm::Instruction::And  || op == llvm::Instruction::Or   ||
-                op == llvm::Instruction::Xor;
-            if (!isArith) return false;
+                op == llvm::Instruction::Add || op == llvm::Instruction::FAdd || op == llvm::Instruction::Sub ||
+                op == llvm::Instruction::FSub || op == llvm::Instruction::Mul || op == llvm::Instruction::FMul ||
+                op == llvm::Instruction::And || op == llvm::Instruction::Or || op == llvm::Instruction::Xor;
+            if (!isArith)
+                return false;
         }
     }
     return true;
 }
 
-static std::vector<SdrRegion> phase1Detect(llvm::Function& F,
-                                            llvm::TargetTransformInfo& TTI,
-                                            const SdrConfig& cfg) {
+static std::vector<SdrRegion> phase1Detect(llvm::Function& F, llvm::TargetTransformInfo& TTI, const SdrConfig& cfg) {
     std::vector<SdrRegion> regions;
 
     for (auto& BB : F) {
         for (auto& I : BB) {
             auto* fvt = llvm::dyn_cast<llvm::FixedVectorType>(I.getType());
-            if (!fvt || !isVectorArith(&I)) continue;
+            if (!fvt || !isVectorArith(&I))
+                continue;
 
             const unsigned origLanes = fvt->getNumElements();
-            if (origLanes < 2) continue; // Nothing to narrow.
+            if (origLanes < 2)
+                continue; // Nothing to narrow.
 
             auto [usedMask, usedLanes] = computeUsedLanes(&I);
 
@@ -172,7 +173,10 @@ static std::vector<SdrRegion> phase1Detect(llvm::Function& F,
                     // Users can be ConstantExpr nodes (not Instruction subtypes),
                     // especially in constant-folded IR.  Always use dyn_cast.
                     auto* inst = llvm::dyn_cast<llvm::Instruction>(u);
-                    if (!inst) { ++nonExtractUsers; continue; }
+                    if (!inst) {
+                        ++nonExtractUsers;
+                        continue;
+                    }
                     if (isConstExtract(inst))
                         ++extractUsers;
                     else
@@ -180,8 +184,7 @@ static std::vector<SdrRegion> phase1Detect(llvm::Function& F,
                 }
 
                 if (extractUsers > 0 && nonExtractUsers == 0) {
-                    kind = (usedLanes < origLanes) ? RegionKind::PartialUse
-                                                   : RegionKind::ExtractChain;
+                    kind = (usedLanes < origLanes) ? RegionKind::PartialUse : RegionKind::ExtractChain;
                 } else if (usedLanes < origLanes) {
                     kind = RegionKind::PartialUse;
                 } else {
@@ -193,15 +196,14 @@ static std::vector<SdrRegion> phase1Detect(llvm::Function& F,
             // lane utilisation is already high enough).
             if (!isReduction && kind != RegionKind::ScalarMix) {
                 const double useFrac = static_cast<double>(usedLanes) / origLanes;
-                if (useFrac >= cfg.partialUseFraction) continue;
+                if (useFrac >= cfg.partialUseFraction)
+                    continue;
             }
 
             // Compute original cost for profitability gate in phase 4.
             const double origCost = vecArithCost(TTI, I.getOpcode(), fvt);
 
-            regions.push_back(SdrRegion{
-                &I, kind, origLanes, usedLanes, usedMask, isReduction, origCost
-            });
+            regions.push_back(SdrRegion{&I, kind, origLanes, usedLanes, usedMask, isReduction, origCost});
         }
     }
     return regions;
@@ -221,8 +223,7 @@ static ScalarLanes devectorize(SdrRegion& region, llvm::IRBuilder<>& builder) {
     ScalarLanes lanes(N);
     for (unsigned i = 0; i < N; ++i) {
         auto* idx = llvm::ConstantInt::get(llvm::Type::getInt32Ty(root->getContext()), i);
-        lanes[i] = builder.CreateExtractElement(root, idx,
-                                                 root->getName() + ".sdr.s" + std::to_string(i));
+        lanes[i] = builder.CreateExtractElement(root, idx, root->getName() + ".sdr.s" + std::to_string(i));
     }
     return lanes;
 }
@@ -230,26 +231,31 @@ static ScalarLanes devectorize(SdrRegion& region, llvm::IRBuilder<>& builder) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct DataflowResult {
-    uint64_t liveMask      = 0;
-    unsigned liveCount     = 0;
+    uint64_t liveMask = 0;
+    unsigned liveCount = 0;
     unsigned parallelWidth = 0; // smallest power-of-2 ≥ liveCount
-    bool     isReduction   = false;
+    bool isReduction = false;
 };
 
 static unsigned nextPow2(unsigned v) noexcept {
-    if (v <= 1) return 1;
+    if (v <= 1)
+        return 1;
     --v;
-    v |= v >> 1; v |= v >> 2; v |= v >> 4; v |= v >> 8; v |= v >> 16;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
     return v + 1;
 }
 
-static DataflowResult phase3Analyze(const SdrRegion& region,
-                                     const ScalarLanes& lanes) {
+static DataflowResult phase3Analyze(const SdrRegion& region, const ScalarLanes& lanes) {
     DataflowResult res;
     const unsigned N = region.origLanes;
 
     for (unsigned i = 0; i < N; ++i) {
-        if (!lanes[i]) continue;
+        if (!lanes[i])
+            continue;
         if (!lanes[i]->use_empty()) {
             res.liveMask |= (uint64_t(1) << i);
             ++res.liveCount;
@@ -257,7 +263,8 @@ static DataflowResult phase3Analyze(const SdrRegion& region,
     }
 
     res.parallelWidth = nextPow2(res.liveCount);
-    if (res.parallelWidth < 2) res.parallelWidth = 2; // Minimum useful vector width.
+    if (res.parallelWidth < 2)
+        res.parallelWidth = 2; // Minimum useful vector width.
 
     // Confirm reduction if the region claimed it and scalar uses form a tree.
     res.isReduction = region.isReduction && (res.liveCount == N);
@@ -271,26 +278,31 @@ static DataflowResult phase3Analyze(const SdrRegion& region,
 /// Returns Intrinsic::not_intrinsic for unsupported opcodes.
 static llvm::Intrinsic::ID reduceIntrinsicFor(unsigned opcode) noexcept {
     switch (opcode) {
-        case llvm::Instruction::Add:
-        case llvm::Instruction::FAdd: return llvm::Intrinsic::vector_reduce_add;
-        case llvm::Instruction::Mul:
-        case llvm::Instruction::FMul: return llvm::Intrinsic::vector_reduce_mul;
-        case llvm::Instruction::And:  return llvm::Intrinsic::vector_reduce_and;
-        case llvm::Instruction::Or:   return llvm::Intrinsic::vector_reduce_or;
-        case llvm::Instruction::Xor:  return llvm::Intrinsic::vector_reduce_xor;
-        default:                      return llvm::Intrinsic::not_intrinsic;
+    case llvm::Instruction::Add:
+    case llvm::Instruction::FAdd:
+        return llvm::Intrinsic::vector_reduce_add;
+    case llvm::Instruction::Mul:
+    case llvm::Instruction::FMul:
+        return llvm::Intrinsic::vector_reduce_mul;
+    case llvm::Instruction::And:
+        return llvm::Intrinsic::vector_reduce_and;
+    case llvm::Instruction::Or:
+        return llvm::Intrinsic::vector_reduce_or;
+    case llvm::Instruction::Xor:
+        return llvm::Intrinsic::vector_reduce_xor;
+    default:
+        return llvm::Intrinsic::not_intrinsic;
     }
 }
 
 /// Replace @p extract users with the given scalar @p replacement, leaving
 /// extractelement instructions for potential DCE by subsequent passes.
-static void replaceExtractUsers(llvm::Value* vec,
-                                 unsigned laneIdx,
-                                 llvm::Value* replacement) {
+static void replaceExtractUsers(llvm::Value* vec, unsigned laneIdx, llvm::Value* replacement) {
     llvm::SmallVector<llvm::User*, 8> toReplace;
     for (llvm::User* u : vec->users()) {
         auto* ee = llvm::dyn_cast<llvm::ExtractElementInst>(u);
-        if (!ee) continue;
+        if (!ee)
+            continue;
         if (extractLaneIndex(ee) == static_cast<int64_t>(laneIdx))
             toReplace.push_back(ee);
     }
@@ -301,11 +313,9 @@ static void replaceExtractUsers(llvm::Value* vec,
 }
 
 /// Build a narrow vector from the live subset of lanes and insert it into the
-static llvm::Value* buildNarrowVector(llvm::Instruction* insertBefore,
-                                       llvm::Type* elemTy,
-                                       const std::vector<llvm::Value*>& liveScalars,
-                                       unsigned newLanes,
-                                       llvm::LLVMContext& ctx) {
+static llvm::Value* buildNarrowVector(llvm::Instruction* insertBefore, llvm::Type* elemTy,
+                                      const std::vector<llvm::Value*>& liveScalars, unsigned newLanes,
+                                      llvm::LLVMContext& ctx) {
     llvm::IRBuilder<> b(insertBefore);
     auto* newVT = llvm::FixedVectorType::get(elemTy, newLanes);
     llvm::Value* vec = llvm::UndefValue::get(newVT);
@@ -318,15 +328,14 @@ static llvm::Value* buildNarrowVector(llvm::Instruction* insertBefore,
         auto* idx = llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), slot);
         vec = b.CreateInsertElement(vec, s, idx, "sdr.narrow.ins");
         ++slot;
-        if (slot >= newLanes) break;
+        if (slot >= newLanes)
+            break;
     }
     return vec;
 }
 
 /// Emit llvm.vector.reduce.X(@p vec) just before @p insertBefore.
-static llvm::Value* emitReductionIntrinsic(llvm::Instruction* insertBefore,
-                                            llvm::Intrinsic::ID iid,
-                                            llvm::Value* vec) {
+static llvm::Value* emitReductionIntrinsic(llvm::Instruction* insertBefore, llvm::Intrinsic::ID iid, llvm::Value* vec) {
     llvm::IRBuilder<> b(insertBefore);
     llvm::Module* M = insertBefore->getModule();
     llvm::Function* intrinsicFn =
@@ -340,31 +349,28 @@ static llvm::Value* emitReductionIntrinsic(llvm::Instruction* insertBefore,
 
 enum class RevecAction { Reduce, Narrow, Widen, Passthrough };
 
-static SdrStats phase4Revectorize(std::vector<SdrRegion>& regions,
-                                   const std::vector<ScalarLanes>& allLanes,
-                                   const std::vector<DataflowResult>& dfResults,
-                                   llvm::TargetTransformInfo& TTI,
-                                   const SdrConfig& cfg) {
+static SdrStats phase4Revectorize(std::vector<SdrRegion>& regions, const std::vector<ScalarLanes>& allLanes,
+                                  const std::vector<DataflowResult>& dfResults, llvm::TargetTransformInfo& TTI,
+                                  const SdrConfig& cfg) {
     SdrStats stats;
 
     for (size_t ri = 0; ri < regions.size(); ++ri) {
-        SdrRegion& reg    = regions[ri];
+        SdrRegion& reg = regions[ri];
         const DataflowResult& df = dfResults[ri];
         const ScalarLanes& lanes = allLanes[ri];
 
-        if (!reg.root) continue;
+        if (!reg.root)
+            continue;
         auto* fvt = llvm::cast<llvm::FixedVectorType>(reg.root->getType());
         llvm::Type* elemTy = fvt->getElementType();
         llvm::LLVMContext& ctx = reg.root->getContext();
 
         // ── Case 1: Reduction → intrinsic ────────────────────────────────
         if (df.isReduction && cfg.enableReductionRecognition) {
-            const llvm::Intrinsic::ID iid =
-                reduceIntrinsicFor(reg.root->getOpcode());
+            const llvm::Intrinsic::ID iid = reduceIntrinsicFor(reg.root->getOpcode());
             if (iid != llvm::Intrinsic::not_intrinsic) {
                 // Cost of reduction intrinsic vs. extract+arith chain.
-                auto redCost = TTI.getArithmeticReductionCost(
-                    reg.root->getOpcode(), fvt, /*FMF=*/std::nullopt);
+                auto redCost = TTI.getArithmeticReductionCost(reg.root->getOpcode(), fvt, /*FMF=*/std::nullopt);
                 const double newCost = static_cast<double>(
 #if LLVM_VERSION_MAJOR >= 20
                     redCost.getValue()
@@ -373,12 +379,10 @@ static SdrStats phase4Revectorize(std::vector<SdrRegion>& regions,
 #endif
                 );
                 const double saving = reg.origCost - newCost;
-                if (saving >= cfg.minAbsoluteSaving &&
-                    newCost <= reg.origCost * cfg.costThreshold) {
+                if (saving >= cfg.minAbsoluteSaving && newCost <= reg.origCost * cfg.costThreshold) {
                     // Replace: emit reduction intrinsic, replace all extract users.
                     llvm::Instruction* insertPt = reg.root->getNextNode();
-                    llvm::Value* redResult = emitReductionIntrinsic(
-                        insertPt, iid, reg.root);
+                    llvm::Value* redResult = emitReductionIntrinsic(insertPt, iid, reg.root);
                     // Replace all extractelement users that formed the reduction.
                     for (unsigned i = 0; i < reg.origLanes; ++i)
                         replaceExtractUsers(reg.root, i, redResult);
@@ -391,18 +395,18 @@ static SdrStats phase4Revectorize(std::vector<SdrRegion>& regions,
         }
 
         // ── Case 2: Narrow ────────────────────────────────────────────────
-        if (cfg.enableNarrowing &&
-            df.liveCount > 0 &&
-            df.liveCount < reg.origLanes) {
+        if (cfg.enableNarrowing && df.liveCount > 0 && df.liveCount < reg.origLanes) {
             const unsigned newLanes = nextPow2(df.liveCount);
-            if (newLanes >= reg.origLanes) { ++stats.skippedCostly; continue; }
+            if (newLanes >= reg.origLanes) {
+                ++stats.skippedCostly;
+                continue;
+            }
 
             auto* newVT = llvm::FixedVectorType::get(elemTy, newLanes);
             const double newCost = vecArithCost(TTI, reg.root->getOpcode(), newVT);
             const double saving = reg.origCost - newCost;
 
-            if (saving < cfg.minAbsoluteSaving ||
-                newCost > reg.origCost * cfg.costThreshold) {
+            if (saving < cfg.minAbsoluteSaving || newCost > reg.origCost * cfg.costThreshold) {
                 ++stats.skippedCostly;
                 continue;
             }
@@ -417,19 +421,20 @@ static SdrStats phase4Revectorize(std::vector<SdrRegion>& regions,
             while (liveScalars.size() < newLanes)
                 liveScalars.push_back(nullptr); // fill with undef
 
-            llvm::Value* narrowVec = buildNarrowVector(
-                reg.root->getNextNode(), elemTy, liveScalars, newLanes, ctx);
-            if (!narrowVec) { ++stats.skippedCostly; continue; }
+            llvm::Value* narrowVec = buildNarrowVector(reg.root->getNextNode(), elemTy, liveScalars, newLanes, ctx);
+            if (!narrowVec) {
+                ++stats.skippedCostly;
+                continue;
+            }
 
             // Replace extract users with extracts from the narrow vector.
             unsigned slot = 0;
             for (unsigned i = 0; i < reg.origLanes && slot < newLanes; ++i) {
-                if (!(df.liveMask & (uint64_t(1) << i))) continue;
-                auto* newIdx = llvm::ConstantInt::get(
-                    llvm::Type::getInt32Ty(ctx), slot);
+                if (!(df.liveMask & (uint64_t(1) << i)))
+                    continue;
+                auto* newIdx = llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), slot);
                 llvm::IRBuilder<> b(reg.root->getNextNode());
-                llvm::Value* newExt = b.CreateExtractElement(narrowVec, newIdx,
-                                                              "sdr.narrow.ext");
+                llvm::Value* newExt = b.CreateExtractElement(narrowVec, newIdx, "sdr.narrow.ext");
                 replaceExtractUsers(reg.root, i, newExt);
                 ++slot;
             }
@@ -438,16 +443,14 @@ static SdrStats phase4Revectorize(std::vector<SdrRegion>& regions,
         }
 
         // ── Case 3: Widen ─────────────────────────────────────────────────
-        if (cfg.enableWidening &&
-            reg.origLanes < cfg.maxWidenLanes) {
+        if (cfg.enableWidening && reg.origLanes < cfg.maxWidenLanes) {
             const unsigned newLanes = std::min(reg.origLanes * 2, cfg.maxWidenLanes);
             auto* newVT = llvm::FixedVectorType::get(elemTy, newLanes);
             const double newCost = vecArithCost(TTI, reg.root->getOpcode(), newVT);
-            const double saving  = reg.origCost - newCost;
+            const double saving = reg.origCost - newCost;
 
             // Widening is worthwhile only when throughput actually improves.
-            if (saving >= cfg.minAbsoluteSaving &&
-                newCost <= reg.origCost * cfg.costThreshold) {
+            if (saving >= cfg.minAbsoluteSaving && newCost <= reg.origCost * cfg.costThreshold) {
                 // Widen: pad the existing vector with undef lanes using
                 // shufflevector, then operate on the wider vector.
                 llvm::IRBuilder<> b(reg.root);
@@ -462,30 +465,35 @@ static SdrStats phase4Revectorize(std::vector<SdrRegion>& regions,
                 bool ok = true;
                 for (unsigned opIdx = 0; opIdx < reg.root->getNumOperands(); ++opIdx) {
                     llvm::Value* op = reg.root->getOperand(opIdx);
-                    if (!llvm::isa<llvm::FixedVectorType>(op->getType())) { ok = false; break; }
+                    if (!llvm::isa<llvm::FixedVectorType>(op->getType())) {
+                        ok = false;
+                        break;
+                    }
                     auto* poison = llvm::PoisonValue::get(op->getType());
-                    llvm::Value* wider = b.CreateShuffleVector(op, poison, mask,
-                                                               "sdr.widen.shuf");
+                    llvm::Value* wider = b.CreateShuffleVector(op, poison, mask, "sdr.widen.shuf");
                     newOps.push_back(wider);
                 }
-                if (!ok) { ++stats.skippedCostly; continue; }
+                if (!ok) {
+                    ++stats.skippedCostly;
+                    continue;
+                }
 
                 // Recreate the op on the wider type.
                 llvm::Value* wideResult = nullptr;
                 if (auto* bo = llvm::dyn_cast<llvm::BinaryOperator>(reg.root)) {
-                    wideResult = b.CreateBinOp(
-                        bo->getOpcode(), newOps[0], newOps[1], "sdr.widen.op");
+                    wideResult = b.CreateBinOp(bo->getOpcode(), newOps[0], newOps[1], "sdr.widen.op");
                 }
-                if (!wideResult) { ++stats.skippedCostly; continue; }
+                if (!wideResult) {
+                    ++stats.skippedCostly;
+                    continue;
+                }
 
                 // Narrow back to original width with extract-element so
                 // existing users are unaffected.
                 for (unsigned i = 0; i < reg.origLanes; ++i) {
-                    auto* idx = llvm::ConstantInt::get(
-                        llvm::Type::getInt32Ty(ctx), i);
+                    auto* idx = llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx), i);
                     llvm::IRBuilder<> eb(reg.root->getNextNode());
-                    llvm::Value* ext = eb.CreateExtractElement(wideResult, idx,
-                                                               "sdr.widen.ext");
+                    llvm::Value* ext = eb.CreateExtractElement(wideResult, idx, "sdr.widen.ext");
                     replaceExtractUsers(reg.root, i, ext);
                 }
                 ++stats.widened;
@@ -502,48 +510,51 @@ static SdrStats phase4Revectorize(std::vector<SdrRegion>& regions,
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-static SdrStats runOnFunction(llvm::Function& F,
-                               llvm::TargetTransformInfo& TTI,
-                               const SdrConfig& cfg) {
+static SdrStats runOnFunction(llvm::Function& F, llvm::TargetTransformInfo& TTI, const SdrConfig& cfg) {
     SdrStats stats;
-    if (F.isDeclaration()) return stats;
+    if (F.isDeclaration())
+        return stats;
 
     // Phase 1: detect candidate regions.
     auto regions = phase1Detect(F, TTI, cfg);
     stats.regionsDetected = static_cast<unsigned>(regions.size());
 
-    if (regions.empty()) return stats;
+    if (regions.empty())
+        return stats;
 
     // Apply max-region-size filter.
     unsigned instrCount = 0;
-    for (auto& BB : F) instrCount += static_cast<unsigned>(BB.size());
+    for (auto& BB : F)
+        instrCount += static_cast<unsigned>(BB.size());
     {
-        auto it = std::remove_if(regions.begin(), regions.end(),
-            [&](const SdrRegion& r) {
-                (void)r;
-                if (instrCount > cfg.maxRegionSize * 4) {
-                    ++stats.skippedLarge;
-                    return true;
-                }
-                return false;
-            });
+        auto it = std::remove_if(regions.begin(), regions.end(), [&](const SdrRegion& r) {
+            (void)r;
+            if (instrCount > cfg.maxRegionSize * 4) {
+                ++stats.skippedLarge;
+                return true;
+            }
+            return false;
+        });
         regions.erase(it, regions.end());
     }
     stats.regionsAnalyzed = static_cast<unsigned>(regions.size());
-    if (regions.empty()) return stats;
+    if (regions.empty())
+        return stats;
 
     // Phase 2: devectorize.
     std::vector<ScalarLanes> allLanes(regions.size());
     llvm::IRBuilder<> builder(F.getContext());
     for (size_t i = 0; i < regions.size(); ++i) {
-        if (!regions[i].root) continue;
+        if (!regions[i].root)
+            continue;
         allLanes[i] = devectorize(regions[i], builder);
     }
 
     // Phase 3: scalar dataflow analysis.
     std::vector<DataflowResult> dfResults(regions.size());
     for (size_t i = 0; i < regions.size(); ++i) {
-        if (!regions[i].root) continue;
+        if (!regions[i].root)
+            continue;
         dfResults[i] = phase3Analyze(regions[i], allLanes[i]);
     }
 
@@ -551,11 +562,11 @@ static SdrStats runOnFunction(llvm::Function& F,
     SdrStats phase4Stats = phase4Revectorize(regions, allLanes, dfResults, TTI, cfg);
 
     // Merge stats.
-    stats.narrowed           += phase4Stats.narrowed;
-    stats.widened            += phase4Stats.widened;
+    stats.narrowed += phase4Stats.narrowed;
+    stats.widened += phase4Stats.widened;
     stats.reductionsReplaced += phase4Stats.reductionsReplaced;
-    stats.passthrough        += phase4Stats.passthrough;
-    stats.skippedCostly      += phase4Stats.skippedCostly;
+    stats.passthrough += phase4Stats.passthrough;
+    stats.skippedCostly += phase4Stats.skippedCostly;
 
     return stats;
 }
@@ -564,23 +575,23 @@ static SdrStats runOnFunction(llvm::Function& F,
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-SdrStats runSDR(llvm::Module& module,
-                const std::function<llvm::TargetTransformInfo(llvm::Function&)>& getTTI,
+SdrStats runSDR(llvm::Module& module, const std::function<llvm::TargetTransformInfo(llvm::Function&)>& getTTI,
                 const SdrConfig& cfg) {
     SdrStats total;
 
     for (llvm::Function& F : module) {
-        if (F.isDeclaration()) continue;
+        if (F.isDeclaration())
+            continue;
         llvm::TargetTransformInfo TTI = getTTI(F);
         SdrStats fs = runOnFunction(F, TTI, cfg);
-        total.regionsDetected   += fs.regionsDetected;
-        total.regionsAnalyzed   += fs.regionsAnalyzed;
-        total.narrowed          += fs.narrowed;
-        total.widened           += fs.widened;
-        total.reductionsReplaced+= fs.reductionsReplaced;
-        total.passthrough       += fs.passthrough;
-        total.skippedCostly     += fs.skippedCostly;
-        total.skippedLarge      += fs.skippedLarge;
+        total.regionsDetected += fs.regionsDetected;
+        total.regionsAnalyzed += fs.regionsAnalyzed;
+        total.narrowed += fs.narrowed;
+        total.widened += fs.widened;
+        total.reductionsReplaced += fs.reductionsReplaced;
+        total.passthrough += fs.passthrough;
+        total.skippedCostly += fs.skippedCostly;
+        total.skippedLarge += fs.skippedLarge;
     }
 
     return total;

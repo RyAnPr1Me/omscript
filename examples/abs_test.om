@@ -1,3 +1,4 @@
+import std;
 // Test abs() built-in function
 fn main() {
     var a = abs(-10);     // 10

@@ -1,3 +1,4 @@
+import std;
 // Test: elif keyword
 // elif (condition) { ... } — alias for else if (condition) { ... }
 

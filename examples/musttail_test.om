@@ -1,3 +1,4 @@
+import std;
 // Test guaranteed tail call optimization (musttail).
 // Self-recursive functions get musttail, ensuring O(1) stack usage.
 fn factorial(n, acc) {

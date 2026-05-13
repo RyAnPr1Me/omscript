@@ -1,3 +1,4 @@
+import std;
 // comptime_loop_reason_test.om
 // Verifies CF-CTRE loop reasoning (closed-form symbolic analysis).
 //

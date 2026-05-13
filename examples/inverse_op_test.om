@@ -1,3 +1,4 @@
+import std;
 // Test chained inverse operation elimination.
 // (x + C) - C → x, (x - C) + C → x
 fn test_add_sub(x) {

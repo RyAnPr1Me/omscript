@@ -29,10 +29,14 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 
     // Codegen safety-net: a VarDecl that escaped parser checks is allowed
     if (stmt->typeName.empty() && !stmt->initializer && !stmt->isCompilerGenerated) {
-        codegenError("Variable '" + stmt->name + "' has no type annotation and no initializer. "
-                     "All user-declared variables require an explicit type "
-                     "(e.g., 'var " + stmt->name + ":i64 = ...') unless an "
-                     "initializer is present from which the type can be inferred.", stmt);
+        codegenError("Variable '" + stmt->name +
+                         "' has no type annotation and no initializer. "
+                         "All user-declared variables require an explicit type "
+                         "(e.g., 'var " +
+                         stmt->name +
+                         ":i64 = ...') unless an "
+                         "initializer is present from which the type can be inferred.",
+                     stmt);
     }
 
     // When the variable is declared global (inside a function), create a
@@ -47,12 +51,8 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             return;
         }
         llvm::Type* ty = stmt->typeName.empty() ? getDefaultType() : resolveAnnotatedType(stmt->typeName);
-        auto* gv = new llvm::GlobalVariable(
-            *module, ty,
-            stmt->isConst,
-            llvm::GlobalValue::ExternalLinkage,
-            llvm::Constant::getNullValue(ty),
-            llvmName);
+        auto* gv = new llvm::GlobalVariable(*module, ty, stmt->isConst, llvm::GlobalValue::ExternalLinkage,
+                                            llvm::Constant::getNullValue(ty), llvmName);
         gv->setAlignment(llvm::MaybeAlign(8));
         globalVars_[llvmName] = gv;
         namedValues[stmt->name] = gv;
@@ -71,28 +71,24 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     }
 
     // ───────────────────────────────────────────────────────────────────────
-    if (!stmt->typeName.empty() && stmt->typeName[0] == '&' &&
-        stmt->initializer &&
+    if (!stmt->typeName.empty() && stmt->typeName[0] == '&' && stmt->initializer &&
         stmt->initializer->type == ASTNodeType::BORROW_EXPR) {
         auto* bw = static_cast<BorrowExpr*>(stmt->initializer.get());
         // Require explicit `&` on the initializer for the reference form.
-        if (!bw->source ||
-            bw->source->type != ASTNodeType::UNARY_EXPR ||
+        if (!bw->source || bw->source->type != ASTNodeType::UNARY_EXPR ||
             static_cast<UnaryExpr*>(bw->source.get())->op != "&") {
-            codegenError("Reference borrow '" + stmt->name +
-                         "' requires '&' on the initializer (e.g. `borrow var " +
-                         stmt->name + ":" + stmt->typeName + " = &x;`)", stmt);
+            codegenError("Reference borrow '" + stmt->name + "' requires '&' on the initializer (e.g. `borrow var " +
+                             stmt->name + ":" + stmt->typeName + " = &x;`)",
+                         stmt);
         }
         // generateBorrowExpr validates borrow state for the source variable
         llvm::Value* ptrVal = generateBorrowExpr(bw);
         if (!ptrVal->getType()->isPointerTy()) {
-            codegenError("Reference borrow source for '" + stmt->name +
-                         "' did not produce a pointer", stmt);
+            codegenError("Reference borrow source for '" + stmt->name + "' did not produce a pointer", stmt);
         }
         // Allocate a pointer slot for the reference variable itself.
         llvm::Type* refStorageTy = llvm::PointerType::getUnqual(*context);
-        llvm::AllocaInst* refAlloca =
-            createEntryBlockAlloca(function, stmt->name, refStorageTy);
+        llvm::AllocaInst* refAlloca = createEntryBlockAlloca(function, stmt->name, refStorageTy);
         builder->CreateAlignedStore(ptrVal, refAlloca, llvm::MaybeAlign(8));
         // Strip the leading '&' to get the element annotation (e.g. "i64").
         const std::string elemAnnot = stmt->typeName.substr(1);
@@ -113,9 +109,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     }
 
     // Resolve the alloca type from the type annotation if present.
-    llvm::Type* allocaType = stmt->typeName.empty()
-                                 ? getDefaultType()
-                                 : resolveAnnotatedType(stmt->typeName);
+    llvm::Type* allocaType = stmt->typeName.empty() ? getDefaultType() : resolveAnnotatedType(stmt->typeName);
     llvm::Value* initValue = nullptr;
 
     // Check if this is a SIMD vector type.
@@ -134,36 +128,34 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 llvm::Value* elem = generateExpression(arrExpr->elements[0].get());
                 elem = convertToVectorElement(elem, elemTy);
                 llvm::Value* vec = llvm::UndefValue::get(vecTy);
-                vec = builder->CreateInsertElement(vec, elem,
-                    llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "simd.broadcast");
+                vec = builder->CreateInsertElement(
+                    vec, elem, llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "simd.broadcast");
                 vec = builder->CreateShuffleVector(vec, llvm::UndefValue::get(vecTy),
-                    llvm::ConstantAggregateZero::get(
-                        llvm::FixedVectorType::get(llvm::Type::getInt32Ty(*context), numElems)),
-                    "simd.splat");
+                                                   llvm::ConstantAggregateZero::get(llvm::FixedVectorType::get(
+                                                       llvm::Type::getInt32Ty(*context), numElems)),
+                                                   "simd.splat");
                 initValue = vec;
             } else if (arrExpr->elements.size() != numElems) {
                 codegenError("SIMD vector type requires exactly " + std::to_string(numElems) +
-                                 " elements (or 1 to broadcast), but " +
-                                 std::to_string(arrExpr->elements.size()) +
+                                 " elements (or 1 to broadcast), but " + std::to_string(arrExpr->elements.size()) +
                                  " provided",
                              stmt);
             } else {
-            // Start with an undef vector and insert each element.
-            llvm::Value* vec = llvm::UndefValue::get(vecTy);
-            for (unsigned i = 0; i < numElems; ++i) {
-                llvm::Value* elem = generateExpression(arrExpr->elements[i].get());
-                elem = convertToVectorElement(elem, elemTy);
-                vec = builder->CreateInsertElement(vec, elem,
-                    llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), i), "simd.ins");
-            }
-            initValue = vec;
+                // Start with an undef vector and insert each element.
+                llvm::Value* vec = llvm::UndefValue::get(vecTy);
+                for (unsigned i = 0; i < numElems; ++i) {
+                    llvm::Value* elem = generateExpression(arrExpr->elements[i].get());
+                    elem = convertToVectorElement(elem, elemTy);
+                    vec = builder->CreateInsertElement(
+                        vec, elem, llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), i), "simd.ins");
+                }
+                initValue = vec;
             }
         } else {
             // Check if this array literal is eligible for stack allocation.
             bool useStackAlloc = false;
             bool useReadOnlyGlobal = false;
-            if (stmt->initializer->type == ASTNodeType::ARRAY_EXPR &&
-                optimizationLevel >= OptimizationLevel::O1) {
+            if (stmt->initializer->type == ASTNodeType::ARRAY_EXPR && optimizationLevel >= OptimizationLevel::O1) {
                 auto* arrExpr = static_cast<ArrayExpr*>(stmt->initializer.get());
                 bool hasSpreadElem = false;
                 bool allIntLiterals = true;
@@ -173,17 +165,14 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                         break;
                     }
                     if (elem->type == ASTNodeType::LITERAL_EXPR &&
-                        static_cast<LiteralExpr*>(elem.get())->literalType ==
-                            LiteralExpr::LiteralType::INTEGER) {
-                        continue;  // OK
+                        static_cast<LiteralExpr*>(elem.get())->literalType == LiteralExpr::LiteralType::INTEGER) {
+                        continue; // OK
                     }
                     // Negative integer literal: unary `-` on integer.
                     if (elem->type == ASTNodeType::UNARY_EXPR) {
                         auto* un = static_cast<UnaryExpr*>(elem.get());
-                        if (un->op == "-" && un->operand &&
-                            un->operand->type == ASTNodeType::LITERAL_EXPR &&
-                            static_cast<LiteralExpr*>(un->operand.get())
-                                    ->literalType ==
+                        if (un->op == "-" && un->operand && un->operand->type == ASTNodeType::LITERAL_EXPR &&
+                            static_cast<LiteralExpr*>(un->operand.get())->literalType ==
                                 LiteralExpr::LiteralType::INTEGER) {
                             continue;
                         }
@@ -193,8 +182,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 const size_t n = arrExpr->elements.size();
                 if (!hasSpreadElem) {
                     // Strongest form: bind the var to a private global
-                    if (allIntLiterals && n >= 2 &&
-                        optimizationLevel >= OptimizationLevel::O2 &&
+                    if (allIntLiterals && n >= 2 && optimizationLevel >= OptimizationLevel::O2 &&
                         doesVarHaveOnlyReadOnlyUses(stmt->name)) {
                         useReadOnlyGlobal = true;
                     } else if (n <= kMaxStackArrayElements &&
@@ -212,14 +200,12 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 }
             }
             // ── array_fill(N, V) → ro-global LUT ────────────────────────────
-            else if (stmt->initializer->type == ASTNodeType::CALL_EXPR &&
-                     optimizationLevel >= OptimizationLevel::O2) {
+            else if (stmt->initializer->type == ASTNodeType::CALL_EXPR && optimizationLevel >= OptimizationLevel::O2) {
                 auto* call = static_cast<CallExpr*>(stmt->initializer.get());
-                if (call->callee == "array_fill" &&
-                    call->arguments.size() == 2) {
-                    auto getConstInt = [](const Expression* e,
-                                          int64_t& out) -> bool {
-                        if (!e) return false;
+                if (call->callee == "array_fill" && call->arguments.size() == 2) {
+                    auto getConstInt = [](const Expression* e, int64_t& out) -> bool {
+                        if (!e)
+                            return false;
                         if (e->type == ASTNodeType::LITERAL_EXPR) {
                             auto* lit = static_cast<const LiteralExpr*>(e);
                             if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
@@ -229,8 +215,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                         }
                         if (e->type == ASTNodeType::UNARY_EXPR) {
                             auto* un = static_cast<const UnaryExpr*>(e);
-                            if (un->op == "-" && un->operand &&
-                                un->operand->type == ASTNodeType::LITERAL_EXPR) {
+                            if (un->op == "-" && un->operand && un->operand->type == ASTNodeType::LITERAL_EXPR) {
                                 auto* lit = static_cast<const LiteralExpr*>(un->operand.get());
                                 if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
                                     out = -lit->intValue;
@@ -241,10 +226,8 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                         return false;
                     };
                     int64_t nVal = 0, vVal = 0;
-                    if (getConstInt(call->arguments[0].get(), nVal) &&
-                        getConstInt(call->arguments[1].get(), vVal) &&
-                        nVal >= 2 && nVal <= 1024 &&
-                        doesVarHaveOnlyReadOnlyUses(stmt->name)) {
+                    if (getConstInt(call->arguments[0].get(), nVal) && getConstInt(call->arguments[1].get(), vVal) &&
+                        nVal >= 2 && nVal <= 1024 && doesVarHaveOnlyReadOnlyUses(stmt->name)) {
                         useReadOnlyGlobal = true;
                         pendingArrayReadOnlyGlobal_ = true;
                     }
@@ -256,8 +239,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             // post-generateExpression arrayVars_ tracking block below.
             if (stmt->initializer->type == ASTNodeType::CALL_EXPR) {
                 auto* call = static_cast<CallExpr*>(stmt->initializer.get());
-                if (!call->arguments.empty() &&
-                    (call->callee == "filter" || call->callee == "std::filter")) {
+                if (!call->arguments.empty() && (call->callee == "filter" || call->callee == "std::filter")) {
                     auto* firstArg = call->arguments[0].get();
                     if (firstArg) {
                         if (firstArg->type == ASTNodeType::IDENTIFIER_EXPR) {
@@ -293,10 +275,8 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         // fat-pointer layout ([ len | cap | data... ]) we cannot use strdup
         // (which interprets the header bytes as a C string).  Instead allocate
         // a new fat-pointer block and memcpy the data.
-        if (!stmt->isConst &&
-            stmt->initializer->type == ASTNodeType::LITERAL_EXPR &&
-            static_cast<LiteralExpr*>(stmt->initializer.get())->literalType ==
-                LiteralExpr::LiteralType::STRING) {
+        if (!stmt->isConst && stmt->initializer->type == ASTNodeType::LITERAL_EXPR &&
+            static_cast<LiteralExpr*>(stmt->initializer.get())->literalType == LiteralExpr::LiteralType::STRING) {
             if (doesVarHaveOnlyReadOnlyUses(stmt->name)) {
                 // Static: use the literal pointer directly — no allocation.
                 staticStringVars_.insert(stmt->name);
@@ -306,15 +286,14 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 //   1. Read the stored length.
                 //   2. Allocate a new header+data block.
                 //   3. memcpy the char data (len+1 bytes for NUL).
-                llvm::Value* srcLen  = emitStringLen(initValue, "strdup.srclen");
-                llvm::Value* newHdr  = emitAllocString(srcLen, srcLen, "strdup");
+                llvm::Value* srcLen = emitStringLen(initValue, "strdup.srclen");
+                llvm::Value* newHdr = emitAllocString(srcLen, srcLen, "strdup");
                 llvm::Value* dstData = emitStringData(newHdr, "strdup.dstdata");
                 llvm::Value* srcData = emitStringData(initValue, "strdup.srcdata");
-                llvm::Value* cpLen   = builder->CreateAdd(srcLen,
-                    llvm::ConstantInt::get(getDefaultType(), 1),
-                    "strdup.cplen", /*NUW=*/true, /*NSW=*/true);
+                llvm::Value* cpLen = builder->CreateAdd(srcLen, llvm::ConstantInt::get(getDefaultType(), 1),
+                                                        "strdup.cplen", /*NUW=*/true, /*NSW=*/true);
                 builder->CreateCall(getOrDeclareMemcpy(), {dstData, srcData, cpLen});
-                initValue  = newHdr;
+                initValue = newHdr;
                 allocaType = initValue->getType();
             }
         }
@@ -346,8 +325,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     if (stmt->isRegister) {
         // Warn at compile time if the type can't be promoted to a register
         // (arrays, structs, pointers/strings are not promotable by mem2reg).
-        if (allocaType->isArrayTy() || allocaType->isStructTy() ||
-            allocaType->isPointerTy()) {
+        if (allocaType->isArrayTy() || allocaType->isStructTy() || allocaType->isPointerTy()) {
             const Diagnostic warn{DiagnosticSeverity::Warning,
                                   {"", stmt->line, stmt->column},
                                   "'register' variable '" + stmt->name +
@@ -360,9 +338,8 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             // scoped, helping the register allocator.
             const uint64_t sz = module->getDataLayout().getTypeAllocSize(allocaType);
             auto* szVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), sz);
-            auto* lifetimeStart = OMSC_GET_INTRINSIC_STMT(
-                module.get(), llvm::Intrinsic::lifetime_start,
-                {llvm::PointerType::getUnqual(*context)});
+            auto* lifetimeStart = OMSC_GET_INTRINSIC_STMT(module.get(), llvm::Intrinsic::lifetime_start,
+                                                          {llvm::PointerType::getUnqual(*context)});
             builder->CreateCall(lifetimeStart, {szVal, alloca});
         }
         if (allocaType->isIntegerTy() || allocaType->isDoubleTy() || allocaType->isFloatTy())
@@ -384,10 +361,8 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         atomicVars_.insert(stmt->name);
         // Non-pointer integer/float scalars need alignment == their storage size.
         // Pointers on LP64 need 8-byte alignment (already the default).
-        if (allocaType->isIntegerTy() || allocaType->isFloatTy() ||
-            allocaType->isDoubleTy()) {
-            const llvm::Align naturalAlign =
-                module->getDataLayout().getABITypeAlign(allocaType);
+        if (allocaType->isIntegerTy() || allocaType->isFloatTy() || allocaType->isDoubleTy()) {
+            const llvm::Align naturalAlign = module->getDataLayout().getABITypeAlign(allocaType);
             if (alloca->getAlign() < naturalAlign)
                 alloca->setAlignment(naturalAlign);
         }
@@ -400,8 +375,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     // Track dict variables so dict["key"] routes to map_get IR.
     {
         bool isDict = false;
-        if (!stmt->typeName.empty() &&
-            (stmt->typeName == "dict" || stmt->typeName.rfind("dict[", 0) == 0)) {
+        if (!stmt->typeName.empty() && (stmt->typeName == "dict" || stmt->typeName.rfind("dict[", 0) == 0)) {
             isDict = true;
         }
         if (!isDict && stmt->initializer) {
@@ -409,8 +383,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 isDict = true;
             } else if (stmt->initializer->type == ASTNodeType::CALL_EXPR) {
                 auto* call = static_cast<CallExpr*>(stmt->initializer.get());
-                if (call->callee == "map_new" || call->callee == "map_set" ||
-                    call->callee == "map_remove") {
+                if (call->callee == "map_new" || call->callee == "map_set" || call->callee == "map_remove") {
                     isDict = true;
                 }
             }
@@ -433,17 +406,13 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 ptrElemTypes_[stmt->name] = "ptr";
             }
             // ── Element-addressed &x inference ─────────────────────────────
-            if (stmt->initializer &&
-                stmt->initializer->type == ASTNodeType::UNARY_EXPR) {
+            if (stmt->initializer && stmt->initializer->type == ASTNodeType::UNARY_EXPR) {
                 const auto* ue = static_cast<const UnaryExpr*>(stmt->initializer.get());
-                if (ue->op == "&" && ue->operand &&
-                    ue->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
-                    const std::string& srcName =
-                        static_cast<const IdentifierExpr*>(ue->operand.get())->name;
+                if (ue->op == "&" && ue->operand && ue->operand->type == ASTNodeType::IDENTIFIER_EXPR) {
+                    const std::string& srcName = static_cast<const IdentifierExpr*>(ue->operand.get())->name;
                     // Only override if we don't already have an explicit element type
                     // (i.e., the annotation was just bare `ptr`, not `ptr<T>`).
-                    const bool hasExplicitElemType =
-                        (tn.rfind("ptr<", 0) == 0 && tn.back() == '>');
+                    const bool hasExplicitElemType = (tn.rfind("ptr<", 0) == 0 && tn.back() == '>');
                     if (!hasExplicitElemType) {
                         auto tit = varTypeAnnotations_.find(srcName);
                         if (tit != varTypeAnnotations_.end() && !tit->second.empty()) {
@@ -470,10 +439,9 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     lastAllocWasArena_ = false;
                 } else if (stmt->initializer->type == ASTNodeType::CALL_EXPR) {
                     auto* call = static_cast<CallExpr*>(stmt->initializer.get());
-                    const bool isHeapAlloc =
-                        call->callee == "malloc" || call->callee == "realloc" ||
-                        call->callee == "calloc" ||
-                        (call->callee.rfind("alloc<", 0) == 0 && call->callee.back() == '>');
+                    const bool isHeapAlloc = call->callee == "malloc" || call->callee == "realloc" ||
+                                             call->callee == "calloc" ||
+                                             (call->callee.rfind("alloc<", 0) == 0 && call->callee.back() == '>');
                     if (isHeapAlloc) {
                         heapPtrVarNames_.insert(stmt->name);
                         arenaPtrVarNames_.erase(stmt->name);
@@ -522,13 +490,11 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             // Create a companion alloca for the length in the entry block.
             llvm::Function* fn = builder->GetInsertBlock()->getParent();
             llvm::IRBuilder<> entryB(&fn->getEntryBlock(), fn->getEntryBlock().begin());
-            auto* lenAlloca = entryB.CreateAlloca(getDefaultType(), nullptr,
-                                                   stmt->name + ".pslice.len");
+            auto* lenAlloca = entryB.CreateAlloca(getDefaultType(), nullptr, stmt->name + ".pslice.len");
             lenAlloca->setAlignment(llvm::Align(8));
             psliceLenAllocas_[stmt->name] = lenAlloca;
             // Zero-init the len alloca so it is defined even without initializer.
-            builder->CreateAlignedStore(
-                llvm::ConstantInt::get(getDefaultType(), 0), lenAlloca, llvm::Align(8));
+            builder->CreateAlignedStore(llvm::ConstantInt::get(getDefaultType(), 0), lenAlloca, llvm::Align(8));
         } else {
             psliceVarNames_.erase(stmt->name);
             psliceElemTypes_.erase(stmt->name);
@@ -541,8 +507,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     // from string pointers (both now use pointer-typed allocas).
     {
         bool isArray = false;
-        if (!stmt->typeName.empty() &&
-            stmt->typeName.size() >= 2 &&
+        if (!stmt->typeName.empty() && stmt->typeName.size() >= 2 &&
             stmt->typeName.compare(stmt->typeName.size() - 2, 2, "[]") == 0) {
             isArray = true;
         }
@@ -551,17 +516,14 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 isArray = true;
             } else if (stmt->initializer->type == ASTNodeType::CALL_EXPR) {
                 auto* call = static_cast<CallExpr*>(stmt->initializer.get());
-                if (call->callee == "array_fill" || call->callee == "array_concat" ||
-                    call->callee == "array_copy" || call->callee == "array_map" ||
-                    call->callee == "array_filter" || call->callee == "array_slice" ||
-                    call->callee == "push" || call->callee == "pop" ||
-                    call->callee == "shift" || call->callee == "unshift" ||
-                    call->callee == "sort" || call->callee == "reverse" ||
+                if (call->callee == "array_fill" || call->callee == "array_concat" || call->callee == "array_copy" ||
+                    call->callee == "array_map" || call->callee == "array_filter" || call->callee == "array_slice" ||
+                    call->callee == "push" || call->callee == "pop" || call->callee == "shift" ||
+                    call->callee == "unshift" || call->callee == "sort" || call->callee == "reverse" ||
                     call->callee == "array_remove" || call->callee == "array_reduce" ||
                     call->callee == "array_insert" || call->callee == "array_unique" ||
-                    call->callee == "array_rotate" || call->callee == "array_zip" ||
-                    call->callee == "array_take" || call->callee == "array_drop" ||
-                    call->callee == "range" || call->callee == "range_step" ||
+                    call->callee == "array_rotate" || call->callee == "array_zip" || call->callee == "array_take" ||
+                    call->callee == "array_drop" || call->callee == "range" || call->callee == "range_step" ||
                     call->callee == "str_split" || call->callee == "str_chars" ||
                     arrayReturningFunctions_.count(call->callee)) {
                     isArray = true;
@@ -598,6 +560,25 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             arrayVars_.erase(stmt->name);
     }
 
+    // Track compile-time-constant array lengths for spread-in-function-call support.
+    // When the initializer is a literal array, record its static element count.
+    if (stmt->initializer && stmt->initializer->type == ASTNodeType::ARRAY_EXPR) {
+        auto* ae = static_cast<ArrayExpr*>(stmt->initializer.get());
+        // Only track if no spread elements (spread makes static size ambiguous here).
+        bool hasSpreadElem = false;
+        for (auto& e : ae->elements)
+            if (e->type == ASTNodeType::SPREAD_EXPR) {
+                hasSpreadElem = true;
+                break;
+            }
+        if (!hasSpreadElem)
+            arrayCompTimeLens_[stmt->name] = static_cast<int64_t>(ae->elements.size());
+        else
+            arrayCompTimeLens_.erase(stmt->name);
+    } else {
+        arrayCompTimeLens_.erase(stmt->name);
+    }
+
     bindVariableAnnotated(stmt->name, alloca, stmt->typeName, stmt->isConst);
 
     // If the initializer was a borrow expression, register the alias mapping
@@ -632,32 +613,27 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             if (stmt->isVolatile) {
                 initStore->setVolatile(true);
             }
-            if (stmt->isAtomic && (allocaType->isIntegerTy() ||
-                                   allocaType->isFloatTy()   ||
-                                   allocaType->isDoubleTy()  ||
+            if (stmt->isAtomic && (allocaType->isIntegerTy() || allocaType->isFloatTy() || allocaType->isDoubleTy() ||
                                    allocaType->isPointerTy())) {
-                const llvm::Align atomAlign =
-                    module->getDataLayout().getABITypeAlign(allocaType);
-                initStore->setAtomic(llvm::AtomicOrdering::SequentiallyConsistent,
-                                     llvm::SyncScope::System);
+                const llvm::Align atomAlign = module->getDataLayout().getABITypeAlign(allocaType);
+                initStore->setAtomic(llvm::AtomicOrdering::SequentiallyConsistent, llvm::SyncScope::System);
                 initStore->setAlignment(atomAlign);
             }
             // Tag non-volatile, non-atomic scalar init stores with the scalar
             // TBAA node so LLVM AA can distinguish named-variable slots from
             // heap array/struct/map data.
             if (!stmt->isVolatile && !stmt->isAtomic && tbaaScalar_ &&
-                (allocaType->isIntegerTy() || allocaType->isFloatTy() ||
-                 allocaType->isDoubleTy()  || allocaType->isPointerTy()))
+                (allocaType->isIntegerTy() || allocaType->isFloatTy() || allocaType->isDoubleTy() ||
+                 allocaType->isPointerTy()))
                 initStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
         }
         // For pslice variables, also store the length stashed by pslice_new<T>.
         if (psliceVarNames_.count(stmt->name) && lastPsliceNewLen_) {
             auto lenIt = psliceLenAllocas_.find(stmt->name);
             if (lenIt != psliceLenAllocas_.end()) {
-                llvm::Value* lenToStore = builder->CreateIntCast(
-                    lastPsliceNewLen_, getDefaultType(), /*isSigned=*/false, "pslice.len.cast");
-                auto* lenStore = builder->CreateAlignedStore(
-                    lenToStore, lenIt->second, llvm::Align(8));
+                llvm::Value* lenToStore =
+                    builder->CreateIntCast(lastPsliceNewLen_, getDefaultType(), /*isSigned=*/false, "pslice.len.cast");
+                auto* lenStore = builder->CreateAlignedStore(lenToStore, lenIt->second, llvm::Align(8));
                 if (tbaaScalar_)
                     lenStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
                 // Record compile-time constant length if available.
@@ -677,8 +653,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             }
             // KnownBits fallback: detect non-negativity through LLVM's
             if (!initNonNeg && optimizationLevel >= OptimizationLevel::O1) {
-                llvm::KnownBits kb = llvm::computeKnownBits(
-                    initValue, module->getDataLayout());
+                llvm::KnownBits kb = llvm::computeKnownBits(initValue, module->getDataLayout());
                 initNonNeg = kb.isNonNegative();
             }
             if (initNonNeg)
@@ -698,8 +673,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 }
             }
             // Track constant integer values for `const` variables and
-            bool isComptimeInit = stmt->initializer &&
-                                  stmt->initializer->type == ASTNodeType::COMPTIME_EXPR;
+            bool isComptimeInit = stmt->initializer && stmt->initializer->type == ASTNodeType::COMPTIME_EXPR;
             if (stmt->isConst || isComptimeInit) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(initValue))
                     constIntFolds_[stmt->name] = ci->getSExtValue();
@@ -731,8 +705,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         }
         // ── CF-CTRE scope propagation ──────────────────────────────────────
         if (ctEngine_) {
-            bool hasComptimeInit3 = stmt->initializer &&
-                                    stmt->initializer->type == ASTNodeType::COMPTIME_EXPR;
+            bool hasComptimeInit3 = stmt->initializer && stmt->initializer->type == ASTNodeType::COMPTIME_EXPR;
             if (hasComptimeInit3 && lastComptimeCtResult_) {
                 // Case 1 — consume the stashed CT result.
                 const CTValue& ctv = *lastComptimeCtResult_;
@@ -758,12 +731,12 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             }
         }
         // Propagate integer constant from a zero-param constant-returning fn:
-        if (stmt->isConst && stmt->initializer &&
-            stmt->initializer->type == ASTNodeType::CALL_EXPR) {
+        if (stmt->isConst && stmt->initializer && stmt->initializer->type == ASTNodeType::CALL_EXPR) {
             auto* callInit = static_cast<CallExpr*>(stmt->initializer.get());
             if (callInit->arguments.empty() && optCtx_) {
                 auto v = optCtx_->constIntReturn(callInit->callee);
-                if (v) constIntFolds_.try_emplace(stmt->name, *v);
+                if (v)
+                    constIntFolds_.try_emplace(stmt->name, *v);
             }
         }
         // Track whether this variable holds a string value so that print(),
@@ -794,8 +767,7 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 if (sizeExpr->type == ASTNodeType::LITERAL_EXPR) {
                     auto* lit = static_cast<LiteralExpr*>(sizeExpr);
                     if (lit->literalType == LiteralExpr::LiteralType::INTEGER && lit->intValue > 0) {
-                        knownArraySizes_[stmt->name] =
-                            llvm::ConstantInt::get(getDefaultType(), lit->intValue);
+                        knownArraySizes_[stmt->name] = llvm::ConstantInt::get(getDefaultType(), lit->intValue);
                     }
                 } else if (sizeExpr->type == ASTNodeType::IDENTIFIER_EXPR) {
                     // Variable-size array_fill(varName, val): track the alloca of
@@ -817,7 +789,8 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
             builder->CreateAlignedStore(llvm::ConstantFP::get(allocaType, 0.0), alloca, alloca->getAlign());
         else {
             const unsigned bits = allocaType->isIntegerTy() ? allocaType->getIntegerBitWidth() : 64;
-            builder->CreateAlignedStore(llvm::ConstantInt::get(*context, llvm::APInt(bits, 0)), alloca, alloca->getAlign());
+            builder->CreateAlignedStore(llvm::ConstantInt::get(*context, llvm::APInt(bits, 0)), alloca,
+                                        alloca->getAlign());
         }
     }
 }
@@ -829,11 +802,10 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
     auto emitArenaFreeIfNeeded = [&]() {
         if (!funcArenaBaseAlloca_)
             return;
-        auto* ptrTy  = llvm::PointerType::getUnqual(*context);
-        auto* i64Ty  = llvm::Type::getInt64Ty(*context);
-        auto* lifeSzVal = llvm::ConstantInt::get(
-            i64Ty, static_cast<int64_t>(kFuncArenaSlabSize));
-        auto* lifetimeEnd = OMSC_GET_INTRINSIC_STMT(  // same as OMSC_GET_INTRINSIC; _STMT suffix is the local alias
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        auto* i64Ty = llvm::Type::getInt64Ty(*context);
+        auto* lifeSzVal = llvm::ConstantInt::get(i64Ty, static_cast<int64_t>(kFuncArenaSlabSize));
+        auto* lifetimeEnd = OMSC_GET_INTRINSIC_STMT( // same as OMSC_GET_INTRINSIC; _STMT suffix is the local alias
             module.get(), llvm::Intrinsic::lifetime_end, {ptrTy});
         builder->CreateCall(lifetimeEnd, {lifeSzVal, funcArenaBaseAlloca_});
     };
@@ -850,11 +822,14 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
             }
         }
         for (const auto& pfVar : prefetchedVars_) {
-            if (pfVar == returnedVar) continue; // being returned — exempt
+            if (pfVar == returnedVar)
+                continue; // being returned — exempt
             if (!deadVars_.count(pfVar)) {
                 codegenError("Prefetched variable '" + pfVar +
-                             "' must be explicitly invalidated before return "
-                             "(use 'invalidate " + pfVar + ";')", stmt);
+                                 "' must be explicitly invalidated before return "
+                                 "(use 'invalidate " +
+                                 pfVar + ";')",
+                             stmt);
             }
         }
     }
@@ -877,14 +852,12 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
             if (auto* callInst = llvm::dyn_cast<llvm::CallInst>(retValue)) {
                 // Self-recursive tail calls get musttail: this GUARANTEES the
                 llvm::Function* calledFn = callInst->getCalledFunction();
-                if (calledFn && calledFn == currentFn &&
-                    calledFn->getReturnType() == currentFn->getReturnType() &&
+                if (calledFn && calledFn == currentFn && calledFn->getReturnType() == currentFn->getReturnType() &&
                     calledFn->arg_size() == callInst->arg_size()) {
                     // Verify all parameter types match (required by musttail).
                     bool typesMatch = true;
                     for (unsigned i = 0; i < calledFn->arg_size(); ++i) {
-                        if (callInst->getArgOperand(i)->getType() !=
-                            calledFn->getFunctionType()->getParamType(i)) {
+                        if (callInst->getArgOperand(i)->getType() != calledFn->getFunctionType()->getParamType(i)) {
                             typesMatch = false;
                             break;
                         }
@@ -908,24 +881,23 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
             }
         }
         for (const auto& pfParam : prefetchedParams_) {
-            if (pfParam == transferredParam) continue; // transferred out — keep in cache
+            if (pfParam == transferredParam)
+                continue; // transferred out — keep in cache
             auto it = namedValues.find(pfParam);
             if (it != namedValues.end()) {
-                llvm::Value* ptrVal = builder->CreateLoad(
-                    llvm::cast<llvm::AllocaInst>(it->second)->getAllocatedType(),
-                    it->second, pfParam + ".pf.exit");
-                llvm::Value* ptr = builder->CreateIntToPtr(
-                    ptrVal, llvm::PointerType::getUnqual(*context), pfParam + ".pf.evict");
-                llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
-                    module.get(), llvm::Intrinsic::prefetch,
-                    {llvm::PointerType::getUnqual(*context)});
+                llvm::Value* ptrVal = builder->CreateLoad(llvm::cast<llvm::AllocaInst>(it->second)->getAllocatedType(),
+                                                          it->second, pfParam + ".pf.exit");
+                llvm::Value* ptr =
+                    builder->CreateIntToPtr(ptrVal, llvm::PointerType::getUnqual(*context), pfParam + ".pf.evict");
+                llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(module.get(), llvm::Intrinsic::prefetch,
+                                                                     {llvm::PointerType::getUnqual(*context)});
                 // locality=0: hint CPU to evict from cache (no temporal reuse)
                 builder->CreateCall(prefetchFn, {
-                    ptr,
-                    builder->getInt32(0),  // read
-                    builder->getInt32(0),  // locality=0: evict
-                    builder->getInt32(1)   // data cache
-                });
+                                                    ptr,
+                                                    builder->getInt32(0), // read
+                                                    builder->getInt32(0), // locality=0: evict
+                                                    builder->getInt32(1)  // data cache
+                                                });
             }
         }
 
@@ -938,20 +910,14 @@ void CodeGenerator::generateReturn(ReturnStmt* stmt) {
         for (const auto& pfParam : prefetchedParams_) {
             auto it = namedValues.find(pfParam);
             if (it != namedValues.end()) {
-                llvm::Value* ptrVal = builder->CreateLoad(
-                    llvm::cast<llvm::AllocaInst>(it->second)->getAllocatedType(),
-                    it->second, pfParam + ".pf.exit");
-                llvm::Value* ptr = builder->CreateIntToPtr(
-                    ptrVal, llvm::PointerType::getUnqual(*context), pfParam + ".pf.evict");
-                llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
-                    module.get(), llvm::Intrinsic::prefetch,
-                    {llvm::PointerType::getUnqual(*context)});
-                builder->CreateCall(prefetchFn, {
-                    ptr,
-                    builder->getInt32(0),
-                    builder->getInt32(0),
-                    builder->getInt32(1)
-                });
+                llvm::Value* ptrVal = builder->CreateLoad(llvm::cast<llvm::AllocaInst>(it->second)->getAllocatedType(),
+                                                          it->second, pfParam + ".pf.exit");
+                llvm::Value* ptr =
+                    builder->CreateIntToPtr(ptrVal, llvm::PointerType::getUnqual(*context), pfParam + ".pf.evict");
+                llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(module.get(), llvm::Intrinsic::prefetch,
+                                                                     {llvm::PointerType::getUnqual(*context)});
+                builder->CreateCall(prefetchFn,
+                                    {ptr, builder->getInt32(0), builder->getInt32(0), builder->getInt32(1)});
             }
         }
 
@@ -971,7 +937,8 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
     if (optCtx_) {
         if (optCtx_->isThenBranchDead(stmt)) {
             // Condition is always false — only generate else branch.
-            if (stmt->elseBranch) generateStatement(stmt->elseBranch.get());
+            if (stmt->elseBranch)
+                generateStatement(stmt->elseBranch.get());
             return;
         }
         if (optCtx_->isElseBranchDead(stmt)) {
@@ -1012,8 +979,7 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
             // Block with a single statement
             if (branch->type == ASTNodeType::BLOCK) {
                 auto* block = static_cast<BlockStmt*>(branch);
-                if (block->statements.size() == 1 &&
-                    block->statements[0]->type == ASTNodeType::EXPR_STMT) {
+                if (block->statements.size() == 1 && block->statements[0]->type == ASTNodeType::EXPR_STMT) {
                     auto* exprStmt = static_cast<ExprStmt*>(block->statements[0].get());
                     if (exprStmt->expression->type == ASTNodeType::ASSIGN_EXPR)
                         return static_cast<AssignExpr*>(exprStmt->expression.get());
@@ -1028,8 +994,10 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
         if (thenAssign && elseAssign && thenAssign->name == elseAssign->name) {
             // Check that both RHS values are simple side-effect-free expressions.
             auto isSimpleValue = [](Expression* e) -> bool {
-                if (e->type == ASTNodeType::LITERAL_EXPR) return true;
-                if (e->type == ASTNodeType::IDENTIFIER_EXPR) return true;
+                if (e->type == ASTNodeType::LITERAL_EXPR)
+                    return true;
+                if (e->type == ASTNodeType::IDENTIFIER_EXPR)
+                    return true;
                 if (e->type == ASTNodeType::UNARY_EXPR) {
                     auto* u = static_cast<UnaryExpr*>(e);
                     return (u->op == "-" || u->op == "~" || u->op == "!") &&
@@ -1038,21 +1006,19 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
                 }
                 if (e->type == ASTNodeType::BINARY_EXPR) {
                     auto* b = static_cast<BinaryExpr*>(e);
-                    const bool lhsSimple = b->left->type == ASTNodeType::IDENTIFIER_EXPR ||
-                                           b->left->type == ASTNodeType::LITERAL_EXPR;
-                    const bool rhsSimple = b->right->type == ASTNodeType::IDENTIFIER_EXPR ||
-                                           b->right->type == ASTNodeType::LITERAL_EXPR;
+                    const bool lhsSimple =
+                        b->left->type == ASTNodeType::IDENTIFIER_EXPR || b->left->type == ASTNodeType::LITERAL_EXPR;
+                    const bool rhsSimple =
+                        b->right->type == ASTNodeType::IDENTIFIER_EXPR || b->right->type == ASTNodeType::LITERAL_EXPR;
                     const std::string& op = b->op;
-                    const bool safeOp = (op == "+" || op == "-" || op == "*" ||
-                                         op == "&" || op == "|" || op == "^" ||
+                    const bool safeOp = (op == "+" || op == "-" || op == "*" || op == "&" || op == "|" || op == "^" ||
                                          op == "<<" || op == ">>");
                     return lhsSimple && rhsSimple && safeOp;
                 }
                 return false;
             };
 
-            if (isSimpleValue(thenAssign->value.get()) &&
-                isSimpleValue(elseAssign->value.get())) {
+            if (isSimpleValue(thenAssign->value.get()) && isSimpleValue(elseAssign->value.get())) {
                 // Emit both values eagerly and use select.
                 llvm::Value* thenVal = generateExpression(thenAssign->value.get());
                 llvm::Value* elseVal = generateExpression(elseAssign->value.get());
@@ -1118,26 +1084,31 @@ void CodeGenerator::generateIf(IfStmt* stmt) {
         [&]() {
             // Peel outermost icmp ne %x, 0 (from toBool)
             auto* outerNE = llvm::dyn_cast<llvm::ICmpInst>(condBool);
-            if (!outerNE || outerNE->getPredicate() != llvm::ICmpInst::ICMP_NE) return;
+            if (!outerNE || outerNE->getPredicate() != llvm::ICmpInst::ICMP_NE)
+                return;
             auto* outerRHS = llvm::dyn_cast<llvm::ConstantInt>(outerNE->getOperand(1));
-            if (!outerRHS || !outerRHS->isZero()) return;
+            if (!outerRHS || !outerRHS->isZero())
+                return;
             // Peel optional zext
             llvm::Value* inner = outerNE->getOperand(0);
             if (auto* z = llvm::dyn_cast<llvm::ZExtInst>(inner))
                 inner = z->getOperand(0);
             // Must be an icmp eq/ne against zero
             auto* innerCmp = llvm::dyn_cast<llvm::ICmpInst>(inner);
-            if (!innerCmp) return;
+            if (!innerCmp)
+                return;
             llvm::ConstantInt* zeroC = nullptr;
             llvm::Value* tested = nullptr;
             if ((zeroC = llvm::dyn_cast<llvm::ConstantInt>(innerCmp->getOperand(1))))
                 tested = innerCmp->getOperand(0);
             else if ((zeroC = llvm::dyn_cast<llvm::ConstantInt>(innerCmp->getOperand(0))))
                 tested = innerCmp->getOperand(1);
-            if (!zeroC || !zeroC->isZero() || !tested) return;
+            if (!zeroC || !zeroC->isZero() || !tested)
+                return;
             const bool isEqZero = (innerCmp->getPredicate() == llvm::ICmpInst::ICMP_EQ);
             const bool isNeZero = (innerCmp->getPredicate() == llvm::ICmpInst::ICMP_NE);
-            if (!isEqZero && !isNeZero) return;
+            if (!isEqZero && !isNeZero)
+                return;
             // eq 0 → then-branch (zero path) is rare; ne 0 → then-branch is common.
             const uint32_t thenW = isEqZero ? 1u : 99u;
             const uint32_t elseW = isEqZero ? 99u : 1u;
@@ -1247,20 +1218,21 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     // A preheader assume is emitted once, establishes the invariant at loop
     // entry, and does not appear on any hot back-edge path.
     if (optimizationLevel >= OptimizationLevel::O2) {
-        llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
-            module.get(), llvm::Intrinsic::assume, {});
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(module.get(), llvm::Intrinsic::assume, {});
         llvm::Type* i64Ty = getDefaultType();
         for (auto& kv : namedValues) {
             auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(kv.second);
-            if (!alloca) continue;
-            if (!nonNegValues_.count(alloca)) continue;
+            if (!alloca)
+                continue;
+            if (!nonNegValues_.count(alloca))
+                continue;
             // Only assume for integer allocas — float/pointer non-negativity
             // is not expressed the same way and would confuse LLVM.
-            if (!alloca->getAllocatedType()->isIntegerTy()) continue;
+            if (!alloca->getAllocatedType()->isIntegerTy())
+                continue;
             const std::string varName = kv.first().str();
-            auto* preLoad = builder->CreateAlignedLoad(
-                alloca->getAllocatedType(), alloca,
-                llvm::MaybeAlign(8), (varName + ".pre.nn").c_str());
+            auto* preLoad = builder->CreateAlignedLoad(alloca->getAllocatedType(), alloca, llvm::MaybeAlign(8),
+                                                       (varName + ".pre.nn").c_str());
             // Annotate the preheader load with all applicable metadata so
             // LLVM's LVI/SCEV can use it:
             //   !noundef — OmScript guarantees init before use.
@@ -1268,19 +1240,14 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
             //   !range   — value proven non-negative ([0, INT64_MAX)).
             if (tbaaScalar_)
                 preLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
-            preLoad->setMetadata(llvm::LLVMContext::MD_noundef,
-                                 llvm::MDNode::get(*context, {}));
+            preLoad->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
             if (preLoad->getType()->isIntegerTy(64))
                 preLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             llvm::Value* loaded = preLoad;
             // Widen to i64 if narrower (e.g. i1, i32) before comparison.
-            llvm::Value* asI64 = loaded->getType() == i64Ty
-                ? loaded
-                : builder->CreateSExt(loaded, i64Ty, "nn.sext");
-            llvm::Value* isNN = builder->CreateICmpSGE(
-                asI64,
-                llvm::ConstantInt::get(i64Ty, 0),
-                (varName + ".nn").c_str());
+            llvm::Value* asI64 = loaded->getType() == i64Ty ? loaded : builder->CreateSExt(loaded, i64Ty, "nn.sext");
+            llvm::Value* isNN =
+                builder->CreateICmpSGE(asI64, llvm::ConstantInt::get(i64Ty, 0), (varName + ".nn").c_str());
             builder->CreateCall(assumeFn, {isNN});
         }
     }
@@ -1332,92 +1299,77 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         loopMDs.push_back(nullptr);
         loopMDs.push_back(mustProgress);
         // While-loop unrolling: when truly nested inside another loop
-        if (!inOptMaxFunction && !currentFuncHintUnroll_ && loopNestDepth_ > 1 && optimizationLevel >= OptimizationLevel::O2) {
+        if (!inOptMaxFunction && !currentFuncHintUnroll_ && loopNestDepth_ > 1 &&
+            optimizationLevel >= OptimizationLevel::O2) {
             // Emit unroll.count=2 as a suggestion instead of unroll.disable.
-            loopMDs.push_back(llvm::MDNode::get(
-                *context,
-                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                     llvm::Type::getInt32Ty(*context), 2u))}));
+            loopMDs.push_back(llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                                                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                                               llvm::Type::getInt32Ty(*context), 2u))}));
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
         const bool whileBodyHasNonPow2ModVal = bodyHasNonPow2ModuloValue_;
         if (currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
-        } else if (!whileBodyHasNonPow2ModVal
-                   && (currentFuncHintVectorize_
-                       || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O2
-                           && loopNestDepth_ <= 1))) {
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+        } else if (!whileBodyHasNonPow2ModVal &&
+                   (currentFuncHintVectorize_ ||
+                    (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O2 && loopNestDepth_ <= 1))) {
             // @hot at O2+: auto-enable vectorization for top-level while-loops.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
-        if (currentFuncHintHot_ && currentFuncHintVectorize_
-            && !whileBodyHasNonPow2ModVal
-            && optimizationLevel >= OptimizationLevel::O2
-            && !currentFuncHintNoVectorize_) {
-            loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
+        if (currentFuncHintHot_ && currentFuncHintVectorize_ && !whileBodyHasNonPow2ModVal &&
+            optimizationLevel >= OptimizationLevel::O2 && !currentFuncHintNoVectorize_) {
+            loopMDs.push_back(llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                                                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                                               llvm::Type::getInt32Ty(*context), 4))}));
         }
         // parallel_accesses: suppress when the body has non-pow2 modulo
-        const bool wantParallelWhile = enableParallelize_
-            && !currentFuncHintNoParallelize_
-            && !bodyHasNonPow2Modulo_
-            && loopNestDepth_ <= 1
-            && (currentFuncHintParallelize_
-                || currentFuncHintHot_
-                || optimizationLevel >= OptimizationLevel::O3);
+        const bool wantParallelWhile =
+            enableParallelize_ && !currentFuncHintNoParallelize_ && !bodyHasNonPow2Modulo_ && loopNestDepth_ <= 1 &&
+            (currentFuncHintParallelize_ || currentFuncHintHot_ || optimizationLevel >= OptimizationLevel::O3);
         if (wantParallelWhile) {
             llvm::MDNode* accessGroup = llvm::MDNode::getDistinct(*context, {});
             loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
-                           accessGroup}));
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"), accessGroup}));
             currentLoopAccessGroup_ = accessGroup;
         } else {
             currentLoopAccessGroup_ = nullptr;
         }
 
         // Apply per-loop @loop hints for WhileStmt
-        const LoopConfig& whileLoopHints = (stmt->loopHints.unrollCount > 0 || stmt->loopHints.vectorize || stmt->loopHints.noVectorize || stmt->loopHints.parallel || stmt->loopHints.independent || stmt->loopHints.fuse)
-            ? stmt->loopHints
-            : currentOptMaxConfig_.loop;
+        const LoopConfig& whileLoopHints =
+            (stmt->loopHints.unrollCount > 0 || stmt->loopHints.vectorize || stmt->loopHints.noVectorize ||
+             stmt->loopHints.parallel || stmt->loopHints.independent || stmt->loopHints.fuse)
+                ? stmt->loopHints
+                : currentOptMaxConfig_.loop;
         if (whileLoopHints.unrollCount > 0) {
             loopMDs.push_back(llvm::MDNode::get(
-                *context,
-                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                     llvm::Type::getInt32Ty(*context), (unsigned)whileLoopHints.unrollCount))}));
+                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                               llvm::Type::getInt32Ty(*context), (unsigned)whileLoopHints.unrollCount))}));
         }
         if (whileLoopHints.vectorize) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
         if (whileLoopHints.noVectorize) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
         }
         if (whileLoopHints.parallel) {
             llvm::MDNode* accessGroup2 = llvm::MDNode::getDistinct(*context, {});
             loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
-                           accessGroup2}));
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"), accessGroup2}));
         }
         // @independent for while loops
         if (stmt->loopHints.independent && whileIndependentAccessGroup) {
             loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
-                           whileIndependentAccessGroup}));
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"), whileIndependentAccessGroup}));
         }
 
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
@@ -1496,24 +1448,19 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
         if (currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
-        } else if (currentFuncHintVectorize_
-                   || (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O2
-                       && loopNestDepth_ <= 1)) {
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+        } else if (currentFuncHintVectorize_ ||
+                   (currentFuncHintHot_ && optimizationLevel >= OptimizationLevel::O2 && loopNestDepth_ <= 1)) {
             // Mirror while-loop: @hot+O2+ for top-level do-while loops.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
-        if (currentFuncHintHot_ && currentFuncHintVectorize_
-            && optimizationLevel >= OptimizationLevel::O2
-            && !currentFuncHintNoVectorize_) {
-            loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
+        if (currentFuncHintHot_ && currentFuncHintVectorize_ && optimizationLevel >= OptimizationLevel::O2 &&
+            !currentFuncHintNoVectorize_) {
+            loopMDs.push_back(llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                                                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                                               llvm::Type::getInt32Ty(*context), 4))}));
         }
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
         loopMD->replaceOperandWith(0, loopMD);
@@ -1553,9 +1500,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     const ScopeGuard scope(*this);
 
     // Allocate iterator variable — use annotated type when present
-    llvm::Type* iterType = stmt->iteratorType.empty()
-                               ? getDefaultType()
-                               : resolveAnnotatedType(stmt->iteratorType);
+    llvm::Type* iterType = stmt->iteratorType.empty() ? getDefaultType() : resolveAnnotatedType(stmt->iteratorType);
     llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, stmt->iteratorVar, iterType);
     bindVariable(stmt->iteratorVar, iterAlloca);
 
@@ -1566,8 +1511,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         auto* initSt = builder->CreateAlignedStore(startVal, iterAlloca, iterAlloca->getAlign());
         // Tag the iterator init store with scalar TBAA so LLVM AA knows it
         // doesn't alias heap array/struct/map data.
-        if (tbaaScalar_ && (iterType->isIntegerTy() || iterType->isFloatTy() ||
-                            iterType->isDoubleTy()  || iterType->isPointerTy()))
+        if (tbaaScalar_ &&
+            (iterType->isIntegerTy() || iterType->isFloatTy() || iterType->isDoubleTy() || iterType->isPointerTy()))
             initSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
     }
 
@@ -1604,7 +1549,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         stepVal = convertTo(stepVal, iterType);
         if (auto* stepCI = llvm::dyn_cast<llvm::ConstantInt>(stepVal)) {
             stepKnownPositive = stepCI->getSExtValue() > 0;
-            stepKnownNonZero  = stepCI->getSExtValue() != 0;
+            stepKnownNonZero = stepCI->getSExtValue() != 0;
 
             // Empty-loop elimination for constant wrong-direction step:
             if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
@@ -1640,7 +1585,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         } else {
             llvm::Value* isDesc = builder->CreateICmpSGT(startVal, endVal, "for.isdesc");
             llvm::Value* posOne = llvm::ConstantInt::get(iterType, 1);
-            llvm::Value* negOne = llvm::ConstantInt::get(*context, llvm::APInt(iterBits, static_cast<uint64_t>(-1), true));
+            llvm::Value* negOne =
+                llvm::ConstantInt::get(*context, llvm::APInt(iterBits, static_cast<uint64_t>(-1), true));
             stepVal = builder->CreateSelect(isDesc, negOne, posOne, "for.autostep");
             // Auto-computed step is always +1 or -1, never zero.
             stepKnownNonZero = true;
@@ -1688,7 +1634,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         builder->CreateCondBr(stepNonZero, condBB, stepFailBB, stepW);
 
         builder->SetInsertPoint(stepFailBB);
-        const std::string errorMessage = "Runtime error: for-loop step cannot be zero for iterator '" + stmt->iteratorVar + "'\n";
+        const std::string errorMessage =
+            "Runtime error: for-loop step cannot be zero for iterator '" + stmt->iteratorVar + "'\n";
         llvm::GlobalVariable* messageVar = builder->CreateGlobalString(errorMessage, "forstepmsg");
         llvm::Constant* zeroIndex = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0);
         llvm::Constant* indices[] = {zeroIndex, zeroIndex};
@@ -1700,14 +1647,14 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     }
 
     builder->SetInsertPoint(condBB);
-    llvm::Value* curVal = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), stmt->iteratorVar.c_str());
+    llvm::Value* curVal =
+        builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), stmt->iteratorVar.c_str());
     // Tag iterator loads with TBAA + noundef so LLVM AA and LVI can use them.
     if (auto* curLoadInst = llvm::dyn_cast<llvm::LoadInst>(curVal)) {
-        if (tbaaScalar_ && (iterType->isIntegerTy() || iterType->isFloatTy() ||
-                            iterType->isDoubleTy()  || iterType->isPointerTy()))
+        if (tbaaScalar_ &&
+            (iterType->isIntegerTy() || iterType->isFloatTy() || iterType->isDoubleTy() || iterType->isPointerTy()))
             curLoadInst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
-        curLoadInst->setMetadata(llvm::LLVMContext::MD_noundef,
-                                 llvm::MDNode::get(*context, {}));
+        curLoadInst->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
     }
     // !range on the condition block load: when the loop has constant bounds
     if (stepKnownPositive && iterType->isIntegerTy(64)) {
@@ -1724,8 +1671,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                 llvm::MDBuilder mdB(*context);
                 auto* curLoad = llvm::cast<llvm::LoadInst>(curVal);
                 curLoad->setMetadata(llvm::LLVMContext::MD_range,
-                    mdB.createRange(llvm::APInt(64, 0),
-                                    llvm::APInt(64, bit->second + 1)));
+                                     mdB.createRange(llvm::APInt(64, 0), llvm::APInt(64, bit->second + 1)));
             } else if (!stepIsOne) {
                 // For step > 1, use the generic non-negative range.
                 auto* curLoad = llvm::cast<llvm::LoadInst>(curVal);
@@ -1742,12 +1688,10 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         // Fast path: known ascending loop.
         const bool iterNonNeg = nonNegValues_.count(iterAlloca) > 0;
         const auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal);
-        bool endNonNeg  = nonNegValues_.count(endVal) > 0
-            || (endCI && !endCI->isNegative());
+        bool endNonNeg = nonNegValues_.count(endVal) > 0 || (endCI && !endCI->isNegative());
         // KnownBits fallback: detect non-negativity of end value through
         if (iterNonNeg && !endNonNeg) {
-            llvm::KnownBits endKB = llvm::computeKnownBits(
-                endVal, module->getDataLayout());
+            llvm::KnownBits endKB = llvm::computeKnownBits(endVal, module->getDataLayout());
             endNonNeg = endKB.isNonNegative();
         }
         if (iterNonNeg && endNonNeg) {
@@ -1792,40 +1736,35 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         }
         if (startNonNeg) {
             // Load the iterator once and reuse for all assume conditions.
-            auto* iterLoadForAssume = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), "iter.assume");
+            auto* iterLoadForAssume =
+                builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), "iter.assume");
             // Tag with TBAA + noundef for improved LLVM analysis.
-            if (tbaaScalar_ && (iterType->isIntegerTy() || iterType->isFloatTy() ||
-                                iterType->isDoubleTy()  || iterType->isPointerTy()))
+            if (tbaaScalar_ &&
+                (iterType->isIntegerTy() || iterType->isFloatTy() || iterType->isDoubleTy() || iterType->isPointerTy()))
                 iterLoadForAssume->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
-            iterLoadForAssume->setMetadata(llvm::LLVMContext::MD_noundef,
-                                           llvm::MDNode::get(*context, {}));
+            iterLoadForAssume->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
             llvm::Value* iterVal = iterLoadForAssume;
-            llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
-                module.get(), llvm::Intrinsic::assume, {});
+            llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(module.get(), llvm::Intrinsic::assume, {});
             // Lower bound: assume iter >= 0 (always true for non-negative starts).
-            llvm::Value* isNonNeg = builder->CreateICmpSGE(
-                iterVal, llvm::ConstantInt::get(iterType, 0), "iter.nonneg");
+            llvm::Value* isNonNeg = builder->CreateICmpSGE(iterVal, llvm::ConstantInt::get(iterType, 0), "iter.nonneg");
             builder->CreateCall(assumeFn, {isNonNeg});
             // Tighter lower bound: when start > 0, also assume iter >= start.
             if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
                 if (startCI->getSExtValue() > 0) {
-                    llvm::Value* isGeStart = builder->CreateICmpSGE(
-                        iterVal, startVal, "iter.ge.start");
+                    llvm::Value* isGeStart = builder->CreateICmpSGE(iterVal, startVal, "iter.ge.start");
                     builder->CreateCall(assumeFn, {isGeStart});
                 }
             }
             // Upper bound: assume iter < end.  OmScript's for-loop semantics
-            llvm::Value* isLtEnd = builder->CreateICmpSLT(
-                iterVal, endVal, "iter.lt.end");
+            llvm::Value* isLtEnd = builder->CreateICmpSLT(iterVal, endVal, "iter.lt.end");
             builder->CreateCall(assumeFn, {isLtEnd});
             // Track the alloca as producing non-negative values so that
             nonNegValues_.insert(iterAlloca);
 
             // ── CF-CTRE Phase 9 IV range refinement ────────────────────
             if (optCtx_) {
-                CTInterval ivRange = optCtx_->getExitRange(
-                    builder->GetInsertBlock()->getParent()->getName().str(),
-                    stmt->iteratorVar);
+                CTInterval ivRange =
+                    optCtx_->getExitRange(builder->GetInsertBlock()->getParent()->getName().str(), stmt->iteratorVar);
                 // Only inject if the abstract range is tighter than what we
                 // already know from the start/end IR values.
                 if (ivRange.isRange() && !ivRange.isTop() && ivRange.lo >= 0) {
@@ -1835,8 +1774,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                     const bool knowHi = cHi && cHi->getSExtValue() == ivRange.hi + 1;
                     if (!knowLo || !knowHi) {
                         // Reload the IV (same block — GVN will dedup the load).
-                        llvm::Value* iv2 = builder->CreateAlignedLoad(
-                            iterType, iterAlloca, llvm::MaybeAlign(8), "iter.absi");
+                        llvm::Value* iv2 =
+                            builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), "iter.absi");
                         if (!knowLo) {
                             llvm::Value* c = llvm::ConstantInt::get(iterType, ivRange.lo);
                             llvm::Value* cond = builder->CreateICmpSGE(iv2, c, "iter.absi.lo");
@@ -1881,13 +1820,11 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     llvm::StringMap<llvm::Value*> savedPtrModeLens;
     std::string savedPtrModeIterVar;
 
-    const bool doPtrMode = stepKnownPositive
-        && optimizationLevel >= OptimizationLevel::O2
-        && [&]() {
-               if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(startVal))
-                   return ci->getSExtValue() >= 0;
-               return false;
-           }();
+    const bool doPtrMode = stepKnownPositive && optimizationLevel >= OptimizationLevel::O2 && [&]() {
+        if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(startVal))
+            return ci->getSExtValue() >= 0;
+        return false;
+    }();
 
     if (doPtrMode) {
         // Scan the loop body AST (runs at compile time, not emitted as IR).
@@ -1895,65 +1832,58 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 
         // Save outer loop's pointer-mode state so we can restore it after.
         savedPtrModeDataPtrs = std::move(loopPtrModeDataPtrs_);
-        savedPtrModeLens     = std::move(loopPtrModeLens_);
-        savedPtrModeIterVar  = loopPtrModeIterVar_;
+        savedPtrModeLens = std::move(loopPtrModeLens_);
+        savedPtrModeIterVar = loopPtrModeIterVar_;
         loopPtrModeDataPtrs_.clear();
         loopPtrModeLens_.clear();
         loopPtrModeIterVar_ = stmt->iteratorVar;
 
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
-            module.get(), llvm::Intrinsic::assume, {});
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(module.get(), llvm::Intrinsic::assume, {});
 
         for (auto& [arrName, isWritten] : arrAccesses) {
             // Only handle arrays that are local named variables.
             auto it = namedValues.find(arrName);
-            if (it == namedValues.end()) continue;
+            if (it == namedValues.end())
+                continue;
             // Must be an alloca (local variable), not a parameter forwarded
             // as an integer (those come via function arguments).
-            if (!llvm::isa<llvm::AllocaInst>(it->second)) continue;
+            if (!llvm::isa<llvm::AllocaInst>(it->second))
+                continue;
 
             // Load the array pointer from the alloca (once, before the loop).
-            llvm::Value* arrRaw = builder->CreateAlignedLoad(
-                getDefaultType(), it->second, llvm::MaybeAlign(8),
-                arrName + ".prl.raw");
-            llvm::Value* basePtr =
-                arrRaw->getType()->isPointerTy()
-                    ? arrRaw
-                    : builder->CreateIntToPtr(arrRaw, ptrTy, arrName + ".prl.base");
+            llvm::Value* arrRaw =
+                builder->CreateAlignedLoad(getDefaultType(), it->second, llvm::MaybeAlign(8), arrName + ".prl.raw");
+            llvm::Value* basePtr = arrRaw->getType()->isPointerTy()
+                                       ? arrRaw
+                                       : builder->CreateIntToPtr(arrRaw, ptrTy, arrName + ".prl.base");
 
             // Load the length header once, before the loop.
-            auto* lenLoad = builder->CreateAlignedLoad(
-                getDefaultType(), basePtr, llvm::MaybeAlign(8),
-                arrName + ".prl.len");
+            auto* lenLoad =
+                builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8), arrName + ".prl.len");
             lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
             lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             // If the array is read-only in the loop body, its length is
             // invariant across the loop — mark so LICM can hoist further.
             if (!isWritten)
-                lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
-                                     llvm::MDNode::get(*context, {}));
+                lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load, llvm::MDNode::get(*context, {}));
 
             // Pre-compute data pointer: &arr[0] = base + 1 element.
             llvm::Value* dataPtr = builder->CreateInBoundsGEP(
-                getDefaultType(), basePtr,
-                llvm::ConstantInt::get(getDefaultType(), 1),
-                arrName + ".prl.data");
+                getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), 1), arrName + ".prl.data");
 
             // Emit a SINGLE pre-loop range assertion: end <= len(arr).
-            llvm::Value* endLELen = builder->CreateICmpULE(
-                endVal, lenLoad, arrName + ".prl.safe");
+            llvm::Value* endLELen = builder->CreateICmpULE(endVal, lenLoad, arrName + ".prl.safe");
             builder->CreateCall(assumeFn, {endLELen});
             // Also assert start >= 0 (already proven by doPtrMode gate, but
             // make it explicit for LLVM's range tracking).
-            llvm::Value* startGE0 = builder->CreateICmpSGE(
-                startVal, llvm::ConstantInt::get(getDefaultType(), 0),
-                arrName + ".prl.start.ge0");
+            llvm::Value* startGE0 = builder->CreateICmpSGE(startVal, llvm::ConstantInt::get(getDefaultType(), 0),
+                                                           arrName + ".prl.start.ge0");
             builder->CreateCall(assumeFn, {startGE0});
 
             // Cache the pre-computed values for use inside the loop body.
             loopPtrModeDataPtrs_[arrName] = dataPtr;
-            loopPtrModeLens_[arrName]     = lenLoad;
+            loopPtrModeLens_[arrName] = lenLoad;
             // Also populate the loop-scope length cache so `canElideBoundsCheck`
             loopArrayLenCache_[basePtr] = lenLoad;
         }
@@ -1968,9 +1898,10 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // they survive the clear above and remain visible during body generation.
     for (auto& kv : loopPtrModeLens_) {
         auto arrIt = namedValues.find(kv.first());
-        if (arrIt == namedValues.end()) continue;
+        if (arrIt == namedValues.end())
+            continue;
         // Look up the base ptr from the data ptr (data - 1) — but it's simpler
-        (void)kv;  // entries were already populated in preamble before the save
+        (void)kv; // entries were already populated in preamble before the save
     }
 
     // @independent: pre-create access group so all loads/stores in the
@@ -2001,8 +1932,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Restore pointer-mode state for the enclosing loop (or clear if none).
     if (doPtrMode) {
         loopPtrModeDataPtrs_ = std::move(savedPtrModeDataPtrs);
-        loopPtrModeLens_     = std::move(savedPtrModeLens);
-        loopPtrModeIterVar_  = std::move(savedPtrModeIterVar);
+        loopPtrModeLens_ = std::move(savedPtrModeLens);
+        loopPtrModeIterVar_ = std::move(savedPtrModeIterVar);
     }
 
     if (!builder->GetInsertBlock()->getTerminator()) {
@@ -2011,14 +1942,14 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
 
     // Increment block
     builder->SetInsertPoint(incBB);
-    llvm::Value* nextVal = builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), stmt->iteratorVar.c_str());
+    llvm::Value* nextVal =
+        builder->CreateAlignedLoad(iterType, iterAlloca, llvm::MaybeAlign(8), stmt->iteratorVar.c_str());
     // Tag incBB iterator load with TBAA + noundef.
     if (auto* nextLoadInst = llvm::dyn_cast<llvm::LoadInst>(nextVal)) {
-        if (tbaaScalar_ && (iterType->isIntegerTy() || iterType->isFloatTy() ||
-                            iterType->isDoubleTy()  || iterType->isPointerTy()))
+        if (tbaaScalar_ &&
+            (iterType->isIntegerTy() || iterType->isFloatTy() || iterType->isDoubleTy() || iterType->isPointerTy()))
             nextLoadInst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
-        nextLoadInst->setMetadata(llvm::LLVMContext::MD_noundef,
-                                  llvm::MDNode::get(*context, {}));
+        nextLoadInst->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
     }
     // !range on the increment block load: we reach incBB only after the
     if (stepKnownPositive && iterType->isIntegerTy(64)) {
@@ -2026,12 +1957,9 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         if (bit != allocaUpperBound_.end()) {
             llvm::MDBuilder mdB(*context);
             llvm::cast<llvm::LoadInst>(nextVal)->setMetadata(
-                llvm::LLVMContext::MD_range,
-                mdB.createRange(llvm::APInt(64, 0),
-                                llvm::APInt(64, bit->second)));
+                llvm::LLVMContext::MD_range, mdB.createRange(llvm::APInt(64, 0), llvm::APInt(64, bit->second)));
         } else if (nonNegValues_.count(iterAlloca)) {
-            llvm::cast<llvm::LoadInst>(nextVal)->setMetadata(
-                llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+            llvm::cast<llvm::LoadInst>(nextVal)->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         }
     }
 
@@ -2055,10 +1983,9 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     }
     builder->CreateAlignedStore(incVal, iterAlloca, iterAlloca->getAlign());
     // Tag the iterator increment store with scalar TBAA.
-    if (auto* incStoreLast = llvm::dyn_cast<llvm::StoreInst>(
-            &builder->GetInsertBlock()->back())) {
-        if (tbaaScalar_ && (iterType->isIntegerTy() || iterType->isFloatTy() ||
-                            iterType->isDoubleTy()  || iterType->isPointerTy()))
+    if (auto* incStoreLast = llvm::dyn_cast<llvm::StoreInst>(&builder->GetInsertBlock()->back())) {
+        if (tbaaScalar_ &&
+            (iterType->isIntegerTy() || iterType->isFloatTy() || iterType->isDoubleTy() || iterType->isPointerTy()))
             incStoreLast->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
     }
     auto* backBr = builder->CreateBr(condBB);
@@ -2081,39 +2008,37 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                     // Compute trip count safely using unsigned subtraction to
                     // avoid signed overflow when start and end are far apart.
                     const uint64_t tripCount = (endV >= startV)
-                        ? static_cast<uint64_t>(endV) - static_cast<uint64_t>(startV)
-                        : static_cast<uint64_t>(startV) - static_cast<uint64_t>(endV);
+                                                   ? static_cast<uint64_t>(endV) - static_cast<uint64_t>(startV)
+                                                   : static_cast<uint64_t>(startV) - static_cast<uint64_t>(endV);
                     if (tripCount > 0 && tripCount <= 64) {
                         if (tripCount <= 8) {
                             // Very small constant-trip-count loops: fully unroll.
-                            loopMDs.push_back(llvm::MDNode::get(
-                                *context,
-                                {llvm::MDString::get(*context, "llvm.loop.unroll.full")}));
+                            loopMDs.push_back(
+                                llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.unroll.full")}));
                         } else {
                             llvm::MDNode* unrollCount = llvm::MDNode::get(
-                                *context,
-                                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                                     llvm::Type::getInt32Ty(*context), static_cast<uint32_t>(tripCount)))});
+                                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                               llvm::Type::getInt32Ty(*context), static_cast<uint32_t>(tripCount)))});
                             loopMDs.push_back(unrollCount);
                         }
                         addedUnrollHint = true;
                     }
                     // Trip count multiple hint: when the trip count is a multiple
-                    if (optimizationLevel >= OptimizationLevel::O3
-                            && enableVectorize_ && tripCount > 8) {
+                    if (optimizationLevel >= OptimizationLevel::O3 && enableVectorize_ && tripCount > 8) {
                         // Find the largest power-of-2 that divides tripCount.
                         uint64_t multiple = 1;
                         for (uint64_t p = 64; p > 1; p >>= 1) {
-                            if (tripCount % p == 0) { multiple = p; break; }
+                            if (tripCount % p == 0) {
+                                multiple = p;
+                                break;
+                            }
                         }
                         if (multiple >= 2) {
                             loopMDs.push_back(llvm::MDNode::get(
-                                *context,
-                                {llvm::MDString::get(*context, "llvm.loop.trip.count.multiple"),
-                                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                                     llvm::Type::getInt32Ty(*context),
-                                     static_cast<uint32_t>(multiple)))}));
+                                *context, {llvm::MDString::get(*context, "llvm.loop.trip.count.multiple"),
+                                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                               llvm::Type::getInt32Ty(*context), static_cast<uint32_t>(multiple)))}));
                         }
                     }
                 }
@@ -2127,157 +2052,124 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         const bool cmpModuloLoop = bodyHasNonPow2Modulo_ && !bodyHasNonPow2ModuloValue_;
 
         if (currentFuncHintNoUnroll_) {
-            loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
+            loopMDs.push_back(llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
         } else if (bodyHasInnerLoop_) {
             // When the body contains an inner loop (while/for), disable
             if (!currentFuncHintUnroll_) {
                 // @hot outer loop at O3 with inner loop: emit unroll.count=8 to
-                if (currentFuncHintHot_ && !deeplyNested
-                        && optimizationLevel >= OptimizationLevel::O3) {
+                if (currentFuncHintHot_ && !deeplyNested && optimizationLevel >= OptimizationLevel::O3) {
                     const unsigned outerUnrollCount = 8u;
-                    loopMDs.push_back(llvm::MDNode::get(
-                        *context,
-                        {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                             llvm::Type::getInt32Ty(*context), outerUnrollCount))}));
+                    loopMDs.push_back(
+                        llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                                                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                                         llvm::Type::getInt32Ty(*context), outerUnrollCount))}));
                 } else {
-                    loopMDs.push_back(llvm::MDNode::get(
-                        *context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
+                    loopMDs.push_back(
+                        llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.unroll.disable")}));
                     // llvm.loop.unroll.count = 1 is a belt-and-suspenders constraint:
                     loopMDs.push_back(llvm::MDNode::get(
                         *context,
                         {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                             llvm::Type::getInt32Ty(*context), 1u))}));
+                         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1u))}));
                 }
             } else {
                 // @unroll explicitly requested on an outer loop with inner loop:
                 // use 8 for @hot at O3; otherwise conservative 2.
                 const unsigned explicitCount =
-                    (currentFuncHintHot_ && !deeplyNested
-                     && optimizationLevel >= OptimizationLevel::O3)
-                    ? 8u : 2u;
-                loopMDs.push_back(llvm::MDNode::get(
-                    *context,
-                    {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                     llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                         llvm::Type::getInt32Ty(*context), explicitCount))}));
+                    (currentFuncHintHot_ && !deeplyNested && optimizationLevel >= OptimizationLevel::O3) ? 8u : 2u;
+                loopMDs.push_back(llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                                                               llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                                                   llvm::Type::getInt32Ty(*context), explicitCount))}));
             }
         } else if (currentFuncHintUnroll_ && !addedUnrollHint && !suppressUnrollHint) {
             // @unroll on a non-suppressed loop: apply the unroll count hint.
-             const bool modArrayStore = bodyHasNonPow2ModuloArrayStore_
-                 && optimizationLevel >= OptimizationLevel::O3;
-             // Backward array refs (arr[i] += arr[i-1]): serial loop-carried dependency.
-             const bool suppressUnrollForBackward = bodyHasBackwardArrayRef_
-                 && optimizationLevel >= OptimizationLevel::O3;
-             if (!modArrayStore && !suppressUnrollForBackward) {
-                 static constexpr unsigned kOptMaxUnrollCount = 16;
-                 static constexpr unsigned kOptMaxCmpModuloUnrollCount = 8;
-                 static constexpr unsigned kDefaultUnrollCount = 4;
-                 // For comparison-context non-pow2 modulo loops (e.g. i%3==0 branch),
-                 const unsigned unrollCount =
-                     inOptMaxFunction
-                     ? (cmpModuloLoop ? kOptMaxCmpModuloUnrollCount : kOptMaxUnrollCount)
-                     : (cmpModuloLoop ? kOptMaxCmpModuloUnrollCount : kDefaultUnrollCount);
-                 loopMDs.push_back(llvm::MDNode::get(
-                     *context,
-                     {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                      llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                          llvm::Type::getInt32Ty(*context), unrollCount))}));
-             }
-             // modArrayStore / suppressUnrollForBackward: emit no unroll hint — let
-             // LLVM's O3 cost-model unroller decide freely, matching clang.
+            const bool modArrayStore = bodyHasNonPow2ModuloArrayStore_ && optimizationLevel >= OptimizationLevel::O3;
+            // Backward array refs (arr[i] += arr[i-1]): serial loop-carried dependency.
+            const bool suppressUnrollForBackward =
+                bodyHasBackwardArrayRef_ && optimizationLevel >= OptimizationLevel::O3;
+            if (!modArrayStore && !suppressUnrollForBackward) {
+                static constexpr unsigned kOptMaxUnrollCount = 16;
+                static constexpr unsigned kOptMaxCmpModuloUnrollCount = 8;
+                static constexpr unsigned kDefaultUnrollCount = 4;
+                // For comparison-context non-pow2 modulo loops (e.g. i%3==0 branch),
+                const unsigned unrollCount = inOptMaxFunction
+                                                 ? (cmpModuloLoop ? kOptMaxCmpModuloUnrollCount : kOptMaxUnrollCount)
+                                                 : (cmpModuloLoop ? kOptMaxCmpModuloUnrollCount : kDefaultUnrollCount);
+                loopMDs.push_back(llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                                                               llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                                                   llvm::Type::getInt32Ty(*context), unrollCount))}));
+            }
+            // modArrayStore / suppressUnrollForBackward: emit no unroll hint — let
+            // LLVM's O3 cost-model unroller decide freely, matching clang.
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
         if (currentFuncHintNoVectorize_) {
             // @novectorize is the user's explicit request — always honour it.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
-        } else if (currentFuncHintVectorize_
-                   || (optimizationLevel >= OptimizationLevel::O3
-                       && !bodyHasInnerLoop_ && stepKnownPositive)) {
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+        } else if (currentFuncHintVectorize_ ||
+                   (optimizationLevel >= OptimizationLevel::O3 && !bodyHasInnerLoop_ && stepKnownPositive)) {
             // Force-enable vectorization at O3 for hot loops.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
             // vectorize.predicate.enable: allow predicated (masked) vectorization
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.predicate.enable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
         // Interleaving: @hot+@vectorize at O3 → 4 iterations; plain O3
-        if (optimizationLevel >= OptimizationLevel::O3
-            && !currentFuncHintNoVectorize_
-            && !cmpModuloLoop
-            && !bodyHasInnerLoop_ && stepKnownPositive) {
+        if (optimizationLevel >= OptimizationLevel::O3 && !currentFuncHintNoVectorize_ && !cmpModuloLoop &&
+            !bodyHasInnerLoop_ && stepKnownPositive) {
             const int32_t interleave = (currentFuncHintHot_ && currentFuncHintVectorize_) ? 4 : 2;
-            loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), interleave))}));
+            loopMDs.push_back(llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                                                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                                               llvm::Type::getInt32Ty(*context), interleave))}));
         }
 
         // ── Enhanced vectorization: distribution hint ────────────────
-        if (stepKnownPositive && !deeplyNested && !bodyHasInnerLoop_
-            && !bodyHasBackwardArrayRef_
-            && !bodyHasNonPow2ModuloArrayStore_
-            && !cmpModuloLoop
-            && (optimizationLevel >= OptimizationLevel::O3
-                || (optimizationLevel >= OptimizationLevel::O2 && currentFuncHintHot_))) {
+        if (stepKnownPositive && !deeplyNested && !bodyHasInnerLoop_ && !bodyHasBackwardArrayRef_ &&
+            !bodyHasNonPow2ModuloArrayStore_ && !cmpModuloLoop &&
+            (optimizationLevel >= OptimizationLevel::O3 ||
+             (optimizationLevel >= OptimizationLevel::O2 && currentFuncHintHot_))) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.distribute.enable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
 
         // Loops with backward array references (arr[i-K]) have a loop-carried
         if (bodyHasBackwardArrayRef_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.distribute.enable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.licm_versioning.disable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
 
         // ── Software pipelining hint for @hot O3 innermost loops ─────
-        if (currentFuncHintVectorize_ && optimizationLevel >= OptimizationLevel::O3
-            && !deeplyNested && !bodyHasInnerLoop_ && stepKnownPositive) {
+        if (currentFuncHintVectorize_ && optimizationLevel >= OptimizationLevel::O3 && !deeplyNested &&
+            !bodyHasInnerLoop_ && stepKnownPositive) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.pipeline.disable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
             loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.pipeline.initiationinterval"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))}));
+                *context,
+                {llvm::MDString::get(*context, "llvm.loop.pipeline.initiationinterval"),
+                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))}));
         }
 
         // ── Auto-parallelization hints ─────────────────────────────
-        const bool wantParallel = enableParallelize_
-            && !currentFuncHintNoParallelize_
-            && stepKnownPositive
-            && !deeplyNested
-            && !bodyHasInnerLoop_
-            && !bodyHasBackwardArrayRef_
-            && !bodyHasNonPow2ModuloArrayStore_
-            && !cmpModuloLoop
-            && (currentFuncHintParallelize_
-                || currentFuncHintHot_
-                || optimizationLevel >= OptimizationLevel::O3);
+        const bool wantParallel =
+            enableParallelize_ && !currentFuncHintNoParallelize_ && stepKnownPositive && !deeplyNested &&
+            !bodyHasInnerLoop_ && !bodyHasBackwardArrayRef_ && !bodyHasNonPow2ModuloArrayStore_ && !cmpModuloLoop &&
+            (currentFuncHintParallelize_ || currentFuncHintHot_ || optimizationLevel >= OptimizationLevel::O3);
         if (wantParallel) {
             // Create an access group — this is a unique MDNode that we
             llvm::MDNode* accessGroup = llvm::MDNode::getDistinct(*context, {});
             loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
-                           accessGroup}));
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"), accessGroup}));
             // Store the access group so codegen can attach it to memory
             // operations emitted inside this loop body.
             currentLoopAccessGroup_ = accessGroup;
@@ -2286,40 +2178,37 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         }
 
         // Apply per-loop @loop hints (override/augment function-level) for ForStmt
-        const LoopConfig& loopHintsCfg = (stmt->loopHints.unrollCount > 0 || stmt->loopHints.vectorize || stmt->loopHints.noVectorize || stmt->loopHints.parallel || stmt->loopHints.independent || stmt->loopHints.fuse)
-            ? stmt->loopHints
-            : currentOptMaxConfig_.loop;
+        const LoopConfig& loopHintsCfg =
+            (stmt->loopHints.unrollCount > 0 || stmt->loopHints.vectorize || stmt->loopHints.noVectorize ||
+             stmt->loopHints.parallel || stmt->loopHints.independent || stmt->loopHints.fuse)
+                ? stmt->loopHints
+                : currentOptMaxConfig_.loop;
         if (loopHintsCfg.unrollCount > 0) {
             loopMDs.push_back(llvm::MDNode::get(
-                *context,
-                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                     llvm::Type::getInt32Ty(*context), (unsigned)loopHintsCfg.unrollCount))}));
+                *context, {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context),
+                                                                                (unsigned)loopHintsCfg.unrollCount))}));
         }
         if (loopHintsCfg.vectorize) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
         if (loopHintsCfg.noVectorize) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
         }
         if (loopHintsCfg.parallel) {
             llvm::MDNode* accessGroup2 = llvm::MDNode::getDistinct(*context, {});
             loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
-                           accessGroup2}));
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"), accessGroup2}));
         }
         // @independent: emit parallel_accesses with the pre-created access group.
         // The access group was already attached to all loads/stores in the body.
         if (loopHintsCfg.independent && independentAccessGroup) {
             loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
-                           independentAccessGroup}));
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"), independentAccessGroup}));
         }
 
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
@@ -2350,10 +2239,9 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     }
 
     // ── Range / range_step fast path ─────────────────────────────────────
-    if (stmt->collection->type == ASTNodeType::CALL_EXPR &&
-        optimizationLevel >= OptimizationLevel::O1) {
+    if (stmt->collection->type == ASTNodeType::CALL_EXPR && optimizationLevel >= OptimizationLevel::O1) {
         auto* call = static_cast<CallExpr*>(stmt->collection.get());
-        const bool isRange     = (call->callee == "range"      && call->arguments.size() == 2);
+        const bool isRange = (call->callee == "range" && call->arguments.size() == 2);
         const bool isRangeStep = (call->callee == "range_step" && call->arguments.size() == 3);
         if (isRange || isRangeStep) {
             const ScopeGuard rangeScope(*this);
@@ -2361,19 +2249,19 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
             // Evaluate start, end (and step) exactly once to preserve
             // side-effect order with the unfused builtin path.
             llvm::Value* startV = generateExpression(call->arguments[0].get());
-            llvm::Value* endV   = generateExpression(call->arguments[1].get());
+            llvm::Value* endV = generateExpression(call->arguments[1].get());
             startV = toDefaultType(startV);
-            endV   = toDefaultType(endV);
+            endV = toDefaultType(endV);
 
             llvm::Value* zeroC = llvm::ConstantInt::get(getDefaultType(), 0);
-            llvm::Value* oneC  = llvm::ConstantInt::get(getDefaultType(), 1);
+            llvm::Value* oneC = llvm::ConstantInt::get(getDefaultType(), 1);
 
             llvm::Value* stepV = nullptr; // nullptr → unit step (no mul needed)
             llvm::Value* count = nullptr;
             if (isRange) {
                 // count = max(end - start, 0).  Loop runs `count` times and
                 // binds x to (start + i) for i = 0..count-1.
-                llvm::Value* diff  = builder->CreateSub(endV, startV, "frng.diff");
+                llvm::Value* diff = builder->CreateSub(endV, startV, "frng.diff");
                 llvm::Value* isPos = builder->CreateICmpSGT(diff, zeroC, "frng.ispos");
                 count = builder->CreateSelect(isPos, diff, zeroC, "frng.count");
             } else {
@@ -2383,17 +2271,17 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
                 stepV = toDefaultType(stepV);
 
                 llvm::Value* stepIsZero = builder->CreateICmpEQ(stepV, zeroC, "frng.stepzero");
-                llvm::BasicBlock* stepOkBB   = llvm::BasicBlock::Create(*context, "frng.stepok",   function);
+                llvm::BasicBlock* stepOkBB = llvm::BasicBlock::Create(*context, "frng.stepok", function);
                 llvm::BasicBlock* stepFailBB = llvm::BasicBlock::Create(*context, "frng.stepfail", function);
                 builder->CreateCondBr(stepIsZero, stepFailBB, stepOkBB);
 
                 builder->SetInsertPoint(stepFailBB);
                 {
                     std::string msg = call->line > 0
-                        ? std::string("Runtime error: range step cannot be zero at line ") + std::to_string(call->line) + "\n"
-                        : "Runtime error: range step cannot be zero\n";
-                    builder->CreateCall(getPrintfFunction(),
-                        {builder->CreateGlobalString(msg, "frng_zero_msg")});
+                                          ? std::string("Runtime error: range step cannot be zero at line ") +
+                                                std::to_string(call->line) + "\n"
+                                          : "Runtime error: range step cannot be zero\n";
+                    builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(msg, "frng_zero_msg")});
                 }
                 builder->CreateCall(getOrDeclareAbort());
                 builder->CreateUnreachable();
@@ -2401,11 +2289,11 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
                 builder->SetInsertPoint(stepOkBB);
 
                 // count = max(0, (end - start + step - sign) / step).  This
-                llvm::Value* diff    = builder->CreateSub(endV, startV, "frng.diff");
-                llvm::Value* stepM1  = builder->CreateSub(stepV, oneC,  "frng.stepm1");
+                llvm::Value* diff = builder->CreateSub(endV, startV, "frng.diff");
+                llvm::Value* stepM1 = builder->CreateSub(stepV, oneC, "frng.stepm1");
                 llvm::Value* adjDiff = builder->CreateAdd(diff, stepM1, "frng.adjdiff");
-                llvm::Value* rawCnt  = builder->CreateSDiv(adjDiff, stepV, "frng.rawcount");
-                llvm::Value* isPos   = builder->CreateICmpSGT(rawCnt, zeroC, "frng.ispos");
+                llvm::Value* rawCnt = builder->CreateSDiv(adjDiff, stepV, "frng.rawcount");
+                llvm::Value* isPos = builder->CreateICmpSGT(rawCnt, zeroC, "frng.ispos");
                 count = builder->CreateSelect(isPos, rawCnt, zeroC, "frng.count");
             }
 
@@ -2419,18 +2307,17 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
             llvm::BasicBlock* condBBR = llvm::BasicBlock::Create(*context, "frng.cond", function);
             llvm::BasicBlock* bodyBBR = llvm::BasicBlock::Create(*context, "frng.body", function);
-            llvm::BasicBlock* incBBR  = llvm::BasicBlock::Create(*context, "frng.inc",  function);
-            llvm::BasicBlock* endBBR  = llvm::BasicBlock::Create(*context, "frng.end",  function);
+            llvm::BasicBlock* incBBR = llvm::BasicBlock::Create(*context, "frng.inc", function);
+            llvm::BasicBlock* endBBR = llvm::BasicBlock::Create(*context, "frng.end", function);
 
             builder->CreateBr(condBBR);
 
             // Condition: idx < count (unsigned: idx and count are both ≥ 0).
             builder->SetInsertPoint(condBBR);
-            llvm::Value* curIdxR = builder->CreateAlignedLoad(
-                getDefaultType(), idxAllocaR, llvm::MaybeAlign(8), "frng.idx");
+            llvm::Value* curIdxR =
+                builder->CreateAlignedLoad(getDefaultType(), idxAllocaR, llvm::MaybeAlign(8), "frng.idx");
             if (optimizationLevel >= OptimizationLevel::O1) {
-                llvm::cast<llvm::LoadInst>(curIdxR)->setMetadata(
-                    llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+                llvm::cast<llvm::LoadInst>(curIdxR)->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             }
             llvm::Value* condR = builder->CreateICmpULT(curIdxR, count, "frng.cmp");
             auto* condBrR = builder->CreateCondBr(condR, bodyBBR, endBBR);
@@ -2442,26 +2329,22 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
             // Body: bind x = start + idx [* step], then execute user body.
             builder->SetInsertPoint(bodyBBR);
             if (optimizationLevel >= OptimizationLevel::O2) {
-                llvm::Value* nn = builder->CreateICmpSGE(
-                    curIdxR, zeroC, "frng.nonneg");
-                llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
-                    module.get(), llvm::Intrinsic::assume, {});
+                llvm::Value* nn = builder->CreateICmpSGE(curIdxR, zeroC, "frng.nonneg");
+                llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(module.get(), llvm::Intrinsic::assume, {});
                 builder->CreateCall(assumeFn, {nn});
             }
             // For range:      x = start + idx       (nsw safe; both fit in i64)
             // For range_step: x = start + idx * step (nsw when start and step are
             //   non-negative and proven in-range by the loop condition).
             const bool startNonNeg = startV && nonNegValues_.count(startV);
-            const bool stepNonNeg  = !stepV || nonNegValues_.count(stepV);
-            llvm::Value* offset = stepV
-                ? builder->CreateMul(curIdxR, stepV, "frng.off",
-                                     /*HasNUW=*/stepNonNeg, /*HasNSW=*/stepNonNeg)
-                : curIdxR;
+            const bool stepNonNeg = !stepV || nonNegValues_.count(stepV);
+            llvm::Value* offset = stepV ? builder->CreateMul(curIdxR, stepV, "frng.off",
+                                                             /*HasNUW=*/stepNonNeg, /*HasNSW=*/stepNonNeg)
+                                        : curIdxR;
             // nsw on the iterator add: safe when start>=0 (proven) and offset>=0 (proven).
             const bool iterNSW = (startNonNeg && stepNonNeg) || (stepV == nullptr);
-            llvm::Value* iterVal = builder->CreateAdd(
-                startV, offset, "frng.val",
-                /*HasNUW=*/false, /*HasNSW=*/iterNSW);
+            llvm::Value* iterVal = builder->CreateAdd(startV, offset, "frng.val",
+                                                      /*HasNUW=*/false, /*HasNSW=*/iterNSW);
             builder->CreateAlignedStore(iterVal, iterAllocaR, iterAllocaR->getAlign());
 
             loopStack.push_back({endBBR, incBBR});
@@ -2476,26 +2359,23 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
             // Increment hidden idx and back-edge.
             builder->SetInsertPoint(incBBR);
-            llvm::Value* nextIdxR = builder->CreateAdd(
-                curIdxR, oneC, "frng.next", /*HasNUW=*/true, /*HasNSW=*/true);
+            llvm::Value* nextIdxR = builder->CreateAdd(curIdxR, oneC, "frng.next", /*HasNUW=*/true, /*HasNSW=*/true);
             builder->CreateAlignedStore(nextIdxR, idxAllocaR, idxAllocaR->getAlign());
             auto* backBrR = builder->CreateBr(condBBR);
 
             // Loop metadata: same hints as the array foreach path so the
             // vectorizer/unroller treat both consistently.
             if (optimizationLevel >= OptimizationLevel::O1) {
-                llvm::MDNode* mustProgress = llvm::MDNode::get(
-                    *context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
+                llvm::MDNode* mustProgress =
+                    llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
                 llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
                 loopMDs.push_back(nullptr);
                 loopMDs.push_back(mustProgress);
-                if (!inOptMaxFunction && optimizationLevel >= OptimizationLevel::O3 &&
-                    enableUnrollLoops_) {
+                if (!inOptMaxFunction && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_) {
                     loopMDs.push_back(llvm::MDNode::get(
                         *context,
                         {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                             llvm::Type::getInt32Ty(*context), 4))}));
+                         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4))}));
                 }
                 llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
                 loopMD->replaceOperandWith(0, loopMD);
@@ -2535,15 +2415,15 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         lenVal = emitStringLen(basePtr, "foreach.strlen");
     } else {
         // Array: length stored in slot 0
-                llvm::Value* lenLoad = emitLoadArrayLen(basePtr, "foreach.len");
+        llvm::Value* lenLoad = emitLoadArrayLen(basePtr, "foreach.len");
         lenVal = lenLoad;
     }
 
     // Allocate hidden index variable and the user's iterator variable
     llvm::AllocaInst* idxAlloca = createEntryBlockAlloca(function, "_foreach_idx");
     {
-        auto* idxInitSt = builder->CreateAlignedStore(
-            llvm::ConstantInt::get(getDefaultType(), 0), idxAlloca, idxAlloca->getAlign());
+        auto* idxInitSt =
+            builder->CreateAlignedStore(llvm::ConstantInt::get(getDefaultType(), 0), idxAlloca, idxAlloca->getAlign());
         if (tbaaScalar_)
             idxInitSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
     }
@@ -2575,8 +2455,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     }
     // !range [0, INT64_MAX): the foreach index is always non-negative (starts
     if (optimizationLevel >= OptimizationLevel::O1) {
-        llvm::cast<llvm::LoadInst>(curIdx)->setMetadata(
-            llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        llvm::cast<llvm::LoadInst>(curIdx)->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
     }
 
     llvm::Value* cond = builder->CreateICmpULT(curIdx, lenVal, "foreach.cmp");
@@ -2594,10 +2473,9 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
     // Emit @llvm.assume(idx >= 0) so LLVM's CorrelatedValuePropagation and
     if (optimizationLevel >= OptimizationLevel::O2) {
-        llvm::Value* isNonNeg = builder->CreateICmpSGE(
-            bodyIdx, llvm::ConstantInt::get(getDefaultType(), 0), "foreach.nonneg");
-        llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
-            module.get(), llvm::Intrinsic::assume, {});
+        llvm::Value* isNonNeg =
+            builder->CreateICmpSGE(bodyIdx, llvm::ConstantInt::get(getDefaultType(), 0), "foreach.nonneg");
+        llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(module.get(), llvm::Intrinsic::assume, {});
         builder->CreateCall(assumeFn, {isNonNeg});
     }
 
@@ -2605,7 +2483,8 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     if (isStr) {
         // Fat-pointer string: char data starts at offset 16.  Index into data.
         llvm::Value* strData = emitStringData(basePtr, "foreach.strdata");
-        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strData, bodyIdx, "foreach.charptr");
+        llvm::Value* charPtr =
+            builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strData, bodyIdx, "foreach.charptr");
         auto* charByte = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "foreach.char");
         // TBAA: string character loads are in the string-data type set,
         charByte->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
@@ -2621,14 +2500,13 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         // alias analysis rather than an LLVM IR attribute.
         // Use zext — !range is not valid on zext instructions in LLVM 18.
         auto* charExt = builder->CreateZExt(charByte, getDefaultType(), "foreach.charext",
-                                             /*IsNonNeg=*/false);
+                                            /*IsNonNeg=*/false);
         nonNegValues_.insert(charExt);
         elemVal = charExt;
     } else {
         // Array: element is at slot (bodyIdx + 1).
-        llvm::Value* offset =
-            builder->CreateAdd(bodyIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset",
-                               /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* offset = builder->CreateAdd(bodyIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset",
+                                                 /*HasNUW=*/true, /*HasNSW=*/true);
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr, offset, "foreach.elem.ptr");
         elemVal = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "foreach.elem");
         // TBAA: foreach element loads (slots 1+) never alias the array length
@@ -2642,8 +2520,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     builder->CreateAlignedStore(elemVal, iterAlloca, iterAlloca->getAlign());
     // Tag the iterator element store with scalar TBAA (iterAlloca is always
     // a single i64 slot regardless of element type).
-    if (auto* elemStoreLast = llvm::dyn_cast<llvm::StoreInst>(
-            &builder->GetInsertBlock()->back())) {
+    if (auto* elemStoreLast = llvm::dyn_cast<llvm::StoreInst>(&builder->GetInsertBlock()->back())) {
         if (tbaaScalar_)
             elemStoreLast->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
     }
@@ -2679,54 +2556,43 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         loopMDs.push_back(mustProgress);
         // At O3 with unrolling enabled, hint the unroller with a moderate
         if (!inOptMaxFunction && optimizationLevel >= OptimizationLevel::O3 && enableUnrollLoops_) {
-            loopMDs.push_back(llvm::MDNode::get(
-                *context,
-                {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
-                 llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-                     llvm::Type::getInt32Ty(*context), 2))}));
+            loopMDs.push_back(llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.unroll.count"),
+                                                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                                               llvm::Type::getInt32Ty(*context), 2))}));
         }
         // @vectorize / @novectorize: per-function loop vectorization hints.
         if (currentFuncHintNoVectorize_) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
-        } else if (currentFuncHintVectorize_
-                   || (optimizationLevel >= OptimizationLevel::O3 && loopNestDepth_ == 0)) {
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 0))}));
+        } else if (currentFuncHintVectorize_ || (optimizationLevel >= OptimizationLevel::O3 && loopNestDepth_ == 0)) {
             // O3 outermost for-each: auto-enable vectorization.
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
         // Interleave: @hot+@vectorize at O3 → 4; plain O3 auto-vectorized → 2.
-        if (optimizationLevel >= OptimizationLevel::O3
-            && !currentFuncHintNoVectorize_ && loopNestDepth_ == 0) {
+        if (optimizationLevel >= OptimizationLevel::O3 && !currentFuncHintNoVectorize_ && loopNestDepth_ == 0) {
             const int32_t interleave = (currentFuncHintHot_ && currentFuncHintVectorize_) ? 4 : 2;
-            loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), interleave))}));
+            loopMDs.push_back(llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                                                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+                                                               llvm::Type::getInt32Ty(*context), interleave))}));
         }
         // Loop distribution at O3: split complex for-each bodies into
         // sub-loops with simpler dependence graphs (mirrors for-loop logic).
         if (optimizationLevel >= OptimizationLevel::O3 && loopNestDepth_ == 0) {
             loopMDs.push_back(llvm::MDNode::get(
                 *context, {llvm::MDString::get(*context, "llvm.loop.distribute.enable"),
-                           llvm::ConstantAsMetadata::get(
-                               llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
+                           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt1Ty(*context), 1))}));
         }
         // parallel_accesses: mark for-each as having iteration-independent
-        if ((stmt->loopHints.parallel)
-            || (optimizationLevel >= OptimizationLevel::O3
-                && enableParallelize_ && !currentFuncHintNoParallelize_
-                && loopNestDepth_ == 0
-                && (currentFuncHintParallelize_ || currentFuncHintHot_
-                    || optimizationLevel >= OptimizationLevel::O3))) {
+        if ((stmt->loopHints.parallel) ||
+            (optimizationLevel >= OptimizationLevel::O3 && enableParallelize_ && !currentFuncHintNoParallelize_ &&
+             loopNestDepth_ == 0 &&
+             (currentFuncHintParallelize_ || currentFuncHintHot_ || optimizationLevel >= OptimizationLevel::O3))) {
             llvm::MDNode* accessGroup = llvm::MDNode::getDistinct(*context, {});
             loopMDs.push_back(llvm::MDNode::get(
-                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"),
-                           accessGroup}));
+                *context, {llvm::MDString::get(*context, "llvm.loop.parallel_accesses"), accessGroup}));
             currentLoopAccessGroup_ = accessGroup;
         } else {
             currentLoopAccessGroup_ = nullptr;
@@ -2781,8 +2647,7 @@ void CodeGenerator::generateExprStmt(ExprStmt* stmt) {
         auto* call = static_cast<CallExpr*>(expr);
         if (call->callee == "push" && !call->arguments.empty() &&
             call->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
-            const std::string& arrVarName =
-                static_cast<IdentifierExpr*>(call->arguments[0].get())->name;
+            const std::string& arrVarName = static_cast<IdentifierExpr*>(call->arguments[0].get())->name;
             auto it = namedValues.find(arrVarName);
             if (it != namedValues.end() && it->second) {
                 // Generate push IR (returns i64: new buffer pointer as integer).
@@ -2902,7 +2767,8 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
             // before emitting any IR, matching the regular switch path's semantics.
             std::set<int64_t> seenSmall;
             for (auto& sc : stmt->cases) {
-                if (sc.isDefault) continue;
+                if (sc.isDefault)
+                    continue;
                 auto checkVal = [&](Expression* expr) {
                     llvm::Value* v = generateExpression(expr);
                     if (v->getType()->isDoubleTy())
@@ -2916,7 +2782,8 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
                         codegenError("duplicate case value " + std::to_string(cv) + " in switch statement", expr);
                 };
                 checkVal(sc.value.get());
-                for (auto& ev : sc.values) checkVal(ev.get());
+                for (auto& ev : sc.values)
+                    checkVal(ev.get());
             }
 
             llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "switch.end", function);
@@ -2925,14 +2792,18 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
             // Find the default case.
             SwitchCase* defaultCase = nullptr;
             for (auto& sc : stmt->cases) {
-                if (sc.isDefault) { defaultCase = &sc; break; }
+                if (sc.isDefault) {
+                    defaultCase = &sc;
+                    break;
+                }
             }
 
             // Chain: for each non-default case, emit cmp + condbr.
             // Last false-branch falls through to default (or merge if no default).
             llvm::BasicBlock* falseBB = nullptr;
             for (auto& sc : stmt->cases) {
-                if (sc.isDefault) continue;
+                if (sc.isDefault)
+                    continue;
 
                 // Collect all case values for this arm (already validated above).
                 std::vector<llvm::ConstantInt*> caseConstants;
@@ -2943,7 +2814,8 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
                     caseConstants.push_back(ci);
                 };
                 addVal(sc.value.get());
-                for (auto& ev : sc.values) addVal(ev.get());
+                for (auto& ev : sc.values)
+                    addVal(ev.get());
 
                 // Build the comparison: condVal == c1 || condVal == c2 || ...
                 llvm::Value* cmp = builder->CreateICmpEQ(condVal, caseConstants[0], "switch.cmp");
@@ -2966,7 +2838,8 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
                     const ScopeGuard scope(*this);
                     for (auto& s : sc.body) {
                         generateStatement(s.get());
-                        if (builder->GetInsertBlock()->getTerminator()) break;
+                        if (builder->GetInsertBlock()->getTerminator())
+                            break;
                     }
                 }
                 if (!builder->GetInsertBlock()->getTerminator())
@@ -2980,7 +2853,8 @@ void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
                 const ScopeGuard scope(*this);
                 for (auto& s : defaultCase->body) {
                     generateStatement(s.get());
-                    if (builder->GetInsertBlock()->getTerminator()) break;
+                    if (builder->GetInsertBlock()->getTerminator())
+                        break;
                 }
             }
             if (!builder->GetInsertBlock()->getTerminator())
@@ -3115,23 +2989,21 @@ int64_t CodeGenerator::getCatchStringId(const std::string& s) {
     return id;
 }
 
-void CodeGenerator::buildCatchTable(
-        const std::vector<std::unique_ptr<Statement>>& stmts,
-        llvm::Function* fn) {
+void CodeGenerator::buildCatchTable(const std::vector<std::unique_ptr<Statement>>& stmts, llvm::Function* fn) {
     // Walk the top-level statements of a function body and register every
     for (const auto& s : stmts) {
-        if (s->type != ASTNodeType::CATCH_STMT) continue;
+        if (s->type != ASTNodeType::CATCH_STMT)
+            continue;
         auto* cs = static_cast<CatchStmt*>(s.get());
         int64_t key = cs->isString ? getCatchStringId(cs->strCode) : cs->intCode;
         if (catchTable_.count(key)) {
             codegenError("Duplicate catch(" +
-                (cs->isString ? ("\"" + cs->strCode + "\"") : std::to_string(cs->intCode)) +
-                ") block in the same function", cs);
+                             (cs->isString ? ("\"" + cs->strCode + "\"") : std::to_string(cs->intCode)) +
+                             ") block in the same function",
+                         cs);
         }
         llvm::BasicBlock* bb = llvm::BasicBlock::Create(
-            *context,
-            cs->isString ? ("catch.str." + cs->strCode) : ("catch." + std::to_string(key)),
-            fn);
+            *context, cs->isString ? ("catch.str." + cs->strCode) : ("catch." + std::to_string(key)), fn);
         catchTable_[key] = bb;
     }
     // Create the default (unmatched throw) block once per function.
@@ -3162,7 +3034,8 @@ void CodeGenerator::generateCatch(CatchStmt* stmt) {
     {
         const ScopeGuard scope(*this);
         for (auto& s : stmt->body->statements) {
-            if (builder->GetInsertBlock()->getTerminator()) break;
+            if (builder->GetInsertBlock()->getTerminator())
+                break;
             generateStatement(s.get());
         }
     }
@@ -3174,14 +3047,16 @@ void CodeGenerator::generateCatch(CatchStmt* stmt) {
         // Check if all catch entries point to a non-null, terminated BB; if not
         bool allTerminated = true;
         for (auto& [k, bb] : catchTable_) {
-            if (!bb->getTerminator()) { allTerminated = false; break; }
+            if (!bb->getTerminator()) {
+                allTerminated = false;
+                break;
+            }
         }
         if (allTerminated) {
             builder->SetInsertPoint(catchDefaultBB_);
             // Unmatched throw: print a message and abort.
             std::string errText = "Runtime error: unmatched throw\n";
-            builder->CreateCall(getPrintfFunction(),
-                {builder->CreateGlobalString(errText, "catch_unmatched_msg")});
+            builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(errText, "catch_unmatched_msg")});
             builder->CreateCall(getOrDeclareAbort());
             builder->CreateUnreachable();
         }
@@ -3201,11 +3076,10 @@ void CodeGenerator::generateThrow(ThrowStmt* stmt) {
 
     if (catchTable_.empty()) {
         // No catch blocks in this function — abort with a clear error.
-        std::string errText = stmt->line > 0
-            ? std::string("Runtime error: unhandled throw at line ") + std::to_string(stmt->line) + "\n"
-            : "Runtime error: unhandled throw\n";
-        builder->CreateCall(getPrintfFunction(),
-            {builder->CreateGlobalString(errText, "throw_unhandled_msg")});
+        std::string errText =
+            stmt->line > 0 ? std::string("Runtime error: unhandled throw at line ") + std::to_string(stmt->line) + "\n"
+                           : "Runtime error: unhandled throw\n";
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(errText, "throw_unhandled_msg")});
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
         return;
@@ -3215,8 +3089,7 @@ void CodeGenerator::generateThrow(ThrowStmt* stmt) {
     llvm::BasicBlock* defaultBB = catchDefaultBB_;
     if (!defaultBB) {
         // Safety: create an inline abort block if catchDefaultBB_ is null.
-        defaultBB = llvm::BasicBlock::Create(*context, "throw.nodefault",
-                                             builder->GetInsertBlock()->getParent());
+        defaultBB = llvm::BasicBlock::Create(*context, "throw.nodefault", builder->GetInsertBlock()->getParent());
         builder->SetInsertPoint(defaultBB);
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
@@ -3227,11 +3100,9 @@ void CodeGenerator::generateThrow(ThrowStmt* stmt) {
     llvm::BasicBlock* curBB = builder->GetInsertBlock();
     builder->SetInsertPoint(curBB);
 
-    llvm::SwitchInst* sw = builder->CreateSwitch(val, defaultBB,
-                                                  static_cast<unsigned>(catchTable_.size()));
+    llvm::SwitchInst* sw = builder->CreateSwitch(val, defaultBB, static_cast<unsigned>(catchTable_.size()));
     for (auto& [key, handlerBB] : catchTable_) {
-        auto* caseVal = llvm::ConstantInt::getSigned(
-            llvm::cast<llvm::IntegerType>(getDefaultType()), key);
+        auto* caseVal = llvm::ConstantInt::getSigned(llvm::cast<llvm::IntegerType>(getDefaultType()), key);
         sw->addCase(caseVal, handlerBB);
     }
 }
@@ -3248,7 +3119,8 @@ void CodeGenerator::generateThrow(ThrowStmt* stmt) {
 // function terminates.
 // ---------------------------------------------------------------------------
 void CodeGenerator::emitDeferredFrees() {
-    if (deferredFreeQueue_.empty()) return;
+    if (deferredFreeQueue_.empty())
+        return;
     // Guard: don't insert after a terminator (e.g. after an unreachable block).
     if (builder->GetInsertBlock() && builder->GetInsertBlock()->getTerminator()) {
         deferredFreeQueue_.clear();
@@ -3261,11 +3133,9 @@ void CodeGenerator::emitDeferredFrees() {
         // The alloca is created at function entry and dominates every block,
         // so this load is always valid regardless of where invalidate() was
         // called (e.g. inside a loop body).
-        llvm::Value* heapPtr = builder->CreateLoad(
-            entry.elemType, entry.alloca, entry.alloca->getName() + ".dfree");
+        llvm::Value* heapPtr = builder->CreateLoad(entry.elemType, entry.alloca, entry.alloca->getName() + ".dfree");
         if (!heapPtr->getType()->isPointerTy()) {
-            heapPtr = builder->CreateIntToPtr(heapPtr, ptrTy,
-                                              entry.alloca->getName() + ".dfreeptr");
+            heapPtr = builder->CreateIntToPtr(heapPtr, ptrTy, entry.alloca->getName() + ".dfreeptr");
         }
         builder->CreateCall(freeFn, {heapPtr});
     }
@@ -3292,15 +3162,13 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
     const std::string& name = stmt->varName;
 
     // ── Heap-free heap-allocated variables ────────────────────────────────
-    const bool isHeapString = stringVars_.count(name) > 0 &&
-                               !staticStringVars_.count(name);
-    const bool isHeapArray  = arrayVars_.count(name) > 0 &&
-                               !stackAllocatedArrays_.count(name);
-    const bool isHeapDict   = dictVarNames_.count(name) > 0;
+    const bool isHeapString = stringVars_.count(name) > 0 && !staticStringVars_.count(name);
+    const bool isHeapArray = arrayVars_.count(name) > 0 && !stackAllocatedArrays_.count(name);
+    const bool isHeapDict = dictVarNames_.count(name) > 0;
     // ptr variables whose value was heap-allocated (malloc / heap alloc<T>).
-    const bool isHeapPtr    = heapPtrVarNames_.count(name) > 0;
+    const bool isHeapPtr = heapPtrVarNames_.count(name) > 0;
     // ptr variables backed by the per-function arena slab — no per-object free.
-    const bool isArenaPtr   = arenaPtrVarNames_.count(name) > 0;
+    const bool isArenaPtr = arenaPtrVarNames_.count(name) > 0;
     // struct variables are heap-allocated opaque pointers.
     const bool isHeapStruct = structVars_.count(name) > 0;
     // bigint variables are heap-allocated arbitrary-precision integers.
@@ -3310,8 +3178,7 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
         isHeapBigint = (tit != varTypeAnnotations_.end() && tit->second == "bigint");
     }
 
-    if (isHeapString || isHeapArray || isHeapDict || isHeapPtr ||
-        isHeapStruct || isHeapBigint) {
+    if (isHeapString || isHeapArray || isHeapDict || isHeapPtr || isHeapStruct || isHeapBigint) {
         // Arena-backed pointers must NOT be individually freed; the entire
         // slab is freed once at every function return.
         if (!isArenaPtr) {
@@ -3325,9 +3192,7 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
                 // here (not the loaded value) avoids IR domination violations
                 // that would arise if we pushed the loaded i64/ptr value and
                 // later used it outside its defining basic block.
-                deferredFreeQueue_.push_back(
-                    {allocaInst2,
-                     allocaInst2->getAllocatedType()});
+                deferredFreeQueue_.push_back({allocaInst2, allocaInst2->getAllocatedType()});
             }
         }
     }
@@ -3339,14 +3204,10 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
         if (backingIt != stackPtrBackingAlloca_.end()) {
             auto* backingAlloca = backingIt->second;
             if (backingAlloca) {
-                const uint64_t backingSz =
-                    module->getDataLayout().getTypeAllocSize(
-                        backingAlloca->getAllocatedType());
-                auto* backingSzVal = llvm::ConstantInt::get(
-                    llvm::Type::getInt64Ty(*context), backingSz);
-                auto* lifetimeEnd = OMSC_GET_INTRINSIC_STMT(
-                    module.get(), llvm::Intrinsic::lifetime_end,
-                    {llvm::PointerType::getUnqual(*context)});
+                const uint64_t backingSz = module->getDataLayout().getTypeAllocSize(backingAlloca->getAllocatedType());
+                auto* backingSzVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), backingSz);
+                auto* lifetimeEnd = OMSC_GET_INTRINSIC_STMT(module.get(), llvm::Intrinsic::lifetime_end,
+                                                            {llvm::PointerType::getUnqual(*context)});
                 builder->CreateCall(lifetimeEnd, {backingSzVal, backingAlloca});
             }
             stackPtrBackingAlloca_.erase(backingIt);
@@ -3360,15 +3221,15 @@ void CodeGenerator::generateInvalidate(InvalidateStmt* stmt) {
         auto* allocaTy = allocaInst->getAllocatedType();
         const uint64_t size = module->getDataLayout().getTypeAllocSize(allocaTy);
         auto* sizeVal = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), size);
-        auto* lifetimeEnd = OMSC_GET_INTRINSIC_STMT(
-            module.get(), llvm::Intrinsic::lifetime_end,
-            {llvm::PointerType::getUnqual(*context)});
+        auto* lifetimeEnd = OMSC_GET_INTRINSIC_STMT(module.get(), llvm::Intrinsic::lifetime_end,
+                                                    {llvm::PointerType::getUnqual(*context)});
         builder->CreateCall(lifetimeEnd, {sizeVal, allocaInst});
     }
 
     // Store an undef/poison value to enable dead-store elimination.
     auto* allocaType = llvm::cast<llvm::AllocaInst>(alloca)->getAllocatedType();
-    builder->CreateAlignedStore(llvm::UndefValue::get(allocaType), alloca, llvm::cast<llvm::AllocaInst>(alloca)->getAlign());
+    builder->CreateAlignedStore(llvm::UndefValue::get(allocaType), alloca,
+                                llvm::cast<llvm::AllocaInst>(alloca)->getAlign());
 
     // ── Tracking-set cleanup ───────────────────────────────────────────────
     constIntFolds_.erase(name);
@@ -3408,9 +3269,7 @@ void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
     }
 
     llvm::Value* initValue = nullptr;
-    llvm::Type* allocaType = stmt->typeName.empty()
-                                 ? getDefaultType()
-                                 : resolveAnnotatedType(stmt->typeName);
+    llvm::Type* allocaType = stmt->typeName.empty() ? getDefaultType() : resolveAnnotatedType(stmt->typeName);
 
     if (stmt->initializer) {
         initValue = generateExpression(stmt->initializer.get());
@@ -3433,7 +3292,8 @@ void CodeGenerator::generateMoveDecl(MoveDecl* stmt) {
         if (allocaType->isDoubleTy())
             builder->CreateAlignedStore(llvm::ConstantFP::get(allocaType, 0.0), alloca, alloca->getAlign());
         else
-            builder->CreateAlignedStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca, alloca->getAlign());
+            builder->CreateAlignedStore(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)), alloca,
+                                        alloca->getAlign());
     }
 }
 
@@ -3442,22 +3302,25 @@ llvm::Value* CodeGenerator::generateRangeAnnot(RangeAnnotExpr* expr) {
     if (auto cv = tryFoldInt(expr->inner.get())) {
         const int64_t v = *cv;
         if (v < expr->lo || v > expr->hi) {
-            codegenError(
-                "@range[" + std::to_string(expr->lo) + ", " + std::to_string(expr->hi) +
-                "] violated: inner expression folds to " + std::to_string(v) +
-                " which is outside the declared range", expr);
+            codegenError("@range[" + std::to_string(expr->lo) + ", " + std::to_string(expr->hi) +
+                             "] violated: inner expression folds to " + std::to_string(v) +
+                             " which is outside the declared range",
+                         expr);
         }
     }
 
     // ── Generate the inner value ─────────────────────────────────────────
     llvm::Value* val = generateExpression(expr->inner.get());
-    if (!val) return val;
+    if (!val)
+        return val;
 
     // Range hints only apply to integer values.  Non-integer results
-    if (!val->getType()->isIntegerTy()) return val;
+    if (!val->getType()->isIntegerTy())
+        return val;
 
     // i1 booleans don't have a meaningful integer range; skip the hint.
-    if (val->getType()->isIntegerTy(1)) return val;
+    if (val->getType()->isIntegerTy(1))
+        return val;
 
     llvm::IntegerType* intTy = llvm::cast<llvm::IntegerType>(val->getType());
     const unsigned bits = intTy->getBitWidth();
@@ -3467,10 +3330,13 @@ llvm::Value* CodeGenerator::generateRangeAnnot(RangeAnnotExpr* expr) {
     int64_t hi = expr->hi;
     if (bits < 64) {
         const int64_t typeMin = -(int64_t{1} << (bits - 1));
-        const int64_t typeMax =  (int64_t{1} << (bits - 1)) - 1;
-        if (lo < typeMin) lo = typeMin;
-        if (hi > typeMax) hi = typeMax;
-        if (lo > hi) return val; // nothing to assert
+        const int64_t typeMax = (int64_t{1} << (bits - 1)) - 1;
+        if (lo < typeMin)
+            lo = typeMin;
+        if (hi > typeMax)
+            hi = typeMax;
+        if (lo > hi)
+            return val; // nothing to assert
     }
 
     llvm::Constant* loC = llvm::ConstantInt::get(intTy, lo, /*IsSigned=*/true);
@@ -3478,25 +3344,21 @@ llvm::Value* CodeGenerator::generateRangeAnnot(RangeAnnotExpr* expr) {
 
     // ── !range metadata on load/call results ─────────────────────────────
     if (auto* inst = llvm::dyn_cast<llvm::Instruction>(val)) {
-        bool canAttach = llvm::isa<llvm::LoadInst>(inst) ||
-                         llvm::isa<llvm::CallInst>(inst) ||
-                         llvm::isa<llvm::InvokeInst>(inst);
+        bool canAttach =
+            llvm::isa<llvm::LoadInst>(inst) || llvm::isa<llvm::CallInst>(inst) || llvm::isa<llvm::InvokeInst>(inst);
         if (canAttach && hi < std::numeric_limits<int64_t>::max()) {
             // Don't overwrite a tighter pre-existing !range; intersect
             if (!inst->getMetadata(llvm::LLVMContext::MD_range)) {
                 llvm::Metadata* mdOps[] = {
                     llvm::ConstantAsMetadata::get(loC),
-                    llvm::ConstantAsMetadata::get(
-                        llvm::ConstantInt::get(intTy, hi + 1, /*IsSigned=*/true))};
-                inst->setMetadata(llvm::LLVMContext::MD_range,
-                                  llvm::MDNode::get(*context, mdOps));
+                    llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(intTy, hi + 1, /*IsSigned=*/true))};
+                inst->setMetadata(llvm::LLVMContext::MD_range, llvm::MDNode::get(*context, mdOps));
             }
         }
     }
 
     // ── llvm.assume(val >= lo && val <= hi) ─────────────────────────────
-    llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(
-        module.get(), llvm::Intrinsic::assume, {});
+    llvm::Function* assumeFn = OMSC_GET_INTRINSIC_STMT(module.get(), llvm::Intrinsic::assume, {});
     llvm::Value* geLo = builder->CreateICmpSGE(val, loC, "rangeannot.gelo");
     builder->CreateCall(assumeFn, {geLo});
     llvm::Value* leHi = builder->CreateICmpSLE(val, hiC, "rangeannot.lehi");
@@ -3539,14 +3401,14 @@ llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
             auto* bs = getBorrowStateOpt(srcName);
             if (bs) {
                 if (bs->immutBorrowCount > 0) {
-                    codegenError("Cannot create mutable borrow of '" + srcName +
-                                 "' — it already has " +
-                                 std::to_string(bs->immutBorrowCount) +
-                                 " active immutable borrow(s)", expr);
+                    codegenError("Cannot create mutable borrow of '" + srcName + "' — it already has " +
+                                     std::to_string(bs->immutBorrowCount) + " active immutable borrow(s)",
+                                 expr);
                 }
                 if (bs->mutBorrowed) {
                     codegenError("Cannot create mutable borrow of '" + srcName +
-                                 "' — it already has an active mutable borrow", expr);
+                                     "' — it already has an active mutable borrow",
+                                 expr);
                 }
                 if (bs->frozen) {
                     codegenError("Cannot create mutable borrow of frozen variable '" + srcName + "'", expr);
@@ -3563,7 +3425,8 @@ llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
             if (bs) {
                 if (bs->mutBorrowed) {
                     codegenError("Cannot create immutable borrow of '" + srcName +
-                                 "' — it already has an active mutable borrow", expr);
+                                     "' — it already has an active mutable borrow",
+                                 expr);
                 }
                 if (bs->moved || bs->invalidated) {
                     codegenError("Cannot borrow dead variable '" + srcName + "'", expr);
@@ -3581,12 +3444,12 @@ llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
             scopeName += "." + srcIdent->name;
         }
 
-        llvm::MDNode* domain = llvm::MDNode::getDistinct(
-            *context, {llvm::MDString::get(*context, "omscript.borrow.domain")});
+        llvm::MDNode* domain =
+            llvm::MDNode::getDistinct(*context, {llvm::MDString::get(*context, "omscript.borrow.domain")});
         domain->replaceOperandWith(0, domain);
 
-        llvm::MDNode* scope = llvm::MDNode::getDistinct(
-            *context, {nullptr, domain, llvm::MDString::get(*context, scopeName)});
+        llvm::MDNode* scope =
+            llvm::MDNode::getDistinct(*context, {nullptr, domain, llvm::MDString::get(*context, scopeName)});
         scope->replaceOperandWith(0, scope);
 
         llvm::MDNode* scopeList = llvm::MDNode::get(*context, {scope});
@@ -3595,8 +3458,7 @@ llvm::Value* CodeGenerator::generateBorrowExpr(BorrowExpr* expr) {
             // Immutable borrow: the load does NOT alias any other mutable access.
             loadInst->setMetadata(llvm::LLVMContext::MD_noalias, scopeList);
             // !invariant.load: value will not change while the borrow is alive.
-            loadInst->setMetadata(llvm::LLVMContext::MD_invariant_load,
-                                  llvm::MDNode::get(*context, {}));
+            loadInst->setMetadata(llvm::LLVMContext::MD_invariant_load, llvm::MDNode::get(*context, {}));
         }
     }
 
@@ -3619,11 +3481,13 @@ llvm::Value* CodeGenerator::generateReborrowExpr(ReborrowExpr* expr) {
             }
             if (expr->isMut && bs->mutBorrowed) {
                 codegenError("Cannot create mutable reborrow of '" + srcName +
-                             "' — it already has an active mutable borrow", expr);
+                                 "' — it already has an active mutable borrow",
+                             expr);
             }
             if (expr->isMut && bs->immutBorrowCount > 0) {
                 codegenError("Cannot create mutable reborrow of '" + srcName +
-                             "' — it already has active immutable borrows", expr);
+                                 "' — it already has active immutable borrows",
+                             expr);
             }
             if (expr->isMut && bs->frozen) {
                 codegenError("Cannot create mutable reborrow of frozen variable '" + srcName + "'", expr);
@@ -3657,11 +3521,10 @@ llvm::Value* CodeGenerator::generateReborrowExpr(ReborrowExpr* expr) {
                             if (it2 != namedValues.end()) {
                                 auto* srcAlloca = llvm::dyn_cast<llvm::AllocaInst>(it2->second);
                                 if (srcAlloca) {
-                                    llvm::StructType* sty = llvm::dyn_cast<llvm::StructType>(
-                                        srcAlloca->getAllocatedType());
+                                    llvm::StructType* sty =
+                                        llvm::dyn_cast<llvm::StructType>(srcAlloca->getAllocatedType());
                                     if (sty) {
-                                        val = builder->CreateStructGEP(sty, srcAlloca,
-                                                                       static_cast<unsigned>(fi),
+                                        val = builder->CreateStructGEP(sty, srcAlloca, static_cast<unsigned>(fi),
                                                                        "reborrow.field");
                                     }
                                 }
@@ -3681,9 +3544,8 @@ llvm::Value* CodeGenerator::generateReborrowExpr(ReborrowExpr* expr) {
         //   • nuw: idx >= 0, so idx+1 > 0 and cannot wrap unsigned
         //   • nsw: idx < len <= INT64_MAX-1, so idx+1 <= INT64_MAX (no signed wrap)
         //   • inbounds: idx+1 <= len <= capacity, within the malloc'd slab
-        llvm::Value* elemIdx = builder->CreateAdd(
-            idx, llvm::ConstantInt::get(getDefaultType(), 1), "reborrow.idx",
-            /*HasNUW=*/true, /*HasNSW=*/true);
+        llvm::Value* elemIdx = builder->CreateAdd(idx, llvm::ConstantInt::get(getDefaultType(), 1), "reborrow.idx",
+                                                  /*HasNUW=*/true, /*HasNSW=*/true);
         val = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "reborrow.elem");
     }
 
@@ -3699,7 +3561,8 @@ void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
         // and emit llvm.prefetch on the resulting value (treated as a pointer
         // or array base).  No variable is created, no lifetime tracking needed.
         llvm::Value* addrVal = generateExpression(stmt->addrExpr.get());
-        if (!addrVal) return;
+        if (!addrVal)
+            return;
         // Convert to pointer if needed (e.g. array base is an i64 holding a ptr)
         llvm::Type* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* ptr;
@@ -3709,17 +3572,14 @@ void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
             ptr = builder->CreateIntToPtr(addrVal, ptrTy, "pf.ptr");
         }
         const int32_t locality = stmt->hintHot ? 3 : 2;
-        llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
-            module.get(), llvm::Intrinsic::prefetch,
-            {ptrTy});
+        llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(module.get(), llvm::Intrinsic::prefetch, {ptrTy});
         auto* pfCall = builder->CreateCall(prefetchFn, {
-            ptr,
-            builder->getInt32(0),          // read prefetch
-            builder->getInt32(locality),   // temporal locality
-            builder->getInt32(1)           // data cache
-        });
-        pfCall->setMetadata("omscript.memory_prefetch",
-            llvm::MDNode::get(*context, {}));
+                                                           ptr,
+                                                           builder->getInt32(0),        // read prefetch
+                                                           builder->getInt32(locality), // temporal locality
+                                                           builder->getInt32(1)         // data cache
+                                                       });
+        pfCall->setMetadata("omscript.memory_prefetch", llvm::MDNode::get(*context, {}));
         return;
     }
 
@@ -3760,99 +3620,77 @@ void CodeGenerator::generatePrefetch(PrefetchStmt* stmt) {
             bool isLargeType = elemTy->isArrayTy() || elemTy->isStructTy();
             if (auto* arraySize = allocaInst->getArraySize()) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(arraySize)) {
-                    if (ci->getZExtValue() > 1) isLargeType = true;
+                    if (ci->getZExtValue() > 1)
+                        isLargeType = true;
                 }
             }
 
             if (isLargeType) {
                 // Memory-resident prefetch: for large types (structs, arrays)
-                llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
-                    module.get(), llvm::Intrinsic::prefetch,
-                    {llvm::PointerType::getUnqual(*context)});
+                llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(module.get(), llvm::Intrinsic::prefetch,
+                                                                     {llvm::PointerType::getUnqual(*context)});
                 auto* pfCall = builder->CreateCall(prefetchFn, {
-                    alloca,
-                    builder->getInt32(0),          // read prefetch
-                    builder->getInt32(locality),   // temporal locality
-                    builder->getInt32(1)           // data cache
-                });
+                                                                   alloca,
+                                                                   builder->getInt32(0),        // read prefetch
+                                                                   builder->getInt32(locality), // temporal locality
+                                                                   builder->getInt32(1)         // data cache
+                                                               });
                 // Tag with metadata so the cleanup pass preserves this.
-                pfCall->setMetadata("omscript.memory_prefetch",
-                    llvm::MDNode::get(*context, {}));
+                pfCall->setMetadata("omscript.memory_prefetch", llvm::MDNode::get(*context, {}));
 
                 // Offset prefetch for large types: if the user specified
                 if (stmt->offsetBytes > 0) {
                     llvm::Value* aheadPtr = builder->CreateInBoundsGEP(
-                        builder->getInt8Ty(), alloca,
-                        llvm::ConstantInt::get(getDefaultType(), stmt->offsetBytes),
+                        builder->getInt8Ty(), alloca, llvm::ConstantInt::get(getDefaultType(), stmt->offsetBytes),
                         varName + ".pf.ahead");
-                    auto* pfAhead = builder->CreateCall(prefetchFn, {
-                        aheadPtr,
-                        builder->getInt32(0),
-                        builder->getInt32(locality),
-                        builder->getInt32(1)
-                    });
-                    pfAhead->setMetadata("omscript.memory_prefetch",
-                        llvm::MDNode::get(*context, {}));
+                    auto* pfAhead =
+                        builder->CreateCall(prefetchFn, {aheadPtr, builder->getInt32(0), builder->getInt32(locality),
+                                                         builder->getInt32(1)});
+                    pfAhead->setMetadata("omscript.memory_prefetch", llvm::MDNode::get(*context, {}));
                 }
 
                 // For multi-slot arrays (structs), also prefetch subsequent
                 if (auto* arrTy = llvm::dyn_cast<llvm::ArrayType>(elemTy)) {
                     const uint64_t numSlots = arrTy->getNumElements();
-                    const uint64_t slotSize = module->getDataLayout().getTypeAllocSize(
-                        arrTy->getElementType());
+                    const uint64_t slotSize = module->getDataLayout().getTypeAllocSize(arrTy->getElementType());
                     const uint64_t totalBytes = numSlots * slotSize;
                     // Prefetch every 64 bytes (one cache line) beyond the first.
                     for (uint64_t offset = 64; offset < totalBytes; offset += 64) {
-                        llvm::Value* gepIdx = llvm::ConstantInt::get(
-                            getDefaultType(), offset / slotSize);
-                        llvm::Value* nextPtr = builder->CreateInBoundsGEP(
-                            arrTy->getElementType(), alloca, gepIdx,
-                            varName + ".pf.cacheline");
-                        auto* pfCall2 = builder->CreateCall(prefetchFn, {
-                            nextPtr,
-                            builder->getInt32(0),
-                            builder->getInt32(locality),
-                            builder->getInt32(1)
-                        });
-                        pfCall2->setMetadata("omscript.memory_prefetch",
-                            llvm::MDNode::get(*context, {}));
+                        llvm::Value* gepIdx = llvm::ConstantInt::get(getDefaultType(), offset / slotSize);
+                        llvm::Value* nextPtr = builder->CreateInBoundsGEP(arrTy->getElementType(), alloca, gepIdx,
+                                                                          varName + ".pf.cacheline");
+                        auto* pfCall2 =
+                            builder->CreateCall(prefetchFn, {nextPtr, builder->getInt32(0), builder->getInt32(locality),
+                                                             builder->getInt32(1)});
+                        pfCall2->setMetadata("omscript.memory_prefetch", llvm::MDNode::get(*context, {}));
                     }
                 }
             } else {
                 // Register promotion strategy: do NOT emit llvm.prefetch on
                 if (elemTy->isIntegerTy(64) || elemTy->isPointerTy()) {
-                    llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
-                        module.get(), llvm::Intrinsic::prefetch,
-                        {llvm::PointerType::getUnqual(*context)});
-                    llvm::Value* val = builder->CreateLoad(elemTy, alloca,
-                                                            varName + ".pf.val");
+                    llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(module.get(), llvm::Intrinsic::prefetch,
+                                                                         {llvm::PointerType::getUnqual(*context)});
+                    llvm::Value* val = builder->CreateLoad(elemTy, alloca, varName + ".pf.val");
                     llvm::Value* ptr = val;
                     if (!elemTy->isPointerTy()) {
-                        ptr = builder->CreateIntToPtr(
-                            val, llvm::PointerType::getUnqual(*context),
-                            varName + ".pf.ptr");
+                        ptr = builder->CreateIntToPtr(val, llvm::PointerType::getUnqual(*context), varName + ".pf.ptr");
                     }
                     builder->CreateCall(prefetchFn, {
-                        ptr,
-                        builder->getInt32(0),          // read prefetch
-                        builder->getInt32(locality),   // temporal locality
-                        builder->getInt32(1)           // data cache
-                    });
+                                                        ptr,
+                                                        builder->getInt32(0),        // read prefetch
+                                                        builder->getInt32(locality), // temporal locality
+                                                        builder->getInt32(1)         // data cache
+                                                    });
 
                     // Offset prefetch: prefetch+N brings the cache line at
                     if (stmt->offsetBytes > 0) {
                         llvm::Value* offsetPtr = builder->CreateInBoundsGEP(
-                            builder->getInt8Ty(), ptr,
-                            llvm::ConstantInt::get(getDefaultType(), stmt->offsetBytes),
+                            builder->getInt8Ty(), ptr, llvm::ConstantInt::get(getDefaultType(), stmt->offsetBytes),
                             varName + ".pf.ahead");
-                        auto* pfAhead = builder->CreateCall(prefetchFn, {
-                            offsetPtr,
-                            builder->getInt32(0),
-                            builder->getInt32(locality),
-                            builder->getInt32(1)
-                        });
-                        pfAhead->setMetadata("omscript.memory_prefetch",
-                            llvm::MDNode::get(*context, {}));
+                        auto* pfAhead =
+                            builder->CreateCall(prefetchFn, {offsetPtr, builder->getInt32(0),
+                                                             builder->getInt32(locality), builder->getInt32(1)});
+                        pfAhead->setMetadata("omscript.memory_prefetch", llvm::MDNode::get(*context, {}));
                     }
                 }
             }
@@ -3873,8 +3711,7 @@ void CodeGenerator::markVariableMoved(const std::string& varName) {
 #else
             auto* lifetimeEnd = llvm::Intrinsic::getDeclaration(
 #endif
-                module.get(), llvm::Intrinsic::lifetime_end,
-                {llvm::PointerType::getUnqual(*context)});
+                module.get(), llvm::Intrinsic::lifetime_end, {llvm::PointerType::getUnqual(*context)});
             builder->CreateCall(lifetimeEnd, {szVal, srcAlloca});
             builder->CreateStore(llvm::UndefValue::get(srcTy), srcAlloca);
         }
@@ -3914,7 +3751,8 @@ void CodeGenerator::markVariableMutBorrowed(const std::string& refVar, const std
 
 void CodeGenerator::releaseBorrow(const std::string& refVar) {
     auto mapIt = borrowMap_.find(refVar);
-    if (mapIt == borrowMap_.end()) return;
+    if (mapIt == borrowMap_.end())
+        return;
     const BorrowInfo& info = mapIt->second;
     auto stateIt = varBorrowStates_.find(info.srcVar);
     if (stateIt != varBorrowStates_.end()) {
@@ -3945,13 +3783,15 @@ bool CodeGenerator::isVariableFrozen(const std::string& varName) const {
 
 OwnershipState CodeGenerator::getOwnershipState(const std::string& varName) const {
     auto* s = getBorrowStateOpt(varName);
-    if (!s) return OwnershipState::Owned;
+    if (!s)
+        return OwnershipState::Owned;
     return s->state();
 }
 
 void CodeGenerator::checkVariableReadable(const std::string& varName, ASTNode* site) {
     // Ω spec §6.2: --no-ownership-checks disables all safety validation.
-    if (noOwnershipChecks_) return;
+    if (noOwnershipChecks_)
+        return;
 
     // Dead check (moved / invalidated)
     auto deadIt = deadVars_.find(varName);
@@ -3964,8 +3804,9 @@ void CodeGenerator::checkVariableReadable(const std::string& varName, ASTNode* s
     auto* s = getBorrowStateOpt(varName);
     if (s && s->mutBorrowed) {
         codegenError("Cannot read variable '" + varName +
-                     "' — it has an active mutable borrow (the mutable alias must"
-                     " go out of scope before the source can be read)", site);
+                         "' — it has an active mutable borrow (the mutable alias must"
+                         " go out of scope before the source can be read)",
+                     site);
     }
 }
 
@@ -4017,8 +3858,8 @@ void CodeGenerator::generateFreeze(FreezeStmt* stmt) {
     if (auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(alloca)) {
         llvm::Type* elemTy = allocaInst->getAllocatedType();
         if (elemTy->isIntegerTy() || elemTy->isFloatingPointTy()) {
-            llvm::Value* loadedVal = builder->CreateAlignedLoad(
-                elemTy, allocaInst, llvm::MaybeAlign(8), (name + ".freeze.load").c_str());
+            llvm::Value* loadedVal =
+                builder->CreateAlignedLoad(elemTy, allocaInst, llvm::MaybeAlign(8), (name + ".freeze.load").c_str());
             llvm::Value* frozenVal = builder->CreateFreeze(loadedVal, (name + ".frozen").c_str());
             builder->CreateAlignedStore(frozenVal, allocaInst, llvm::MaybeAlign(8));
         }
@@ -4032,8 +3873,7 @@ void CodeGenerator::generateFreeze(FreezeStmt* stmt) {
 #else
         auto* invariantStart = llvm::Intrinsic::getDeclaration(
 #endif
-            module.get(), llvm::Intrinsic::invariant_start,
-            {llvm::PointerType::getUnqual(*context)});
+            module.get(), llvm::Intrinsic::invariant_start, {llvm::PointerType::getUnqual(*context)});
         builder->CreateCall(invariantStart, {szVal, allocaInst});
     }
 }
@@ -4057,8 +3897,7 @@ void CodeGenerator::generateShared(SharedStmt* stmt) {
         codegenError("Cannot mark invalidated variable '" + name + "' as shared", stmt);
     }
     if (state == OwnershipState::MutBorrowed) {
-        codegenError("Cannot mark '" + name +
-                     "' as shared — it has an active mutable borrow", stmt);
+        codegenError("Cannot mark '" + name + "' as shared — it has an active mutable borrow", stmt);
     }
 
     // Update codegen ownership state to Shared.
@@ -4084,8 +3923,7 @@ void CodeGenerator::generateOwn(OwnStmt* stmt) {
         codegenError("Cannot assert ownership of invalidated variable '" + name + "'", stmt);
     }
     if (state == OwnershipState::Borrowed || state == OwnershipState::MutBorrowed) {
-        codegenError("Cannot assert unique ownership of '" + name +
-                     "' — it has active borrow(s)", stmt);
+        codegenError("Cannot assert unique ownership of '" + name + "' — it has active borrow(s)", stmt);
     }
 
     // Clear shared flag — frozen remains (freeze is a stronger invariant).
@@ -4100,12 +3938,8 @@ void CodeGenerator::generateOwn(OwnStmt* stmt) {
 // or new-construct expression.  basePtr is the already-loaded pointer value;
 // structHint is a (possibly empty) struct-type name used by resolveField.
 void CodeGenerator::emitConstructFieldsInto(
-    llvm::Value* basePtr,
-    const std::string& structHint,
-    const std::vector<std::pair<std::string,
-                                std::unique_ptr<Expression>>>& fields,
-    const ASTNode* errorNode)
-{
+    llvm::Value* basePtr, const std::string& structHint,
+    const std::vector<std::pair<std::string, std::unique_ptr<Expression>>>& fields, const ASTNode* errorNode) {
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
     if (!basePtr->getType()->isPointerTy())
         basePtr = builder->CreateIntToPtr(basePtr, ptrTy, "construct.baseptr");
@@ -4114,52 +3948,40 @@ void CodeGenerator::emitConstructFieldsInto(
         const ResolvedField rf = resolveField(structHint, fieldName, errorNode);
 
         llvm::Value* val = generateExpression(valueExpr.get());
-        llvm::Type*  elemTy = rf.fieldType ? rf.fieldType : getDefaultType();
+        llvm::Type* elemTy = rf.fieldType ? rf.fieldType : getDefaultType();
         val = convertTo(val, elemTy);
 
         llvm::Value* elemPtr;
         if (rf.structType) {
-            elemPtr = builder->CreateStructGEP(
-                rf.structType, basePtr,
-                static_cast<unsigned>(rf.index), "construct.field.ptr");
+            elemPtr = builder->CreateStructGEP(rf.structType, basePtr, static_cast<unsigned>(rf.index),
+                                               "construct.field.ptr");
         } else {
             elemPtr = builder->CreateInBoundsGEP(
-                getDefaultType(), basePtr,
-                llvm::ConstantInt::get(getDefaultType(), rf.index),
-                "construct.field.ptr");
+                getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), rf.index), "construct.field.ptr");
         }
 
         // Choose alignment from field attributes (respects @align annotation)
         // or fall back to the ABI alignment of the element type.
         const auto declIt = structFieldDecls_.find(rf.structName);
         llvm::Align fieldAlign;
-        if (declIt != structFieldDecls_.end() &&
-            rf.index < declIt->second.size() &&
+        if (declIt != structFieldDecls_.end() && rf.index < declIt->second.size() &&
             declIt->second[rf.index].attrs.align > 0) {
-            fieldAlign = llvm::Align(
-                static_cast<unsigned>(declIt->second[rf.index].attrs.align));
+            fieldAlign = llvm::Align(static_cast<unsigned>(declIt->second[rf.index].attrs.align));
         } else {
             fieldAlign = module->getDataLayout().getABITypeAlign(elemTy);
         }
 
-        llvm::StoreInst* store =
-            builder->CreateAlignedStore(val, elemPtr, fieldAlign);
+        llvm::StoreInst* store = builder->CreateAlignedStore(val, elemPtr, fieldAlign);
 
         // Per-field TBAA metadata (matches generateFieldAssign's convention).
-        store->setMetadata(llvm::LLVMContext::MD_tbaa,
-                           getOrCreateFieldTBAA(rf.structName, rf.index));
+        store->setMetadata(llvm::LLVMContext::MD_tbaa, getOrCreateFieldTBAA(rf.structName, rf.index));
 
         // !nontemporal hint for cold fields.
-        if (declIt != structFieldDecls_.end() &&
-            rf.index < declIt->second.size() &&
+        if (declIt != structFieldDecls_.end() && rf.index < declIt->second.size() &&
             declIt->second[rf.index].attrs.cold) {
             llvm::Metadata* one[] = {
-                llvm::ConstantAsMetadata::get(
-                    llvm::ConstantInt::get(
-                        llvm::Type::getInt32Ty(*context), 1))
-            };
-            store->setMetadata(llvm::LLVMContext::MD_nontemporal,
-                               llvm::MDNode::get(*context, one));
+                llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))};
+            store->setMetadata(llvm::LLVMContext::MD_nontemporal, llvm::MDNode::get(*context, one));
         }
     }
 }
@@ -4173,9 +3995,7 @@ void CodeGenerator::generateConstruct(ConstructStmt* stmt) {
     llvm::Value* ptr = generateExpression(stmt->target.get());
 
     // Determine the struct-type hint from the target expression.
-    const std::string hint = stmt->typeName.empty()
-        ? resolveStructType(stmt->target.get())
-        : stmt->typeName;
+    const std::string hint = stmt->typeName.empty() ? resolveStructType(stmt->target.get()) : stmt->typeName;
 
     emitConstructFieldsInto(ptr, hint, stmt->fields, stmt);
 }
@@ -4190,7 +4010,7 @@ llvm::Value* CodeGenerator::generateNewConstruct(NewConstructExpr* expr) {
     // existing smart-allocator path (T1 stack / T2 arena / T3 heap tiers).
     std::vector<std::unique_ptr<Expression>> allocArgs; // empty → alloc<T>(1)
     CallExpr allocCall("alloc<" + expr->typeName + ">", std::move(allocArgs));
-    allocCall.line   = expr->line;
+    allocCall.line = expr->line;
     allocCall.column = expr->column;
     llvm::Value* ptr = generateExpression(&allocCall);
 
@@ -4203,15 +4023,16 @@ llvm::Value* CodeGenerator::generateNewConstruct(NewConstructExpr* expr) {
 // Walks statement/expression trees and collects all base array names accessed
 // via INDEX_EXPR into @p out (deduplicating via @p seen).
 static void collectArrayBases(const Statement* s, std::vector<std::string>& out) {
-    if (!s) return;
+    if (!s)
+        return;
     std::unordered_set<std::string> seen(out.begin(), out.end());
     std::function<void(const Expression*)> scanExpr = [&](const Expression* e) {
-        if (!e) return;
+        if (!e)
+            return;
         if (e->type == ASTNodeType::INDEX_EXPR) {
             const auto* ie = static_cast<const IndexExpr*>(e);
             if (ie->array && ie->array->type == ASTNodeType::IDENTIFIER_EXPR) {
-                const std::string& name =
-                    static_cast<const IdentifierExpr*>(ie->array.get())->name;
+                const std::string& name = static_cast<const IdentifierExpr*>(ie->array.get())->name;
                 if (seen.insert(name).second)
                     out.push_back(name);
             }
@@ -4221,7 +4042,8 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
         }
         if (e->type == ASTNodeType::BINARY_EXPR) {
             const auto* b = static_cast<const BinaryExpr*>(e);
-            scanExpr(b->left.get()); scanExpr(b->right.get());
+            scanExpr(b->left.get());
+            scanExpr(b->right.get());
         } else if (e->type == ASTNodeType::UNARY_EXPR) {
             scanExpr(static_cast<const UnaryExpr*>(e)->operand.get());
         } else if (e->type == ASTNodeType::CALL_EXPR) {
@@ -4229,12 +4051,16 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
                 scanExpr(a.get());
         } else if (e->type == ASTNodeType::TERNARY_EXPR) {
             const auto* t = static_cast<const TernaryExpr*>(e);
-            scanExpr(t->condition.get()); scanExpr(t->thenExpr.get()); scanExpr(t->elseExpr.get());
+            scanExpr(t->condition.get());
+            scanExpr(t->thenExpr.get());
+            scanExpr(t->elseExpr.get());
         } else if (e->type == ASTNodeType::ASSIGN_EXPR) {
             scanExpr(static_cast<const AssignExpr*>(e)->value.get());
         } else if (e->type == ASTNodeType::INDEX_ASSIGN_EXPR) {
             const auto* ia = static_cast<const IndexAssignExpr*>(e);
-            scanExpr(ia->array.get()); scanExpr(ia->index.get()); scanExpr(ia->value.get());
+            scanExpr(ia->array.get());
+            scanExpr(ia->index.get());
+            scanExpr(ia->value.get());
         } else if (e->type == ASTNodeType::ARRAY_EXPR) {
             for (const auto& el : static_cast<const ArrayExpr*>(e)->elements)
                 scanExpr(el.get());
@@ -4248,16 +4074,21 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
         }
     };
     std::function<void(const Statement*)> scanStmt = [&](const Statement* s) {
-        if (!s) return;
+        if (!s)
+            return;
         switch (s->type) {
         case ASTNodeType::EXPR_STMT:
-            scanExpr(static_cast<const ExprStmt*>(s)->expression.get()); break;
+            scanExpr(static_cast<const ExprStmt*>(s)->expression.get());
+            break;
         case ASTNodeType::VAR_DECL:
-            scanExpr(static_cast<const VarDecl*>(s)->initializer.get()); break;
+            scanExpr(static_cast<const VarDecl*>(s)->initializer.get());
+            break;
         case ASTNodeType::MOVE_DECL:
-            scanExpr(static_cast<const MoveDecl*>(s)->initializer.get()); break;
+            scanExpr(static_cast<const MoveDecl*>(s)->initializer.get());
+            break;
         case ASTNodeType::RETURN_STMT:
-            scanExpr(static_cast<const ReturnStmt*>(s)->value.get()); break;
+            scanExpr(static_cast<const ReturnStmt*>(s)->value.get());
+            break;
         case ASTNodeType::BLOCK:
             for (const auto& sub : static_cast<const BlockStmt*>(s)->statements)
                 scanStmt(sub.get());
@@ -4277,8 +4108,10 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
         }
         case ASTNodeType::FOR_STMT: {
             const auto* fs = static_cast<const ForStmt*>(s);
-            scanExpr(fs->start.get()); scanExpr(fs->end.get());
-            scanExpr(fs->step.get()); scanStmt(fs->body.get());
+            scanExpr(fs->start.get());
+            scanExpr(fs->end.get());
+            scanExpr(fs->step.get());
+            scanStmt(fs->body.get());
             break;
         }
         case ASTNodeType::FOR_EACH_STMT: {
@@ -4302,18 +4135,23 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
             break;
         }
         case ASTNodeType::CATCH_STMT:
-            scanStmt(static_cast<const CatchStmt*>(s)->body.get()); break;
+            scanStmt(static_cast<const CatchStmt*>(s)->body.get());
+            break;
         case ASTNodeType::DEFER_STMT:
-            scanStmt(static_cast<const DeferStmt*>(s)->body.get()); break;
+            scanStmt(static_cast<const DeferStmt*>(s)->body.get());
+            break;
         case ASTNodeType::PREFETCH_STMT: {
             const auto* ps = static_cast<const PrefetchStmt*>(s);
-            if (ps->varDecl) scanExpr(ps->varDecl->initializer.get());
-            if (ps->addrExpr) scanExpr(ps->addrExpr.get());
+            if (ps->varDecl)
+                scanExpr(ps->varDecl->initializer.get());
+            if (ps->addrExpr)
+                scanExpr(ps->addrExpr.get());
             break;
         }
         case ASTNodeType::PIPELINE_STMT: {
             const auto* pl = static_cast<const PipelineStmt*>(s);
-            if (pl->count) scanExpr(pl->count.get());
+            if (pl->count)
+                scanExpr(pl->count.get());
             for (const auto& stage : pl->stages)
                 if (stage.body)
                     for (const auto& sub : stage.body->statements)
@@ -4322,8 +4160,10 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
         }
         case ASTNodeType::ASSUME_STMT: {
             const auto* as = static_cast<const AssumeStmt*>(s);
-            if (as->condition) scanExpr(as->condition.get());
-            if (as->deoptBody) scanStmt(as->deoptBody.get());
+            if (as->condition)
+                scanExpr(as->condition.get());
+            if (as->deoptBody)
+                scanStmt(as->deoptBody.get());
             break;
         }
         case ASTNodeType::CONSTRUCT_STMT: {
@@ -4333,7 +4173,8 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
                 scanExpr(fv.get());
             break;
         }
-        default: break;
+        default:
+            break;
         }
     };
     scanStmt(s);
@@ -4357,7 +4198,8 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
     if (!stmt->count) {
         const ScopeGuard scope(*this);
         for (int si = 0; si < nStages; ++si) {
-            if (builder->GetInsertBlock()->getTerminator()) break;
+            if (builder->GetInsertBlock()->getTerminator())
+                break;
             const ScopeGuard stageScope(*this);
             generateBlock(stmt->stages[si].body.get());
         }
@@ -4382,12 +4224,12 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
 
     // Zero-count: no-op.
     if (auto* cv = llvm::dyn_cast<llvm::ConstantInt>(countVal)) {
-        if (cv->getSExtValue() <= 0) return;
+        if (cv->getSExtValue() <= 0)
+            return;
     }
 
     // Hidden iterator alloca: __pipeline_i = 0
-    llvm::AllocaInst* iterAlloca =
-        createEntryBlockAlloca(function, kPipelineIter, iterTy);
+    llvm::AllocaInst* iterAlloca = createEntryBlockAlloca(function, kPipelineIter, iterTy);
     bindVariable(kPipelineIter, iterAlloca);
     loopIterVars_.insert(kPipelineIter);
     builder->CreateAlignedStore(llvm::ConstantInt::get(iterTy, 0), iterAlloca, iterAlloca->getAlign());
@@ -4404,8 +4246,7 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
 
     // ── Condition: __pipeline_i < count ─────────────────────────────────────
     builder->SetInsertPoint(condBB);
-    llvm::Value* iCond = builder->CreateAlignedLoad(
-        iterTy, iterAlloca, llvm::MaybeAlign(8), "__pipeline_i.cond");
+    llvm::Value* iCond = builder->CreateAlignedLoad(iterTy, iterAlloca, llvm::MaybeAlign(8), "__pipeline_i.cond");
     llvm::Value* cond = builder->CreateICmpSLT(iCond, countVal, "pipeline.cond.check");
     builder->CreateCondBr(cond, bodyBB, exitBB);
 
@@ -4414,46 +4255,40 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
 
     // ① Prefetch array elements D iterations ahead.
     if (optimizationLevel >= OptimizationLevel::O1 && !prefetchBases.empty()) {
-        llvm::Value* iBody = builder->CreateAlignedLoad(
-            iterTy, iterAlloca, llvm::MaybeAlign(8), "__pipeline_i.pf");
-        llvm::Value* pfDist  = llvm::ConstantInt::get(iterTy,
-            static_cast<uint64_t>(prefetchDist), /*isSigned=*/true);
-        llvm::Value* pfIndex = builder->CreateAdd(iBody, pfDist,
-            "__pipeline_i.pf.idx", /*HasNUW=*/false, /*HasNSW=*/true);
+        llvm::Value* iBody = builder->CreateAlignedLoad(iterTy, iterAlloca, llvm::MaybeAlign(8), "__pipeline_i.pf");
+        llvm::Value* pfDist = llvm::ConstantInt::get(iterTy, static_cast<uint64_t>(prefetchDist), /*isSigned=*/true);
+        llvm::Value* pfIndex =
+            builder->CreateAdd(iBody, pfDist, "__pipeline_i.pf.idx", /*HasNUW=*/false, /*HasNSW=*/true);
 
-        llvm::Function* prefetchFn = OMSC_GET_INTRINSIC_STMT(
-            module.get(), llvm::Intrinsic::prefetch,
-            {llvm::PointerType::getUnqual(*context)});
+        llvm::Function* prefetchFn =
+            OMSC_GET_INTRINSIC_STMT(module.get(), llvm::Intrinsic::prefetch, {llvm::PointerType::getUnqual(*context)});
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
 
         for (const auto& baseName : prefetchBases) {
             auto it = namedValues.find(baseName);
-            if (it == namedValues.end()) continue;
+            if (it == namedValues.end())
+                continue;
 
-            llvm::Value* rawPtr = builder->CreateAlignedLoad(
-                iterTy, it->second, llvm::MaybeAlign(8), baseName + ".pf.raw");
-            llvm::Value* basePtr =
-                rawPtr->getType()->isPointerTy()
-                    ? rawPtr
-                    : builder->CreateIntToPtr(rawPtr, ptrTy, baseName + ".pf.ptr");
+            llvm::Value* rawPtr =
+                builder->CreateAlignedLoad(iterTy, it->second, llvm::MaybeAlign(8), baseName + ".pf.raw");
+            llvm::Value* basePtr = rawPtr->getType()->isPointerTy()
+                                       ? rawPtr
+                                       : builder->CreateIntToPtr(rawPtr, ptrTy, baseName + ".pf.ptr");
 
             // Skip length header (GEP + 1)
             llvm::Value* dataPtr = builder->CreateInBoundsGEP(
-                getDefaultType(), basePtr,
-                llvm::ConstantInt::get(getDefaultType(), 1),
-                baseName + ".pf.data");
+                getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), 1), baseName + ".pf.data");
 
-            llvm::Value* elemPtr = builder->CreateInBoundsGEP(
-                getDefaultType(), dataPtr, pfIndex, baseName + ".pf.elemptr");
+            llvm::Value* elemPtr =
+                builder->CreateInBoundsGEP(getDefaultType(), dataPtr, pfIndex, baseName + ".pf.elemptr");
 
             auto* pfCall = builder->CreateCall(prefetchFn, {
-                elemPtr,
-                builder->getInt32(0),   // read
-                builder->getInt32(3),   // high temporal locality
-                builder->getInt32(1)    // data cache
-            });
-            pfCall->setMetadata("omscript.pipeline_prefetch",
-                llvm::MDNode::get(*context, {}));
+                                                               elemPtr,
+                                                               builder->getInt32(0), // read
+                                                               builder->getInt32(3), // high temporal locality
+                                                               builder->getInt32(1)  // data cache
+                                                           });
+            pfCall->setMetadata("omscript.pipeline_prefetch", llvm::MDNode::get(*context, {}));
         }
     }
 
@@ -4462,48 +4297,39 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
     {
         const ScopeGuard stageScope(*this);
         for (int si = 0; si < nStages; ++si) {
-            if (builder->GetInsertBlock()->getTerminator()) break;
+            if (builder->GetInsertBlock()->getTerminator())
+                break;
             const ScopeGuard innerScope(*this);
             generateBlock(stmt->stages[si].body.get());
         }
     }
 
     // ③ __pipeline_i++
-    llvm::Value* iStep = builder->CreateAlignedLoad(
-        iterTy, iterAlloca, llvm::MaybeAlign(8), "__pipeline_i.step");
-    llvm::Value* iNext = builder->CreateAdd(
-        iStep, llvm::ConstantInt::get(iterTy, 1),
-        "__pipeline_i.next", /*HasNUW=*/true, /*HasNSW=*/true);
+    llvm::Value* iStep = builder->CreateAlignedLoad(iterTy, iterAlloca, llvm::MaybeAlign(8), "__pipeline_i.step");
+    llvm::Value* iNext = builder->CreateAdd(iStep, llvm::ConstantInt::get(iterTy, 1), "__pipeline_i.next",
+                                            /*HasNUW=*/true, /*HasNSW=*/true);
     builder->CreateAlignedStore(iNext, iterAlloca, iterAlloca->getAlign());
 
     // ④ Back-edge with pipeline loop metadata.
     {
-        llvm::BranchInst* backEdge =
-            llvm::cast<llvm::BranchInst>(builder->CreateBr(condBB));
+        llvm::BranchInst* backEdge = llvm::cast<llvm::BranchInst>(builder->CreateBr(condBB));
 
         llvm::MDBuilder mdb(*context);
         llvm::SmallVector<llvm::Metadata*, 8> mds;
         mds.push_back(nullptr);
 
-        mds.push_back(llvm::MDNode::get(*context,
-            {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
+        mds.push_back(llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")}));
 
-        mds.push_back(llvm::MDNode::get(*context, {
-            llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
-            mdb.createConstant(llvm::ConstantInt::getTrue(*context))
-        }));
+        mds.push_back(llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.vectorize.enable"),
+                                                   mdb.createConstant(llvm::ConstantInt::getTrue(*context))}));
 
-        mds.push_back(llvm::MDNode::get(*context, {
-            llvm::MDString::get(*context, "llvm.loop.interleave.count"),
-            mdb.createConstant(llvm::ConstantInt::get(
-                llvm::Type::getInt32Ty(*context), std::max(2, nStages)))
-        }));
+        mds.push_back(llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.interleave.count"),
+                                                   mdb.createConstant(llvm::ConstantInt::get(
+                                                       llvm::Type::getInt32Ty(*context), std::max(2, nStages)))}));
 
-        mds.push_back(llvm::MDNode::get(*context, {
-            llvm::MDString::get(*context, "llvm.loop.pipeline.initiationinterval"),
-            mdb.createConstant(llvm::ConstantInt::get(
-                llvm::Type::getInt32Ty(*context), 1))
-        }));
+        mds.push_back(llvm::MDNode::get(
+            *context, {llvm::MDString::get(*context, "llvm.loop.pipeline.initiationinterval"),
+                       mdb.createConstant(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))}));
 
         llvm::MDNode* loopMD = llvm::MDNode::get(*context, mds);
         loopMD->replaceOperandWith(0, loopMD);
@@ -4521,31 +4347,27 @@ void CodeGenerator::generatePipeline(PipelineStmt* stmt) {
 
 namespace {
 // Recursively scan an expression for array accesses using iterVar.
-void scanExprForArrayAccesses(
-    const Expression* expr,
-    const std::string& iterVar,
-    std::unordered_map<std::string, bool>& goodArrays,
-    std::unordered_set<std::string>& badArrays)
-{
-    if (!expr) return;
+void scanExprForArrayAccesses(const Expression* expr, const std::string& iterVar,
+                              std::unordered_map<std::string, bool>& goodArrays,
+                              std::unordered_set<std::string>& badArrays) {
+    if (!expr)
+        return;
     switch (expr->type) {
     case ASTNodeType::INDEX_EXPR: {
         const auto* ie = static_cast<const IndexExpr*>(expr);
         // Scan the index expression itself first (it may use other arrays).
         scanExprForArrayAccesses(ie->index.get(), iterVar, goodArrays, badArrays);
         // Check whether the index is exactly iterVar.
-        bool simpleIndex =
-            ie->index->type == ASTNodeType::IDENTIFIER_EXPR &&
-            static_cast<const IdentifierExpr*>(ie->index.get())->name == iterVar;
+        bool simpleIndex = ie->index->type == ASTNodeType::IDENTIFIER_EXPR &&
+                           static_cast<const IdentifierExpr*>(ie->index.get())->name == iterVar;
         if (ie->array->type == ASTNodeType::IDENTIFIER_EXPR) {
-            const std::string& arrName =
-                static_cast<const IdentifierExpr*>(ie->array.get())->name;
+            const std::string& arrName = static_cast<const IdentifierExpr*>(ie->array.get())->name;
             if (!simpleIndex || badArrays.count(arrName)) {
                 badArrays.insert(arrName);
                 goodArrays.erase(arrName);
             } else {
                 if (!goodArrays.count(arrName) && !badArrays.count(arrName))
-                    goodArrays[arrName] = false;  // initially read-only
+                    goodArrays[arrName] = false; // initially read-only
             }
         } else {
             // Non-identifier array base (e.g., nested index, call result):
@@ -4558,12 +4380,10 @@ void scanExprForArrayAccesses(
         const auto* iae = static_cast<const IndexAssignExpr*>(expr);
         scanExprForArrayAccesses(iae->index.get(), iterVar, goodArrays, badArrays);
         scanExprForArrayAccesses(iae->value.get(), iterVar, goodArrays, badArrays);
-        bool simpleIndex =
-            iae->index->type == ASTNodeType::IDENTIFIER_EXPR &&
-            static_cast<const IdentifierExpr*>(iae->index.get())->name == iterVar;
+        bool simpleIndex = iae->index->type == ASTNodeType::IDENTIFIER_EXPR &&
+                           static_cast<const IdentifierExpr*>(iae->index.get())->name == iterVar;
         if (iae->array->type == ASTNodeType::IDENTIFIER_EXPR) {
-            const std::string& arrName =
-                static_cast<const IdentifierExpr*>(iae->array.get())->name;
+            const std::string& arrName = static_cast<const IdentifierExpr*>(iae->array.get())->name;
             if (!simpleIndex || badArrays.count(arrName)) {
                 badArrays.insert(arrName);
                 goodArrays.erase(arrName);
@@ -4583,15 +4403,12 @@ void scanExprForArrayAccesses(
     case ASTNodeType::CALL_EXPR: {
         const auto* ce = static_cast<const CallExpr*>(expr);
         // Length-modifying builtins: disqualify the first argument array.
-        static const std::unordered_set<std::string> kLenModifiers = {
-            "push", "pop", "array_remove", "array_insert",
-            "array_clear", "array_resize"
-        };
+        static const std::unordered_set<std::string> kLenModifiers = {"push",         "pop",         "array_remove",
+                                                                      "array_insert", "array_clear", "array_resize"};
         if (kLenModifiers.count(ce->callee) && !ce->arguments.empty()) {
             const auto* arg0 = ce->arguments[0].get();
             if (arg0->type == ASTNodeType::IDENTIFIER_EXPR) {
-                const std::string& arrName =
-                    static_cast<const IdentifierExpr*>(arg0)->name;
+                const std::string& arrName = static_cast<const IdentifierExpr*>(arg0)->name;
                 badArrays.insert(arrName);
                 goodArrays.erase(arrName);
             }
@@ -4603,7 +4420,7 @@ void scanExprForArrayAccesses(
     // For all other expression types, recursively scan children.
     case ASTNodeType::BINARY_EXPR: {
         const auto* be = static_cast<const BinaryExpr*>(expr);
-        scanExprForArrayAccesses(be->left.get(),  iterVar, goodArrays, badArrays);
+        scanExprForArrayAccesses(be->left.get(), iterVar, goodArrays, badArrays);
         scanExprForArrayAccesses(be->right.get(), iterVar, goodArrays, badArrays);
         return;
     }
@@ -4615,8 +4432,8 @@ void scanExprForArrayAccesses(
     case ASTNodeType::TERNARY_EXPR: {
         const auto* te = static_cast<const TernaryExpr*>(expr);
         scanExprForArrayAccesses(te->condition.get(), iterVar, goodArrays, badArrays);
-        scanExprForArrayAccesses(te->thenExpr.get(),  iterVar, goodArrays, badArrays);
-        scanExprForArrayAccesses(te->elseExpr.get(),  iterVar, goodArrays, badArrays);
+        scanExprForArrayAccesses(te->thenExpr.get(), iterVar, goodArrays, badArrays);
+        scanExprForArrayAccesses(te->elseExpr.get(), iterVar, goodArrays, badArrays);
         return;
     }
     case ASTNodeType::ASSIGN_EXPR: {
@@ -4625,21 +4442,19 @@ void scanExprForArrayAccesses(
         return;
     }
     default:
-        return;  // literals, identifiers, etc. — no array accesses
+        return; // literals, identifiers, etc. — no array accesses
     }
 }
 
 // Recursively scan a statement tree for array accesses using iterVar.
-void scanStmtForArrayAccesses(
-    const Statement* stmt,
-    const std::string& iterVar,
-    std::unordered_map<std::string, bool>& goodArrays,
-    std::unordered_set<std::string>& badArrays,
-    unsigned depth = 0)
-{
-    if (!stmt) return;
+void scanStmtForArrayAccesses(const Statement* stmt, const std::string& iterVar,
+                              std::unordered_map<std::string, bool>& goodArrays,
+                              std::unordered_set<std::string>& badArrays, unsigned depth = 0) {
+    if (!stmt)
+        return;
     // Limit recursion into nested for-loops: inner loops may re-use the same
-    if (depth > 8) return;
+    if (depth > 8)
+        return;
 
     switch (stmt->type) {
     case ASTNodeType::BLOCK: {
@@ -4649,9 +4464,7 @@ void scanStmtForArrayAccesses(
         return;
     }
     case ASTNodeType::EXPR_STMT: {
-        scanExprForArrayAccesses(
-            static_cast<const ExprStmt*>(stmt)->expression.get(),
-            iterVar, goodArrays, badArrays);
+        scanExprForArrayAccesses(static_cast<const ExprStmt*>(stmt)->expression.get(), iterVar, goodArrays, badArrays);
         return;
     }
     case ASTNodeType::VAR_DECL: {
@@ -4691,8 +4504,7 @@ void scanStmtForArrayAccesses(
         const auto* fes = static_cast<const ForEachStmt*>(stmt);
         // If the collection is a named array, check if iterVar accesses it.
         if (fes->collection->type == ASTNodeType::IDENTIFIER_EXPR) {
-            const std::string& cn =
-                static_cast<const IdentifierExpr*>(fes->collection.get())->name;
+            const std::string& cn = static_cast<const IdentifierExpr*>(fes->collection.get())->name;
             // for-each iterates the whole array — length changes would be visible.
             // Conservatively disqualify.
             if (goodArrays.count(cn) || badArrays.count(cn)) {
@@ -4709,9 +4521,8 @@ void scanStmtForArrayAccesses(
 }
 } // anonymous namespace
 
-std::unordered_map<std::string, bool>
-CodeGenerator::preScanLoopArrayAccesses(const Statement* body,
-                                         const std::string& iterVar) {
+std::unordered_map<std::string, bool> CodeGenerator::preScanLoopArrayAccesses(const Statement* body,
+                                                                              const std::string& iterVar) {
     std::unordered_map<std::string, bool> goodArrays;
     std::unordered_set<std::string> badArrays;
     scanStmtForArrayAccesses(body, iterVar, goodArrays, badArrays);

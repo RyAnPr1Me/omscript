@@ -1,3 +1,4 @@
+import std;
 // strings package - utility functions for string operations
 
 fn str_is_empty(s) {

@@ -1,3 +1,4 @@
+import std;
 // Test @loop(fuse=true) — merges two adjacent loops with the same bounds.
 fn main() {
     var a = [0, 0, 0, 0, 0];

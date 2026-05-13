@@ -1,3 +1,4 @@
+import std;
 fn greet(name) {
     return "Hello, " + name + "!";
 }

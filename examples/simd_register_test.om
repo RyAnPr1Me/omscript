@@ -1,3 +1,4 @@
+import std;
 // Test SIMD vector types and register allocation hints
 fn main() {
     var total = 0;

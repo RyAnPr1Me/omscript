@@ -1,3 +1,4 @@
+import std;
 // Test compound assignment to array elements: arr[i] += expr, arr[i] -= expr, etc.
 fn main() {
     var result = 0;

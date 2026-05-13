@@ -1,3 +1,4 @@
+import std;
 // Test: method-call syntax: obj.method(args) desugars to method(obj, args)
 // Covers user-defined "methods", array methods, and string methods.
 

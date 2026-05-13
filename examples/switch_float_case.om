@@ -1,3 +1,4 @@
+import std;
 // case with a float literal should be a compile error, not a silent truncation
 fn main() {
     switch (1) {

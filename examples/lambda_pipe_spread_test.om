@@ -1,3 +1,4 @@
+import std;
 // Test lambda expressions, pipe operator, and spread operator
 
 fn double(x) {

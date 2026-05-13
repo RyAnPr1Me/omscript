@@ -1,3 +1,4 @@
+import std;
 // len_string_test.om
 //
 // Regression test: len() on string variables and string concatenation results

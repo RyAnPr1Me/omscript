@@ -77,8 +77,8 @@ class Program;
 /// The last element of the flattened array format (from OmScript int[][]) is
 /// the expected output; all preceding elements are inputs.
 struct SynthExample {
-    std::vector<int64_t> inputs;   ///< Parameter values (N elements)
-    int64_t              output;   ///< Expected return value
+    std::vector<int64_t> inputs; ///< Parameter values (N elements)
+    int64_t output;              ///< Expected return value
 };
 
 // ─── SynthNode — expression tree node ────────────────────────────────────────
@@ -86,34 +86,34 @@ struct SynthExample {
 /// Operations available to the synthesizer.
 enum class SynthOp : uint8_t {
     // Terminals
-    PARAM,      ///< Reference to parameter index (leaf)
-    CONST,      ///< Small integer constant (leaf)
+    PARAM, ///< Reference to parameter index (leaf)
+    CONST, ///< Small integer constant (leaf)
     // Unary
-    NEG,        ///< -x
-    ABS,        ///< abs(x)
-    NOT,        ///< ~x (bitwise NOT)
+    NEG, ///< -x
+    ABS, ///< abs(x)
+    NOT, ///< ~x (bitwise NOT)
     // Binary
-    ADD,        ///< x + y
-    SUB,        ///< x - y
-    MUL,        ///< x * y
-    DIV,        ///< x / y  (safe: returns 0 for y==0)
-    MOD,        ///< x % y  (safe: returns 0 for y==0)
-    AND,        ///< x & y
-    OR,         ///< x | y
-    XOR,        ///< x ^ y
-    SHL,        ///< x << y  (y clamped to [0,62])
-    SHR,        ///< x >> y  (arithmetic, y clamped to [0,62])
-    POW,        ///< x ** y  (y clamped to [0,30] to avoid overflow)
-    MIN2,       ///< min(x, y)
-    MAX2,       ///< max(x, y)
+    ADD,  ///< x + y
+    SUB,  ///< x - y
+    MUL,  ///< x * y
+    DIV,  ///< x / y  (safe: returns 0 for y==0)
+    MOD,  ///< x % y  (safe: returns 0 for y==0)
+    AND,  ///< x & y
+    OR,   ///< x | y
+    XOR,  ///< x ^ y
+    SHL,  ///< x << y  (y clamped to [0,62])
+    SHR,  ///< x >> y  (arithmetic, y clamped to [0,62])
+    POW,  ///< x ** y  (y clamped to [0,30] to avoid overflow)
+    MIN2, ///< min(x, y)
+    MAX2, ///< max(x, y)
 };
 
 /// Compact expression tree node.
 /// Leaf nodes (PARAM, CONST) have left==right==nullptr.
 /// Unary nodes have right==nullptr.
 struct SynthNode {
-    SynthOp  op;
-    int32_t  value;   ///< PARAM: parameter index; CONST: constant value
+    SynthOp op;
+    int32_t value; ///< PARAM: parameter index; CONST: constant value
     std::unique_ptr<SynthNode> left;
     std::unique_ptr<SynthNode> right;
 
@@ -123,26 +123,26 @@ struct SynthNode {
 
 // ─── SynthResult ─────────────────────────────────────────────────────────────
 struct SynthResult {
-    std::unique_ptr<SynthNode> expr;   ///< Synthesized expression tree
-    double                     cost;   ///< Lower is better
-    int                        depth;  ///< Tree depth
-    int                        nodes;  ///< Node count
-    int64_t                    firstOutput; ///< Result on first example's inputs
+    std::unique_ptr<SynthNode> expr; ///< Synthesized expression tree
+    double cost;                     ///< Lower is better
+    int depth;                       ///< Tree depth
+    int nodes;                       ///< Node count
+    int64_t firstOutput;             ///< Result on first example's inputs
 };
 
 // ─── SynthConfig ─────────────────────────────────────────────────────────────
 struct SynthConfig {
-    std::vector<std::string> ops;     ///< Allowed op names (empty = all)
-    int    maxDepth{4};               ///< Maximum expression-tree depth [1..8]
-    int    maxCandidates{200000};     ///< Evaluation budget
-    bool   preferSize{false};         ///< true = optimise for code size
+    std::vector<std::string> ops; ///< Allowed op names (empty = all)
+    int maxDepth{4};              ///< Maximum expression-tree depth [1..8]
+    int maxCandidates{200000};    ///< Evaluation budget
+    bool preferSize{false};       ///< true = optimise for code size
 };
 
 // ─── SynthesisEngine ─────────────────────────────────────────────────────────
 /// Stateless synthesis engine: given examples + config, finds the best
 /// expression that maps inputs → output for every example.
 class SynthesisEngine {
-public:
+  public:
     SynthesisEngine() = default;
 
     /// Primary entry point.
@@ -150,39 +150,29 @@ public:
     /// @param examples   Non-empty set of I/O examples.
     /// @param cfg        Search configuration.
     /// @returns The best matching SynthResult, or nullopt if none found.
-    std::optional<SynthResult> synthesize(
-        int                              nParams,
-        const std::vector<SynthExample>& examples,
-        const SynthConfig&               cfg = {}) const;
+    std::optional<SynthResult> synthesize(int nParams, const std::vector<SynthExample>& examples,
+                                          const SynthConfig& cfg = {}) const;
 
     /// Evaluate a SynthNode on a specific set of inputs.
-    static int64_t eval(const SynthNode* node,
-                        const std::vector<int64_t>& inputs);
+    static int64_t eval(const SynthNode* node, const std::vector<int64_t>& inputs);
 
     /// Render a SynthNode as an OmScript expression string
     /// (parameter names are p0, p1, … unless `paramNames` is provided).
-    static std::string render(const SynthNode* node,
-                              const std::vector<std::string>& paramNames = {});
+    static std::string render(const SynthNode* node, const std::vector<std::string>& paramNames = {});
 
     /// Render a SynthNode as a unique OmScript Expression AST subtree.
-    static std::unique_ptr<Expression> lowerToAST(
-        const SynthNode*                node,
-        const std::vector<std::string>& paramNames);
+    static std::unique_ptr<Expression> lowerToAST(const SynthNode* node, const std::vector<std::string>& paramNames);
 
-private:
+  private:
     // Enumerate candidate nodes at a given depth, append to `out`.
-    static void enumerate(
-        int                              depth,
-        int                              nParams,
-        const std::vector<SynthOp>&      allowedOps,
-        std::vector<std::unique_ptr<SynthNode>>& out);
+    static void enumerate(int depth, int nParams, const std::vector<SynthOp>& allowedOps,
+                          std::vector<std::unique_ptr<SynthNode>>& out);
 
     static std::vector<SynthOp> resolveOps(const SynthConfig& cfg);
     static double nodeCost(const SynthNode* node, bool preferSize);
-    static int    nodeCount(const SynthNode* node);
-    static int    nodeDepth(const SynthNode* node);
-    static bool   verifyAll(const SynthNode* node,
-                            const std::vector<SynthExample>& examples);
+    static int nodeCount(const SynthNode* node);
+    static int nodeDepth(const SynthNode* node);
+    static bool verifyAll(const SynthNode* node, const std::vector<SynthExample>& examples);
 };
 
 // ─── Whole-program synthesis pass ────────────────────────────────────────────

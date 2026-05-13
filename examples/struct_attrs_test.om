@@ -1,3 +1,4 @@
+import std;
 // Test struct field attributes for optimization hints
 
 struct Particle {

@@ -92,8 +92,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
 
     // Lexical analysis
     if (verbose_) {
-        std::cout << "  Preprocessing done [+" << elapsedMs(compileStart) << "ms]: "
-                  << pp.macroMap().size() << " macros defined\n";
+        std::cout << "  Preprocessing done [+" << elapsedMs(compileStart) << "ms]: " << pp.macroMap().size()
+                  << " macros defined\n";
         std::cout << "  Lexing...\n";
     }
     Lexer lexer(std::move(source));
@@ -107,9 +107,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         throw FileError(sourceFile + ": " + e.what());
     }
     if (verbose_) {
-        std::cout << "  Lex done [+" << elapsedMs(compileStart) << "ms, "
-                  << elapsedMs(lexStart) << "ms]: "
-                  << tokens.size() << " tokens\n";
+        std::cout << "  Lex done [+" << elapsedMs(compileStart) << "ms, " << elapsedMs(lexStart)
+                  << "ms]: " << tokens.size() << " tokens\n";
     }
     (void)ppStart; // reserved for future per-pp timing
 
@@ -134,9 +133,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         std::cerr << w << "\n";
     }
     if (verbose_) {
-        std::cout << "  Parse done [+" << elapsedMs(compileStart) << "ms, "
-                  << elapsedMs(parseStart) << "ms]: "
-                  << program->functions.size() << " function(s)\n";
+        std::cout << "  Parse done [+" << elapsedMs(compileStart) << "ms, " << elapsedMs(parseStart)
+                  << "ms]: " << program->functions.size() << " function(s)\n";
     }
 
     // Code generation
@@ -189,10 +187,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
                 irInstructions += F.getInstructionCount();
             }
         }
-        std::cout << "  Codegen done [+" << elapsedMs(compileStart) << "ms, "
-                  << elapsedMs(codegenStart) << "ms]: "
-                  << irFunctions << " function(s), "
-                  << irInstructions << " IR instruction(s)\n";
+        std::cout << "  Codegen done [+" << elapsedMs(compileStart) << "ms, " << elapsedMs(codegenStart)
+                  << "ms]: " << irFunctions << " function(s), " << irInstructions << " IR instruction(s)\n";
     }
 
     // Print LLVM IR only in verbose mode

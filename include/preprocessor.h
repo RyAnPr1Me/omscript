@@ -30,17 +30,18 @@ class Preprocessor {
     std::string process(const std::string& source);
 
     /// Warnings accumulated during processing (from #warning / #info).
-    const std::vector<std::string>& warnings() const noexcept { return warnings_; }
+    const std::vector<std::string>& warnings() const noexcept {
+        return warnings_;
+    }
 
     /// Perform macro substitution on @p text (not a directive line).
     /// Public so ExprEval can call it; declared const.
-    std::string substituteMacros(const std::string& text, int lineNo,
-                                  int depth = 0) const;
+    std::string substituteMacros(const std::string& text, int lineNo, int depth = 0) const;
 
     /// The macro definitions (exposed for ExprEval::defined() check).
     struct MacroDef {
         bool isFunctionLike = false;
-        bool isCounter      = false; ///< auto-increments on use
+        bool isCounter = false; ///< auto-increments on use
         std::vector<std::string> params;
         std::string body;
         mutable int counterValue = 0;
@@ -58,7 +59,9 @@ class Preprocessor {
         bool isReserved = false;
     };
 
-    const std::unordered_map<std::string, MacroDef>& macroMap() const noexcept { return macros_; }
+    const std::unordered_map<std::string, MacroDef>& macroMap() const noexcept {
+        return macros_;
+    }
 
   private:
     std::string filename_;
@@ -76,18 +79,16 @@ class Preprocessor {
 
     void handleDefine(const std::string& rest, int lineNo);
 
-    std::string expandSimple(const std::string& name, int lineNo,
-                              int depth) const;
+    std::string expandSimple(const std::string& name, int lineNo, int depth) const;
 
-    static std::vector<std::string> collectArgs(const std::string& text,
-                                                 size_t& pos);
+    static std::vector<std::string> collectArgs(const std::string& text, size_t& pos);
 
     long long evalExpr(const std::string& expr, int lineNo) const;
 
     static int cmpVersion(const std::string& a, const std::string& b);
 
     static bool isIdentStart(char c) noexcept;
-    static bool isIdentChar(char c)  noexcept;
+    static bool isIdentChar(char c) noexcept;
     static std::string trimLeft(const std::string& s);
     static std::string trim(const std::string& s);
 
@@ -100,8 +101,7 @@ class Preprocessor {
     /// Validate function-like macro invocation: arity + per-arg types.
     /// Throws DiagnosticError on mismatch.  Adds warnings for footguns
     /// like multi-evaluation of a function-call argument.
-    void validateMacroCall(const std::string& name, const MacroDef& def,
-                           const std::vector<std::string>& args,
+    void validateMacroCall(const std::string& name, const MacroDef& def, const std::vector<std::string>& args,
                            int lineNo) const;
 };
 

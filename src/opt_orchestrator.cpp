@@ -9,20 +9,20 @@
 ///     tracked, dependency-ordered pipeline.
 
 #include "opt_orchestrator.h"
-#include "codegen.h"   // CodeGenerator + OptimizationLevel
-#include "optimization_manager.h" // PassScheduler
 #include "alg_simp_pass.h"
+#include "borrow_checker.h"
+#include "codegen.h" // CodeGenerator + OptimizationLevel
 #include "copy_prop_pass.h"
-#include "dce_pass.h"
 #include "cse_pass.h"
+#include "dce_pass.h"
+#include "diagnostic.h"
 #include "ersl.h"
+#include "hgoe_egraph.h"
+#include "optimization_manager.h" // PassScheduler
 #include "pass_utils.h"
+#include "uniqueness_analysis.h"
 #include "width_legalization.h"
 #include "width_opt_pass.h"
-#include "diagnostic.h"
-#include "uniqueness_analysis.h"
-#include "borrow_checker.h"
-#include "hgoe_egraph.h"
 
 #include <cassert>
 #include <chrono>
@@ -50,7 +50,7 @@ uint32_t PassRegistry::registerPass(PassMetadata meta) {
     meta.id = nextId_++;
     const size_t idx = passes_.size();
     passes_.push_back(std::move(meta));
-    byId_[passes_[idx].id]     = idx;
+    byId_[passes_[idx].id] = idx;
     byName_[passes_[idx].name] = idx;
     return passes_[idx].id;
 }
@@ -65,13 +65,12 @@ const PassMetadata* PassRegistry::find(const std::string& name) const noexcept {
     return (it != byName_.end()) ? &passes_[it->second] : nullptr;
 }
 
-std::vector<uint32_t> PassRegistry::topologicalOrder(
-    const std::vector<uint32_t>& subset) const
-{
+std::vector<uint32_t> PassRegistry::topologicalOrder(const std::vector<uint32_t>& subset) const {
     // Build the working set.
     std::unordered_set<uint32_t> inSet;
     if (subset.empty()) {
-        for (const auto& p : passes_) inSet.insert(p.id);
+        for (const auto& p : passes_)
+            inSet.insert(p.id);
     } else {
         inSet.insert(subset.begin(), subset.end());
     }
@@ -79,7 +78,8 @@ std::vector<uint32_t> PassRegistry::topologicalOrder(
     // Map fact-name → set of pass IDs that produce it.
     std::unordered_map<std::string, std::vector<uint32_t>> producers;
     for (const auto& p : passes_) {
-        if (!inSet.count(p.id)) continue;
+        if (!inSet.count(p.id))
+            continue;
         for (const char* fact : p.provides_) {
             producers[fact].push_back(p.id);
         }
@@ -89,17 +89,21 @@ std::vector<uint32_t> PassRegistry::topologicalOrder(
     // in-degree: number of unsatisfied requirements.
     std::unordered_map<uint32_t, int> inDegree;
     for (const auto& p : passes_) {
-        if (!inSet.count(p.id)) continue;
+        if (!inSet.count(p.id))
+            continue;
         inDegree[p.id] = 0;
     }
     for (const auto& p : passes_) {
-        if (!inSet.count(p.id)) continue;
+        if (!inSet.count(p.id))
+            continue;
         for (const char* req : p.requires_) {
             // Each producer of 'req' is a prerequisite.
             auto it = producers.find(req);
-            if (it == producers.end()) continue;
+            if (it == producers.end())
+                continue;
             for (uint32_t pid : it->second) {
-                if (pid != p.id) inDegree[p.id]++;
+                if (pid != p.id)
+                    inDegree[p.id]++;
             }
         }
     }
@@ -110,10 +114,12 @@ std::vector<uint32_t> PassRegistry::topologicalOrder(
     {
         std::vector<uint32_t> tmp;
         for (const auto& [id, deg] : inDegree) {
-            if (deg == 0) tmp.push_back(id);
+            if (deg == 0)
+                tmp.push_back(id);
         }
         std::sort(tmp.begin(), tmp.end());
-        for (auto id : tmp) ready.push_back(id);
+        for (auto id : tmp)
+            ready.push_back(id);
     }
 
     std::vector<uint32_t> order;
@@ -125,12 +131,14 @@ std::vector<uint32_t> PassRegistry::topologicalOrder(
         order.push_back(cur);
 
         const PassMetadata* meta = find(cur);
-        if (!meta) continue;
+        if (!meta)
+            continue;
 
         // Decrement in-degree of every pass that requires a fact this pass provides.
         for (const char* fact : meta->provides_) {
             for (const auto& p : passes_) {
-                if (!inSet.count(p.id)) continue;
+                if (!inSet.count(p.id))
+                    continue;
                 for (const char* req : p.requires_) {
                     if (std::string(req) == fact) {
                         inDegree[p.id]--;
@@ -151,13 +159,14 @@ std::vector<uint32_t> PassRegistry::topologicalOrder(
         std::string cycleNames;
         for (const auto& p : passes_) {
             if (inSet.count(p.id) && !reached.count(p.id)) {
-                if (!cycleNames.empty()) cycleNames += ", ";
+                if (!cycleNames.empty())
+                    cycleNames += ", ";
                 cycleNames += p.name;
             }
         }
-        throw std::logic_error(
-            "OptimizationOrchestrator: dependency cycle detected in pass registry"
-            " (involved passes: " + cycleNames + ")");
+        throw std::logic_error("OptimizationOrchestrator: dependency cycle detected in pass registry"
+                               " (involved passes: " +
+                               cycleNames + ")");
     }
     return order;
 }
@@ -167,27 +176,27 @@ std::vector<uint32_t> PassRegistry::topologicalOrder(
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace PassId {
-    uint32_t kPreflightCheck    = 0;
-    uint32_t kStringTypes       = 0;
-    uint32_t kArrayTypes        = 0;
-    uint32_t kConstantReturns   = 0;
-    uint32_t kPurity            = 0;
-    uint32_t kEffects           = 0;
-    uint32_t kERSL              = 0;
-    uint32_t kSynthesis         = 0;
-    uint32_t kCFCTRE            = 0;
-    uint32_t kEGraph            = 0;
-    uint32_t kRangeAnalysis     = 0;
-    uint32_t kRLC               = 0;
-    uint32_t kDCE               = 0;
-    uint32_t kCSE               = 0;
-    uint32_t kAlgSimp           = 0;
-    uint32_t kCopyProp          = 0;
-    uint32_t kWidthLegalization = 0;
-    uint32_t kWidthOpt          = 0;
-    uint32_t kUniqueness        = 0;
-    uint32_t kBorrowCheck       = 0;
-    uint32_t kHGOEEGraph        = 0;
+uint32_t kPreflightCheck = 0;
+uint32_t kStringTypes = 0;
+uint32_t kArrayTypes = 0;
+uint32_t kConstantReturns = 0;
+uint32_t kPurity = 0;
+uint32_t kEffects = 0;
+uint32_t kERSL = 0;
+uint32_t kSynthesis = 0;
+uint32_t kCFCTRE = 0;
+uint32_t kEGraph = 0;
+uint32_t kRangeAnalysis = 0;
+uint32_t kRLC = 0;
+uint32_t kDCE = 0;
+uint32_t kCSE = 0;
+uint32_t kAlgSimp = 0;
+uint32_t kCopyProp = 0;
+uint32_t kWidthLegalization = 0;
+uint32_t kWidthOpt = 0;
+uint32_t kUniqueness = 0;
+uint32_t kBorrowCheck = 0;
+uint32_t kHGOEEGraph = 0;
 } // namespace PassId
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -198,7 +207,8 @@ namespace PassId {
 
 static void registerAllPasses() {
     static bool done = false;
-    if (done) return;
+    if (done)
+        return;
     done = true;
 
     auto& reg = PassRegistry::instance();
@@ -209,9 +219,9 @@ static void registerAllPasses() {
         "Pre-flight error detection: scan for fatal errors (e.g. literal division by zero) before any optimisation",
         PassPhase::Preprocessing,
         PassKind::Analysis,
-        {},                                  // requires nothing — runs first
-        {AnalysisFact::kPreflightCheck},     // provides
-        {},                                  // invalidates nothing
+        {},                              // requires nothing — runs first
+        {AnalysisFact::kPreflightCheck}, // provides
+        {},                              // invalidates nothing
     });
 
     PassId::kStringTypes = reg.registerPass({
@@ -220,9 +230,9 @@ static void registerAllPasses() {
         "Pre-analyse string return types and parameter types across all functions",
         PassPhase::Preprocessing,
         PassKind::Analysis,
-        {},                              // requires nothing
-        {AnalysisFact::kStringTypes},    // provides
-        {},                              // invalidates nothing
+        {},                           // requires nothing
+        {AnalysisFact::kStringTypes}, // provides
+        {},                           // invalidates nothing
     });
 
     PassId::kArrayTypes = reg.registerPass({
@@ -323,8 +333,7 @@ static void registerAllPasses() {
         // shapes (ranges, CSE candidates, width information) is now stale.
         // CF-CTRE purity and effect facts remain valid since the transformations
         // are semantics-preserving.
-        {AnalysisFact::kRangeAnalysis, AnalysisFact::kCSE,
-         AnalysisFact::kWidthLegalization, AnalysisFact::kWidthOpt},
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kCSE, AnalysisFact::kWidthLegalization, AnalysisFact::kWidthOpt},
     });
 
     PassId::kRangeAnalysis = reg.registerPass({
@@ -344,15 +353,16 @@ static void registerAllPasses() {
         "Region Lifetime Coalescing: merge temporally disjoint newRegion() pairs to reduce allocation overhead",
         PassPhase::ASTTransform,
         PassKind::SemanticTransform,
-        {AnalysisFact::kEffects},           // requires effects analysis
-        {AnalysisFact::kRLC},               // provides rlc fact
+        {AnalysisFact::kEffects},                                               // requires effects analysis
+        {AnalysisFact::kRLC},                                                   // provides rlc fact
         {AnalysisFact::kPurity, AnalysisFact::kEffects, AnalysisFact::kCFCTRE}, // invalidates after AST mutation
     });
 
     PassId::kDCE = reg.registerPass({
         0,
         "dce",
-        "Dead Code Elimination: remove unreachable branches from constant-condition ifs/whiles and prune post-return stmts",
+        "Dead Code Elimination: remove unreachable branches from constant-condition ifs/whiles and prune post-return "
+        "stmts",
         PassPhase::ASTTransform,
         PassKind::CostTransform,
         // DCE benefits from CFCTRE having folded constants into the AST, but
@@ -361,8 +371,7 @@ static void registerAllPasses() {
         {AnalysisFact::kDCE},
         // Removing branches invalidates range analysis and width maps that
         // were computed over the now-removed code paths.
-        {AnalysisFact::kRangeAnalysis, AnalysisFact::kWidthLegalization,
-         AnalysisFact::kWidthOpt},
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kWidthLegalization, AnalysisFact::kWidthOpt},
     });
 
     PassId::kCSE = reg.registerPass({
@@ -393,8 +402,7 @@ static void registerAllPasses() {
         {AnalysisFact::kCFCTRE, AnalysisFact::kDCE},
         {AnalysisFact::kAlgSimp},
         // AlgSimp replaces expressions; all shape-derived downstream facts are stale.
-        {AnalysisFact::kRangeAnalysis, AnalysisFact::kWidthLegalization,
-         AnalysisFact::kWidthOpt},
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kWidthLegalization, AnalysisFact::kWidthOpt},
     });
 
     PassId::kCopyProp = reg.registerPass({
@@ -410,8 +418,7 @@ static void registerAllPasses() {
         {AnalysisFact::kCopyProp},
         // Substituting identifiers changes the shape of expressions; CSE,
         // range analysis, width maps, and any name-based facts are potentially stale.
-        {AnalysisFact::kCSE, AnalysisFact::kRangeAnalysis,
-         AnalysisFact::kWidthLegalization, AnalysisFact::kWidthOpt},
+        {AnalysisFact::kCSE, AnalysisFact::kRangeAnalysis, AnalysisFact::kWidthLegalization, AnalysisFact::kWidthOpt},
     });
 
     PassId::kWidthLegalization = reg.registerPass({
@@ -428,8 +435,7 @@ static void registerAllPasses() {
         // with no valid width facts.  Adding kHGOEEGraph here pushes
         // kWidthLegalization (and transitively kWidthOpt) to the last topological
         // tier, after all rewrites have settled.
-        {AnalysisFact::kRangeAnalysis, AnalysisFact::kCopyProp, AnalysisFact::kAlgSimp,
-         AnalysisFact::kHGOEEGraph},
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kCopyProp, AnalysisFact::kAlgSimp, AnalysisFact::kHGOEEGraph},
         {AnalysisFact::kWidthLegalization},
         // Pure analysis — does not modify the AST, invalidates nothing.
         {},
@@ -447,8 +453,7 @@ static void registerAllPasses() {
         {AnalysisFact::kWidthLegalization},
         {AnalysisFact::kWidthOpt},
         // This pass rewrites AST expressions; invalidate dependent analyses.
-        {AnalysisFact::kRangeAnalysis, AnalysisFact::kWidthLegalization,
-         AnalysisFact::kCSE},
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kWidthLegalization, AnalysisFact::kCSE},
     });
 
     // ── Uniqueness Analysis ───────────────────────────────────────────────
@@ -508,8 +513,7 @@ static void registerAllPasses() {
         {AnalysisFact::kEGraph, AnalysisFact::kCFCTRE},
         {AnalysisFact::kHGOEEGraph},
         // Rewrites expressions — invalidates all shape-derived downstream facts.
-        {AnalysisFact::kRangeAnalysis, AnalysisFact::kCSE,
-         AnalysisFact::kWidthLegalization, AnalysisFact::kWidthOpt},
+        {AnalysisFact::kRangeAnalysis, AnalysisFact::kCSE, AnalysisFact::kWidthLegalization, AnalysisFact::kWidthOpt},
     });
 }
 
@@ -529,10 +533,8 @@ const AnalysisDependencyGraph& defaultDepGraph() noexcept {
 
 } // anonymous namespace
 
-OptimizationOrchestrator::OptimizationOrchestrator(OptimizationLevel optLevel,
-                                                     bool verbose,
-                                                     CodeGenerator* codegen,
-                                                     OptimizationManager* manager) noexcept
+OptimizationOrchestrator::OptimizationOrchestrator(OptimizationLevel optLevel, bool verbose, CodeGenerator* codegen,
+                                                   OptimizationManager* manager) noexcept
     : optLevel_(optLevel), verbose_(verbose), codegen_(codegen), manager_(manager) {
     registerAllPasses();
 }
@@ -543,31 +545,30 @@ OptimizationOrchestrator::OptimizationOrchestrator(OptimizationLevel optLevel,
 // Centralised here so the 10-entry table only appears once; the two callers
 // just call buildDispatch() and pass the result along.
 
-std::unordered_map<uint32_t, PassScheduler::Runner>
-OptimizationOrchestrator::buildDispatch() {
+std::unordered_map<uint32_t, PassScheduler::Runner> OptimizationOrchestrator::buildDispatch() {
     using R = PassScheduler::Runner;
     return {
-        {PassId::kPreflightCheck,    R([this](Program* p, OptimizationContext& c){ runPreflightCheck(p, c); })},
-        {PassId::kStringTypes,       R([this](Program* p, OptimizationContext& c){ runStringTypes(p, c); })},
-        {PassId::kArrayTypes,        R([this](Program* p, OptimizationContext& c){ runArrayTypes(p, c); })},
-        {PassId::kConstantReturns,   R([this](Program* p, OptimizationContext& c){ runConstantReturns(p, c); })},
-        {PassId::kPurity,            R([this](Program* p, OptimizationContext& c){ runPurity(p, c); })},
-        {PassId::kEffects,           R([this](Program* p, OptimizationContext& c){ runEffects(p, c); })},
-        {PassId::kERSL,              R([this](Program* p, OptimizationContext& c){ runERSL(p, c); })},
-        {PassId::kSynthesis,         R([this](Program* p, OptimizationContext& c){ runSynthesis(p, c); })},
-        {PassId::kCFCTRE,            R([this](Program* p, OptimizationContext& c){ runCFCTRE(p, c); })},
-        {PassId::kEGraph,            R([this](Program* p, OptimizationContext& c){ runEGraph(p, c); })},
-        {PassId::kRangeAnalysis,     R([this](Program* p, OptimizationContext& c){ runRangeAnalysis(p, c); })},
-        {PassId::kRLC,               R([this](Program* p, OptimizationContext& c){ runRLC(p, c); })},
-        {PassId::kDCE,               R([this](Program* p, OptimizationContext& c){ runDCE(p, c); })},
-        {PassId::kCSE,               R([this](Program* p, OptimizationContext& c){ runCSE(p, c); })},
-        {PassId::kAlgSimp,           R([this](Program* p, OptimizationContext& c){ runAlgSimp(p, c); })},
-        {PassId::kCopyProp,          R([this](Program* p, OptimizationContext& c){ runCopyProp(p, c); })},
-        {PassId::kWidthLegalization, R([this](Program* p, OptimizationContext& c){ runWidthLegalization(p, c); })},
-        {PassId::kWidthOpt,          R([this](Program* p, OptimizationContext& c){ runWidthOpt(p, c); })},
-        {PassId::kUniqueness,        R([this](Program* p, OptimizationContext& c){ runUniqueness(p, c); })},
-        {PassId::kBorrowCheck,       R([this](Program* p, OptimizationContext& c){ runBorrowCheck(p, c); })},
-        {PassId::kHGOEEGraph,        R([this](Program* p, OptimizationContext& c){ runHGOEEGraph(p, c); })},
+        {PassId::kPreflightCheck, R([this](Program* p, OptimizationContext& c) { runPreflightCheck(p, c); })},
+        {PassId::kStringTypes, R([this](Program* p, OptimizationContext& c) { runStringTypes(p, c); })},
+        {PassId::kArrayTypes, R([this](Program* p, OptimizationContext& c) { runArrayTypes(p, c); })},
+        {PassId::kConstantReturns, R([this](Program* p, OptimizationContext& c) { runConstantReturns(p, c); })},
+        {PassId::kPurity, R([this](Program* p, OptimizationContext& c) { runPurity(p, c); })},
+        {PassId::kEffects, R([this](Program* p, OptimizationContext& c) { runEffects(p, c); })},
+        {PassId::kERSL, R([this](Program* p, OptimizationContext& c) { runERSL(p, c); })},
+        {PassId::kSynthesis, R([this](Program* p, OptimizationContext& c) { runSynthesis(p, c); })},
+        {PassId::kCFCTRE, R([this](Program* p, OptimizationContext& c) { runCFCTRE(p, c); })},
+        {PassId::kEGraph, R([this](Program* p, OptimizationContext& c) { runEGraph(p, c); })},
+        {PassId::kRangeAnalysis, R([this](Program* p, OptimizationContext& c) { runRangeAnalysis(p, c); })},
+        {PassId::kRLC, R([this](Program* p, OptimizationContext& c) { runRLC(p, c); })},
+        {PassId::kDCE, R([this](Program* p, OptimizationContext& c) { runDCE(p, c); })},
+        {PassId::kCSE, R([this](Program* p, OptimizationContext& c) { runCSE(p, c); })},
+        {PassId::kAlgSimp, R([this](Program* p, OptimizationContext& c) { runAlgSimp(p, c); })},
+        {PassId::kCopyProp, R([this](Program* p, OptimizationContext& c) { runCopyProp(p, c); })},
+        {PassId::kWidthLegalization, R([this](Program* p, OptimizationContext& c) { runWidthLegalization(p, c); })},
+        {PassId::kWidthOpt, R([this](Program* p, OptimizationContext& c) { runWidthOpt(p, c); })},
+        {PassId::kUniqueness, R([this](Program* p, OptimizationContext& c) { runUniqueness(p, c); })},
+        {PassId::kBorrowCheck, R([this](Program* p, OptimizationContext& c) { runBorrowCheck(p, c); })},
+        {PassId::kHGOEEGraph, R([this](Program* p, OptimizationContext& c) { runHGOEEGraph(p, c); })},
     };
 }
 
@@ -576,7 +577,8 @@ OptimizationOrchestrator::buildDispatch() {
 PassScheduler OptimizationOrchestrator::makeScheduler(OptimizationContext& ctx) {
     PassScheduler s = manager_ ? manager_->createScheduler(ctx) : PassScheduler(ctx);
 #ifndef NDEBUG
-    if (!manager_) s.setStrictMode(true);
+    if (!manager_)
+        s.setStrictMode(true);
 #endif
     return s;
 }
@@ -605,14 +607,13 @@ void OptimizationOrchestrator::runInvalidated(Program* program, OptimizationCont
 // that factKey is valid in ctx.  Delegates to PassScheduler::runToProvide()
 // using the shared dispatch map built by buildDispatch().
 
-bool OptimizationOrchestrator::runToProvide(const std::string& factKey,
-                                             Program* program,
-                                             OptimizationContext& ctx) {
+bool OptimizationOrchestrator::runToProvide(const std::string& factKey, Program* program, OptimizationContext& ctx) {
     const auto dispatch = buildDispatch();
     ctx.setDependencyGraph(&defaultDepGraph());
     PassScheduler scheduler = makeScheduler(ctx);
     const bool ok = scheduler.runToProvide(factKey, program, dispatch);
-    if (ok) syncFactsToContext(program, ctx);
+    if (ok)
+        syncFactsToContext(program, ctx);
     return ok;
 }
 
@@ -632,14 +633,12 @@ bool OptimizationOrchestrator::runToProvide(const std::string& factKey,
 //   4. Accumulate stats_.totalElapsedMs across the whole pipeline.
 //   5. When verbose, print a per-pass timing summary table.
 
-void OptimizationOrchestrator::runPassPipeline(Program* program,
-                                                OptimizationContext& ctx,
-                                                bool skipValid) {
+void OptimizationOrchestrator::runPassPipeline(Program* program, OptimizationContext& ctx, bool skipValid) {
     // ── Dispatch map ─────────────────────────────────────────────────────
     const auto dispatch = buildDispatch();
 
-    const auto& reg   = PassRegistry::instance();
-    const auto  order = reg.topologicalOrder(); // dependency-sorted IDs
+    const auto& reg = PassRegistry::instance();
+    const auto order = reg.topologicalOrder(); // dependency-sorted IDs
 
     // Install the standard analysis dependency graph so that invalidating one
     // fact automatically cascades to all facts computed from it.
@@ -655,10 +654,12 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
 
     for (uint32_t id : order) {
         const PassMetadata* meta = reg.find(id);
-        if (!meta) continue;
+        if (!meta)
+            continue;
 
         auto it = dispatch.find(id);
-        if (it == dispatch.end()) continue; // pass has no wrapper (IR-level pass, etc.)
+        if (it == dispatch.end())
+            continue; // pass has no wrapper (IR-level pass, etc.)
 
         // ── Skip already-valid passes (runInvalidated mode) ────────────
         if (skipValid && scheduler.allProvidedValid(*meta)) {
@@ -672,8 +673,7 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
         // and maximum debuggability; running these passes would modify the AST
         // and make single-step debugging unpredictable.
         // SemanticTransform and Analysis passes always run regardless of level.
-        if (meta->kind == PassKind::CostTransform &&
-            optLevel_ == OptimizationLevel::O0) {
+        if (meta->kind == PassKind::CostTransform && optLevel_ == OptimizationLevel::O0) {
             ++stats_.passesSkipped;
             continue;
         }
@@ -696,7 +696,8 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
         for (int round = 0; round < kMaxPrereqRounds; ++round) {
             bool allValid = true;
             for (const char* req : meta->requires_) {
-                if (ctx.validity().isValid(req)) continue;
+                if (ctx.validity().isValid(req))
+                    continue;
                 allValid = false;
                 // Try to satisfy the missing requirement by re-running its producer.
                 if (!scheduler.runToProvide(req, program, dispatch)) {
@@ -704,7 +705,8 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
                     break;
                 }
             }
-            if (!prereqsOk || allValid) break;
+            if (!prereqsOk || allValid)
+                break;
         }
         if (!prereqsOk || !scheduler.checkPreconditions(*meta)) {
             ++stats_.passesSkipped;
@@ -714,8 +716,8 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
         // ── Time and run the pass ──────────────────────────────────────
         const auto tStart = std::chrono::steady_clock::now();
         it->second(program, ctx);
-        const auto tEnd   = std::chrono::steady_clock::now();
-        const double ms   = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
+        const auto tEnd = std::chrono::steady_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
 
         // ── Apply invalidation ─────────────────────────────────────────
         // After a transformation pass (e.g. synthesis) modifies the AST,
@@ -733,15 +735,12 @@ void OptimizationOrchestrator::runPassPipeline(Program* program,
     }
 
     const auto tPipelineEnd = std::chrono::steady_clock::now();
-    stats_.totalElapsedMs =
-        std::chrono::duration<double, std::milli>(tPipelineEnd - tPipelineStart).count();
+    stats_.totalElapsedMs = std::chrono::duration<double, std::milli>(tPipelineEnd - tPipelineStart).count();
 
     // ── Verbose timing summary ─────────────────────────────────────────
     if (verbose_) {
-        std::cout << "  [opt] Pre-pass pipeline: "
-                  << stats_.passesRun    << " ran, "
-                  << stats_.passesSkipped << " skipped, "
-                  << stats_.totalElapsedMs << " ms total\n";
+        std::cout << "  [opt] Pre-pass pipeline: " << stats_.passesRun << " ran, " << stats_.passesSkipped
+                  << " skipped, " << stats_.totalElapsedMs << " ms total\n";
         for (const auto& pt : stats_.passTimings) {
             std::cout << "  [opt]   " << pt.name << ": " << pt.elapsedMs << " ms\n";
         }
@@ -780,8 +779,7 @@ void OptimizationOrchestrator::runPurity(Program* program, OptimizationContext& 
     ctx.validity().purity = true;
 }
 
-void OptimizationOrchestrator::runPreflightCheck(Program* program,
-                                                   OptimizationContext& ctx) {
+void OptimizationOrchestrator::runPreflightCheck(Program* program, OptimizationContext& ctx) {
     if (!program) {
         ctx.validity().preflightCheck = true;
         return;
@@ -797,41 +795,44 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program,
     // concern handled by the existing bounds-check infrastructure.
 
     std::function<void(const Expression*, const std::string&)> checkExpr;
-    std::function<void(const Statement*,  const std::string&)> checkStmt;
+    std::function<void(const Statement*, const std::string&)> checkStmt;
 
     checkExpr = [&](const Expression* e, const std::string& fnName) {
-        if (!e) return;
+        if (!e)
+            return;
         if (e->type == ASTNodeType::BINARY_EXPR) {
             const auto* bin = static_cast<const BinaryExpr*>(e);
             // Check for literal zero divisor.
-            if ((bin->op == "/" || bin->op == "%") && bin->right &&
-                isIntLiteralVal(bin->right.get(), 0)) {
-                throw DiagnosticError(Diagnostic{
-                    DiagnosticSeverity::Error,
-                    {fnName, 0, 0},
-                    "division by zero (literal 0 as "
-                    + std::string(bin->op == "/" ? "divisor" : "modulus")
-                    + ") in function '" + fnName + "'",
-                    ErrorCode::E011_DIVISION_BY_ZERO});
+            if ((bin->op == "/" || bin->op == "%") && bin->right && isIntLiteralVal(bin->right.get(), 0)) {
+                throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error,
+                                                 {fnName, 0, 0},
+                                                 "division by zero (literal 0 as " +
+                                                     std::string(bin->op == "/" ? "divisor" : "modulus") +
+                                                     ") in function '" + fnName + "'",
+                                                 ErrorCode::E011_DIVISION_BY_ZERO});
             }
             // Recurse into both sides.
-            checkExpr(bin->left.get(),  fnName);
+            checkExpr(bin->left.get(), fnName);
             checkExpr(bin->right.get(), fnName);
             return;
         }
         // Recurse into common expression shapes.
         switch (e->type) {
         case ASTNodeType::UNARY_EXPR:
-            checkExpr(static_cast<const UnaryExpr*>(e)->operand.get(), fnName); break;
+            checkExpr(static_cast<const UnaryExpr*>(e)->operand.get(), fnName);
+            break;
         case ASTNodeType::PREFIX_EXPR:
-            checkExpr(static_cast<const PrefixExpr*>(e)->operand.get(), fnName); break;
+            checkExpr(static_cast<const PrefixExpr*>(e)->operand.get(), fnName);
+            break;
         case ASTNodeType::POSTFIX_EXPR:
-            checkExpr(static_cast<const PostfixExpr*>(e)->operand.get(), fnName); break;
+            checkExpr(static_cast<const PostfixExpr*>(e)->operand.get(), fnName);
+            break;
         case ASTNodeType::TERNARY_EXPR: {
             const auto* t = static_cast<const TernaryExpr*>(e);
             checkExpr(t->condition.get(), fnName);
-            checkExpr(t->thenExpr.get(),  fnName);
-            checkExpr(t->elseExpr.get(),  fnName); break;
+            checkExpr(t->thenExpr.get(), fnName);
+            checkExpr(t->elseExpr.get(), fnName);
+            break;
         }
         case ASTNodeType::CALL_EXPR:
             for (const auto& a : static_cast<const CallExpr*>(e)->arguments)
@@ -839,44 +840,58 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program,
             break;
         case ASTNodeType::INDEX_EXPR: {
             const auto* i = static_cast<const IndexExpr*>(e);
-            checkExpr(i->array.get(), fnName); checkExpr(i->index.get(), fnName); break;
+            checkExpr(i->array.get(), fnName);
+            checkExpr(i->index.get(), fnName);
+            break;
         }
         case ASTNodeType::ASSIGN_EXPR:
-            checkExpr(static_cast<const AssignExpr*>(e)->value.get(), fnName); break;
+            checkExpr(static_cast<const AssignExpr*>(e)->value.get(), fnName);
+            break;
         case ASTNodeType::INDEX_ASSIGN_EXPR: {
             const auto* ia = static_cast<const IndexAssignExpr*>(e);
-            checkExpr(ia->array.get(), fnName); checkExpr(ia->index.get(), fnName);
-            checkExpr(ia->value.get(), fnName); break;
+            checkExpr(ia->array.get(), fnName);
+            checkExpr(ia->index.get(), fnName);
+            checkExpr(ia->value.get(), fnName);
+            break;
         }
         case ASTNodeType::FIELD_ACCESS_EXPR:
-            checkExpr(static_cast<const FieldAccessExpr*>(e)->object.get(), fnName); break;
+            checkExpr(static_cast<const FieldAccessExpr*>(e)->object.get(), fnName);
+            break;
         case ASTNodeType::FIELD_ASSIGN_EXPR: {
             const auto* fa = static_cast<const FieldAssignExpr*>(e);
-            checkExpr(fa->object.get(), fnName); checkExpr(fa->value.get(), fnName); break;
+            checkExpr(fa->object.get(), fnName);
+            checkExpr(fa->value.get(), fnName);
+            break;
         }
         case ASTNodeType::SPREAD_EXPR:
-            checkExpr(static_cast<const SpreadExpr*>(e)->operand.get(), fnName); break;
+            checkExpr(static_cast<const SpreadExpr*>(e)->operand.get(), fnName);
+            break;
         case ASTNodeType::PIPE_EXPR:
-            checkExpr(static_cast<const PipeExpr*>(e)->left.get(), fnName); break;
+            checkExpr(static_cast<const PipeExpr*>(e)->left.get(), fnName);
+            break;
         case ASTNodeType::MOVE_EXPR:
-            checkExpr(static_cast<const MoveExpr*>(e)->source.get(), fnName); break;
+            checkExpr(static_cast<const MoveExpr*>(e)->source.get(), fnName);
+            break;
         case ASTNodeType::BORROW_EXPR:
-            checkExpr(static_cast<const BorrowExpr*>(e)->source.get(), fnName); break;
+            checkExpr(static_cast<const BorrowExpr*>(e)->source.get(), fnName);
+            break;
         case ASTNodeType::REBORROW_EXPR: {
             const auto* rb = static_cast<const ReborrowExpr*>(e);
             checkExpr(rb->source.get(), fnName);
-            if (rb->indexExpr) checkExpr(rb->indexExpr.get(), fnName);
+            if (rb->indexExpr)
+                checkExpr(rb->indexExpr.get(), fnName);
             break;
         }
         case ASTNodeType::RANGE_ANNOT_EXPR:
-            checkExpr(static_cast<const RangeAnnotExpr*>(e)->inner.get(), fnName); break;
+            checkExpr(static_cast<const RangeAnnotExpr*>(e)->inner.get(), fnName);
+            break;
         case ASTNodeType::STRUCT_LITERAL_EXPR:
             for (const auto& fv : static_cast<const StructLiteralExpr*>(e)->fieldValues)
                 checkExpr(fv.second.get(), fnName);
             break;
         case ASTNodeType::DICT_EXPR:
             for (const auto& p : static_cast<const DictExpr*>(e)->pairs) {
-                checkExpr(p.first.get(),  fnName);
+                checkExpr(p.first.get(), fnName);
                 checkExpr(p.second.get(), fnName);
             }
             break;
@@ -884,55 +899,74 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program,
             for (const auto& el : static_cast<const ArrayExpr*>(e)->elements)
                 checkExpr(el.get(), fnName);
             break;
-        default: break;
+        default:
+            break;
         }
     };
 
     checkStmt = [&](const Statement* s, const std::string& fnName) {
-        if (!s) return;
+        if (!s)
+            return;
         switch (s->type) {
         case ASTNodeType::BLOCK:
             for (const auto& st : static_cast<const BlockStmt*>(s)->statements)
                 checkStmt(st.get(), fnName);
             break;
         case ASTNodeType::VAR_DECL:
-            checkExpr(static_cast<const VarDecl*>(s)->initializer.get(), fnName); break;
+            checkExpr(static_cast<const VarDecl*>(s)->initializer.get(), fnName);
+            break;
         case ASTNodeType::MOVE_DECL:
-            checkExpr(static_cast<const MoveDecl*>(s)->initializer.get(), fnName); break;
+            checkExpr(static_cast<const MoveDecl*>(s)->initializer.get(), fnName);
+            break;
         case ASTNodeType::RETURN_STMT:
-            checkExpr(static_cast<const ReturnStmt*>(s)->value.get(), fnName); break;
+            checkExpr(static_cast<const ReturnStmt*>(s)->value.get(), fnName);
+            break;
         case ASTNodeType::EXPR_STMT:
-            checkExpr(static_cast<const ExprStmt*>(s)->expression.get(), fnName); break;
+            checkExpr(static_cast<const ExprStmt*>(s)->expression.get(), fnName);
+            break;
         case ASTNodeType::IF_STMT: {
             const auto* i = static_cast<const IfStmt*>(s);
             checkExpr(i->condition.get(), fnName);
             checkStmt(i->thenBranch.get(), fnName);
-            checkStmt(i->elseBranch.get(), fnName); break;
+            checkStmt(i->elseBranch.get(), fnName);
+            break;
         }
         case ASTNodeType::WHILE_STMT: {
             const auto* w = static_cast<const WhileStmt*>(s);
-            checkExpr(w->condition.get(), fnName); checkStmt(w->body.get(), fnName); break;
+            checkExpr(w->condition.get(), fnName);
+            checkStmt(w->body.get(), fnName);
+            break;
         }
         case ASTNodeType::DO_WHILE_STMT: {
             const auto* d = static_cast<const DoWhileStmt*>(s);
-            checkStmt(d->body.get(), fnName); checkExpr(d->condition.get(), fnName); break;
+            checkStmt(d->body.get(), fnName);
+            checkExpr(d->condition.get(), fnName);
+            break;
         }
         case ASTNodeType::FOR_STMT: {
             const auto* f = static_cast<const ForStmt*>(s);
-            checkExpr(f->start.get(), fnName); checkExpr(f->end.get(), fnName);
-            checkExpr(f->step.get(),  fnName); checkStmt(f->body.get(), fnName); break;
+            checkExpr(f->start.get(), fnName);
+            checkExpr(f->end.get(), fnName);
+            checkExpr(f->step.get(), fnName);
+            checkStmt(f->body.get(), fnName);
+            break;
         }
         case ASTNodeType::FOR_EACH_STMT: {
             const auto* fe = static_cast<const ForEachStmt*>(s);
-            checkExpr(fe->collection.get(), fnName); checkStmt(fe->body.get(), fnName); break;
+            checkExpr(fe->collection.get(), fnName);
+            checkStmt(fe->body.get(), fnName);
+            break;
         }
         case ASTNodeType::SWITCH_STMT: {
             const auto* sw = static_cast<const SwitchStmt*>(s);
             checkExpr(sw->condition.get(), fnName);
             for (const auto& c : sw->cases) {
-                if (c.value) checkExpr(c.value.get(), fnName);
-                for (const auto& v : c.values) checkExpr(v.get(), fnName);
-                for (const auto& st : c.body) checkStmt(st.get(), fnName);
+                if (c.value)
+                    checkExpr(c.value.get(), fnName);
+                for (const auto& v : c.values)
+                    checkExpr(v.get(), fnName);
+                for (const auto& st : c.body)
+                    checkStmt(st.get(), fnName);
             }
             break;
         }
@@ -948,36 +982,41 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program,
         }
         case ASTNodeType::THROW_STMT: {
             const auto* ts = static_cast<const ThrowStmt*>(s);
-            if (ts->value) checkExpr(ts->value.get(), fnName);
+            if (ts->value)
+                checkExpr(ts->value.get(), fnName);
             break;
         }
         case ASTNodeType::PREFETCH_STMT: {
             const auto* ps = static_cast<const PrefetchStmt*>(s);
             if (ps->varDecl && ps->varDecl->initializer)
                 checkExpr(ps->varDecl->initializer.get(), fnName);
-            if (ps->addrExpr) checkExpr(ps->addrExpr.get(), fnName);
+            if (ps->addrExpr)
+                checkExpr(ps->addrExpr.get(), fnName);
             break;
         }
         case ASTNodeType::ASSUME_STMT: {
             const auto* as = static_cast<const AssumeStmt*>(s);
-            if (as->condition) checkExpr(as->condition.get(), fnName);
-            if (as->deoptBody) checkStmt(as->deoptBody.get(), fnName);
+            if (as->condition)
+                checkExpr(as->condition.get(), fnName);
+            if (as->deoptBody)
+                checkStmt(as->deoptBody.get(), fnName);
             break;
         }
         case ASTNodeType::PIPELINE_STMT: {
             const auto* pl = static_cast<const PipelineStmt*>(s);
-            if (pl->count) checkExpr(pl->count.get(), fnName);
+            if (pl->count)
+                checkExpr(pl->count.get(), fnName);
             for (const auto& stage : pl->stages)
-                if (stage.body) checkStmt(stage.body.get(), fnName);
+                if (stage.body)
+                    checkStmt(stage.body.get(), fnName);
             break;
         }
-        default: break;
+        default:
+            break;
         }
     };
 
-    forEachFunction(program, [&](const FunctionDecl* fn) {
-        checkStmt(fn->body.get(), fn->name);
-    });
+    forEachFunction(program, [&](const FunctionDecl* fn) { checkStmt(fn->body.get(), fn->name); });
     // Also check global variable initializers.
     for (const auto& g : program->globals) {
         if (g && g->initializer)
@@ -997,7 +1036,8 @@ void OptimizationOrchestrator::runERSL(Program* program, OptimizationContext& ct
     // This is a pure computation: no AST modification, no LLVM analysis required.
     if (program) {
         for (const auto& func : program->functions) {
-            if (!func) continue;
+            if (!func)
+                continue;
             FunctionFacts& ff = ctx.mutableFacts(func->name);
             ff.ersl = deriveEffectSummary(ff.effects);
         }
@@ -1024,7 +1064,8 @@ void OptimizationOrchestrator::runEGraph(Program* program, OptimizationContext& 
     // Populate pure-user-functions so algebraic rules can fire across call boundaries.
     std::unordered_set<std::string> pureUserFuncs;
     for (const auto& [name, ff] : ctx.allFacts()) {
-        if (ff.isPure) pureUserFuncs.insert(name);
+        if (ff.isPure)
+            pureUserFuncs.insert(name);
     }
     ctx.egraph().setPureUserFuncs(std::move(pureUserFuncs));
     codegen_->runEGraphPass(program, ctx);
@@ -1041,7 +1082,8 @@ void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationCo
     // Helper: try to read a literal int from an expression.
     auto litInt = [](const Expression* e) -> std::optional<int64_t> {
         long long v = 0;
-        if (isIntLiteral(e, &v)) return static_cast<int64_t>(v);
+        if (isIntLiteral(e, &v))
+            return static_cast<int64_t>(v);
         return {};
     };
 
@@ -1049,7 +1091,8 @@ void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationCo
     // Returns nullopt when no bound can be proven.
     std::function<std::optional<ValueRange>(const Expression*)> exprRange;
     exprRange = [&](const Expression* e) -> std::optional<ValueRange> {
-        if (!e) return {};
+        if (!e)
+            return {};
 
         // Literal integer → exact point range.
         if (auto v = litInt(e))
@@ -1069,7 +1112,8 @@ void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationCo
             // return expr % C → [0, C-1]  (when C is a positive literal)
             if (bin->op == "%") {
                 if (auto c = litInt(bin->right.get())) {
-                    if (*c > 0) return ValueRange{0, *c - 1};
+                    if (*c > 0)
+                        return ValueRange{0, *c - 1};
                 }
             }
             // return a + b → join(range(a), range(b)) only when both are in [0, N]
@@ -1113,8 +1157,10 @@ void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationCo
             if (call->callee == "min" && call->arguments.size() == 2) {
                 auto c0 = litInt(call->arguments[0].get());
                 auto c1 = litInt(call->arguments[1].get());
-                if (c0) return ValueRange{std::numeric_limits<int64_t>::min(), *c0};
-                if (c1) return ValueRange{std::numeric_limits<int64_t>::min(), *c1};
+                if (c0)
+                    return ValueRange{std::numeric_limits<int64_t>::min(), *c0};
+                if (c1)
+                    return ValueRange{std::numeric_limits<int64_t>::min(), *c1};
             }
         }
 
@@ -1123,50 +1169,52 @@ void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationCo
 
     // Collect all return expressions from a function body (recursively).
     // Also sets `hasUnboundReturn` if any return expression can't be bounded.
-    std::function<void(const Statement*, std::vector<const Expression*>&, bool&)>
-        collectReturns = [&](const Statement* s,
-                             std::vector<const Expression*>& rets,
-                             bool& hasUnboundReturn) {
-        if (!s) return;
-        switch (s->type) {
-        case ASTNodeType::RETURN_STMT: {
-            auto* rs = static_cast<const ReturnStmt*>(s);
-            if (rs->value) rets.push_back(rs->value.get());
-            else hasUnboundReturn = true; // void return
-            break;
-        }
-        case ASTNodeType::BLOCK: {
-            auto* blk = static_cast<const BlockStmt*>(s);
-            for (const auto& child : blk->statements)
-                collectReturns(child.get(), rets, hasUnboundReturn);
-            break;
-        }
-        case ASTNodeType::IF_STMT: {
-            auto* ifs = static_cast<const IfStmt*>(s);
-            collectReturns(ifs->thenBranch.get(), rets, hasUnboundReturn);
-            collectReturns(ifs->elseBranch.get(), rets, hasUnboundReturn);
-            break;
-        }
-        case ASTNodeType::WHILE_STMT:
-            collectReturns(static_cast<const WhileStmt*>(s)->body.get(), rets, hasUnboundReturn);
-            break;
-        case ASTNodeType::DO_WHILE_STMT:
-            collectReturns(static_cast<const DoWhileStmt*>(s)->body.get(), rets, hasUnboundReturn);
-            break;
-        case ASTNodeType::FOR_STMT:
-            collectReturns(static_cast<const ForStmt*>(s)->body.get(), rets, hasUnboundReturn);
-            break;
-        case ASTNodeType::FOR_EACH_STMT:
-            collectReturns(static_cast<const ForEachStmt*>(s)->body.get(), rets, hasUnboundReturn);
-            break;
-        default:
-            break;
-        }
-    };
+    std::function<void(const Statement*, std::vector<const Expression*>&, bool&)> collectReturns =
+        [&](const Statement* s, std::vector<const Expression*>& rets, bool& hasUnboundReturn) {
+            if (!s)
+                return;
+            switch (s->type) {
+            case ASTNodeType::RETURN_STMT: {
+                auto* rs = static_cast<const ReturnStmt*>(s);
+                if (rs->value)
+                    rets.push_back(rs->value.get());
+                else
+                    hasUnboundReturn = true; // void return
+                break;
+            }
+            case ASTNodeType::BLOCK: {
+                auto* blk = static_cast<const BlockStmt*>(s);
+                for (const auto& child : blk->statements)
+                    collectReturns(child.get(), rets, hasUnboundReturn);
+                break;
+            }
+            case ASTNodeType::IF_STMT: {
+                auto* ifs = static_cast<const IfStmt*>(s);
+                collectReturns(ifs->thenBranch.get(), rets, hasUnboundReturn);
+                collectReturns(ifs->elseBranch.get(), rets, hasUnboundReturn);
+                break;
+            }
+            case ASTNodeType::WHILE_STMT:
+                collectReturns(static_cast<const WhileStmt*>(s)->body.get(), rets, hasUnboundReturn);
+                break;
+            case ASTNodeType::DO_WHILE_STMT:
+                collectReturns(static_cast<const DoWhileStmt*>(s)->body.get(), rets, hasUnboundReturn);
+                break;
+            case ASTNodeType::FOR_STMT:
+                collectReturns(static_cast<const ForStmt*>(s)->body.get(), rets, hasUnboundReturn);
+                break;
+            case ASTNodeType::FOR_EACH_STMT:
+                collectReturns(static_cast<const ForEachStmt*>(s)->body.get(), rets, hasUnboundReturn);
+                break;
+            default:
+                break;
+            }
+        };
 
     for (const auto& func : program->functions) {
         FunctionFacts& ff = ctx.mutableFacts(func->name);
-        if (ff.returnRange.has_value()) continue; // already populated
+        if (ff.returnRange.has_value())
+            continue; // already populated
 
         // Phase 1: point range from known-constant return (CFCTRE result).
         if (ff.constIntReturn.has_value()) {
@@ -1180,14 +1228,16 @@ void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationCo
         }
 
         // Phase 2: structural analysis across ALL return statements.
-        if (!func->body || func->body->statements.empty()) continue;
+        if (!func->body || func->body->statements.empty())
+            continue;
 
         std::vector<const Expression*> retExprs;
         bool hasUnboundReturn = false;
         for (const auto& s : func->body->statements)
             collectReturns(s.get(), retExprs, hasUnboundReturn);
 
-        if (retExprs.empty() || hasUnboundReturn) continue;
+        if (retExprs.empty() || hasUnboundReturn)
+            continue;
 
         // Compute range for each return expression and join them.
         // If any return can't be bounded, the whole function range is unknown.
@@ -1195,7 +1245,10 @@ void OptimizationOrchestrator::runRangeAnalysis(Program* program, OptimizationCo
         bool allBounded = true;
         for (const Expression* re : retExprs) {
             auto rng = exprRange(re);
-            if (!rng) { allBounded = false; break; }
+            if (!rng) {
+                allBounded = false;
+                break;
+            }
             joined = joined ? std::optional(ValueRange::join(*joined, *rng)) : rng;
         }
 
@@ -1225,7 +1278,8 @@ void OptimizationOrchestrator::runCSE(Program* program, OptimizationContext& ctx
     if (ctx.validity().ersl && program) {
         std::unordered_map<std::string, EffectSummary> idempotent;
         for (const auto& func : program->functions) {
-            if (!func) continue;
+            if (!func)
+                continue;
             const EffectSummary& es = ctx.effectSummary(func->name);
             if (es.canDuplicate)
                 idempotent.emplace(func->name, es);
@@ -1251,20 +1305,17 @@ void OptimizationOrchestrator::runCopyProp(Program* program, OptimizationContext
     // is handled by PassScheduler::applyInvalidation() from the pass metadata.
 }
 
-void OptimizationOrchestrator::runWidthLegalization(Program* program,
-                                                      OptimizationContext& ctx) {
+void OptimizationOrchestrator::runWidthLegalization(Program* program, OptimizationContext& ctx) {
     WidthLegalizationPass pass(ctx);
     pass.run(program);
     ctx.validity().widthLegalization = true;
     if (verbose_) {
-        std::cout << "  [width] Width legalization complete: "
-                  << pass.narrowedCount() << " narrowed, "
-                  << pass.wideCount()     << " wide (>64-bit) expressions\n";
+        std::cout << "  [width] Width legalization complete: " << pass.narrowedCount() << " narrowed, "
+                  << pass.wideCount() << " wide (>64-bit) expressions\n";
     }
 }
 
-void OptimizationOrchestrator::runWidthOpt(Program* program,
-                                            OptimizationContext& ctx) {
+void OptimizationOrchestrator::runWidthOpt(Program* program, OptimizationContext& ctx) {
     const uint32_t n = runWidthOptPass(program, ctx, verbose_);
     ctx.validity().widthOpt = true;
     if (n > 0) {
@@ -1272,17 +1323,17 @@ void OptimizationOrchestrator::runWidthOpt(Program* program,
         // facts now so demand-driven recomputation works correctly even before
         // PassScheduler::applyInvalidation() runs its unconditional pass.
         ctx.validity().widthLegalization = false;
-        ctx.validity().rangeAnalysis     = false;
-        ctx.validity().cse               = false;
+        ctx.validity().rangeAnalysis = false;
+        ctx.validity().cse = false;
     }
 }
 
 // ── syncFactsToContext ────────────────────────────────────────────────────────
 // Fill derived facts and CF-CTRE results into OptimizationContext after passes run.
 
-void OptimizationOrchestrator::syncFactsToContext(Program* program,
-                                                   OptimizationContext& ctx) const {
-    if (!program) return;
+void OptimizationOrchestrator::syncFactsToContext(Program* program, OptimizationContext& ctx) const {
+    if (!program)
+        return;
 
     for (const auto& func : program->functions) {
         const std::string& name = func->name;
@@ -1296,11 +1347,9 @@ void OptimizationOrchestrator::syncFactsToContext(Program* program,
             ff.constIntReturn = codegen_->getConstIntReturn(name);
         if (!ff.constStringReturn)
             ff.constStringReturn = codegen_->getConstStringReturn(name);
-        if (!ff.effects.readsMemory && !ff.effects.writesMemory &&
-            !ff.effects.hasIO      && !ff.effects.hasMutation) {
+        if (!ff.effects.readsMemory && !ff.effects.writesMemory && !ff.effects.hasIO && !ff.effects.hasMutation) {
             const FunctionEffects inferred = codegen_->getFunctionEffects(name);
-            if (inferred.readsMemory || inferred.writesMemory ||
-                inferred.hasIO       || inferred.hasMutation) {
+            if (inferred.readsMemory || inferred.writesMemory || inferred.hasIO || inferred.hasMutation) {
                 ff.effects = inferred;
             }
         }
@@ -1310,11 +1359,12 @@ void OptimizationOrchestrator::syncFactsToContext(Program* program,
 
         // CF-CTRE results.
         if (ctx.ctEngine()) {
-            ff.isDead         = ctx.ctEngine()->deadFunctions().count(name) > 0;
+            ff.isDead = ctx.ctEngine()->deadFunctions().count(name) > 0;
             ff.foldedByCFCTRE = ctx.ctEngine()->foldableCallees().count(name) > 0;
             const auto& uniform = ctx.ctEngine()->uniformReturnValues();
             auto it = uniform.find(name);
-            if (it != uniform.end()) ff.uniformCTReturn = it->second;
+            if (it != uniform.end())
+                ff.uniformCTReturn = it->second;
         }
     }
 }
@@ -1323,8 +1373,7 @@ void OptimizationOrchestrator::syncFactsToContext(Program* program,
 // runUniqueness — ownership-aware uniqueness analysis
 // ─────────────────────────────────────────────────────────────────────────────
 
-void OptimizationOrchestrator::runUniqueness(Program* program,
-                                              OptimizationContext& ctx) {
+void OptimizationOrchestrator::runUniqueness(Program* program, OptimizationContext& ctx) {
     // The uniqueness analysis is a pure analysis pass: it does not transform
     // the AST.  The actual per-function `computeUniqueness()` calls happen
     // lazily inside `CodeGenerator::generateFunction()`, which reads the
@@ -1347,8 +1396,7 @@ void OptimizationOrchestrator::runUniqueness(Program* program,
 // runBorrowCheck — standalone AST-level borrow checker
 // ─────────────────────────────────────────────────────────────────────────────
 
-void OptimizationOrchestrator::runBorrowCheck(Program* program,
-                                               OptimizationContext& ctx) {
+void OptimizationOrchestrator::runBorrowCheck(Program* program, OptimizationContext& ctx) {
     if (!program) {
         ctx.validity().borrowCheck = true;
         return;
@@ -1361,8 +1409,7 @@ void OptimizationOrchestrator::runBorrowCheck(Program* program,
 //
 // Runs the fused equality-saturation + HGOE-scoring pass on the program AST.
 // Only activates at O2+ (opt level where superoptimizer-class work is worth it).
-void OptimizationOrchestrator::runHGOEEGraph(Program* program,
-                                              OptimizationContext& ctx) {
+void OptimizationOrchestrator::runHGOEEGraph(Program* program, OptimizationContext& ctx) {
     if (!program) {
         ctx.validity().hgoeEGraph = true;
         return;
@@ -1378,12 +1425,12 @@ void OptimizationOrchestrator::runHGOEEGraph(Program* program,
     hgoe_egraph::HGOEGuidedConfig cfg;
     // Scale budget with optimisation level: O2=modest, O3=full
     if (optLevel >= 3) {
-        cfg.nodeLimit    = 50'000;
-        cfg.iterLimit    = 40;
+        cfg.nodeLimit = 50'000;
+        cfg.iterLimit = 40;
         cfg.nodesPerIter = 5'000;
     } else {
-        cfg.nodeLimit    = 20'000;
-        cfg.iterLimit    = 25;
+        cfg.nodeLimit = 20'000;
+        cfg.iterLimit = 25;
         cfg.nodesPerIter = 2'000;
     }
     cfg.deterministicMode = true;

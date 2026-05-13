@@ -1,3 +1,4 @@
+import std;
 // Test string functions: str_len and char_at
 fn main() {
     var s = "Hello";

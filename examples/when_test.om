@@ -1,3 +1,4 @@
+import std;
 // Test: when statement
 // when (expr) { val => { ... }, _ => { ... } } — pattern-matching switch
 

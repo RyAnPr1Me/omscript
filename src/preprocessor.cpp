@@ -5,29 +5,29 @@
 #include <cctype>
 #include <cstdio>
 #include <ctime>
-#include <sstream>
-#include <unordered_set>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/TargetParser/Host.h>
+#include <sstream>
+#include <unordered_set>
 
 // Detect OS and architecture at compile time for __OS__ / __ARCH__
 #if defined(_WIN32) || defined(_WIN64)
-#  define OMSC_PP_OS   "windows"
+#define OMSC_PP_OS "windows"
 #elif defined(__APPLE__)
-#  define OMSC_PP_OS   "macos"
+#define OMSC_PP_OS "macos"
 #else
-#  define OMSC_PP_OS   "linux"
+#define OMSC_PP_OS "linux"
 #endif
 
 #if defined(__x86_64__) || defined(_M_X64)
-#  define OMSC_PP_ARCH "x86_64"
+#define OMSC_PP_ARCH "x86_64"
 #elif defined(__aarch64__) || defined(_M_ARM64)
-#  define OMSC_PP_ARCH "aarch64"
+#define OMSC_PP_ARCH "aarch64"
 #elif defined(__arm__) || defined(_M_ARM)
-#  define OMSC_PP_ARCH "arm"
+#define OMSC_PP_ARCH "arm"
 #else
-#  define OMSC_PP_ARCH "unknown"
+#define OMSC_PP_ARCH "unknown"
 #endif
 
 namespace omscript {
@@ -36,8 +36,7 @@ namespace omscript {
 // Construction / predefined macros
 // ============================================================
 
-Preprocessor::Preprocessor(std::string filename)
-    : filename_(std::move(filename)) {
+Preprocessor::Preprocessor(std::string filename) : filename_(std::move(filename)) {
     // Helper that installs a reserved (predefined, non-redefinable) macro.
     // All compiler-installed macros go through this so the reserved-name
     // check in handleDefine / #undef handling catches every one.
@@ -47,9 +46,9 @@ Preprocessor::Preprocessor(std::string filename)
         def.isReserved = true;
         macros_[name] = std::move(def);
     };
-    reserve("__VERSION__",   "\"" OMSC_VERSION "\"");
-    reserve("__OS__",        "\"" OMSC_PP_OS "\"");
-    reserve("__ARCH__",      "\"" OMSC_PP_ARCH "\"");
+    reserve("__VERSION__", "\"" OMSC_VERSION "\"");
+    reserve("__OS__", "\"" OMSC_PP_OS "\"");
+    reserve("__ARCH__", "\"" OMSC_PP_ARCH "\"");
     // Original file as the user passed it on the command line — preserved
     // across `#line` directives that rewrite __FILE__ / line numbers (a la
     // C99 __BASE_FILE__).
@@ -68,16 +67,13 @@ Preprocessor::Preprocessor(std::string filename)
         localtime_r(&now, &tm_buf);
 #endif
         // C-style "Mmm dd yyyy" — matches C's __DATE__.
-        static const char* const kMonths[12] = {
-            "Jan","Feb","Mar","Apr","May","Jun",
-            "Jul","Aug","Sep","Oct","Nov","Dec"};
+        static const char* const kMonths[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
         char dateBuf[32];
-        std::snprintf(dateBuf, sizeof(dateBuf), "\"%s %2d %4d\"",
-                      kMonths[tm_buf.tm_mon], tm_buf.tm_mday,
+        std::snprintf(dateBuf, sizeof(dateBuf), "\"%s %2d %4d\"", kMonths[tm_buf.tm_mon], tm_buf.tm_mday,
                       tm_buf.tm_year + 1900);
         char timeBuf[16];
-        std::snprintf(timeBuf, sizeof(timeBuf), "\"%02d:%02d:%02d\"",
-                      tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
+        std::snprintf(timeBuf, sizeof(timeBuf), "\"%02d:%02d:%02d\"", tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
         reserve("__DATE__", dateBuf);
         reserve("__TIME__", timeBuf);
     }
@@ -111,16 +107,26 @@ Preprocessor::Preprocessor(std::string filename)
             return it != hostFeatures.end() && it->second;
         };
 
-        if (on("sse2"))     define1("__SIMD_SSE2__");
-        if (on("sse3"))     define1("__SIMD_SSE3__");
-        if (on("ssse3"))    define1("__SIMD_SSSE3__");
-        if (on("sse4.1"))   define1("__SIMD_SSE41__");
-        if (on("sse4.2"))   define1("__SIMD_SSE42__");
-        if (on("avx"))      define1("__SIMD_AVX__");
-        if (on("avx2"))     define1("__SIMD_AVX2__");
-        if (on("avx512f"))  define1("__SIMD_AVX512F__");
-        if (on("avx512bw")) define1("__SIMD_AVX512BW__");
-        if (on("neon"))     define1("__SIMD_NEON__");
+        if (on("sse2"))
+            define1("__SIMD_SSE2__");
+        if (on("sse3"))
+            define1("__SIMD_SSE3__");
+        if (on("ssse3"))
+            define1("__SIMD_SSSE3__");
+        if (on("sse4.1"))
+            define1("__SIMD_SSE41__");
+        if (on("sse4.2"))
+            define1("__SIMD_SSE42__");
+        if (on("avx"))
+            define1("__SIMD_AVX__");
+        if (on("avx2"))
+            define1("__SIMD_AVX2__");
+        if (on("avx512f"))
+            define1("__SIMD_AVX512F__");
+        if (on("avx512bw"))
+            define1("__SIMD_AVX512BW__");
+        if (on("neon"))
+            define1("__SIMD_NEON__");
 
         // __VECTOR_WIDTH__: natural i32 SIMD lane count on this host.
         // Matches the preferredVectorWidth_ that codegen computes from the same
@@ -147,14 +153,18 @@ bool Preprocessor::isIdentChar(char c) noexcept {
 }
 std::string Preprocessor::trimLeft(const std::string& s) {
     size_t i = 0;
-    while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) i++;
+    while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i])))
+        i++;
     return s.substr(i);
 }
 std::string Preprocessor::trim(const std::string& s) {
-    if (s.empty()) return s;
+    if (s.empty())
+        return s;
     size_t l = 0, r = s.size() - 1;
-    while (l <= r && std::isspace(static_cast<unsigned char>(s[l]))) l++;
-    while (r > l && std::isspace(static_cast<unsigned char>(s[r]))) r--;
+    while (l <= r && std::isspace(static_cast<unsigned char>(s[l])))
+        l++;
+    while (r > l && std::isspace(static_cast<unsigned char>(s[r])))
+        r--;
     return s.substr(l, r - l + 1);
 }
 
@@ -168,17 +178,23 @@ int Preprocessor::cmpVersion(const std::string& a, const std::string& b) {
         std::istringstream ss(s);
         std::string tok;
         while (std::getline(ss, tok, '.')) {
-            try { parts.push_back(std::stoi(tok)); }
-            catch (...) { parts.push_back(0); }
+            try {
+                parts.push_back(std::stoi(tok));
+            } catch (...) {
+                parts.push_back(0);
+            }
         }
         return parts;
     };
     auto pa = parse(a), pb = parse(b);
     const size_t n = std::max(pa.size(), pb.size());
-    pa.resize(n, 0); pb.resize(n, 0);
+    pa.resize(n, 0);
+    pb.resize(n, 0);
     for (size_t i = 0; i < n; i++) {
-        if (pa[i] < pb[i]) return -1;
-        if (pa[i] > pb[i]) return  1;
+        if (pa[i] < pb[i])
+            return -1;
+        if (pa[i] > pb[i])
+            return 1;
     }
     return 0;
 }
@@ -201,11 +217,10 @@ void Preprocessor::handleDefine(const std::string& rest, int lineNo) {
     size_t i = 0;
     if (i >= r.size() || !isIdentStart(r[i])) {
         throw omscript::DiagnosticError(omscript::Diagnostic{
-            omscript::DiagnosticSeverity::Error,
-            {filename_, lineNo, 0},
-            "#define: expected macro name"});
+            omscript::DiagnosticSeverity::Error, {filename_, lineNo, 0}, "#define: expected macro name"});
     }
-    while (i < r.size() && isIdentChar(r[i])) i++;
+    while (i < r.size() && isIdentChar(r[i]))
+        i++;
     const std::string name = r.substr(0, i);
 
     // ── Reserved-name protection ────────────────────────────────────────
@@ -216,12 +231,11 @@ void Preprocessor::handleDefine(const std::string& rest, int lineNo) {
     // that read the same predefs.  Catch the attempt at #define time.
     {
         auto existing = macros_.find(name);
-        if (isSpecialReservedName(name) ||
-            (existing != macros_.end() && existing->second.isReserved)) {
-            throw omscript::DiagnosticError(omscript::Diagnostic{
-                omscript::DiagnosticSeverity::Error,
-                {filename_, lineNo, 0},
-                "#define: '" + name + "' is a reserved predefined macro and cannot be redefined"});
+        if (isSpecialReservedName(name) || (existing != macros_.end() && existing->second.isReserved)) {
+            throw omscript::DiagnosticError(
+                omscript::Diagnostic{omscript::DiagnosticSeverity::Error,
+                                     {filename_, lineNo, 0},
+                                     "#define: '" + name + "' is a reserved predefined macro and cannot be redefined"});
         }
     }
 
@@ -235,17 +249,22 @@ void Preprocessor::handleDefine(const std::string& rest, int lineNo) {
         // and paramTypes=["int","int"].  Untyped params get "" in
         // paramTypes (treated as "any" by validateMacroCall).
         while (i < r.size() && r[i] != ')') {
-            while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i]))) i++;
-            if (i >= r.size() || r[i] == ')') break;
+            while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i])))
+                i++;
+            if (i >= r.size() || r[i] == ')')
+                break;
             const size_t pstart = i;
-            while (i < r.size() && isIdentChar(r[i])) i++;
+            while (i < r.size() && isIdentChar(r[i]))
+                i++;
             if (i > pstart) {
                 def.params.push_back(r.substr(pstart, i - pstart));
                 std::string ptype;
-                while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i]))) i++;
+                while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i])))
+                    i++;
                 if (i < r.size() && r[i] == ':') {
                     i++;
-                    while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i]))) i++;
+                    while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i])))
+                        i++;
                     const size_t ts = i;
                     // Accept simple type names only (e.g. `int`, `f32x4`,
                     // `string`).  Composite forms like `int*` or `int[]`
@@ -259,17 +278,22 @@ void Preprocessor::handleDefine(const std::string& rest, int lineNo) {
                 }
                 def.paramTypes.push_back(std::move(ptype));
             }
-            while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i]))) i++;
-            if (i < r.size() && r[i] == ',') i++;
+            while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i])))
+                i++;
+            if (i < r.size() && r[i] == ',')
+                i++;
         }
-        if (i < r.size()) i++;  // skip ')'
+        if (i < r.size())
+            i++; // skip ')'
 
         // Optional return-type annotation: `) -> <type>`.  Recorded for
         // documentation only; not currently checked at expansion sites.
-        while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i]))) i++;
+        while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i])))
+            i++;
         if (i + 1 < r.size() && r[i] == '-' && r[i + 1] == '>') {
             i += 2;
-            while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i]))) i++;
+            while (i < r.size() && std::isspace(static_cast<unsigned char>(r[i])))
+                i++;
             const size_t ts = i;
             // Same simple-identifier restriction as the parameter type
             // parser above — composite syntax isn't checked anywhere yet.
@@ -292,13 +316,11 @@ void Preprocessor::handleDefine(const std::string& rest, int lineNo) {
         auto existing = macros_.find(name);
         if (existing != macros_.end() && !existing->second.isReserved) {
             const MacroDef& old = existing->second;
-            const bool same = (old.isFunctionLike == def.isFunctionLike &&
-                               old.params == def.params &&
-                               old.paramTypes == def.paramTypes &&
-                               old.body == def.body);
+            const bool same = (old.isFunctionLike == def.isFunctionLike && old.params == def.params &&
+                               old.paramTypes == def.paramTypes && old.body == def.body);
             if (!same) {
-                warnings_.push_back(filename_ + ":" + std::to_string(lineNo) +
-                    ": warning: macro '" + name + "' redefined with a different body");
+                warnings_.push_back(filename_ + ":" + std::to_string(lineNo) + ": warning: macro '" + name +
+                                    "' redefined with a different body");
             }
         }
     }
@@ -310,8 +332,7 @@ void Preprocessor::handleDefine(const std::string& rest, int lineNo) {
 // Macro argument collection
 // ============================================================
 
-std::vector<std::string> Preprocessor::collectArgs(const std::string& text,
-                                                     size_t& pos) {
+std::vector<std::string> Preprocessor::collectArgs(const std::string& text, size_t& pos) {
     std::vector<std::string> args;
     std::string cur;
     int depth = 1;
@@ -321,17 +342,43 @@ std::vector<std::string> Preprocessor::collectArgs(const std::string& text,
         const char c = text[pos++];
         if (inStr) {
             cur += c;
-            if (c == '\\' && pos < text.size()) { cur += text[pos++]; continue; }
-            if (c == strChar) inStr = false;
+            if (c == '\\' && pos < text.size()) {
+                cur += text[pos++];
+                continue;
+            }
+            if (c == strChar)
+                inStr = false;
             continue;
         }
-        if (c == '"' || c == '\'') { inStr = true; strChar = c; cur += c; continue; }
-        if (c == '(') { depth++; cur += c; continue; }
-        if (c == ')') { depth--; if (depth == 0) { args.push_back(trim(cur)); return args; } cur += c; continue; }
-        if (c == ',' && depth == 1) { args.push_back(trim(cur)); cur.clear(); continue; }
+        if (c == '"' || c == '\'') {
+            inStr = true;
+            strChar = c;
+            cur += c;
+            continue;
+        }
+        if (c == '(') {
+            depth++;
+            cur += c;
+            continue;
+        }
+        if (c == ')') {
+            depth--;
+            if (depth == 0) {
+                args.push_back(trim(cur));
+                return args;
+            }
+            cur += c;
+            continue;
+        }
+        if (c == ',' && depth == 1) {
+            args.push_back(trim(cur));
+            cur.clear();
+            continue;
+        }
         cur += c;
     }
-    if (!trim(cur).empty()) args.push_back(trim(cur));
+    if (!trim(cur).empty())
+        args.push_back(trim(cur));
     return args;
 }
 
@@ -354,59 +401,90 @@ std::string Preprocessor::classifyArg(const std::string& a) {
     //   "expr"   — anything else (operators, parens, calls — caller-defined)
     //   ""       — empty
     size_t l = 0, r = a.size();
-    while (l < r && std::isspace(static_cast<unsigned char>(a[l]))) ++l;
-    while (r > l && std::isspace(static_cast<unsigned char>(a[r - 1]))) --r;
-    if (l == r) return "";
+    while (l < r && std::isspace(static_cast<unsigned char>(a[l])))
+        ++l;
+    while (r > l && std::isspace(static_cast<unsigned char>(a[r - 1])))
+        --r;
+    if (l == r)
+        return "";
     const std::string s = a.substr(l, r - l);
 
-    if (s == "true" || s == "false") return "bool";
-    if (s.front() == '"'  && s.back() == '"' ) return "string";
-    if (s.front() == '\'' && s.back() == '\'') return "string";
+    if (s == "true" || s == "false")
+        return "bool";
+    if (s.front() == '"' && s.back() == '"')
+        return "string";
+    if (s.front() == '\'' && s.back() == '\'')
+        return "string";
 
     // Numeric classification — accept optional leading sign, then check
     // every remaining char is a digit / '.' / 'e' / 'E' / hex prefix etc.
     {
         size_t k = 0;
-        if (s[k] == '+' || s[k] == '-') ++k;
-        if (k < s.size() && s[k] == '0' && k + 1 < s.size() &&
-            (s[k + 1] == 'x' || s[k + 1] == 'X')) {
+        if (s[k] == '+' || s[k] == '-')
+            ++k;
+        if (k < s.size() && s[k] == '0' && k + 1 < s.size() && (s[k + 1] == 'x' || s[k + 1] == 'X')) {
             // 0x… hex literal
             k += 2;
-            if (k >= s.size()) return "expr";
+            if (k >= s.size())
+                return "expr";
             for (; k < s.size(); ++k)
-                if (!std::isxdigit(static_cast<unsigned char>(s[k]))) return "expr";
+                if (!std::isxdigit(static_cast<unsigned char>(s[k])))
+                    return "expr";
             return "int";
         }
-        if (k < s.size() && s[k] == '0' && k + 1 < s.size() &&
-            (s[k + 1] == 'b' || s[k + 1] == 'B')) {
+        if (k < s.size() && s[k] == '0' && k + 1 < s.size() && (s[k + 1] == 'b' || s[k + 1] == 'B')) {
             k += 2;
-            if (k >= s.size()) return "expr";
+            if (k >= s.size())
+                return "expr";
             for (; k < s.size(); ++k)
-                if (s[k] != '0' && s[k] != '1') return "expr";
+                if (s[k] != '0' && s[k] != '1')
+                    return "expr";
             return "int";
         }
         bool hasDigit = false, hasDot = false, hasExp = false, allOk = true;
         for (; k < s.size(); ++k) {
             const char c = s[k];
-            if (std::isdigit(static_cast<unsigned char>(c))) { hasDigit = true; }
-            else if (c == '.') { if (hasDot || hasExp) { allOk = false; break; } hasDot = true; }
-            else if (c == 'e' || c == 'E') {
-                if (hasExp || !hasDigit) { allOk = false; break; }
+            if (std::isdigit(static_cast<unsigned char>(c))) {
+                hasDigit = true;
+            } else if (c == '.') {
+                if (hasDot || hasExp) {
+                    allOk = false;
+                    break;
+                }
+                hasDot = true;
+            } else if (c == 'e' || c == 'E') {
+                if (hasExp || !hasDigit) {
+                    allOk = false;
+                    break;
+                }
                 hasExp = true;
-                if (k + 1 < s.size() && (s[k + 1] == '+' || s[k + 1] == '-')) ++k;
+                if (k + 1 < s.size() && (s[k + 1] == '+' || s[k + 1] == '-'))
+                    ++k;
+            } else if (c == 'f' || c == 'F') {
+                if (k + 1 != s.size()) {
+                    allOk = false;
+                    break;
+                }
+                hasDot = true;
+            } else {
+                allOk = false;
+                break;
             }
-            else if (c == 'f' || c == 'F') { if (k + 1 != s.size()) { allOk = false; break; } hasDot = true; }
-            else { allOk = false; break; }
         }
-        if (allOk && hasDigit) return (hasDot || hasExp) ? "float" : "int";
+        if (allOk && hasDigit)
+            return (hasDot || hasExp) ? "float" : "int";
     }
 
     // Bare identifier
     {
         bool ok = !s.empty() && (std::isalpha(static_cast<unsigned char>(s[0])) || s[0] == '_');
         for (size_t k = 1; ok && k < s.size(); ++k)
-            if (!isIdentChar(s[k])) { ok = false; break; }
-        if (ok) return "ident";
+            if (!isIdentChar(s[k])) {
+                ok = false;
+                break;
+            }
+        if (ok)
+            return "ident";
     }
 
     return "expr";
@@ -418,21 +496,21 @@ namespace {
 // flag the classic multi-evaluation footgun MAX(f(), g()).
 bool argLooksLikeCall(const std::string& arg) {
     size_t i = 0;
-    while (i < arg.size() && std::isspace(static_cast<unsigned char>(arg[i]))) ++i;
+    while (i < arg.size() && std::isspace(static_cast<unsigned char>(arg[i])))
+        ++i;
     const size_t start = i;
     while (i < arg.size() &&
-           (std::isalnum(static_cast<unsigned char>(arg[i])) ||
-            arg[i] == '_' || arg[i] == '.' || arg[i] == ':'))
+           (std::isalnum(static_cast<unsigned char>(arg[i])) || arg[i] == '_' || arg[i] == '.' || arg[i] == ':'))
         ++i;
-    if (i == start) return false;
-    while (i < arg.size() && std::isspace(static_cast<unsigned char>(arg[i]))) ++i;
+    if (i == start)
+        return false;
+    while (i < arg.size() && std::isspace(static_cast<unsigned char>(arg[i])))
+        ++i;
     return i < arg.size() && arg[i] == '(';
 }
 } // namespace
 
-void Preprocessor::validateMacroCall(const std::string& name,
-                                     const MacroDef& def,
-                                     const std::vector<std::string>& args,
+void Preprocessor::validateMacroCall(const std::string& name, const MacroDef& def, const std::vector<std::string>& args,
                                      int lineNo) const {
     // Arity check.  Empty-arg edge case: a call written `FOO()` returns
     // one zero-length arg from collectArgs; treat that as zero args when
@@ -440,14 +518,14 @@ void Preprocessor::validateMacroCall(const std::string& name,
     // still works.
     const size_t expected = def.params.size();
     size_t actual = args.size();
-    if (actual == 1 && args[0].empty() && expected == 0) actual = 0;
+    if (actual == 1 && args[0].empty() && expected == 0)
+        actual = 0;
     if (actual != expected) {
-        throw omscript::DiagnosticError(omscript::Diagnostic{
-            omscript::DiagnosticSeverity::Error,
-            {filename_, lineNo, 0},
-            "macro '" + name + "' expects " + std::to_string(expected) +
-            " argument" + (expected == 1 ? "" : "s") +
-            ", got " + std::to_string(actual)});
+        throw omscript::DiagnosticError(
+            omscript::Diagnostic{omscript::DiagnosticSeverity::Error,
+                                 {filename_, lineNo, 0},
+                                 "macro '" + name + "' expects " + std::to_string(expected) + " argument" +
+                                     (expected == 1 ? "" : "s") + ", got " + std::to_string(actual)});
     }
 
     // Per-argument type classification (only when the macro declared a
@@ -456,26 +534,32 @@ void Preprocessor::validateMacroCall(const std::string& name,
     // type, because it might further expand or evaluate to the right
     // shape — we only reject *obvious* mismatches.
     auto compatible = [](const std::string& declared, const std::string& shape) {
-        if (declared.empty() || declared == "any") return true;
-        if (shape.empty() || shape == "ident" || shape == "expr") return true;
-        if (declared == "int"   || declared == "uint")  return shape == "int";
-        if (declared == "float" || declared == "double") return shape == "int" || shape == "float";
-        if (declared == "string") return shape == "string";
-        if (declared == "bool")   return shape == "bool" || shape == "int";
+        if (declared.empty() || declared == "any")
+            return true;
+        if (shape.empty() || shape == "ident" || shape == "expr")
+            return true;
+        if (declared == "int" || declared == "uint")
+            return shape == "int";
+        if (declared == "float" || declared == "double")
+            return shape == "int" || shape == "float";
+        if (declared == "string")
+            return shape == "string";
+        if (declared == "bool")
+            return shape == "bool" || shape == "int";
         // Unknown declared type — don't second-guess the user
         return true;
     };
     for (size_t i = 0; i < expected; ++i) {
         const std::string& declared = (i < def.paramTypes.size()) ? def.paramTypes[i] : "";
-        if (declared.empty() || declared == "any") continue;
+        if (declared.empty() || declared == "any")
+            continue;
         const std::string shape = classifyArg(args[i]);
         if (!compatible(declared, shape)) {
             throw omscript::DiagnosticError(omscript::Diagnostic{
                 omscript::DiagnosticSeverity::Error,
                 {filename_, lineNo, 0},
-                "macro '" + name + "': argument " + std::to_string(i + 1) +
-                " ('" + def.params[i] + "') is declared " + declared +
-                " but got a " + shape + "-shaped value: " + args[i]});
+                "macro '" + name + "': argument " + std::to_string(i + 1) + " ('" + def.params[i] + "') is declared " +
+                    declared + " but got a " + shape + "-shaped value: " + args[i]});
         }
     }
 
@@ -490,8 +574,10 @@ void Preprocessor::validateMacroCall(const std::string& name,
         while (k < b.size()) {
             if (isIdentStart(b[k])) {
                 size_t s = k;
-                while (k < b.size() && isIdentChar(b[k])) ++k;
-                if (b.substr(s, k - s) == param) ++n;
+                while (k < b.size() && isIdentChar(b[k]))
+                    ++k;
+                if (b.substr(s, k - s) == param)
+                    ++n;
             } else {
                 ++k;
             }
@@ -499,14 +585,13 @@ void Preprocessor::validateMacroCall(const std::string& name,
         return n;
     };
     for (size_t i = 0; i < expected; ++i) {
-        if (!argLooksLikeCall(args[i])) continue;
+        if (!argLooksLikeCall(args[i]))
+            continue;
         if (countParamUses(def.params[i]) > 1) {
-            warnings_.push_back(
-                filename_ + ":" + std::to_string(lineNo) +
-                ": warning: macro '" + name + "' uses parameter '" +
-                def.params[i] + "' more than once and argument '" +
-                args[i] + "' looks like a function call — it will be "
-                "evaluated multiple times");
+            warnings_.push_back(filename_ + ":" + std::to_string(lineNo) + ": warning: macro '" + name +
+                                "' uses parameter '" + def.params[i] + "' more than once and argument '" + args[i] +
+                                "' looks like a function call — it will be "
+                                "evaluated multiple times");
         }
     }
 }
@@ -515,8 +600,7 @@ void Preprocessor::validateMacroCall(const std::string& name,
 // expandSimple
 // ============================================================
 
-std::string Preprocessor::expandSimple(const std::string& name, int lineNo,
-                                        int depth) const {
+std::string Preprocessor::expandSimple(const std::string& name, int lineNo, int depth) const {
     if (name == "__FILE__")
         return "\"" + filename_ + "\"";
     if (name == "__LINE__")
@@ -526,7 +610,8 @@ std::string Preprocessor::expandSimple(const std::string& name, int lineNo,
     }
 
     auto it = macros_.find(name);
-    if (it == macros_.end()) return name;
+    if (it == macros_.end())
+        return name;
 
     const MacroDef& def = it->second;
 
@@ -534,7 +619,8 @@ std::string Preprocessor::expandSimple(const std::string& name, int lineNo,
         return std::to_string(def.counterValue++);
     }
 
-    if (def.isFunctionLike) return name;
+    if (def.isFunctionLike)
+        return name;
 
     // ── Cycle detection ────────────────────────────────────────────────
     // Object-like macro expansion: if we're already in the middle of
@@ -543,10 +629,10 @@ std::string Preprocessor::expandSimple(const std::string& name, int lineNo,
     // recurse until the depth-256 guard fires; with this we surface the
     // cycle as a deterministic, readable error pointing at the macro.
     if (expanding_.count(name)) {
-        throw omscript::DiagnosticError(omscript::Diagnostic{
-            omscript::DiagnosticSeverity::Error,
-            {filename_, lineNo, 0},
-            "cyclic macro expansion detected involving '" + name + "'"});
+        throw omscript::DiagnosticError(
+            omscript::Diagnostic{omscript::DiagnosticSeverity::Error,
+                                 {filename_, lineNo, 0},
+                                 "cyclic macro expansion detected involving '" + name + "'"});
     }
     expanding_.insert(name);
     std::string out;
@@ -564,18 +650,17 @@ std::string Preprocessor::expandSimple(const std::string& name, int lineNo,
 // substituteMacros — the single full definition
 // ============================================================
 
-std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
-                                             int depth) const {
+std::string Preprocessor::substituteMacros(const std::string& text, int lineNo, int depth) const {
     // Defence-in-depth recursion limit.  In practice the per-macro cycle
     // check (expanding_) catches most pathological cases; this guard
     // catches deep-but-acyclic chains (e.g. 200 nested function-like
     // expansions) and turns them into a real diagnostic instead of
     // silently truncating output.
     if (depth > 256) {
-        throw omscript::DiagnosticError(omscript::Diagnostic{
-            omscript::DiagnosticSeverity::Error,
-            {filename_, lineNo, 0},
-            "macro expansion exceeded 256 levels of nesting (possible runaway expansion)"});
+        throw omscript::DiagnosticError(
+            omscript::Diagnostic{omscript::DiagnosticSeverity::Error,
+                                 {filename_, lineNo, 0},
+                                 "macro expansion exceeded 256 levels of nesting (possible runaway expansion)"});
     }
 
     std::string result;
@@ -593,24 +678,32 @@ std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
             while (i < text.size()) {
                 const char sc = text[i++];
                 result += sc;
-                if (sc == '\\' && i < text.size()) { result += text[i++]; continue; }
-                if (sc == q) break;
+                if (sc == '\\' && i < text.size()) {
+                    result += text[i++];
+                    continue;
+                }
+                if (sc == q)
+                    break;
             }
             continue;
         }
 
         // Line comment
         if (c == '/' && i + 1 < text.size() && text[i + 1] == '/') {
-            while (i < text.size()) result += text[i++];
+            while (i < text.size())
+                result += text[i++];
             continue;
         }
 
         // Block comment
         if (c == '/' && i + 1 < text.size() && text[i + 1] == '*') {
-            result += text[i++]; result += text[i++];
+            result += text[i++];
+            result += text[i++];
             while (i + 1 < text.size()) {
                 if (text[i] == '*' && text[i + 1] == '/') {
-                    result += text[i++]; result += text[i++]; break;
+                    result += text[i++];
+                    result += text[i++];
+                    break;
                 }
                 result += text[i++];
             }
@@ -620,7 +713,8 @@ std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
         // Identifier: check for macro
         if (isIdentStart(c)) {
             const size_t start = i;
-            while (i < text.size() && isIdentChar(text[i])) i++;
+            while (i < text.size() && isIdentChar(text[i]))
+                i++;
             const std::string ident = text.substr(start, i - start);
 
             auto it = macros_.find(ident);
@@ -633,7 +727,8 @@ std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
 
             if (it != macros_.end() && it->second.isFunctionLike) {
                 size_t j = i;
-                while (j < text.size() && std::isspace(static_cast<unsigned char>(text[j]))) j++;
+                while (j < text.size() && std::isspace(static_cast<unsigned char>(text[j])))
+                    j++;
                 if (j < text.size() && text[j] == '(') {
                     j++;
                     std::vector<std::string> args = collectArgs(text, j);
@@ -648,10 +743,10 @@ std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
 
                     // ── Cycle detection for function-like expansions.
                     if (expanding_.count(ident)) {
-                        throw omscript::DiagnosticError(omscript::Diagnostic{
-                            omscript::DiagnosticSeverity::Error,
-                            {filename_, lineNo, 0},
-                            "cyclic macro expansion detected involving '" + ident + "'"});
+                        throw omscript::DiagnosticError(
+                            omscript::Diagnostic{omscript::DiagnosticSeverity::Error,
+                                                 {filename_, lineNo, 0},
+                                                 "cyclic macro expansion detected involving '" + ident + "'"});
                     }
                     expanding_.insert(ident);
 
@@ -670,11 +765,14 @@ std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
                         std::string s = "\"";
                         // Trim leading/trailing whitespace.
                         size_t start = 0, end = a.size();
-                        while (start < end && std::isspace(static_cast<unsigned char>(a[start]))) ++start;
-                        while (end > start && std::isspace(static_cast<unsigned char>(a[end - 1]))) --end;
+                        while (start < end && std::isspace(static_cast<unsigned char>(a[start])))
+                            ++start;
+                        while (end > start && std::isspace(static_cast<unsigned char>(a[end - 1])))
+                            --end;
                         for (size_t k = start; k < end; ++k) {
                             char ch = a[k];
-                            if (ch == '"' || ch == '\\') s += '\\';
+                            if (ch == '"' || ch == '\\')
+                                s += '\\';
                             s += ch;
                         }
                         s += '"';
@@ -688,31 +786,29 @@ std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
                             // Recognise `#` followed by an identifier — but
                             // skip `##` (handled below) so we don't confuse
                             // stringification with token pasting.
-                            if (expanded[k] == '#'
-                                && k + 1 < expanded.size()
-                                && expanded[k + 1] != '#'
-                                && (k == 0 || expanded[k - 1] != '#')) {
+                            if (expanded[k] == '#' && k + 1 < expanded.size() && expanded[k + 1] != '#' &&
+                                (k == 0 || expanded[k - 1] != '#')) {
                                 size_t s = k + 1;
                                 // Tolerate whitespace between `#` and the param name.
-                                while (s < expanded.size()
-                                       && std::isspace(static_cast<unsigned char>(expanded[s])))
+                                while (s < expanded.size() && std::isspace(static_cast<unsigned char>(expanded[s])))
                                     ++s;
                                 if (s < expanded.size() && isIdentStart(expanded[s])) {
                                     size_t e = s;
-                                    while (e < expanded.size() && isIdentChar(expanded[e])) ++e;
+                                    while (e < expanded.size() && isIdentChar(expanded[e]))
+                                        ++e;
                                     const std::string name = expanded.substr(s, e - s);
                                     bool replaced = false;
                                     for (size_t pi = 0; pi < def.params.size(); ++pi) {
                                         if (def.params[pi] == name) {
-                                            const std::string& a =
-                                                (pi < args.size()) ? args[pi] : std::string();
+                                            const std::string& a = (pi < args.size()) ? args[pi] : std::string();
                                             out += stringifyArg(a);
                                             k = e;
                                             replaced = true;
                                             break;
                                         }
                                     }
-                                    if (replaced) continue;
+                                    if (replaced)
+                                        continue;
                                 }
                             }
                             out += expanded[k++];
@@ -728,7 +824,8 @@ std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
                         while (ei < expanded.size()) {
                             if (isIdentStart(expanded[ei])) {
                                 const size_t es = ei;
-                                while (ei < expanded.size() && isIdentChar(expanded[ei])) ei++;
+                                while (ei < expanded.size() && isIdentChar(expanded[ei]))
+                                    ei++;
                                 const std::string tok = expanded.substr(es, ei - es);
                                 newExp += (tok == param) ? arg : tok;
                             } else {
@@ -747,7 +844,8 @@ std::string Preprocessor::substituteMacros(const std::string& text, int lineNo,
                     auto applyTokenPaste = [](std::string s) {
                         for (;;) {
                             const size_t hpos = s.find("##");
-                            if (hpos == std::string::npos) return s;
+                            if (hpos == std::string::npos)
+                                return s;
                             size_t lo = hpos;
                             while (lo > 0 && std::isspace(static_cast<unsigned char>(s[lo - 1])))
                                 --lo;
@@ -801,11 +899,16 @@ struct ExprEval {
         : src(s), pos(0), pp(p), lineNo(ln), macros(m) {}
 
     void skip() {
-        while (pos < src.size() && std::isspace(static_cast<unsigned char>(src[pos]))) pos++;
+        while (pos < src.size() && std::isspace(static_cast<unsigned char>(src[pos])))
+            pos++;
     }
 
-    bool isIdStart(char c) { return std::isalpha(static_cast<unsigned char>(c)) || c == '_'; }
-    bool isIdChar(char c)  { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }
+    bool isIdStart(char c) {
+        return std::isalpha(static_cast<unsigned char>(c)) || c == '_';
+    }
+    bool isIdChar(char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+    }
 
     long long parsePrimary();
     long long parseUnary();
@@ -820,51 +923,63 @@ struct ExprEval {
     long long parseAnd();
     long long parseOr();
     long long parseTernary();
-    long long parse() { return parseTernary(); }
+    long long parse() {
+        return parseTernary();
+    }
 };
 
 long long ExprEval::parsePrimary() {
     skip();
-    if (pos >= src.size()) return 0;
+    if (pos >= src.size())
+        return 0;
 
     if (src[pos] == '(') {
         pos++;
         long long v = parseTernary();
         skip();
-        if (pos < src.size() && src[pos] == ')') pos++;
+        if (pos < src.size() && src[pos] == ')')
+            pos++;
         return v;
     }
 
     if (std::isdigit(static_cast<unsigned char>(src[pos]))) {
         const size_t start = pos;
         // Hex literal: 0x… / 0X…
-        if (src[pos] == '0' && pos + 1 < src.size() &&
-            (src[pos + 1] == 'x' || src[pos + 1] == 'X')) {
+        if (src[pos] == '0' && pos + 1 < src.size() && (src[pos + 1] == 'x' || src[pos + 1] == 'X')) {
             pos += 2;
             const size_t hstart = pos;
-            while (pos < src.size() &&
-                   std::isxdigit(static_cast<unsigned char>(src[pos]))) pos++;
-            if (pos == hstart) return 0;
+            while (pos < src.size() && std::isxdigit(static_cast<unsigned char>(src[pos])))
+                pos++;
+            if (pos == hstart)
+                return 0;
             return std::stoll(src.substr(hstart, pos - hstart), nullptr, 16);
         }
-        while (pos < src.size() && std::isdigit(static_cast<unsigned char>(src[pos]))) pos++;
+        while (pos < src.size() && std::isdigit(static_cast<unsigned char>(src[pos])))
+            pos++;
         return std::stoll(src.substr(start, pos - start));
     }
 
     if (isIdStart(src[pos])) {
         const size_t start = pos;
-        while (pos < src.size() && isIdChar(src[pos])) pos++;
+        while (pos < src.size() && isIdChar(src[pos]))
+            pos++;
         const std::string ident = src.substr(start, pos - start);
 
         if (ident == "defined") {
             skip();
             const bool paren = (pos < src.size() && src[pos] == '(');
-            if (paren) pos++;
+            if (paren)
+                pos++;
             skip();
             const size_t ns = pos;
-            while (pos < src.size() && isIdChar(src[pos])) pos++;
+            while (pos < src.size() && isIdChar(src[pos]))
+                pos++;
             const std::string name = src.substr(ns, pos - ns);
-            if (paren) { skip(); if (pos < src.size() && src[pos] == ')') pos++; }
+            if (paren) {
+                skip();
+                if (pos < src.size() && src[pos] == ')')
+                    pos++;
+            }
             return macros.count(name) ? 1 : 0;
         }
 
@@ -881,21 +996,43 @@ long long ExprEval::parsePrimary() {
 
 long long ExprEval::parseUnary() {
     skip();
-    if (pos < src.size() && src[pos] == '!') { pos++; return !parseUnary(); }
-    if (pos < src.size() && src[pos] == '-') { pos++; return -parseUnary(); }
-    if (pos < src.size() && src[pos] == '+') { pos++; return parseUnary(); }
-    if (pos < src.size() && src[pos] == '~') { pos++; return ~parseUnary(); }
+    if (pos < src.size() && src[pos] == '!') {
+        pos++;
+        return !parseUnary();
+    }
+    if (pos < src.size() && src[pos] == '-') {
+        pos++;
+        return -parseUnary();
+    }
+    if (pos < src.size() && src[pos] == '+') {
+        pos++;
+        return parseUnary();
+    }
+    if (pos < src.size() && src[pos] == '~') {
+        pos++;
+        return ~parseUnary();
+    }
     return parsePrimary();
 }
 long long ExprEval::parseMul() {
     long long v = parseUnary();
     while (true) {
         skip();
-        if (pos >= src.size()) break;
-        if (src[pos] == '*') { pos++; v *= parseUnary(); }
-        else if (src[pos] == '/') { pos++; const long long r = parseUnary(); v = r ? v / r : 0; }
-        else if (src[pos] == '%') { pos++; const long long r = parseUnary(); v = r ? v % r : 0; }
-        else break;
+        if (pos >= src.size())
+            break;
+        if (src[pos] == '*') {
+            pos++;
+            v *= parseUnary();
+        } else if (src[pos] == '/') {
+            pos++;
+            const long long r = parseUnary();
+            v = r ? v / r : 0;
+        } else if (src[pos] == '%') {
+            pos++;
+            const long long r = parseUnary();
+            v = r ? v % r : 0;
+        } else
+            break;
     }
     return v;
 }
@@ -903,10 +1040,16 @@ long long ExprEval::parseAdd() {
     long long v = parseMul();
     while (true) {
         skip();
-        if (pos >= src.size()) break;
-        if (src[pos] == '+') { pos++; v += parseMul(); }
-        else if (src[pos] == '-') { pos++; v -= parseMul(); }
-        else break;
+        if (pos >= src.size())
+            break;
+        if (src[pos] == '+') {
+            pos++;
+            v += parseMul();
+        } else if (src[pos] == '-') {
+            pos++;
+            v -= parseMul();
+        } else
+            break;
     }
     return v;
 }
@@ -914,11 +1057,14 @@ long long ExprEval::parseShift() {
     long long v = parseAdd();
     while (true) {
         skip();
-        if (pos + 1 < src.size() && src[pos] == '<' && src[pos+1] == '<') {
-            pos += 2; v = v << parseAdd();
-        } else if (pos + 1 < src.size() && src[pos] == '>' && src[pos+1] == '>') {
-            pos += 2; v = v >> parseAdd();
-        } else break;
+        if (pos + 1 < src.size() && src[pos] == '<' && src[pos + 1] == '<') {
+            pos += 2;
+            v = v << parseAdd();
+        } else if (pos + 1 < src.size() && src[pos] == '>' && src[pos + 1] == '>') {
+            pos += 2;
+            v = v >> parseAdd();
+        } else
+            break;
     }
     return v;
 }
@@ -930,16 +1076,26 @@ long long ExprEval::parseCmp() {
         // single-char `<` / `>` to avoid eating `<=` as `<` then `=`.
         // `==` and `!=` have lower precedence in C — handled in parseEq.
         if (pos + 1 < src.size()) {
-            if (src[pos]=='<' && src[pos+1]=='=') { pos+=2; v=(v<=parseShift()); continue; }
-            if (src[pos]=='>' && src[pos+1]=='=') { pos+=2; v=(v>=parseShift()); continue; }
+            if (src[pos] == '<' && src[pos + 1] == '=') {
+                pos += 2;
+                v = (v <= parseShift());
+                continue;
+            }
+            if (src[pos] == '>' && src[pos + 1] == '=') {
+                pos += 2;
+                v = (v >= parseShift());
+                continue;
+            }
         }
-        if (pos < src.size() && src[pos] == '<' &&
-            (pos + 1 >= src.size() || src[pos+1] != '<')) {
-            pos++; v=(v< parseShift()); continue;
+        if (pos < src.size() && src[pos] == '<' && (pos + 1 >= src.size() || src[pos + 1] != '<')) {
+            pos++;
+            v = (v < parseShift());
+            continue;
         }
-        if (pos < src.size() && src[pos] == '>' &&
-            (pos + 1 >= src.size() || src[pos+1] != '>')) {
-            pos++; v=(v> parseShift()); continue;
+        if (pos < src.size() && src[pos] == '>' && (pos + 1 >= src.size() || src[pos + 1] != '>')) {
+            pos++;
+            v = (v > parseShift());
+            continue;
         }
         break;
     }
@@ -949,11 +1105,14 @@ long long ExprEval::parseEq() {
     long long v = parseCmp();
     while (true) {
         skip();
-        if (pos + 1 < src.size() && src[pos]=='=' && src[pos+1]=='=') {
-            pos += 2; v = (v == parseCmp());
-        } else if (pos + 1 < src.size() && src[pos]=='!' && src[pos+1]=='=') {
-            pos += 2; v = (v != parseCmp());
-        } else break;
+        if (pos + 1 < src.size() && src[pos] == '=' && src[pos + 1] == '=') {
+            pos += 2;
+            v = (v == parseCmp());
+        } else if (pos + 1 < src.size() && src[pos] == '!' && src[pos + 1] == '=') {
+            pos += 2;
+            v = (v != parseCmp());
+        } else
+            break;
     }
     return v;
 }
@@ -962,10 +1121,11 @@ long long ExprEval::parseBitAnd() {
     while (true) {
         skip();
         // Single `&`, NOT `&&` (handled in parseAnd).
-        if (pos < src.size() && src[pos] == '&' &&
-            (pos + 1 >= src.size() || src[pos+1] != '&')) {
-            pos++; v &= parseEq();
-        } else break;
+        if (pos < src.size() && src[pos] == '&' && (pos + 1 >= src.size() || src[pos + 1] != '&')) {
+            pos++;
+            v &= parseEq();
+        } else
+            break;
     }
     return v;
 }
@@ -973,8 +1133,11 @@ long long ExprEval::parseBitXor() {
     long long v = parseBitAnd();
     while (true) {
         skip();
-        if (pos < src.size() && src[pos] == '^') { pos++; v ^= parseBitAnd(); }
-        else break;
+        if (pos < src.size() && src[pos] == '^') {
+            pos++;
+            v ^= parseBitAnd();
+        } else
+            break;
     }
     return v;
 }
@@ -983,10 +1146,11 @@ long long ExprEval::parseBitOr() {
     while (true) {
         skip();
         // Single `|`, NOT `||` (handled in parseOr).
-        if (pos < src.size() && src[pos] == '|' &&
-            (pos + 1 >= src.size() || src[pos+1] != '|')) {
-            pos++; v |= parseBitXor();
-        } else break;
+        if (pos < src.size() && src[pos] == '|' && (pos + 1 >= src.size() || src[pos + 1] != '|')) {
+            pos++;
+            v |= parseBitXor();
+        } else
+            break;
     }
     return v;
 }
@@ -994,9 +1158,12 @@ long long ExprEval::parseAnd() {
     long long v = parseBitOr();
     while (true) {
         skip();
-        if (pos + 1 < src.size() && src[pos]=='&' && src[pos+1]=='&') {
-            pos += 2; const long long r = parseBitOr(); v = (v && r);
-        } else break;
+        if (pos + 1 < src.size() && src[pos] == '&' && src[pos + 1] == '&') {
+            pos += 2;
+            const long long r = parseBitOr();
+            v = (v && r);
+        } else
+            break;
     }
     return v;
 }
@@ -1004,9 +1171,12 @@ long long ExprEval::parseOr() {
     long long v = parseAnd();
     while (true) {
         skip();
-        if (pos + 1 < src.size() && src[pos]=='|' && src[pos+1]=='|') {
-            pos += 2; const long long r = parseAnd(); v = (v || r);
-        } else break;
+        if (pos + 1 < src.size() && src[pos] == '|' && src[pos + 1] == '|') {
+            pos += 2;
+            const long long r = parseAnd();
+            v = (v || r);
+        } else
+            break;
     }
     return v;
 }
@@ -1061,8 +1231,7 @@ std::string Preprocessor::process(const std::string& source) {
             continue;
         }
         // Also handle `\<CR><LF>` (Windows CRLF line continuation).
-        if (c == '\\' && i + 2 < source.size() &&
-                source[i + 1] == '\r' && source[i + 2] == '\n') {
+        if (c == '\\' && i + 2 < source.size() && source[i + 1] == '\r' && source[i + 2] == '\n') {
             i += 2;
             continue;
         }
@@ -1083,7 +1252,8 @@ std::string Preprocessor::process(const std::string& source) {
     {
         std::istringstream ss(joined);
         std::string line;
-        while (std::getline(ss, line)) lines.push_back(line);
+        while (std::getline(ss, line))
+            lines.push_back(line);
     }
 
     // Step 3: Process each line
@@ -1119,7 +1289,8 @@ std::string Preprocessor::process(const std::string& source) {
         std::string rest = trimLeft(stripped.substr(dpos + 1));
 
         size_t kend = 0;
-        while (kend < rest.size() && std::isalpha(static_cast<unsigned char>(rest[kend]))) kend++;
+        while (kend < rest.size() && std::isalpha(static_cast<unsigned char>(rest[kend])))
+            kend++;
         const std::string kw = rest.substr(0, kend);
         const std::string arg = trim(rest.substr(kend));
 
@@ -1128,26 +1299,24 @@ std::string Preprocessor::process(const std::string& source) {
             const bool defined = macros_.count(name) > 0;
             const bool cond = (kw == "ifdef") ? defined : !defined;
             condStack.push_back({isActive() && cond, cond, false});
-            output += '\n'; continue;
+            output += '\n';
+            continue;
         }
         if (kw == "if") {
             const bool cond = isActive() && (evalExpr(arg, lineNo) != 0);
             condStack.push_back({cond, cond, false});
-            output += '\n'; continue;
+            output += '\n';
+            continue;
         }
         if (kw == "elif" || kw == "elifdef" || kw == "elifndef") {
             if (condStack.size() <= 1)
                 throw omscript::DiagnosticError(omscript::Diagnostic{
-                    omscript::DiagnosticSeverity::Error,
-                    {filename_, lineNo, 0},
-                    "#" + kw + " without #if"});
+                    omscript::DiagnosticSeverity::Error, {filename_, lineNo, 0}, "#" + kw + " without #if"});
             CondEntry& top = condStack.back();
             if (top.done)
                 throw omscript::DiagnosticError(omscript::Diagnostic{
-                    omscript::DiagnosticSeverity::Error,
-                    {filename_, lineNo, 0},
-                    "#" + kw + " after #else"});
-            if (!top.seenTrue && condStack[condStack.size()-2].active) {
+                    omscript::DiagnosticSeverity::Error, {filename_, lineNo, 0}, "#" + kw + " after #else"});
+            if (!top.seenTrue && condStack[condStack.size() - 2].active) {
                 bool cond;
                 if (kw == "elifdef") {
                     cond = macros_.count(trim(arg)) > 0;
@@ -1161,85 +1330,82 @@ std::string Preprocessor::process(const std::string& source) {
             } else {
                 top.active = false;
             }
-            output += '\n'; continue;
+            output += '\n';
+            continue;
         }
         if (kw == "else") {
             if (condStack.size() <= 1)
                 throw omscript::DiagnosticError(omscript::Diagnostic{
-                    omscript::DiagnosticSeverity::Error,
-                    {filename_, lineNo, 0},
-                    "#else without #if"});
+                    omscript::DiagnosticSeverity::Error, {filename_, lineNo, 0}, "#else without #if"});
             CondEntry& top = condStack.back();
             if (top.done)
                 throw omscript::DiagnosticError(omscript::Diagnostic{
-                    omscript::DiagnosticSeverity::Error,
-                    {filename_, lineNo, 0},
-                    "duplicate #else"});
+                    omscript::DiagnosticSeverity::Error, {filename_, lineNo, 0}, "duplicate #else"});
             top.done = true;
-            if (!top.seenTrue && condStack[condStack.size()-2].active) {
+            if (!top.seenTrue && condStack[condStack.size() - 2].active) {
                 top.active = true;
                 top.seenTrue = true;
             } else {
                 top.active = false;
             }
-            output += '\n'; continue;
+            output += '\n';
+            continue;
         }
         if (kw == "endif") {
             if (condStack.size() <= 1)
                 throw omscript::DiagnosticError(omscript::Diagnostic{
-                    omscript::DiagnosticSeverity::Error,
-                    {filename_, lineNo, 0},
-                    "#endif without #if"});
+                    omscript::DiagnosticSeverity::Error, {filename_, lineNo, 0}, "#endif without #if"});
             condStack.pop_back();
             // Preserve any trailing content after #endif (e.g. `#endif;` in
             // statements like `const X = #if ... value #endif;`).
             if (!arg.empty())
                 output += arg;
-            output += '\n'; continue;
+            output += '\n';
+            continue;
         }
 
         if (!isActive()) {
-            output += '\n'; continue;
+            output += '\n';
+            continue;
         }
 
         if (kw == "define") {
             handleDefine(arg, lineNo);
-            output += '\n'; continue;
+            output += '\n';
+            continue;
         }
         if (kw == "undef") {
             const std::string un = trim(arg);
             // Reserved-name protection mirrors the #define path.
             auto it = macros_.find(un);
-            if (isSpecialReservedName(un) ||
-                (it != macros_.end() && it->second.isReserved)) {
+            if (isSpecialReservedName(un) || (it != macros_.end() && it->second.isReserved)) {
                 throw omscript::DiagnosticError(omscript::Diagnostic{
                     omscript::DiagnosticSeverity::Error,
                     {filename_, lineNo, 0},
                     "#undef: '" + un + "' is a reserved predefined macro and cannot be undefined"});
             }
             if (it == macros_.end()) {
-                warnings_.push_back(filename_ + ":" + std::to_string(lineNo) +
-                    ": warning: #undef of macro '" + un + "' that was never defined");
+                warnings_.push_back(filename_ + ":" + std::to_string(lineNo) + ": warning: #undef of macro '" + un +
+                                    "' that was never defined");
             } else {
                 macros_.erase(it);
             }
-            output += '\n'; continue;
+            output += '\n';
+            continue;
         }
         if (kw == "error") {
-            throw omscript::DiagnosticError(omscript::Diagnostic{
-                omscript::DiagnosticSeverity::Error,
-                {filename_, lineNo, 0},
-                "#error " + arg});
+            throw omscript::DiagnosticError(
+                omscript::Diagnostic{omscript::DiagnosticSeverity::Error, {filename_, lineNo, 0}, "#error " + arg});
         }
         if (kw == "warning") {
-            warnings_.push_back(filename_ + ":" + std::to_string(lineNo) +
-                                  ": warning: " + arg);
-            output += '\n'; continue;
+            warnings_.push_back(filename_ + ":" + std::to_string(lineNo) + ": warning: " + arg);
+            output += '\n';
+            continue;
         }
         if (kw == "info") {
-            warnings_.push_back(filename_ + ":" + std::to_string(lineNo) +
-                                  ": info: " + arg);
-            output += '\n'; continue;
+            warnings_.push_back(filename_ + ":" + std::to_string(lineNo) + ": info: " + arg);
+            output += '\n';
+            continue;
         }
         if (kw == "assert") {
             std::string exprPart = arg;
@@ -1252,15 +1418,12 @@ std::string Preprocessor::process(const std::string& source) {
                     msgPart = arg.substr(qpos + 1, qend - qpos - 1);
             }
             if (evalExpr(exprPart, lineNo) == 0) {
-                const std::string msg = msgPart.empty()
-                    ? "compile-time assertion failed: " + exprPart
-                    : msgPart;
+                const std::string msg = msgPart.empty() ? "compile-time assertion failed: " + exprPart : msgPart;
                 throw omscript::DiagnosticError(omscript::Diagnostic{
-                    omscript::DiagnosticSeverity::Error,
-                    {filename_, lineNo, 0},
-                    "#assert failed: " + msg});
+                    omscript::DiagnosticSeverity::Error, {filename_, lineNo, 0}, "#assert failed: " + msg});
             }
-            output += '\n'; continue;
+            output += '\n';
+            continue;
         }
         if (kw == "require") {
             std::string reqVer = trim(arg);
@@ -1270,16 +1433,15 @@ std::string Preprocessor::process(const std::string& source) {
                 throw omscript::DiagnosticError(omscript::Diagnostic{
                     omscript::DiagnosticSeverity::Error,
                     {filename_, lineNo, 0},
-                    "#require: compiler version " OMSC_VERSION
-                    " is older than required " + reqVer});
+                    "#require: compiler version " OMSC_VERSION " is older than required " + reqVer});
             }
-            output += '\n'; continue;
+            output += '\n';
+            continue;
         }
         if (kw == "counter") {
             const std::string cname = trim(arg);
             auto it = macros_.find(cname);
-            if (isSpecialReservedName(cname) ||
-                (it != macros_.end() && it->second.isReserved)) {
+            if (isSpecialReservedName(cname) || (it != macros_.end() && it->second.isReserved)) {
                 throw omscript::DiagnosticError(omscript::Diagnostic{
                     omscript::DiagnosticSeverity::Error,
                     {filename_, lineNo, 0},
@@ -1289,7 +1451,8 @@ std::string Preprocessor::process(const std::string& source) {
             def.isCounter = true;
             def.counterValue = 0;
             macros_[cname] = std::move(def);
-            output += '\n'; continue;
+            output += '\n';
+            continue;
         }
         if (kw == "pragma") {
             // `#pragma once` is recognised silently so user code can adopt
@@ -1302,19 +1465,18 @@ std::string Preprocessor::process(const std::string& source) {
             // Other `#pragma <key>` forms are passed through silently for
             // now to preserve behaviour with existing code that may use
             // pragmas as toolchain hints.
-            output += '\n'; continue;
+            output += '\n';
+            continue;
         }
 
-        warnings_.push_back(filename_ + ":" + std::to_string(lineNo) +
-                              ": warning: unknown preprocessor directive '#" + kw + "'");
+        warnings_.push_back(filename_ + ":" + std::to_string(lineNo) + ": warning: unknown preprocessor directive '#" +
+                            kw + "'");
         output += '\n';
     }
 
     if (condStack.size() > 1) {
         throw omscript::DiagnosticError(omscript::Diagnostic{
-            omscript::DiagnosticSeverity::Error,
-            {filename_, 0, 0},
-            "unterminated #if / #ifdef block"});
+            omscript::DiagnosticSeverity::Error, {filename_, 0, 0}, "unterminated #if / #ifdef block"});
     }
 
     return output;

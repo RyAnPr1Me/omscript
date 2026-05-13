@@ -1,3 +1,4 @@
+import std;
 // float_string_concat_test.om
 //
 // Regression test: string + float concatenation previously produced garbage

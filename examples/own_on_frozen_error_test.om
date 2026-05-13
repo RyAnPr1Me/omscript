@@ -1,3 +1,4 @@
+import std;
 // own_on_frozen_error_test.om — verify E021 own-on-frozen
 // This test is expected to FAIL at compile time with:
 //   [E021] cannot assert unique ownership of 'x' — it is frozen

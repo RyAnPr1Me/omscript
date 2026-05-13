@@ -1,3 +1,4 @@
+import std;
 // str_replace_all_test.om
 //
 // Regression test: str_replace previously only replaced the FIRST occurrence

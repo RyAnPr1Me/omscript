@@ -1,3 +1,4 @@
+import std;
 // bigint_test.om — Tests for bigint type usage in OmScript
 // The bigint type maps to the runtime BigInt library (include/bigint.h).
 

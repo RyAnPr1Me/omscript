@@ -1,3 +1,4 @@
+import std;
 // Test: forever keyword
 // forever { ... } — infinite loop (alias for loop)
 

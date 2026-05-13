@@ -1174,7 +1174,7 @@ var cell: int = matrix[0][1];  // 2
 
 **Syntax**:
 - `dict` (untyped dictionary)
-- `dict[K, V]` (typed dictionary with key type `K` and value type `V`) — **not yet fully implemented**; use `dict`
+- `dict[K, V]` (typed dictionary annotation — parsed but keys and values are stored as `i64`; the type parameters are informational only)
 
 **Representation**: Hash map (heap-allocated, reference-counted).
 
@@ -1182,8 +1182,8 @@ var cell: int = matrix[0][1];  // 2
 
 **Operations**:
 - Creation: `map_new()` or literal `{ k1: v1, k2: v2, ... }`
-- Access: `map_get(d, key, default)`
-- Mutation: `map_set(d, key, value)` (returns new map)
+- Access: `map_get(d, key, default)` or subscript `d[key]` (returns `0` for missing keys)
+- Mutation: `map_set(d, key, value)` (returns new map) or `d[key] = value` (in-place)
 - Check: `map_has(d, key)` (returns 1 or 0)
 - Removal: `map_remove(d, key)` (returns new map)
 - Size: `map_size(d)`
@@ -1194,7 +1194,9 @@ var cell: int = matrix[0][1];  // 2
 ```omscript
 var ages: dict = { "Alice": 30, "Bob": 25 };
 var alice_age: int = map_get(ages, "Alice", 0);  // 30
-ages = map_set(ages, "Charlie", 35);
+var same: int = ages["Alice"];                   // 30 — subscript syntax
+ages = map_set(ages, "Charlie", 35);             // functional style
+ages["Dave"] = 28;                               // subscript assignment
 var has_bob: int = map_has(ages, "Bob");         // 1
 ```
 
@@ -3579,7 +3581,22 @@ var a: int[] = [1, 2, 3];
 var b: int[] = [0, ...a, 4];  // [0, 1, 2, 3, 4]
 ```
 
-**Example (function call)**: **Not currently implemented** (future feature).
+**Spread in function calls**: `...arr` can be used in function call argument position to expand a fixed-size array into individual positional arguments:
+
+```omscript
+fn add3(a, b, c) { return a + b + c; }
+
+var args = [10, 20, 30];
+var r = add3(...args);      // → add3(10, 20, 30) → 60
+
+var pair = [5, 7];
+var r2 = add3(1, ...pair);  // → add3(1, 5, 7)   → 13
+
+// Inline literal spread:
+var r3 = add3(...[100, 200, 300]);  // → 600
+```
+
+The spread array's length must be statically known at compile time (the callee has fixed arity). Arrays initialized from literal expressions qualify; dynamically-grown arrays (e.g. the result of `push()`) do not.
 
 ### 9.9 Increment / Decrement (`++` / `--`)
 
@@ -3945,18 +3962,20 @@ var scores: dict = { 1: 100, 2: 200, 3: 300 };
 var empty_map: dict = {};
 ```
 
-**Type annotation**: `dict` (untyped); typed variants (`dict[K, V]`) not yet fully implemented.
+**Type annotation**: `dict` or `dict[K, V]` (the type parameters are informational; all keys and values are stored as `i64` internally).
 
-**Access**: Use `map_get(d, key, default)` (see Part 2 for dict functions).
+**Access**: Use `map_get(d, key, default)` (see Part 2 for dict functions), or the subscript operator `d[key]` (missing keys return `0`).
 
 ```omscript
 var age: int = map_get(d, "age", 0);  // 30
+var same:int = d["age"];              // 30
 ```
 
-**Mutation**: Dicts are **immutable** from the user perspective; operations like `map_set` return a new dict.
+**Mutation**: Dicts support both `map_set(d, key, val)` (returns a new dict) and the in-place subscript assignment `d[key] = val` (updates the dict in-place and writes back the potentially-reallocated pointer):
 
 ```omscript
-d = map_set(d, "city", "NYC");
+d = map_set(d, "city", "NYC");  // functional style
+d["zip"] = 10001;               // subscript assignment — equivalent
 ```
 
 ### 10.5 Struct Literals
@@ -4092,9 +4111,14 @@ println(len(a));                // 100
 println(a[0]);                  // 42
 ```
 
-#### Type-annotated literals (planned feature)
+#### Type-annotated literals
 
-Syntax `[]T{...}` is parsed but not yet implemented in code generation.
+`[]T{elem1, elem2, ...}` — typed array literal syntax. The type annotation (`T`) is informational and does not affect code generation (all array elements are i64 at runtime). Elements are parsed identically to an untyped `[elem1, elem2, ...]` array literal.
+
+```omscript
+var nums = []int{10, 20, 30};  // same as [10, 20, 30]
+var ptrs = []ptr<Node>{a, b};  // same as [a, b]
+```
 
 ### 11.3 Indexing, slicing, negative indices
 
@@ -5277,10 +5301,15 @@ var g: float = str_to_float("1e5");    // 100000.0
 var m = map_new();
 ```
 
-#### Literal syntax (planned feature)
+#### Literal syntax — `dict { ... }`
 
-**Syntax:** `dict { key1: val1, key2: val2 }`  
-**Status:** Parsed but not yet implemented in code generation.
+**Syntax:** `dict { key1: val1, key2: val2, ... }`  
+**Status:** Fully implemented. The `dict { ... }` form is a keyword-prefixed dict literal equivalent to `{ key1: val1, key2: val2, ... }`. Both forms produce the same map value.
+
+```omscript
+var d = dict { "x": 10, "y": 20 };
+println(map_get(d, "x", 0));  // 10
+```
 
 ---
 
@@ -5487,7 +5516,7 @@ struct Person { name, age }
 
 **Field types:** All fields are i64 (integers, floats-as-bits, or pointers).
 
-**Attributes:** `@packed` is parsed but not yet implemented. Future feature for controlling memory layout.
+**Attributes:** `@packed` is a supported shorthand for `@repr(packed)` — it emits a C-compatible packed LLVM struct type with no padding between fields.
 
 **Alignment:** Fields are 8-byte aligned (standard i64 alignment).
 
@@ -5513,27 +5542,54 @@ var p = Point { x: 10, y: 20 };
 
 ### 14.4 Field access & mutation
 
-#### Access: `s.field`
+#### Access: `s.field` or `p->field`
 
-**Semantics:** Return the value of `field` in struct `s`.  
+**Semantics:** Return the value of `field` in struct `s` (or via pointer `p`).  
 **Implementation:** Load via `GEP` (GetElementPtr) with offset calculated from field index.
+
+`p->field` is the C-style pointer member access operator, identical to `p.field` — OmScript automatically dereferences struct pointer variables in both cases.
 
 **Example:**
 ```omscript
 struct Point { x, y }
 var p = Point { x: 10, y: 20 };
-println(p.x);  // 10
+println(p.x);   // 10
+
+var q: ptr<Point> = new Point { x: 3, y: 4 };
+println(q->x);  // 3  (identical to q.x)
+println(q->y);  // 4
+invalidate q;
 ```
 
-#### Mutation: `s.field = value`
+#### Mutation: `s.field = value` or `p->field = value`
 
-**Semantics:** Store `value` into `field` of struct `s`.  
-**Implementation:** Store via `GEP`.
+**Semantics:** Store `value` into `field` of struct `s` (or via pointer `p`).  
+**Implementation:** Store via `GEP`. Compound assignment (`p->x += n`) is also supported.
 
 **Example:**
 ```omscript
 p.x = 30;
-println(p.x);  // 30
+println(p.x);   // 30
+
+var r: ptr<Point> = new Point { x: 1, y: 2 };
+r->x = 10;      // same as r.x = 10
+r->y += 5;      // compound assignment through arrow
+println(r->x);  // 10
+println(r->y);  // 7
+invalidate r;
+```
+
+#### Arrow method calls: `p->method(args)`
+
+`p->method(args)` is identical to `p.method(args)` — both desugar to `method(p, args)`.
+
+```omscript
+fn Counter::increment(self) { self.count = self.count + 1; }
+
+var c: ptr<Counter> = new Counter { count: 0 };
+c->increment();     // same as c.increment()
+println(c->count);  // 1
+invalidate c;
 ```
 
 ---
@@ -5547,7 +5603,34 @@ fn StructName::method(self, args...) {
 }
 ```
 
-**Status:** Parsed but method-call syntax (`obj.method()`) is NOT yet implemented. Workaround: call as `StructName::method(obj, args)`.
+**Status**: Methods are fully supported. Define with `fn StructName::method(self, args...)` and call with `obj.method(args)`.
+
+Method calls (`obj.method(args)`) are **automatically desugared** to `StructName::method(obj, args)` — the receiver is inserted as the first argument.
+
+```omscript
+struct Counter { count }
+
+fn Counter::increment(self) {
+    self.count = self.count + 1;
+}
+
+fn Counter::add(self, n) {
+    self.count = self.count + n;
+}
+
+fn Counter::get(self) {
+    return self.count;
+}
+
+var c: ptr<Counter> = new Counter { count: 0 };
+c.increment();   // desugars to Counter::increment(c)
+c.add(5);        // desugars to Counter::add(c, 5)
+println(c.get()); // desugars to Counter::get(c) → 6
+```
+
+Both call styles are accepted:
+- `obj.method(args)` — dot-call syntax (recommended)
+- `StructName::method(obj, args)` — explicit qualified call
 
 ---
 
@@ -6205,10 +6288,12 @@ var one: ptr<i64> = alloc<i64>();    // 1 element, raw
 
 `new T(n)` is semantically distinct from `alloc<T>(n)`. It uses the same three-tier compile-time allocation strategy but **guarantees zero-initialised memory** — all bytes are set to zero before the pointer is returned.
 
+For **struct element types**, `new T(n)` goes one step further than a flat `memset`: it emits explicit per-field typed stores (with per-field TBAA metadata) so the optimizer can see each field write individually and apply SROA, copy propagation, and alias analysis more aggressively.
+
 | Tier | Zero-init mechanism |
 |------|---------------------|
-| **T1 Stack** | `alloca` + `memset(ptr, 0, n×sizeof(T))` |
-| **T2 Arena** | arena GEP + `memset(ptr, 0, n×sizeof(T))` |
+| **T1 Stack** | `alloca` + typed per-field `store zero` for structs; `memset(ptr, 0, n×sizeof(T))` for scalars |
+| **T2 Arena** | arena GEP + same field-by-field zero stores for structs; `memset` for scalars |
 | **T3 Heap** | `calloc(n, sizeof(T))` — OS-level zeroing, no extra call |
 
 `new T` (no parens) zero-initialises exactly 1 element.
@@ -6219,7 +6304,13 @@ fn dyn(n: int) -> ptr<i64> {
     return new i64(n);             // T3: calloc (n is dynamic)
 }
 var one: ptr<i64> = new i64;       // 1 element, zero-initialised
+
+struct Point { x, y }
+var p: ptr<Point> = new Point;     // T1: both fields zero-initialised via typed stores
+var pts: ptr<Point> = new Point(3);// T1: all 3 elements, all fields zero
 ```
+
+**`sizeof(T)` for struct types** uses the full LLVM struct layout (all fields + padding), not pointer size. `new Point(1)` where `Point = {i64, i64}` allocates 16 bytes, not 8.
 
 **When to use `alloc<T>` vs `new T`:**
 
@@ -7606,11 +7697,12 @@ Right shift (divide by 2^n, floor).
 
 ### 19.13 The `std::` namespace
 
-**Built-in namespace:** Every standard library function is accessible as `std::name` without any import statement.
+**Built-in namespace:** Every standard library function is accessible as `std::name`. To call functions by bare name (without the `std::` prefix), add `import std;` at the top of the file.
 
 **Dispatch rules:**
-- `std::abs(x)` resolves to the same function as `abs(x)`.
-- No difference in semantics; purely a namespace prefix for clarity.
+- `std::abs(x)` resolves to the same function as `abs(x)` (when `import std;` is present).
+- Bare calls without `import std;` are a compile error.
+- No difference in semantics between `std::name` and bare `name`; purely a namespace prefix.
 
 **List of std:: symbols:**
 
@@ -7733,7 +7825,7 @@ OmScript's concurrency model is a thin layer over the host's POSIX threading pri
 | Thread | `pthread_create` / `pthread_join` | `i64` (pthread_t) |
 | Mutex | `pthread_mutex_*` | `i64` (`pthread_mutex_t*` cast to int) |
 | Parallel loop | `@parallel for` → loop-parallelism metadata | n/a |
-| Atomics | — | not yet implemented |
+| Atomics | `atomic var` qualifier | `i64` (seq-cst loads/stores/RMW) |
 
 ### 20.1 Threads
 
@@ -8276,6 +8368,73 @@ std::array_map(a, f);
 ```
 
 **Alias-free:** `std::name` always resolves to the same function as `name` (no aliasing or shadowing).
+
+**`import std;` — mandatory namespace import:**
+
+Use `import std;` (identifier form, no quotes) at the top of any file that calls standard library functions by their bare names (without `std::`).  
+**Without `import std;`, bare stdlib calls are a compile error.**
+
+```omscript
+import std;           // required to call stdlib functions without std::
+
+fn main() {
+    println("hello"); // ok — import std; is present
+    var x = abs(-5);  // ok — import std; is present
+    return 0;
+}
+```
+
+Alternatively, fully qualify every call with `std::` (no import required):
+
+```omscript
+// No import std; needed when using std:: prefix
+fn main() {
+    std::println("hello");   // always works
+    var x = std::abs(-5);    // always works
+    return 0;
+}
+```
+
+Both forms are equivalent in semantics; the choice is stylistic.
+
+---
+
+### 23.8 User-defined namespaces
+
+OmScript supports user-defined namespace blocks that group functions, structs, and enums under a named scope.
+
+**Syntax:**
+```omscript
+namespace Math {
+    fn add(a, b) { return a + b; }
+    fn mul(a, b) { return a * b; }
+
+    struct Vec2 { x, y }
+}
+```
+
+Declarations inside a `namespace` block are registered with their fully qualified names (`Math::add`, `Math::Vec2`) and must be called that way unless the namespace is imported.
+
+**Qualified access (no import required):**
+```omscript
+var r = Math::add(3, 4);           // qualified function call
+var v = Math::Vec2 { x: 1, y: 2 }; // qualified struct literal
+```
+
+**Bare access after `import NSName;`:**
+```omscript
+import Math;      // import namespace — enables bare access
+
+var r = add(3, 4);           // equivalent to Math::add(3, 4)
+var v = Vec2 { x: 1, y: 2 }; // equivalent to Math::Vec2 { x: 1, y: 2 }
+```
+
+**Allowed declarations inside a namespace block:**
+- `fn` — function definitions
+- `struct` — struct type definitions
+- `enum` — enum definitions
+
+Namespaces cannot be nested. Each namespace block contributes to a flat per-name registry; multiple `namespace Math { ... }` blocks in the same file are additive.
 
 ---
 
@@ -9383,9 +9542,17 @@ llvm-profdata merge *.profraw -o merged.profdata
 
 ### 26.6 Escape Analysis & Stack Allocation
 
-**Not yet implemented**. Planned:
-- Detect heap allocations (`newRegion()`, `alloc()`) that do not escape function scope.
-- Lower to `alloca` (stack allocation) when safe.
+**Implemented** via the three-tier allocation strategy in `alloc<T>` and `new T(n)` (see §17.9.2):
+
+- **T1 (Stack)**: when the allocation count is a compile-time constant and `count × sizeof(T) ≤ 8 KiB`, the compiler unconditionally emits a stack `alloca` in the function entry block — no escape analysis required because the decision is made entirely at the allocation site.
+- **T2 (Arena)**: compile-time constant allocations that fit the 64 KiB per-function slab are GEP'd into a shared entry-block alloca. Zero heap involvement; the slab is lifetime-scoped.
+- **T3 (Heap)**: dynamic counts or oversized allocations fall through to `malloc` / `calloc`.
+
+Additionally, the LLVM mid-end's own escape analysis (`-O1`+) can promote surviving T3 heap allocations to stack once it proves the pointer does not escape the function (i.e. is not returned, stored into a global, or passed to an escaping callee). LLVM's analysis has no hard byte threshold.
+
+**Compile-time array escape heuristic** (§11.5): arrays declared with literal-sized `array_fill` / `[...]` and proven not to escape are stack-promoted by the AST-level analysis in `codegen.cpp` (`optStats_.escapeStackAllocs` counter). The 4,096-byte threshold in §11.5 is specific to that array heuristic and is separate from `alloc<T>` / `new T`.
+
+**`kStackAllocThreshold` = 8,192 bytes** (`include/codegen.h`). Allocations larger than this threshold remain on the heap even when the count is constant, to prevent stack overflow.
 
 ### 26.7 Bounds-Check Hoisting
 
@@ -10932,7 +11099,11 @@ fn compute(x: int) -> int {
 - v5.0 will require explicit migration (automated tool planned).
 
 **LLVM compatibility**:
-- Current: LLVM 18 (primary). LLVM 17 and 19–21 are expected to work but are not CI-tested.
-- Future: LLVM 22+ will require updates to HGOE and superoptimizer (latency tables).
+- **Primary**: LLVM 18 — CI-tested on every push.
+- **LLVM 17**: expected to work; not CI-tested.
+- **LLVM 19**: supported — `llvm::Intrinsic::getOrInsertDeclaration` replaces `getDeclaration` (`#if LLVM_VERSION_MAJOR >= 19`).
+- **LLVM 20–21**: supported — `VirtualFileSystem.h` include path changed in 22 (`#if LLVM_VERSION_MAJOR < 22`); `Attribute::NoCapture` replaced by `captures(none)` in 21 (`#if LLVM_VERSION_MAJOR >= 21`).
+- **LLVM 22+**: `llvm/Passes/PassPlugin.h` moved to `llvm/Plugins/PassPlugin.h` — handled via `#if LLVM_VERSION_MAJOR >= 22`; `VirtualFileSystem.h` removed; Polly plugin path updated. All known breaking API changes are guarded.
+- **macOS ARM64 (Apple Silicon)**: fully supported. The data layout and target triple are initialised at the start of `generate()` (via `InitializeNativeTarget` + `createTargetMachine` + `setDataLayout`) before any IR is emitted, ensuring correct ABI alignment for all types including `i64` (align 8, not 4).
 
 **End of Part 3**

@@ -1,0 +1,46 @@
+import std;
+// arrow_operator_test.om — verify `->` pointer member access (Round-53).
+//
+// `p->field` is syntactic sugar for `p.field`.
+// `p->method(args)` is syntactic sugar for `p.method(args)`.
+//
+// Expected exit code: 0
+
+struct Point { x, y }
+
+fn Point::distSq(self) {
+    return self.x * self.x + self.y * self.y;
+}
+
+fn Point::scale(self, factor) {
+    return Point { x: self.x * factor, y: self.y * factor };
+}
+
+fn main() -> int {
+    var p: ptr<Point> = new Point { x: 3, y: 4 };
+
+    // Arrow field read
+    if (p->x != 3) { return 1; }
+    if (p->y != 4) { return 2; }
+
+    // Arrow field write (direct, not through method)
+    p->x = 10;
+    if (p->x != 10) { return 3; }
+
+    // Compound assignment through arrow
+    p->y += 6;
+    if (p->y != 10) { return 4; }
+
+    // Arrow method call returning a value (no in-place mutation)
+    p->x = 3;
+    p->y = 4;
+    var dsq = p->distSq();  // 9 + 16 = 25
+    if (dsq != 25) { return 5; }
+
+    // Arrow vs dot are equivalent
+    if (p->x != p.x) { return 6; }
+    if (p->y != p.y) { return 7; }
+
+    invalidate p;
+    return 0;
+}

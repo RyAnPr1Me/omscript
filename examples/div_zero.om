@@ -1,3 +1,4 @@
+import std;
 fn main() {
     var numerator = 10;
     var denominator = 0;

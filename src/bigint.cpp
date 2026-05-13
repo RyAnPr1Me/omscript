@@ -19,22 +19,28 @@ OmBigUInt OmBigUInt::from_i64(int64_t v) {
 }
 
 size_t OmBigUInt::bit_length() const {
-    if (limbs.empty()) return 0;
+    if (limbs.empty())
+        return 0;
     uint64_t top = limbs.back();
     size_t bits = (limbs.size() - 1) * 64;
-    while (top) { ++bits; top >>= 1; }
+    while (top) {
+        ++bits;
+        top >>= 1;
+    }
     return bits;
 }
 
 bool OmBigUInt::test_bit(size_t n) const {
     size_t idx = n / 64, bit = n % 64;
-    if (idx >= limbs.size()) return false;
+    if (idx >= limbs.size())
+        return false;
     return (limbs[idx] >> bit) & 1;
 }
 
 void OmBigUInt::set_bit(size_t n) {
     size_t idx = n / 64, bit = n % 64;
-    if (idx >= limbs.size()) limbs.resize(idx + 1, 0);
+    if (idx >= limbs.size())
+        limbs.resize(idx + 1, 0);
     limbs[idx] |= (uint64_t(1) << bit);
 }
 
@@ -77,14 +83,14 @@ OmBigUInt OmBigUInt::operator-(const OmBigUInt& o) const {
 }
 
 OmBigUInt OmBigUInt::operator*(const OmBigUInt& o) const {
-    if (is_zero() || o.is_zero()) return OmBigUInt();
+    if (is_zero() || o.is_zero())
+        return OmBigUInt();
     const size_t n = limbs.size(), m = o.limbs.size();
     std::vector<uint64_t> res(n + m, 0);
     for (size_t i = 0; i < n; ++i) {
         uint64_t carry = 0;
         for (size_t j = 0; j < m; ++j) {
-            unsigned __int128 prod = static_cast<unsigned __int128>(limbs[i]) * o.limbs[j]
-                                   + res[i + j] + carry;
+            unsigned __int128 prod = static_cast<unsigned __int128>(limbs[i]) * o.limbs[j] + res[i + j] + carry;
             res[i + j] = static_cast<uint64_t>(prod);
             carry = static_cast<uint64_t>(prod >> 64);
         }
@@ -95,8 +101,10 @@ OmBigUInt OmBigUInt::operator*(const OmBigUInt& o) const {
 
 // divmod: Knuth Algorithm D (long division in base 2^64)
 std::pair<OmBigUInt, OmBigUInt> OmBigUInt::divmod(const OmBigUInt& u, const OmBigUInt& v) {
-    if (v.is_zero()) throw std::runtime_error("OmBigUInt: division by zero");
-    if (u < v) return {OmBigUInt(), u};
+    if (v.is_zero())
+        throw std::runtime_error("OmBigUInt: division by zero");
+    if (u < v)
+        return {OmBigUInt(), u};
     if (v.limbs.size() == 1) {
         // Short division
         uint64_t d = v.limbs[0];
@@ -118,7 +126,10 @@ std::pair<OmBigUInt, OmBigUInt> OmBigUInt::divmod(const OmBigUInt& u, const OmBi
     int s = 0;
     {
         uint64_t top = v.limbs.back();
-        while ((top & (uint64_t(1) << 63)) == 0) { ++s; top <<= 1; }
+        while ((top & (uint64_t(1) << 63)) == 0) {
+            ++s;
+            top <<= 1;
+        }
     }
 
     // Shift u and v left by s bits
@@ -131,8 +142,7 @@ std::pair<OmBigUInt, OmBigUInt> OmBigUInt::divmod(const OmBigUInt& u, const OmBi
 
     for (size_t j = m + 1; j-- > 0;) {
         // Estimate q[j]
-        unsigned __int128 num = (static_cast<unsigned __int128>(un.limbs[j + n]) << 64)
-                              | un.limbs[j + n - 1];
+        unsigned __int128 num = (static_cast<unsigned __int128>(un.limbs[j + n]) << 64) | un.limbs[j + n - 1];
         uint64_t vTop = vn.limbs[n - 1];
         unsigned __int128 qhat = num / vTop;
         unsigned __int128 rhat = num % vTop;
@@ -140,11 +150,11 @@ std::pair<OmBigUInt, OmBigUInt> OmBigUInt::divmod(const OmBigUInt& u, const OmBi
         // Refine qhat
         typedef unsigned __int128 u128;
         const u128 maxU64 = (u128(1) << 64);
-        while (qhat >= maxU64 ||
-               qhat * vn.limbs[n - 2] > ((rhat << 64) | (j + n >= 2 ? un.limbs[j + n - 2] : 0))) {
+        while (qhat >= maxU64 || qhat * vn.limbs[n - 2] > ((rhat << 64) | (j + n >= 2 ? un.limbs[j + n - 2] : 0))) {
             --qhat;
             rhat += vTop;
-            if (rhat >= maxU64) break;
+            if (rhat >= maxU64)
+                break;
         }
 
         // Multiply and subtract
@@ -154,7 +164,8 @@ std::pair<OmBigUInt, OmBigUInt> OmBigUInt::divmod(const OmBigUInt& u, const OmBi
             unsigned __int128 prod = qhat * vd + msub_borrow;
             uint64_t sub_val = static_cast<uint64_t>(prod);
             msub_borrow = static_cast<uint64_t>(prod >> 64);
-            if (un.limbs[j + i] < sub_val) ++msub_borrow;
+            if (un.limbs[j + i] < sub_val)
+                ++msub_borrow;
             un.limbs[j + i] -= sub_val;
         }
 
@@ -188,7 +199,8 @@ OmBigUInt OmBigUInt::operator%(const OmBigUInt& o) const {
 OmBigUInt OmBigUInt::operator&(const OmBigUInt& o) const {
     const size_t n = std::min(limbs.size(), o.limbs.size());
     std::vector<uint64_t> res(n);
-    for (size_t i = 0; i < n; ++i) res[i] = limbs[i] & o.limbs[i];
+    for (size_t i = 0; i < n; ++i)
+        res[i] = limbs[i] & o.limbs[i];
     return OmBigUInt(std::move(res));
 }
 
@@ -215,7 +227,8 @@ OmBigUInt OmBigUInt::operator^(const OmBigUInt& o) const {
 }
 
 OmBigUInt OmBigUInt::operator<<(size_t n) const {
-    if (is_zero() || n == 0) return *this;
+    if (is_zero() || n == 0)
+        return *this;
     const size_t limb_shift = n / 64, bit_shift = n % 64;
     std::vector<uint64_t> res(limbs.size() + limb_shift + 1, 0);
     for (size_t i = 0; i < limbs.size(); ++i) {
@@ -227,9 +240,11 @@ OmBigUInt OmBigUInt::operator<<(size_t n) const {
 }
 
 OmBigUInt OmBigUInt::operator>>(size_t n) const {
-    if (is_zero() || n == 0) return *this;
+    if (is_zero() || n == 0)
+        return *this;
     const size_t limb_shift = n / 64, bit_shift = n % 64;
-    if (limb_shift >= limbs.size()) return OmBigUInt();
+    if (limb_shift >= limbs.size())
+        return OmBigUInt();
     std::vector<uint64_t> res(limbs.size() - limb_shift, 0);
     for (size_t i = 0; i < res.size(); ++i) {
         res[i] = limbs[i + limb_shift] >> bit_shift;
@@ -240,11 +255,13 @@ OmBigUInt OmBigUInt::operator>>(size_t n) const {
 }
 
 OmBigUInt OmBigUInt::pow(const OmBigUInt& exp) const {
-    if (exp.is_zero()) return OmBigUInt(1);
+    if (exp.is_zero())
+        return OmBigUInt(1);
     OmBigUInt base(*this), result(1);
     OmBigUInt e = exp;
     while (!e.is_zero()) {
-        if (e.test_bit(0)) result *= base;
+        if (e.test_bit(0))
+            result *= base;
         base *= base;
         e = e >> 1;
     }
@@ -262,7 +279,8 @@ OmBigUInt OmBigUInt::gcd(const OmBigUInt& a, const OmBigUInt& b) {
 }
 
 std::string OmBigUInt::to_string(int base) const {
-    if (is_zero()) return "0";
+    if (is_zero())
+        return "0";
     if (base == 16) {
         std::string hex;
         for (size_t i = limbs.size(); i-- > 0;) {
@@ -292,10 +310,14 @@ OmBigUInt OmBigUInt::from_string(const std::string& s, int base) {
     OmBigUInt bv(static_cast<uint64_t>(base));
     for (char c : s) {
         int digit;
-        if (c >= '0' && c <= '9') digit = c - '0';
-        else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
-        else continue;
+        if (c >= '0' && c <= '9')
+            digit = c - '0';
+        else if (c >= 'a' && c <= 'f')
+            digit = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F')
+            digit = c - 'A' + 10;
+        else
+            continue;
         result = result * bv + OmBigUInt(static_cast<uint64_t>(digit));
     }
     return result;
@@ -306,7 +328,8 @@ OmBigUInt OmBigUInt::from_string(const std::string& s, int base) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 int OmBigInt::compare(const OmBigInt& o) const {
-    if (neg != o.neg) return neg ? -1 : 1;
+    if (neg != o.neg)
+        return neg ? -1 : 1;
     int cmp = mag.compare(o.mag);
     return neg ? -cmp : cmp;
 }
@@ -317,8 +340,10 @@ OmBigInt OmBigInt::operator+(const OmBigInt& o) const {
     }
     // Different signs: subtract magnitudes
     int cmp = mag.compare(o.mag);
-    if (cmp == 0) return OmBigInt();
-    if (cmp > 0) return OmBigInt(mag - o.mag, neg);
+    if (cmp == 0)
+        return OmBigInt();
+    if (cmp > 0)
+        return OmBigInt(mag - o.mag, neg);
     return OmBigInt(o.mag - mag, o.neg);
 }
 
@@ -341,7 +366,8 @@ OmBigInt OmBigInt::operator%(const OmBigInt& o) const {
 }
 
 OmBigInt OmBigInt::pow(const OmBigInt& exp) const {
-    if (exp.is_negative()) throw std::runtime_error("OmBigInt::pow: negative exponent");
+    if (exp.is_negative())
+        throw std::runtime_error("OmBigInt::pow: negative exponent");
     OmBigUInt result_mag = mag.pow(exp.mag);
     // Negative base ^ odd exponent = negative
     bool result_neg = neg && !exp.is_zero() && exp.mag.test_bit(0);
@@ -358,14 +384,17 @@ int64_t OmBigInt::to_i64() const {
 }
 
 std::string OmBigInt::to_string(int base) const {
-    if (is_zero()) return "0";
+    if (is_zero())
+        return "0";
     std::string s = mag.to_string(base);
-    if (neg) s = "-" + s;
+    if (neg)
+        s = "-" + s;
     return s;
 }
 
 OmBigInt OmBigInt::from_string(const std::string& s, int base) {
-    if (s.empty()) return OmBigInt();
+    if (s.empty())
+        return OmBigInt();
     bool negative = (s[0] == '-');
     std::string rest = negative ? s.substr(1) : s;
     OmBigUInt mag = OmBigUInt::from_string(rest, base);

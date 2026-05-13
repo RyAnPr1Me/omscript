@@ -1,3 +1,4 @@
+import std;
 // Test reference counting behavior
 fn string_operations() {
     var s1 = "Hello";

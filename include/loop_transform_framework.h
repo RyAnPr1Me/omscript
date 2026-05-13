@@ -55,8 +55,8 @@
 ///   4. No changes to any other part of the pipeline are needed.
 
 #include "optimization_manager.h" // LoopTransform, LegalityService, CostModel,
-                                   // LegalityVerdict, LoopLegalityContext
-#include "polyopt.h"               // checkLoopLegality, LoopLegalityResult
+                                  // LegalityVerdict, LoopLegalityContext
+#include "polyopt.h"              // checkLoopLegality, LoopLegalityResult
 
 // Forward declarations.
 namespace llvm {
@@ -73,13 +73,13 @@ namespace omscript {
 // LoopTransformStatus — outcome of a UnifiedLoopTransformer::execute() call
 // ─────────────────────────────────────────────────────────────────────────────
 enum class LoopTransformStatus : uint8_t {
-    Applied         = 0, ///< Transform was applied successfully
-    SkippedIllegal  = 1, ///< Skipped: legality check returned Illegal
-    SkippedUnknown  = 2, ///< Skipped: legality returned Unknown (conservative)
-    SkippedUnprof   = 3, ///< Skipped: transform was legal but not profitable
-    SkippedNoSCoP   = 4, ///< Skipped: SCoP detection failed for this loop
+    Applied = 0,         ///< Transform was applied successfully
+    SkippedIllegal = 1,  ///< Skipped: legality check returned Illegal
+    SkippedUnknown = 2,  ///< Skipped: legality returned Unknown (conservative)
+    SkippedUnprof = 3,   ///< Skipped: transform was legal but not profitable
+    SkippedNoSCoP = 4,   ///< Skipped: SCoP detection failed for this loop
     SkippedDisabled = 5, ///< Skipped: this transform is disabled in config
-    Failed          = 6, ///< Transform attempted but IR rewrite failed
+    Failed = 6,          ///< Transform attempted but IR rewrite failed
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -157,12 +157,11 @@ struct LoopTransformResult {
 /// UnifiedLoopTransformer fixes this by routing every request through the same
 /// LegalityService → polyhedral check → CostModel → dispatch sequence.
 class UnifiedLoopTransformer {
-public:
+  public:
     /// Construct with non-owning pointers to the shared services.
     /// @p legality and @p costModel may be null; if so, the corresponding
     /// checks are skipped (conservative: Unknown/always-profitable).
-    UnifiedLoopTransformer(const LegalityService* legality,
-                           const CostModel*       costModel) noexcept
+    UnifiedLoopTransformer(const LegalityService* legality, const CostModel* costModel) noexcept
         : legality_(legality), costModel_(costModel) {}
 
     /// Evaluate and (if safe and profitable) apply the transform described by
@@ -170,22 +169,19 @@ public:
     ///
     /// The result indicates whether the transform was applied and why it was
     /// skipped if not.
-    LoopTransformResult execute(const LoopTransformRequest& req,
-                                llvm::ScalarEvolution& SE,
-                                llvm::DominatorTree& DT,
+    LoopTransformResult execute(const LoopTransformRequest& req, llvm::ScalarEvolution& SE, llvm::DominatorTree& DT,
                                 llvm::LoopInfo& LI) const;
 
-private:
+  private:
     const LegalityService* legality_;
-    const CostModel*       costModel_;
+    const CostModel* costModel_;
 
     /// Build a LoopLegalityContext from the request fields.
     LoopLegalityContext buildLegalityContext(const LoopTransformRequest& req) const;
 
     /// Return true if the CostModel considers the transform profitable.
     /// Falls back to true (always profitable) when costModel_ is null.
-    bool checkProfitability(LoopTransform transform,
-                            llvm::Loop* loop) const noexcept;
+    bool checkProfitability(LoopTransform transform, llvm::Loop* loop) const noexcept;
 };
 
 } // namespace omscript

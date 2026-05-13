@@ -1,3 +1,4 @@
+import std;
 @unknown
 fn foo() {
     return 0;

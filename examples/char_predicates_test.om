@@ -1,3 +1,4 @@
+import std;
 // char_predicates_test.om
 // Tests for the is_upper, is_lower, is_space, and is_alnum character
 // classification builtins.  Each assertion contributes 1 to the total;

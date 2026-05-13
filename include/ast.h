@@ -12,6 +12,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace omscript {
@@ -64,15 +65,15 @@ enum class ASTNodeType {
     DEFER_STMT,
     SCOPE_RESOLUTION_EXPR,
     ASSUME_STMT,
-    COMPTIME_EXPR,  // comptime { ... } — compile-time evaluated block expression
-    REBORROW_EXPR,  // reborrow ref = &src; / reborrow ref = &src.field; / reborrow ref = &src[idx];
-    PIPELINE_STMT,  // pipeline (i in start...end) { stage name { ... } ... }
-    RANGE_ANNOT_EXPR, // @range[lo, hi] expr — compiler-level integer range hint
-    SHARED_STMT,    // shared x; — mark variable as shared ownership (Ω spec §3.1)
-    OWN_STMT,       // own x;   — explicitly assert unique ownership (Ω spec §3.1)
-    DEREF_ASSIGN_EXPR,  // *p = v — write through pointer (Ω spec §4.2)
-    CONSTRUCT_STMT,     // construct ptr { field: val, ... }; — in-place field init
-    NEW_CONSTRUCT_EXPR  // new T { field: val, ... } — alloc<T>(1) + field init
+    COMPTIME_EXPR,     // comptime { ... } — compile-time evaluated block expression
+    REBORROW_EXPR,     // reborrow ref = &src; / reborrow ref = &src.field; / reborrow ref = &src[idx];
+    PIPELINE_STMT,     // pipeline (i in start...end) { stage name { ... } ... }
+    RANGE_ANNOT_EXPR,  // @range[lo, hi] expr — compiler-level integer range hint
+    SHARED_STMT,       // shared x; — mark variable as shared ownership (Ω spec §3.1)
+    OWN_STMT,          // own x;   — explicitly assert unique ownership (Ω spec §3.1)
+    DEREF_ASSIGN_EXPR, // *p = v — write through pointer (Ω spec §4.2)
+    CONSTRUCT_STMT,    // construct ptr { field: val, ... }; — in-place field init
+    NEW_CONSTRUCT_EXPR // new T { field: val, ... } — alloc<T>(1) + field init
 };
 
 class ASTNode {
@@ -110,7 +111,8 @@ class LiteralExpr : public Expression {
     explicit LiteralExpr(long long val)
         : Expression(ASTNodeType::LITERAL_EXPR), literalType(LiteralType::INTEGER), intValue(val) {}
 
-    explicit LiteralExpr(double val) : Expression(ASTNodeType::LITERAL_EXPR), literalType(LiteralType::FLOAT), floatValue(val) {}
+    explicit LiteralExpr(double val)
+        : Expression(ASTNodeType::LITERAL_EXPR), literalType(LiteralType::FLOAT), floatValue(val) {}
 
     explicit LiteralExpr(const std::string& val)
         : Expression(ASTNodeType::LITERAL_EXPR), literalType(LiteralType::STRING), intValue(0), stringValue(val) {}
@@ -226,8 +228,8 @@ class IndexAssignExpr : public Expression {
 /// The pointer expression is evaluated and the RHS value is stored through it.
 class DerefAssignExpr : public Expression {
   public:
-    std::unique_ptr<Expression> ptr;    ///< The pointer expression (e.g. p, p+1)
-    std::unique_ptr<Expression> value;  ///< The RHS value to store
+    std::unique_ptr<Expression> ptr;   ///< The pointer expression (e.g. p, p+1)
+    std::unique_ptr<Expression> value; ///< The RHS value to store
 
     DerefAssignExpr(std::unique_ptr<Expression> p, std::unique_ptr<Expression> val)
         : Expression(ASTNodeType::DEREF_ASSIGN_EXPR), ptr(std::move(p)), value(std::move(val)) {}
@@ -246,7 +248,8 @@ class SpreadExpr : public Expression {
   public:
     std::unique_ptr<Expression> operand;
 
-    explicit SpreadExpr(std::unique_ptr<Expression> op) : Expression(ASTNodeType::SPREAD_EXPR), operand(std::move(op)) {}
+    explicit SpreadExpr(std::unique_ptr<Expression> op)
+        : Expression(ASTNodeType::SPREAD_EXPR), operand(std::move(op)) {}
 };
 
 class PipeExpr : public Expression {
@@ -261,8 +264,8 @@ class PipeExpr : public Expression {
 /// Scope resolution expression: Scope::Member (e.g. Color::RED, Status::OK)
 class ScopeResolutionExpr : public Expression {
   public:
-    std::string scopeName;   ///< The scope/namespace name (e.g. "Color")
-    std::string memberName;  ///< The member name (e.g. "RED")
+    std::string scopeName;  ///< The scope/namespace name (e.g. "Color")
+    std::string memberName; ///< The member name (e.g. "RED")
 
     ScopeResolutionExpr(const std::string& scope, const std::string& member)
         : Expression(ASTNodeType::SCOPE_RESOLUTION_EXPR), scopeName(scope), memberName(member) {}
@@ -273,7 +276,8 @@ class ExprStmt : public Statement {
   public:
     std::unique_ptr<Expression> expression;
 
-    explicit ExprStmt(std::unique_ptr<Expression> expr) : Statement(ASTNodeType::EXPR_STMT), expression(std::move(expr)) {}
+    explicit ExprStmt(std::unique_ptr<Expression> expr)
+        : Statement(ASTNodeType::EXPR_STMT), expression(std::move(expr)) {}
 };
 
 class VarDecl : public Statement {
@@ -282,11 +286,11 @@ class VarDecl : public Statement {
     std::unique_ptr<Expression> initializer;
     bool isConst;
     std::string typeName;
-    bool isRegister = false; ///< `register var` — force variable into CPU register via mem2reg
-    bool isGlobal = false;          ///< Declared with the `global` keyword
-    bool isAtomic   = false; ///< `atomic var`   — all loads/stores use atomic seq-cst ordering
-    bool isVolatile = false; ///< `volatile var`  — all loads/stores are volatile; suppress opts
-    std::string globalNamespace;    ///< Non-empty when imported: the alias under which this global lives (e.g. "foo")
+    bool isRegister = false;     ///< `register var` — force variable into CPU register via mem2reg
+    bool isGlobal = false;       ///< Declared with the `global` keyword
+    bool isAtomic = false;       ///< `atomic var`   — all loads/stores use atomic seq-cst ordering
+    bool isVolatile = false;     ///< `volatile var`  — all loads/stores are volatile; suppress opts
+    std::string globalNamespace; ///< Non-empty when imported: the alias under which this global lives (e.g. "foo")
     /// True for VarDecl nodes synthesised by the compiler (for-loop desugaring,
     /// foreach item variables, etc.).  These are exempt from the mandatory-type
     /// annotation check; only user-written declarations require an explicit type.
@@ -304,40 +308,40 @@ class ReturnStmt : public Statement {
 };
 
 struct LoopConfig {
-    int  unrollCount  = 0;    // 0 = auto
-    bool vectorize    = false;
-    bool noVectorize  = false;
-    int  tileSize     = 0;    // 0 = no tiling
-    bool parallel     = false;
-    bool independent  = false; ///< @independent — no cross-iteration dependencies (alias-free)
-    bool fuse         = false; ///< @fuse — merge with adjacent compatible loop
+    int unrollCount = 0; // 0 = auto
+    bool vectorize = false;
+    bool noVectorize = false;
+    int tileSize = 0; // 0 = no tiling
+    bool parallel = false;
+    bool independent = false; ///< @independent — no cross-iteration dependencies (alias-free)
+    bool fuse = false;        ///< @fuse — merge with adjacent compatible loop
 };
 
 struct MemoryConfig {
     /// Prefer stack allocation for small local arrays instead of heap.
     /// Reserved for future implementation; currently ignored.
-    bool preferStack  = false;
+    bool preferStack = false;
     /// Emit llvm.prefetch hints for all pointer-type parameters at function
     /// entry.  Active: auto-prefetch emitted in generateFunction().
-    bool prefetch     = false;
+    bool prefetch = false;
     /// All pointer parameters are already noalias in OPTMAX functions (language
     /// invariant).  Setting this to true adds an additional per-pair
     /// alias-scope annotation pass (future work beyond the base noalias).
-    bool noalias      = false;
+    bool noalias = false;
 };
 
 enum class SafetyLevel { On, Relaxed, Off };
 
 struct OptMaxConfig {
-    bool         enabled       = false;
-    SafetyLevel  safety        = SafetyLevel::On;
-    bool         fastMath      = false;
-    bool         aggressiveVec = false;
-    LoopConfig   loop;
+    bool enabled = false;
+    SafetyLevel safety = SafetyLevel::On;
+    bool fastMath = false;
+    bool aggressiveVec = false;
+    LoopConfig loop;
     MemoryConfig memory;
     std::vector<std::string> assumes;
     std::vector<std::string> specialize;
-    bool         report        = false;
+    bool report = false;
 };
 
 class IfStmt : public Statement {
@@ -347,8 +351,8 @@ class IfStmt : public Statement {
     std::unique_ptr<Statement> elseBranch;
 
     /// Branch prediction hints: `likely if (...)` / `unlikely if (...)`
-    bool hintLikely = false;    ///< Hint: then-branch is the common path
-    bool hintUnlikely = false;  ///< Hint: then-branch is the rare path
+    bool hintLikely = false;   ///< Hint: then-branch is the common path
+    bool hintUnlikely = false; ///< Hint: then-branch is the rare path
 
     IfStmt(std::unique_ptr<Expression> cond, std::unique_ptr<Statement> thenB,
            std::unique_ptr<Statement> elseB = nullptr, bool likely = false, bool unlikely = false)
@@ -416,7 +420,7 @@ class ForEachStmt : public Statement {
 // A single case arm in a switch statement.
 // Supports multiple values per case: case 1, 2, 3: ...
 struct SwitchCase {
-    std::unique_ptr<Expression> value; // nullptr for default case (first value for single-value compat)
+    std::unique_ptr<Expression> value;               // nullptr for default case (first value for single-value compat)
     std::vector<std::unique_ptr<Expression>> values; // all values for multi-value case
     std::vector<std::unique_ptr<Statement>> body;
     bool isDefault;
@@ -460,20 +464,18 @@ class BlockStmt : public Statement {
 /// immediately following this catch block.
 class CatchStmt : public Statement {
   public:
-    bool isString;          ///< true if the error code is a string literal
-    int64_t intCode;        ///< valid when !isString
-    std::string strCode;    ///< valid when  isString
+    bool isString;       ///< true if the error code is a string literal
+    int64_t intCode;     ///< valid when !isString
+    std::string strCode; ///< valid when  isString
     std::unique_ptr<BlockStmt> body;
 
     /// Integer error code
     CatchStmt(int64_t code, std::unique_ptr<BlockStmt> b)
-        : Statement(ASTNodeType::CATCH_STMT), isString(false), intCode(code), strCode(""),
-          body(std::move(b)) {}
+        : Statement(ASTNodeType::CATCH_STMT), isString(false), intCode(code), strCode(""), body(std::move(b)) {}
 
     /// String error code
     CatchStmt(const std::string& code, std::unique_ptr<BlockStmt> b)
-        : Statement(ASTNodeType::CATCH_STMT), isString(true), intCode(0), strCode(code),
-          body(std::move(b)) {}
+        : Statement(ASTNodeType::CATCH_STMT), isString(true), intCode(0), strCode(code), body(std::move(b)) {}
 };
 
 class ThrowStmt : public Statement {
@@ -493,7 +495,7 @@ class DeferStmt : public Statement {
 class AssumeStmt : public Statement {
   public:
     std::unique_ptr<Expression> condition;
-    std::unique_ptr<Statement> deoptBody;  // nullptr if no else deopt
+    std::unique_ptr<Statement> deoptBody; // nullptr if no else deopt
     AssumeStmt(std::unique_ptr<Expression> cond, std::unique_ptr<Statement> body = nullptr)
         : Statement(ASTNodeType::ASSUME_STMT), condition(std::move(cond)), deoptBody(std::move(body)) {}
 };
@@ -523,11 +525,10 @@ struct FieldAttrs {
 /// A single field within a struct declaration, with optional attributes.
 struct StructField {
     std::string name;
-    std::string typeName;   ///< Optional type annotation
+    std::string typeName; ///< Optional type annotation
     FieldAttrs attrs;
 
-    StructField(const std::string& n, const std::string& t = "", FieldAttrs a = {})
-        : name(n), typeName(t), attrs(a) {}
+    StructField(const std::string& n, const std::string& t = "", FieldAttrs a = {}) : name(n), typeName(t), attrs(a) {}
 };
 
 // Forward declaration for OperatorOverload.
@@ -536,31 +537,31 @@ class FunctionDecl;
 /// Operator overload definition within a struct.
 /// e.g. `operator+(other: Vec2) -> Vec2 { ... }`
 struct OperatorOverload {
-    std::string op;          ///< Operator string: "+", "-", "*", "/", "==", "!=", "<", ">"
-    std::string paramName;   ///< Right-hand operand parameter name
-    std::string paramType;   ///< Optional type annotation for parameter
-    std::string returnType;  ///< Optional return type annotation
+    std::string op;                     ///< Operator string: "+", "-", "*", "/", "==", "!=", "<", ">"
+    std::string paramName;              ///< Right-hand operand parameter name
+    std::string paramType;              ///< Optional type annotation for parameter
+    std::string returnType;             ///< Optional return type annotation
     std::unique_ptr<FunctionDecl> impl; ///< Implementation function
 };
 
 /// Layout representation hint for structs.
 enum class StructRepr {
-    Auto,        ///< @repr(auto) — compiler optimizes layout freely (default)
-    C,           ///< @repr(C)    — stable, ABI-compatible C-style layout (fields in order, natural alignment)
-    Packed,      ///< @repr(packed) — minimal memory, no padding between fields
-    AlignN,      ///< @repr(align(N)) — force struct-level alignment to N bytes
-    SoA,         ///< @repr(soa) — hint: prefer structure-of-arrays layout
+    Auto,   ///< @repr(auto) — compiler optimizes layout freely (default)
+    C,      ///< @repr(C)    — stable, ABI-compatible C-style layout (fields in order, natural alignment)
+    Packed, ///< @repr(packed) — minimal memory, no padding between fields
+    AlignN, ///< @repr(align(N)) — force struct-level alignment to N bytes
+    SoA,    ///< @repr(soa) — hint: prefer structure-of-arrays layout
 };
 
 class StructDecl : public Statement {
   public:
     std::string name;
-    std::vector<std::string> fields;       ///< Field names (for backwards compat)
-    std::vector<StructField> fieldDecls;   ///< Rich field info with attributes
+    std::vector<std::string> fields;         ///< Field names (for backwards compat)
+    std::vector<StructField> fieldDecls;     ///< Rich field info with attributes
     std::vector<OperatorOverload> operators; ///< Operator overload definitions
 
-    StructRepr repr = StructRepr::Auto;    ///< @repr(...) layout hint
-    int reprAlignN  = 0;                   ///< @repr(align(N)) value; 0 when repr != AlignN
+    StructRepr repr = StructRepr::Auto; ///< @repr(...) layout hint
+    int reprAlignN = 0;                 ///< @repr(align(N)) value; 0 when repr != AlignN
 
     StructDecl(const std::string& n, std::vector<std::string> f)
         : Statement(ASTNodeType::STRUCT_DECL), name(n), fields(std::move(f)) {}
@@ -574,8 +575,7 @@ class StructLiteralExpr : public Expression {
     std::string structName;
     std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fieldValues;
 
-    StructLiteralExpr(const std::string& name,
-                      std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fv)
+    StructLiteralExpr(const std::string& name, std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fv)
         : Expression(ASTNodeType::STRUCT_LITERAL_EXPR), structName(name), fieldValues(std::move(fv)) {}
 };
 
@@ -595,8 +595,7 @@ class FieldAssignExpr : public Expression {
     std::unique_ptr<Expression> value;
 
     FieldAssignExpr(std::unique_ptr<Expression> obj, const std::string& field, std::unique_ptr<Expression> val)
-        : Expression(ASTNodeType::FIELD_ASSIGN_EXPR), object(std::move(obj)), fieldName(field),
-          value(std::move(val)) {}
+        : Expression(ASTNodeType::FIELD_ASSIGN_EXPR), object(std::move(obj)), fieldName(field), value(std::move(val)) {}
 };
 
 // Top-level
@@ -605,7 +604,7 @@ class Parameter {
     std::string name;
     std::string typeName;
     std::unique_ptr<Expression> defaultValue; // nullptr if no default
-    bool hintPrefetch = false; ///< @prefetch — prefetch memory at function entry, invalidate at exit
+    bool hintPrefetch = false;                ///< @prefetch — prefetch memory at function entry, invalidate at exit
 
     Parameter(const std::string& n, const std::string& t = "", std::unique_ptr<Expression> def = nullptr)
         : name(n), typeName(t), defaultValue(std::move(def)) {}
@@ -614,11 +613,11 @@ class Parameter {
 class FunctionDecl : public ASTNode {
   public:
     std::string name;
-    std::vector<std::string> typeParams;  // Generic type parameters like <T, R>
+    std::vector<std::string> typeParams; // Generic type parameters like <T, R>
     std::vector<Parameter> parameters;
     std::unique_ptr<BlockStmt> body;
     bool isOptMax;
-    std::string returnType;  // Optional return type annotation (e.g. "int", "int[]", "Point")
+    std::string returnType; // Optional return type annotation (e.g. "int", "int[]", "Point")
 
     /// Memory-access level from @memory(none|readonly|writeonly|readwrite|
     /// argmem|argmem_ro|inaccessiblemem|inaccessiblemem_or_argmem).
@@ -637,37 +636,37 @@ class FunctionDecl : public ASTNode {
     MemoryEffect hintMemoryEffect = MemoryEffect::Default;
 
     /// Compiler hint annotations for functions.
-    bool hintInline = false;    ///< @opt(inline) — suggest inlining this function
-    bool hintNoInline = false;  ///< @opt(noinline) — prevent inlining this function
-    bool hintCold = false;      ///< @opt(cold) — mark function as rarely executed
-    bool hintHot = false;       ///< @opt(hot) — mark function as frequently executed
-    bool hintPure = false;      ///< @semantics(pure) — function has no side effects
-    bool hintNoReturn = false;  ///< @semantics(noreturn) — function never returns
-    bool hintStatic = false;    ///< @static — use internal linkage for better IPO
-    bool hintFlatten = false;   ///< @opt(flatten) — inline all callees within this function
-    bool hintUnroll = false;    ///< @opt(unroll) — aggressively unroll all loops in this function
-    bool hintNoUnroll = false;  ///< @opt(nounroll) — disable loop unrolling in this function
-    bool hintRestrict = false;  ///< @semantics(restrict) — all pointer params are noalias
-    bool hintVectorize = false;   ///< @opt(vectorize) — enable loop vectorization for all loops
-    bool hintNoVectorize = false; ///< @opt(novectorize) — disable loop vectorization for all loops
+    bool hintInline = false;        ///< @opt(inline) — suggest inlining this function
+    bool hintNoInline = false;      ///< @opt(noinline) — prevent inlining this function
+    bool hintCold = false;          ///< @opt(cold) — mark function as rarely executed
+    bool hintHot = false;           ///< @opt(hot) — mark function as frequently executed
+    bool hintPure = false;          ///< @semantics(pure) — function has no side effects
+    bool hintNoReturn = false;      ///< @semantics(noreturn) — function never returns
+    bool hintStatic = false;        ///< @static — use internal linkage for better IPO
+    bool hintFlatten = false;       ///< @opt(flatten) — inline all callees within this function
+    bool hintUnroll = false;        ///< @opt(unroll) — aggressively unroll all loops in this function
+    bool hintNoUnroll = false;      ///< @opt(nounroll) — disable loop unrolling in this function
+    bool hintRestrict = false;      ///< @semantics(restrict) — all pointer params are noalias
+    bool hintVectorize = false;     ///< @opt(vectorize) — enable loop vectorization for all loops
+    bool hintNoVectorize = false;   ///< @opt(novectorize) — disable loop vectorization for all loops
     bool hintParallelize = false;   ///< @opt(parallel) — enable auto-parallelization for all loops
     bool hintNoParallelize = false; ///< @opt(noparallel) — disable auto-parallelization for all loops
-    bool hintMinSize = false;     ///< @opt(minsize) — optimize for minimum code size
-    bool hintOptNone = false;     ///< @opt(optnone) — disable all optimizations (useful for debugging)
-    bool hintNoUnwind = false;    ///< @semantics(nounwind) — function never throws C++ exceptions
-    bool hintConstEval = false;   ///< @semantics(const_eval) — evaluate at compile time when all args are constants
-    int  hintAlign = 0;           ///< @opt(align=N) / @opt(align=AUTO) — align function entry (0=default, -1=auto/64B, N=exact)
+    bool hintMinSize = false;       ///< @opt(minsize) — optimize for minimum code size
+    bool hintOptNone = false;       ///< @opt(optnone) — disable all optimizations (useful for debugging)
+    bool hintNoUnwind = false;      ///< @semantics(nounwind) — function never throws C++ exceptions
+    bool hintConstEval = false;     ///< @semantics(const_eval) — evaluate at compile time when all args are constants
+    int hintAlign = 0; ///< @opt(align=N) / @opt(align=AUTO) — align function entry (0=default, -1=auto/64B, N=exact)
     bool hintSpeculatable = false; ///< @semantics(speculatable) — may be hoisted/speculated across branches
-    bool hintWillReturn = false;  ///< @semantics(willreturn) — function always terminates in finite time
-    bool hintNoSync = false;      ///< @semantics(nosync) — no synchronization, mutex, or I/O side effects
-    bool hintNoFree = false;      ///< @semantics(nofree) — function never frees/deallocates memory
-    OptMaxConfig optMaxConfig;    ///< OPTMAX v2 configuration (enabled when @optmax / @optmax(...) is used)
+    bool hintWillReturn = false;   ///< @semantics(willreturn) — function always terminates in finite time
+    bool hintNoSync = false;       ///< @semantics(nosync) — no synchronization, mutex, or I/O side effects
+    bool hintNoFree = false;       ///< @semantics(nofree) — function never frees/deallocates memory
+    OptMaxConfig optMaxConfig;     ///< OPTMAX v2 configuration (enabled when @optmax / @optmax(...) is used)
 
     /// @memory(allocator, size=N, count=M) — marks this function as an allocator
     /// wrapper. LLVM adds `allocsize` so alias analysis can track allocation sizes.
     ///   allocatorSizeParam >= 0: 0-based index of the "size" parameter
     ///   allocatorCountParam >= 0: 0-based index of the "count" parameter (-1 = none)
-    int allocatorSizeParam  = -1; ///< -1 = not an allocator wrapper
+    int allocatorSizeParam = -1;  ///< -1 = not an allocator wrapper
     int allocatorCountParam = -1; ///< -1 = no count parameter
 
     /// @memory(noalias_ret) — return pointer is guaranteed not to alias any existing
@@ -676,9 +675,10 @@ class FunctionDecl : public ASTNode {
     /// when they are not full allocators (so @memory(allocator) would be wrong).
     bool hintNoAliasReturn = false;
 
-    FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params, std::unique_ptr<BlockStmt> b, bool optMax = false, const std::string& retType = "")
-        : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)), body(std::move(b)), isOptMax(optMax), returnType(retType) {
-    }
+    FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params,
+                 std::unique_ptr<BlockStmt> b, bool optMax = false, const std::string& retType = "")
+        : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)),
+          body(std::move(b)), isOptMax(optMax), returnType(retType) {}
 
     /// Returns the number of parameters that have no default value.
     size_t requiredParameters() const {
@@ -707,14 +707,19 @@ class Program : public ASTNode {
     std::vector<std::unique_ptr<FunctionDecl>> functions;
     std::vector<std::unique_ptr<EnumDecl>> enums;
     std::vector<std::unique_ptr<StructDecl>> structs;
-    bool fileNoAlias = false;  ///< @noalias file directive: all pointers are noalias
+    bool fileNoAlias = false;                      ///< @noalias file directive: all pointers are noalias
     std::vector<std::unique_ptr<VarDecl>> globals; ///< Top-level global variable declarations
+    /// Namespaces that were explicitly imported via `import std;` (identifier
+    /// form).  The codegen uses this to enforce that stdlib functions are called
+    /// via `std::` qualification unless the `std` namespace is in this set.
+    std::unordered_set<std::string> importedNamespaces;
 
     Program(std::vector<std::unique_ptr<FunctionDecl>> funcs, std::vector<std::unique_ptr<EnumDecl>> enms = {},
             std::vector<std::unique_ptr<StructDecl>> strcts = {}, bool noAlias = false,
-            std::vector<std::unique_ptr<VarDecl>> globs = {})
+            std::vector<std::unique_ptr<VarDecl>> globs = {}, std::unordered_set<std::string> importedNs = {})
         : ASTNode(ASTNodeType::PROGRAM), functions(std::move(funcs)), enums(std::move(enms)),
-          structs(std::move(strcts)), fileNoAlias(noAlias), globals(std::move(globs)) {}
+          structs(std::move(strcts)), fileNoAlias(noAlias), globals(std::move(globs)),
+          importedNamespaces(std::move(importedNs)) {}
 };
 
 // ---------------------------------------------------------------------------
@@ -726,8 +731,7 @@ class MoveExpr : public Expression {
   public:
     std::unique_ptr<Expression> source;
 
-    explicit MoveExpr(std::unique_ptr<Expression> src)
-        : Expression(ASTNodeType::MOVE_EXPR), source(std::move(src)) {}
+    explicit MoveExpr(std::unique_ptr<Expression> src) : Expression(ASTNodeType::MOVE_EXPR), source(std::move(src)) {}
 };
 
 /// `@range[lo, hi] expr` — internal range-bound annotation.
@@ -777,18 +781,18 @@ class BorrowExpr : public Expression {
 /// `reborrow ref = &src[idx];` — partial borrow of an array element.
 class ReborrowExpr : public Expression {
   public:
-    std::unique_ptr<Expression> source;  ///< The source expression (identifier, field access, index)
-    bool isMut = false;                  ///< true for mutable reborrow
-    std::string fieldName;               ///< Non-empty if partial borrow of a field
+    std::unique_ptr<Expression> source;    ///< The source expression (identifier, field access, index)
+    bool isMut = false;                    ///< true for mutable reborrow
+    std::string fieldName;                 ///< Non-empty if partial borrow of a field
     std::unique_ptr<Expression> indexExpr; ///< Non-null if partial borrow of an array element
 
     /// Pending source variable name (set during codegen, mirrors BorrowExpr).
     mutable std::string pendingSrcVar;
 
-    explicit ReborrowExpr(std::unique_ptr<Expression> src, bool mut = false,
-                          std::string field = "", std::unique_ptr<Expression> idx = nullptr)
-        : Expression(ASTNodeType::REBORROW_EXPR), source(std::move(src)), isMut(mut),
-          fieldName(std::move(field)), indexExpr(std::move(idx)) {}
+    explicit ReborrowExpr(std::unique_ptr<Expression> src, bool mut = false, std::string field = "",
+                          std::unique_ptr<Expression> idx = nullptr)
+        : Expression(ASTNodeType::REBORROW_EXPR), source(std::move(src)), isMut(mut), fieldName(std::move(field)),
+          indexExpr(std::move(idx)) {}
 };
 
 /// Dict literal: `{"key": val, ...}` — zero-cost map construction.
@@ -808,8 +812,7 @@ class InvalidateStmt : public Statement {
   public:
     std::string varName;
 
-    explicit InvalidateStmt(const std::string& name)
-        : Statement(ASTNodeType::INVALIDATE_STMT), varName(name) {}
+    explicit InvalidateStmt(const std::string& name) : Statement(ASTNodeType::INVALIDATE_STMT), varName(name) {}
 };
 
 /// `move T a = b;` — variable declaration with move semantics.
@@ -853,8 +856,8 @@ class PrefetchStmt : public Statement {
 
     /// Constructor for prefetch with variable declaration.
     PrefetchStmt(std::unique_ptr<VarDecl> decl, bool hot, bool immut, int64_t offset = 0)
-        : Statement(ASTNodeType::PREFETCH_STMT), varDecl(std::move(decl)),
-          hintHot(hot), hintImmut(immut), offsetBytes(offset) {}
+        : Statement(ASTNodeType::PREFETCH_STMT), varDecl(std::move(decl)), hintHot(hot), hintImmut(immut),
+          offsetBytes(offset) {}
 
     /// Constructor for expression-style prefetch(expr).
     explicit PrefetchStmt(std::unique_ptr<Expression> addr, int64_t offset = 0)
@@ -871,8 +874,7 @@ class FreezeStmt : public Statement {
   public:
     std::string varName;
 
-    explicit FreezeStmt(const std::string& name)
-        : Statement(ASTNodeType::FREEZE_STMT), varName(name) {}
+    explicit FreezeStmt(const std::string& name) : Statement(ASTNodeType::FREEZE_STMT), varName(name) {}
 };
 
 /// `shared x;` — transitions variable `x` to read-only aliasable ownership (Ω spec §3.1).
@@ -886,8 +888,7 @@ class SharedStmt : public Statement {
   public:
     std::string varName;
 
-    explicit SharedStmt(const std::string& name)
-        : Statement(ASTNodeType::SHARED_STMT), varName(name) {}
+    explicit SharedStmt(const std::string& name) : Statement(ASTNodeType::SHARED_STMT), varName(name) {}
 };
 
 /// `own x;` — explicitly asserts unique ownership of variable `x` (Ω spec §3.1).
@@ -898,8 +899,7 @@ class OwnStmt : public Statement {
   public:
     std::string varName;
 
-    explicit OwnStmt(const std::string& name)
-        : Statement(ASTNodeType::OWN_STMT), varName(name) {}
+    explicit OwnStmt(const std::string& name) : Statement(ASTNodeType::OWN_STMT), varName(name) {}
 };
 
 /// `comptime { statements... }` — compile-time evaluated block expression.
@@ -917,8 +917,7 @@ class ComptimeExpr : public Expression {
   public:
     std::unique_ptr<BlockStmt> body;
 
-    explicit ComptimeExpr(std::unique_ptr<BlockStmt> b)
-        : Expression(ASTNodeType::COMPTIME_EXPR), body(std::move(b)) {}
+    explicit ComptimeExpr(std::unique_ptr<BlockStmt> b) : Expression(ASTNodeType::COMPTIME_EXPR), body(std::move(b)) {}
 };
 
 // ---------------------------------------------------------------------------
@@ -937,19 +936,19 @@ class ComptimeExpr : public Expression {
 /// program's static call graph".  Unknown callees pessimise every flag.
 struct FunctionEffects {
     // ── Heap / parameter memory ───────────────────────────────────────────
-    bool readsMemory  = false; ///< Reads from heap/params (loads, index, field)
+    bool readsMemory = false;  ///< Reads from heap/params (loads, index, field)
     bool writesMemory = false; ///< Writes to heap/params (index/field assign, push, pop, sort…)
-    bool hasIO        = false; ///< Performs I/O (print, file_*, input, sleep…)
-    bool hasMutation  = false; ///< Mutates parameter-reachable memory observable outside the callee
+    bool hasIO = false;        ///< Performs I/O (print, file_*, input, sleep…)
+    bool hasMutation = false;  ///< Mutates parameter-reachable memory observable outside the callee
 
     // ── New (overhauled) effect axes ──────────────────────────────────────
-    bool mayThrow         = false; ///< May throw, panic, abort, or exit
-    bool mayNotReturn     = false; ///< May fail to return (calls noreturn callee or unbounded loop)
-    bool allocates        = false; ///< Performs heap allocation (alloc, newRegion, array constructors…)
-    bool deallocates      = false; ///< Frees heap memory (free, invalidate, region destroy)
-    bool hasIndirectCall  = false; ///< Calls through an unresolved name (function pointer / unknown callee)
-    bool readsGlobal      = false; ///< Reads a top-level global variable
-    bool writesGlobal     = false; ///< Writes a top-level global variable
+    bool mayThrow = false;        ///< May throw, panic, abort, or exit
+    bool mayNotReturn = false;    ///< May fail to return (calls noreturn callee or unbounded loop)
+    bool allocates = false;       ///< Performs heap allocation (alloc, newRegion, array constructors…)
+    bool deallocates = false;     ///< Frees heap memory (free, invalidate, region destroy)
+    bool hasIndirectCall = false; ///< Calls through an unresolved name (function pointer / unknown callee)
+    bool readsGlobal = false;     ///< Reads a top-level global variable
+    bool writesGlobal = false;    ///< Writes a top-level global variable
 
     /// Per-parameter mutation mask.  `paramMutated[i] == true` means
     /// parameter `i` (or memory reachable through it) is mutated by the
@@ -962,30 +961,35 @@ struct FunctionEffects {
 
     /// True when the function has no detectable memory effects at all.
     bool isReadNone() const {
-        return !readsMemory && !writesMemory && !hasIO && !hasMutation
-            && !readsGlobal && !writesGlobal && !allocates && !deallocates
-            && !hasIndirectCall;
+        return !readsMemory && !writesMemory && !hasIO && !hasMutation && !readsGlobal && !writesGlobal && !allocates &&
+               !deallocates && !hasIndirectCall;
     }
     /// True when the function only reads memory (no writes, no I/O, no mutation).
     bool isReadOnly() const {
-        return (readsMemory || readsGlobal)
-            && !writesMemory && !writesGlobal && !hasIO && !hasMutation
-            && !allocates && !deallocates && !hasIndirectCall;
+        return (readsMemory || readsGlobal) && !writesMemory && !writesGlobal && !hasIO && !hasMutation && !allocates &&
+               !deallocates && !hasIndirectCall;
     }
     /// True when the function is safe to mark nosync (no I/O, no concurrency).
-    bool isNoSync() const { return !hasIO; }
+    bool isNoSync() const {
+        return !hasIO;
+    }
     /// True when the function can be inferred as @pure by the compiler.
-    bool inferredPure() const { return isReadNone() || isReadOnly(); }
+    bool inferredPure() const {
+        return isReadNone() || isReadOnly();
+    }
     /// True when the function provably never throws / aborts / exits.
-    bool isNoUnwind() const { return !mayThrow; }
+    bool isNoUnwind() const {
+        return !mayThrow;
+    }
     /// True when the function provably terminates.
-    bool willReturn() const { return !mayNotReturn; }
+    bool willReturn() const {
+        return !mayNotReturn;
+    }
     /// True when the function only touches memory reachable through its
     /// arguments — no globals, no I/O, no allocation, no indirect calls.
     /// Maps to the LLVM `argmemonly` memory effect.
     bool argMemOnly() const {
-        return !readsGlobal && !writesGlobal && !hasIO
-            && !allocates && !deallocates && !hasIndirectCall;
+        return !readsGlobal && !writesGlobal && !hasIO && !allocates && !deallocates && !hasIndirectCall;
     }
     /// True when parameter @p i is mutated.  Returns false when the per-param
     /// mask hasn't been populated for this function (conservative for callers
@@ -995,23 +999,25 @@ struct FunctionEffects {
     }
     /// True when at least one parameter is known to be mutated.
     bool anyParamMutated() const {
-        for (bool b : paramMutated) if (b) return true;
+        for (bool b : paramMutated)
+            if (b)
+                return true;
         return false;
     }
     /// Merge another summary into this one (logical OR over every flag,
     /// element-wise OR over the param-mutation mask up to the shorter length).
     void mergeFrom(const FunctionEffects& o) {
-        readsMemory      = readsMemory      || o.readsMemory;
-        writesMemory     = writesMemory     || o.writesMemory;
-        hasIO            = hasIO            || o.hasIO;
-        hasMutation      = hasMutation      || o.hasMutation;
-        mayThrow         = mayThrow         || o.mayThrow;
-        mayNotReturn     = mayNotReturn     || o.mayNotReturn;
-        allocates        = allocates        || o.allocates;
-        deallocates      = deallocates      || o.deallocates;
-        hasIndirectCall  = hasIndirectCall  || o.hasIndirectCall;
-        readsGlobal      = readsGlobal      || o.readsGlobal;
-        writesGlobal     = writesGlobal     || o.writesGlobal;
+        readsMemory = readsMemory || o.readsMemory;
+        writesMemory = writesMemory || o.writesMemory;
+        hasIO = hasIO || o.hasIO;
+        hasMutation = hasMutation || o.hasMutation;
+        mayThrow = mayThrow || o.mayThrow;
+        mayNotReturn = mayNotReturn || o.mayNotReturn;
+        allocates = allocates || o.allocates;
+        deallocates = deallocates || o.deallocates;
+        hasIndirectCall = hasIndirectCall || o.hasIndirectCall;
+        readsGlobal = readsGlobal || o.readsGlobal;
+        writesGlobal = writesGlobal || o.writesGlobal;
         // Param-mutation masks merge only when sizes match (same function).
         if (paramMutated.size() == o.paramMutated.size()) {
             for (std::size_t i = 0; i < paramMutated.size(); ++i)
@@ -1020,18 +1026,10 @@ struct FunctionEffects {
     }
     /// Equality across every effect axis (used by the fixed-point loop).
     bool equalsForFixedPoint(const FunctionEffects& o) const {
-        return readsMemory     == o.readsMemory
-            && writesMemory    == o.writesMemory
-            && hasIO           == o.hasIO
-            && hasMutation     == o.hasMutation
-            && mayThrow        == o.mayThrow
-            && mayNotReturn    == o.mayNotReturn
-            && allocates       == o.allocates
-            && deallocates     == o.deallocates
-            && hasIndirectCall == o.hasIndirectCall
-            && readsGlobal     == o.readsGlobal
-            && writesGlobal    == o.writesGlobal
-            && paramMutated    == o.paramMutated;
+        return readsMemory == o.readsMemory && writesMemory == o.writesMemory && hasIO == o.hasIO &&
+               hasMutation == o.hasMutation && mayThrow == o.mayThrow && mayNotReturn == o.mayNotReturn &&
+               allocates == o.allocates && deallocates == o.deallocates && hasIndirectCall == o.hasIndirectCall &&
+               readsGlobal == o.readsGlobal && writesGlobal == o.writesGlobal && paramMutated == o.paramMutated;
     }
 };
 
@@ -1045,8 +1043,7 @@ struct StageDecl {
     std::string name;
     std::unique_ptr<BlockStmt> body;
 
-    StageDecl(std::string n, std::unique_ptr<BlockStmt> b)
-        : name(std::move(n)), body(std::move(b)) {}
+    StageDecl(std::string n, std::unique_ptr<BlockStmt> b) : name(std::move(n)), body(std::move(b)) {}
 };
 
 /// `pipeline N { stage name { ... } ... }`
@@ -1070,12 +1067,11 @@ struct StageDecl {
 /// hardware instruction scheduler can overlap stage execution.
 class PipelineStmt : public Statement {
   public:
-    std::unique_ptr<Expression> count;   ///< Number of executions; nullptr = run once
-    std::vector<StageDecl> stages;       ///< Ordered list of stages
+    std::unique_ptr<Expression> count; ///< Number of executions; nullptr = run once
+    std::vector<StageDecl> stages;     ///< Ordered list of stages
 
     PipelineStmt(std::unique_ptr<Expression> cnt, std::vector<StageDecl> stgs)
-        : Statement(ASTNodeType::PIPELINE_STMT),
-          count(std::move(cnt)), stages(std::move(stgs)) {}
+        : Statement(ASTNodeType::PIPELINE_STMT), count(std::move(cnt)), stages(std::move(stgs)) {}
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1116,12 +1112,9 @@ class ConstructStmt : public Statement {
     /// Field name → initialiser expression pairs, in source order.
     std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fields;
 
-    ConstructStmt(std::unique_ptr<Expression> tgt,
-                  std::string                  tn,
+    ConstructStmt(std::unique_ptr<Expression> tgt, std::string tn,
                   std::vector<std::pair<std::string, std::unique_ptr<Expression>>> flds)
-        : Statement(ASTNodeType::CONSTRUCT_STMT),
-          target(std::move(tgt)),
-          typeName(std::move(tn)),
+        : Statement(ASTNodeType::CONSTRUCT_STMT), target(std::move(tgt)), typeName(std::move(tn)),
           fields(std::move(flds)) {}
 };
 
@@ -1146,15 +1139,11 @@ class ConstructStmt : public Statement {
 ///   // result = ptr
 class NewConstructExpr : public Expression {
   public:
-    std::string typeName;  ///< Struct type to allocate and initialise
+    std::string typeName; ///< Struct type to allocate and initialise
     std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fields;
 
-    NewConstructExpr(std::string tn,
-                     std::vector<std::pair<std::string,
-                                           std::unique_ptr<Expression>>> flds)
-        : Expression(ASTNodeType::NEW_CONSTRUCT_EXPR),
-          typeName(std::move(tn)),
-          fields(std::move(flds)) {}
+    NewConstructExpr(std::string tn, std::vector<std::pair<std::string, std::unique_ptr<Expression>>> flds)
+        : Expression(ASTNodeType::NEW_CONSTRUCT_EXPR), typeName(std::move(tn)), fields(std::move(flds)) {}
 };
 
 } // namespace omscript

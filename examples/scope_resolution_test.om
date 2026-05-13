@@ -1,3 +1,4 @@
+import std;
 // Test :: scope resolution operator for enums
 enum Color {
     RED,

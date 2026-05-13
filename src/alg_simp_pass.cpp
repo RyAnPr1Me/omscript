@@ -37,16 +37,17 @@ namespace omscript {
 
 /// True when @p expr is a float literal.
 static bool isFloatLit(const Expression* expr) {
-    if (!expr || expr->type != ASTNodeType::LITERAL_EXPR) return false;
-    return static_cast<const LiteralExpr*>(expr)->literalType
-               == LiteralExpr::LiteralType::FLOAT;
+    if (!expr || expr->type != ASTNodeType::LITERAL_EXPR)
+        return false;
+    return static_cast<const LiteralExpr*>(expr)->literalType == LiteralExpr::LiteralType::FLOAT;
 }
 
 /// True when @p a and @p b are identifier expressions with the same name.
 static bool sameIdent(const Expression* a, const Expression* b) {
     const auto* ia = asIdentifier(a);
     const auto* ib = asIdentifier(b);
-    if (!ia || !ib) return false;
+    if (!ia || !ib)
+        return false;
     return ia->name == ib->name;
 }
 
@@ -59,8 +60,10 @@ static bool sameIdent(const Expression* a, const Expression* b) {
 /// maps to the boolean as: true = "safe to apply integer-only rules",
 /// false = "unsafe or unknown".
 static bool definitelyInteger(const Expression* expr) {
-    if (!expr) return true;
-    if (isFloatLit(expr)) return false;
+    if (!expr)
+        return true;
+    if (isFloatLit(expr))
+        return false;
     switch (expr->type) {
     case ASTNodeType::BINARY_EXPR: {
         const auto* b = static_cast<const BinaryExpr*>(expr);
@@ -97,7 +100,8 @@ static unsigned simplifyStmt(Statement* stmt);
 // ─────────────────────────────────────────────────────────────────────────────
 
 static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
-    if (!expr) return 0;
+    if (!expr)
+        return 0;
     unsigned count = 0;
 
     // ── Recurse into children first (bottom-up) ──────────────────────────
@@ -164,7 +168,8 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
     case ASTNodeType::REBORROW_EXPR: {
         auto* rb = static_cast<ReborrowExpr*>(expr.get());
         count += simplifyExpr(rb->source);
-        if (rb->indexExpr) count += simplifyExpr(rb->indexExpr);
+        if (rb->indexExpr)
+            count += simplifyExpr(rb->indexExpr);
         break;
     }
     case ASTNodeType::RANGE_ANNOT_EXPR:
@@ -204,9 +209,12 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
         long long lv = 0;
         if (isIntLiteral(un->operand.get(), &lv)) {
             std::optional<long long> result;
-            if      (un->op == "-") result = static_cast<long long>(-static_cast<uint64_t>(lv));
-            else if (un->op == "!") result = (lv != 0) ? 0LL : 1LL;
-            else if (un->op == "~") result = ~lv;
+            if (un->op == "-")
+                result = static_cast<long long>(-static_cast<uint64_t>(lv));
+            else if (un->op == "!")
+                result = (lv != 0) ? 0LL : 1LL;
+            else if (un->op == "~")
+                result = ~lv;
             if (result.has_value()) {
                 expr = makeIntLiteral(*result);
                 ++count;
@@ -232,35 +240,53 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 // Cast through uint64_t for +, -, * so that overflow is
                 // well-defined (two's complement wrapping), matching the
                 // language's integer semantics for 64-bit wrap-around.
-                if      (op == "+")                      result = static_cast<long long>(static_cast<uint64_t>(lv) + static_cast<uint64_t>(rv));
-                else if (op == "-")                      result = static_cast<long long>(static_cast<uint64_t>(lv) - static_cast<uint64_t>(rv));
-                else if (op == "*")                      result = static_cast<long long>(static_cast<uint64_t>(lv) * static_cast<uint64_t>(rv));
+                if (op == "+")
+                    result = static_cast<long long>(static_cast<uint64_t>(lv) + static_cast<uint64_t>(rv));
+                else if (op == "-")
+                    result = static_cast<long long>(static_cast<uint64_t>(lv) - static_cast<uint64_t>(rv));
+                else if (op == "*")
+                    result = static_cast<long long>(static_cast<uint64_t>(lv) * static_cast<uint64_t>(rv));
                 else if (op == "/" && rv != 0) {
                     // Guard: INT64_MIN / -1 is UB (signed overflow); return INT64_MIN to match
                     // wrap-around semantics consistent with runtime integer evaluation.
-                    if (lv == LLONG_MIN && rv == -1) result = static_cast<long long>(LLONG_MIN);
-                    else                             result = lv / rv;
-                }
-                else if (op == "%" && rv != 0) {
+                    if (lv == LLONG_MIN && rv == -1)
+                        result = static_cast<long long>(LLONG_MIN);
+                    else
+                        result = lv / rv;
+                } else if (op == "%" && rv != 0) {
                     // Guard: INT64_MIN % -1 is UB/SIGFPE on x86-64; result is 0.
-                    if (lv == LLONG_MIN && rv == -1) result = 0LL;
-                    else                             result = lv % rv;
-                }
-                else if (op == "&")                      result = lv & rv;
-                else if (op == "|")                      result = lv | rv;
-                else if (op == "^")                      result = lv ^ rv;
-                else if (op == "==" )                    result = (lv == rv) ? 1LL : 0LL;
-                else if (op == "!=" )                    result = (lv != rv) ? 1LL : 0LL;
-                else if (op == "<"  )                    result = (lv <  rv) ? 1LL : 0LL;
-                else if (op == "<=" )                    result = (lv <= rv) ? 1LL : 0LL;
-                else if (op == ">"  )                    result = (lv >  rv) ? 1LL : 0LL;
-                else if (op == ">=" )                    result = (lv >= rv) ? 1LL : 0LL;
-                else if (op == "&&" )                    result = (lv && rv) ? 1LL : 0LL;
-                else if (op == "||" )                    result = (lv || rv) ? 1LL : 0LL;
-                else if (op == "<<" && rv >= 0 && rv < 64) result = static_cast<long long>(static_cast<uint64_t>(lv) << static_cast<uint64_t>(rv));
+                    if (lv == LLONG_MIN && rv == -1)
+                        result = 0LL;
+                    else
+                        result = lv % rv;
+                } else if (op == "&")
+                    result = lv & rv;
+                else if (op == "|")
+                    result = lv | rv;
+                else if (op == "^")
+                    result = lv ^ rv;
+                else if (op == "==")
+                    result = (lv == rv) ? 1LL : 0LL;
+                else if (op == "!=")
+                    result = (lv != rv) ? 1LL : 0LL;
+                else if (op == "<")
+                    result = (lv < rv) ? 1LL : 0LL;
+                else if (op == "<=")
+                    result = (lv <= rv) ? 1LL : 0LL;
+                else if (op == ">")
+                    result = (lv > rv) ? 1LL : 0LL;
+                else if (op == ">=")
+                    result = (lv >= rv) ? 1LL : 0LL;
+                else if (op == "&&")
+                    result = (lv && rv) ? 1LL : 0LL;
+                else if (op == "||")
+                    result = (lv || rv) ? 1LL : 0LL;
+                else if (op == "<<" && rv >= 0 && rv < 64)
+                    result = static_cast<long long>(static_cast<uint64_t>(lv) << static_cast<uint64_t>(rv));
                 // OmScript `>>` on scalar integers is always a logical (unsigned) right-shift
                 // (maps to LLVM CreateLShr).  Cast through uint64_t to match that semantics.
-                else if (op == ">>" && rv >= 0 && rv < 64) result = static_cast<long long>(static_cast<uint64_t>(lv) >> static_cast<uint64_t>(rv));
+                else if (op == ">>" && rv >= 0 && rv < 64)
+                    result = static_cast<long long>(static_cast<uint64_t>(lv) >> static_cast<uint64_t>(rv));
                 if (result.has_value()) {
                     expr = makeIntLiteral(*result);
                     ++count;
@@ -285,8 +311,7 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             }
             // x + x → x * 2  (same identifier — always valid for any numeric type)
             if (sameIdent(L, R)) {
-                auto dup = std::make_unique<IdentifierExpr>(
-                    static_cast<const IdentifierExpr*>(L)->name);
+                auto dup = std::make_unique<IdentifierExpr>(static_cast<const IdentifierExpr*>(L)->name);
                 expr = makeBinary("*", std::move(dup), makeIntLiteral(2));
                 ++count;
                 return count;
@@ -296,9 +321,7 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
                 auto* ul = static_cast<UnaryExpr*>(bin->left.get());
                 auto* ur = static_cast<UnaryExpr*>(bin->right.get());
                 if (ul->op == "-" && ur->op == "-") {
-                    auto inner = makeBinary("+",
-                        std::move(ul->operand),
-                        std::move(ur->operand));
+                    auto inner = makeBinary("+", std::move(ul->operand), std::move(ur->operand));
                     expr = makeUnary("-", std::move(inner));
                     ++count;
                     return count;
@@ -653,21 +676,23 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
         // This is always correct for integers; the egraph does it at the IR
         // level, but doing it at the AST level allows downstream passes to
         // see a simpler comparison expression.
-        if (un->op == "!" && un->operand &&
-                un->operand->type == ASTNodeType::BINARY_EXPR) {
+        if (un->op == "!" && un->operand && un->operand->type == ASTNodeType::BINARY_EXPR) {
             auto* inner = static_cast<BinaryExpr*>(un->operand.get());
             std::string flipped;
-            if      (inner->op == "==") flipped = "!=";
-            else if (inner->op == "!=") flipped = "==";
-            else if (inner->op == "<" ) flipped = ">=";
-            else if (inner->op == ">" ) flipped = "<=";
-            else if (inner->op == "<=") flipped = ">";
-            else if (inner->op == ">=") flipped = "<";
+            if (inner->op == "==")
+                flipped = "!=";
+            else if (inner->op == "!=")
+                flipped = "==";
+            else if (inner->op == "<")
+                flipped = ">=";
+            else if (inner->op == ">")
+                flipped = "<=";
+            else if (inner->op == "<=")
+                flipped = ">";
+            else if (inner->op == ">=")
+                flipped = "<";
             if (!flipped.empty()) {
-                auto newBin = std::make_unique<BinaryExpr>(
-                    flipped,
-                    std::move(inner->left),
-                    std::move(inner->right));
+                auto newBin = std::make_unique<BinaryExpr>(flipped, std::move(inner->left), std::move(inner->right));
                 expr = std::move(newBin);
                 ++count;
                 return count;
@@ -696,8 +721,7 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
         }
         // cond ? x : x  →  x  (both arms are the same simple identifier)
         if (sameIdent(tern->thenExpr.get(), tern->elseExpr.get())) {
-            expr = makeIdentifier(
-                static_cast<IdentifierExpr*>(tern->thenExpr.get())->name);
+            expr = makeIdentifier(static_cast<IdentifierExpr*>(tern->thenExpr.get())->name);
             ++count;
             return count;
         }
@@ -711,7 +735,8 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 static unsigned simplifyStmt(Statement* stmt) {
-    if (!stmt) return 0;
+    if (!stmt)
+        return 0;
     unsigned count = 0;
 
     switch (stmt->type) {
@@ -781,7 +806,8 @@ static unsigned simplifyStmt(Statement* stmt) {
     case ASTNodeType::ASSUME_STMT: {
         auto* as = static_cast<AssumeStmt*>(stmt);
         count += simplifyExpr(as->condition);
-        if (as->deoptBody) count += simplifyStmt(as->deoptBody.get());
+        if (as->deoptBody)
+            count += simplifyStmt(as->deoptBody.get());
         break;
     }
 
@@ -824,7 +850,8 @@ static unsigned simplifyStmt(Statement* stmt) {
 
     case ASTNodeType::PIPELINE_STMT: {
         auto* pl = static_cast<PipelineStmt*>(stmt);
-        if (pl->count) count += simplifyExpr(pl->count);
+        if (pl->count)
+            count += simplifyExpr(pl->count);
         for (auto& stage : pl->stages) {
             if (stage.body)
                 for (auto& s : stage.body->statements)
@@ -854,8 +881,7 @@ AlgSimpStats runAlgSimpPass(Program* program, bool verbose) {
 
         const unsigned applied = total.rulesApplied - before;
         if (verbose && applied > 0) {
-            std::cerr << "[AlgSimp] " << fn->name
-                      << ": " << applied << " algebraic simplification(s)\n";
+            std::cerr << "[AlgSimp] " << fn->name << ": " << applied << " algebraic simplification(s)\n";
         }
     });
 

@@ -20,7 +20,7 @@ enum class TokenType {
     INTEGER,
     FLOAT,
     STRING,
-    BYTES_LITERAL,  // 0x"AABBCC" — hex byte array literal
+    BYTES_LITERAL, // 0x"AABBCC" — hex byte array literal
     IDENTIFIER,
 
     // Keywords
@@ -84,6 +84,7 @@ enum class TokenType {
     SHARED,    // shared   — read-only aliasable ownership state (Ω spec §3.1)
     OWN,       // own      — explicit unique-ownership declaration (Ω spec §3.1)
     CONSTRUCT, // construct — in-place field initialization of allocated memory
+    NAMESPACE, // namespace — user-defined namespace block
 
     // Operators
     PLUS,
@@ -130,9 +131,9 @@ enum class TokenType {
     FAT_ARROW,
     PIPE_FORWARD,
     SPREAD,
-    SCOPE,              // :: — scope resolution operator
-    AND_ASSIGN,         // &&= — logical AND compound assignment
-    OR_ASSIGN,          // ||= — logical OR compound assignment
+    SCOPE,      // :: — scope resolution operator
+    AND_ASSIGN, // &&= — logical AND compound assignment
+    OR_ASSIGN,  // ||= — logical OR compound assignment
 
     // Delimiters
     LPAREN,
@@ -147,7 +148,7 @@ enum class TokenType {
     DOT,
 
     // Special
-    AT,  // @ — used for function annotations (@inline, @noinline, @cold)
+    AT,             // @ — used for function annotations (@inline, @noinline, @cold)
     BACKTICK_IDENT, // `name` — backtick-quoted identifier for infix operator creation
     END_OF_FILE,
     INVALID

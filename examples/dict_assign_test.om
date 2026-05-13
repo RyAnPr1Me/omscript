@@ -1,0 +1,39 @@
+import std;
+// Test dict indexed assignment: dict["key"] = val, dict[intKey] = val
+// Expected exit code: 0
+
+fn main() {
+    var total = 0;
+
+    // Basic string-key assignment
+    var d: dict[str, int] = {};
+    d["x"] = 10;
+    d["y"] = 20;
+    d["z"] = 30;
+    total = total + (map_size(d) == 3);         // 1
+    total = total + (d["x"] == 10);             // 1
+    total = total + (d["y"] == 20);             // 1
+    total = total + (d["z"] == 30);             // 1
+
+    // Overwrite existing key
+    d["x"] = 99;
+    total = total + (d["x"] == 99);             // 1
+    total = total + (map_size(d) == 3);         // 1
+
+    // Integer key assignment
+    var nums: dict[int, int] = {};
+    nums[1] = 100;
+    nums[2] = 200;
+    total = total + (nums[1] == 100);           // 1
+    total = total + (nums[2] == 200);           // 1
+    total = total + (map_size(nums) == 2);      // 1
+
+    // Assignment on dict literal
+    var m = {"a": 1, "b": 2};
+    m["c"] = 3;
+    total = total + (map_size(m) == 3);         // 1
+    total = total + (m["c"] == 3);              // 1
+
+    println(total);
+    return 0;
+}

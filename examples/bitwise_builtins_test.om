@@ -1,3 +1,4 @@
+import std;
 // Test new bitwise built-in functions
 fn main() {
     // popcount: count set bits

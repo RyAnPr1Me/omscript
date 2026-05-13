@@ -1,3 +1,4 @@
+import std;
 // Test basic expressions and control flow
 fn test_expressions() {
     var a = 5;

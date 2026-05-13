@@ -1,3 +1,4 @@
+import std;
 // Tests for array_product, array_last, array_insert, str_pad_left, str_pad_right
 
 fn test_array_product() {

@@ -32,8 +32,8 @@ namespace omscript {
 
 /// Per-pass statistics returned from runDCEPass().
 struct DCEStats {
-    unsigned deadIfBranches   = 0; ///< `if` statements replaced by a single branch
-    unsigned deadLoops        = 0; ///< While loops removed (condition is literal 0)
+    unsigned deadIfBranches = 0;   ///< `if` statements replaced by a single branch
+    unsigned deadLoops = 0;        ///< While loops removed (condition is literal 0)
     unsigned unreachableStmts = 0; ///< Statements pruned after unconditional return
 };
 

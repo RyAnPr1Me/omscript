@@ -43,7 +43,7 @@ omsc_bigint_t* omsc_bigint_gcd(const omsc_bigint_t* a, const omsc_bigint_t* b);
 
 // ── Bitwise ───────────────────────────────────────────────────────────────────
 omsc_bigint_t* omsc_bigint_and(const omsc_bigint_t* a, const omsc_bigint_t* b);
-omsc_bigint_t* omsc_bigint_or (const omsc_bigint_t* a, const omsc_bigint_t* b);
+omsc_bigint_t* omsc_bigint_or(const omsc_bigint_t* a, const omsc_bigint_t* b);
 omsc_bigint_t* omsc_bigint_xor(const omsc_bigint_t* a, const omsc_bigint_t* b);
 omsc_bigint_t* omsc_bigint_shl(const omsc_bigint_t* a, long long n);
 omsc_bigint_t* omsc_bigint_shr(const omsc_bigint_t* a, long long n);
@@ -51,11 +51,11 @@ omsc_bigint_t* omsc_bigint_shr(const omsc_bigint_t* a, long long n);
 // ── Comparison ────────────────────────────────────────────────────────────────
 /// Returns -1, 0, or 1.
 int omsc_bigint_cmp(const omsc_bigint_t* a, const omsc_bigint_t* b);
-int omsc_bigint_eq (const omsc_bigint_t* a, const omsc_bigint_t* b); // 1 if equal
-int omsc_bigint_lt (const omsc_bigint_t* a, const omsc_bigint_t* b); // 1 if a < b
-int omsc_bigint_le (const omsc_bigint_t* a, const omsc_bigint_t* b); // 1 if a <= b
-int omsc_bigint_gt (const omsc_bigint_t* a, const omsc_bigint_t* b); // 1 if a > b
-int omsc_bigint_ge (const omsc_bigint_t* a, const omsc_bigint_t* b); // 1 if a >= b
+int omsc_bigint_eq(const omsc_bigint_t* a, const omsc_bigint_t* b); // 1 if equal
+int omsc_bigint_lt(const omsc_bigint_t* a, const omsc_bigint_t* b); // 1 if a < b
+int omsc_bigint_le(const omsc_bigint_t* a, const omsc_bigint_t* b); // 1 if a <= b
+int omsc_bigint_gt(const omsc_bigint_t* a, const omsc_bigint_t* b); // 1 if a > b
+int omsc_bigint_ge(const omsc_bigint_t* a, const omsc_bigint_t* b); // 1 if a >= b
 
 // ── Conversion ────────────────────────────────────────────────────────────────
 /// Returns a malloc'd NUL-terminated decimal string.  Caller must free() it.

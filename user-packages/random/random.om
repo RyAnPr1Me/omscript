@@ -1,3 +1,4 @@
+import std;
 // random package - pseudo-random number generation utilities
 // Uses a linear congruential generator (LCG)
 

@@ -18,9 +18,9 @@
 #include "hgoe_egraph.h"
 #include "ast.h"
 #include "egraph.h"
-#include <iostream>
 #include "opt_context.h"
 #include "pass_utils.h"
+#include <iostream>
 
 #include <algorithm>
 #include <cassert>
@@ -42,19 +42,19 @@ using namespace egraph;
 // ─────────────────────────────────────────────────────────────────────────────
 
 // instrClass encoding (matches NodeMeta::instrClass)
-static constexpr uint8_t kIntArith   = 0;
-static constexpr uint8_t kIntMul     = 1;
-static constexpr uint8_t kIntDiv     = 2;
-static constexpr uint8_t kFPArith    = 3;
-static constexpr uint8_t kFPMul      = 4;
-static constexpr uint8_t kFPDiv      = 5;
-static constexpr uint8_t kVectorOp   = 6;
-static constexpr uint8_t kLoad       = 7;
-static constexpr uint8_t kStore      = 8;
-static constexpr uint8_t kBranch     = 9;
-static constexpr uint8_t kShift      = 10;
+static constexpr uint8_t kIntArith = 0;
+static constexpr uint8_t kIntMul = 1;
+static constexpr uint8_t kIntDiv = 2;
+static constexpr uint8_t kFPArith = 3;
+static constexpr uint8_t kFPMul = 4;
+static constexpr uint8_t kFPDiv = 5;
+static constexpr uint8_t kVectorOp = 6;
+static constexpr uint8_t kLoad = 7;
+static constexpr uint8_t kStore = 8;
+static constexpr uint8_t kBranch = 9;
+static constexpr uint8_t kShift = 10;
 static constexpr uint8_t kComparison = 11;
-static constexpr uint8_t kOther      = 12;
+static constexpr uint8_t kOther = 12;
 
 egraph::MultiCost baselineCost(const ENode& node) noexcept {
     MultiCost mc;
@@ -64,7 +64,9 @@ egraph::MultiCost baselineCost(const ENode& node) noexcept {
     case Op::ConstF:
     case Op::Var:
     case Op::Nop:
-        mc.cycles = 0.0; mc.uops = 0.0; mc.latency = 0.0;
+        mc.cycles = 0.0;
+        mc.uops = 0.0;
+        mc.latency = 0.0;
         mc.registerPressure = 1.0;
         break;
 
@@ -72,28 +74,40 @@ egraph::MultiCost baselineCost(const ENode& node) noexcept {
     case Op::Add:
     case Op::Sub:
     case Op::Neg:
-        mc.cycles = 0.25; mc.uops = 1.0; mc.latency = 1.0;
-        mc.throughputPressure = 0.25; mc.registerPressure = 1.0;
+        mc.cycles = 0.25;
+        mc.uops = 1.0;
+        mc.latency = 1.0;
+        mc.throughputPressure = 0.25;
+        mc.registerPressure = 1.0;
         break;
 
     // Integer multiply: 3 cycle latency, 1 cycle throughput
     case Op::Mul:
-        mc.cycles = 1.0; mc.uops = 1.0; mc.latency = 3.0;
-        mc.throughputPressure = 1.0; mc.registerPressure = 1.0;
+        mc.cycles = 1.0;
+        mc.uops = 1.0;
+        mc.latency = 3.0;
+        mc.throughputPressure = 1.0;
+        mc.registerPressure = 1.0;
         break;
 
     // Integer divide/mod: expensive — 20-30 cycle latency on x86-64
     case Op::Div:
     case Op::Mod:
-        mc.cycles = 25.0; mc.uops = 10.0; mc.latency = 25.0;
-        mc.throughputPressure = 25.0; mc.registerPressure = 1.0;
+        mc.cycles = 25.0;
+        mc.uops = 10.0;
+        mc.latency = 25.0;
+        mc.throughputPressure = 25.0;
+        mc.registerPressure = 1.0;
         break;
 
     // Power: depends on implementation; model as a call (expensive)
     case Op::Pow:
     case Op::Sqrt:
-        mc.cycles = 20.0; mc.uops = 6.0; mc.latency = 20.0;
-        mc.throughputPressure = 20.0; mc.registerPressure = 1.0;
+        mc.cycles = 20.0;
+        mc.uops = 6.0;
+        mc.latency = 20.0;
+        mc.throughputPressure = 20.0;
+        mc.registerPressure = 1.0;
         break;
 
     // Bitwise ops: same as add (ALU, 1 cycle)
@@ -104,15 +118,21 @@ egraph::MultiCost baselineCost(const ENode& node) noexcept {
     case Op::LogAnd:
     case Op::LogOr:
     case Op::LogNot:
-        mc.cycles = 0.25; mc.uops = 1.0; mc.latency = 1.0;
-        mc.throughputPressure = 0.25; mc.registerPressure = 1.0;
+        mc.cycles = 0.25;
+        mc.uops = 1.0;
+        mc.latency = 1.0;
+        mc.throughputPressure = 0.25;
+        mc.registerPressure = 1.0;
         break;
 
     // Shifts: 1 cycle latency
     case Op::Shl:
     case Op::Shr:
-        mc.cycles = 0.5; mc.uops = 1.0; mc.latency = 1.0;
-        mc.throughputPressure = 0.5; mc.registerPressure = 1.0;
+        mc.cycles = 0.5;
+        mc.uops = 1.0;
+        mc.latency = 1.0;
+        mc.throughputPressure = 0.5;
+        mc.registerPressure = 1.0;
         break;
 
     // Comparisons: 1 cycle (flag-setting is free on x86 as part of ALU op)
@@ -122,20 +142,29 @@ egraph::MultiCost baselineCost(const ENode& node) noexcept {
     case Op::Le:
     case Op::Gt:
     case Op::Ge:
-        mc.cycles = 0.5; mc.uops = 1.0; mc.latency = 1.0;
-        mc.throughputPressure = 0.5; mc.registerPressure = 1.0;
+        mc.cycles = 0.5;
+        mc.uops = 1.0;
+        mc.latency = 1.0;
+        mc.throughputPressure = 0.5;
+        mc.registerPressure = 1.0;
         break;
 
     // Ternary (select): 1 cycle cmov
     case Op::Ternary:
-        mc.cycles = 0.5; mc.uops = 1.0; mc.latency = 1.0;
-        mc.branchPenalty = 0.0; mc.registerPressure = 1.0;
+        mc.cycles = 0.5;
+        mc.uops = 1.0;
+        mc.latency = 1.0;
+        mc.branchPenalty = 0.0;
+        mc.registerPressure = 1.0;
         break;
 
     // Call: very expensive (call overhead + unknown callee)
     case Op::Call:
-        mc.cycles = 10.0; mc.uops = 4.0; mc.latency = 10.0;
-        mc.throughputPressure = 5.0; mc.registerPressure = 4.0;
+        mc.cycles = 10.0;
+        mc.uops = 4.0;
+        mc.latency = 10.0;
+        mc.throughputPressure = 5.0;
+        mc.registerPressure = 4.0;
         mc.memoryPressure = 1.0; // may touch stack
         break;
     }
@@ -215,9 +244,7 @@ egraph::NodeMeta nodeMetaFor(const ENode& node) noexcept {
 // ─────────────────────────────────────────────────────────────────────────────
 
 HGOEGuidedOptimizer::HGOEGuidedOptimizer(HGOEGuidedConfig config)
-    : graph_(SaturationConfig{config.nodeLimit,
-                               config.iterLimit,
-                               config.enableConstantFolding}),
+    : graph_(SaturationConfig{config.nodeLimit, config.iterLimit, config.enableConstantFolding}),
       cfg_(std::move(config)) {}
 
 egraph::ClassId HGOEGuidedOptimizer::seed(ENode node) {
@@ -233,8 +260,12 @@ egraph::ClassId HGOEGuidedOptimizer::seedBinOp(Op op, ClassId lhs, ClassId rhs) 
     return graph_.addBinOp(op, lhs, rhs);
 }
 
-size_t HGOEGuidedOptimizer::numClasses() const { return graph_.numClasses(); }
-size_t HGOEGuidedOptimizer::numNodes()   const { return graph_.numNodes(); }
+size_t HGOEGuidedOptimizer::numClasses() const {
+    return graph_.numClasses();
+}
+size_t HGOEGuidedOptimizer::numNodes() const {
+    return graph_.numNodes();
+}
 
 double HGOEGuidedOptimizer::scalar(const MultiCost& mc) const noexcept {
     return scalarize(mc, cfg_.weights);
@@ -242,31 +273,31 @@ double HGOEGuidedOptimizer::scalar(const MultiCost& mc) const noexcept {
 
 // ── computeNodeCost ──────────────────────────────────────────────────────────
 
-MultiCost HGOEGuidedOptimizer::computeNodeCost(const ENode& node,
-                                                ClassId /*cls*/) {
+MultiCost HGOEGuidedOptimizer::computeNodeCost(const ENode& node, ClassId /*cls*/) {
     MultiCost mc = baselineCost(node);
     // Add children's best-known costs (critical-path max for latency,
     // sum for throughput and register pressure).
     double maxChildLatency = 0.0;
-    double sumChildCycles  = 0.0;
-    double maxChildReg     = 0.0;
-    double sumChildMem     = 0.0;
+    double sumChildCycles = 0.0;
+    double maxChildReg = 0.0;
+    double sumChildMem = 0.0;
 
     for (ClassId childId : node.children) {
         ClassId canonical = graph_.find(childId);
         const EClass& child = graph_.getClass(canonical);
         const MultiCost& cc = child.bestCost;
         maxChildLatency = std::max(maxChildLatency, cc.latency);
-        sumChildCycles  += cc.cycles;
-        maxChildReg     = std::max(maxChildReg, cc.registerPressure);
-        sumChildMem     += cc.memoryPressure;
+        sumChildCycles += cc.cycles;
+        maxChildReg = std::max(maxChildReg, cc.registerPressure);
+        sumChildMem += cc.memoryPressure;
     }
 
-    mc.latency            += maxChildLatency;
-    mc.cycles             += sumChildCycles;
-    mc.registerPressure   += maxChildReg;
-    mc.memoryPressure     += sumChildMem;
-    mc.throughputPressure += sumChildCycles;  // add only child contribution; own baseline already in mc.throughputPressure
+    mc.latency += maxChildLatency;
+    mc.cycles += sumChildCycles;
+    mc.registerPressure += maxChildReg;
+    mc.memoryPressure += sumChildMem;
+    mc.throughputPressure +=
+        sumChildCycles; // add only child contribution; own baseline already in mc.throughputPressure
     return mc;
 }
 
@@ -278,7 +309,8 @@ bool HGOEGuidedOptimizer::scoreClass(ClassId id) {
 
     bool improved = false;
     for (const ENode& node : cls.nodes) {
-        if (cls.hgoePruned) break;
+        if (cls.hgoePruned)
+            break;
         // Skip self-referential nodes: rules like `x * 1 → x` merge the Mul
         // class into the Var class, creating nodes whose canonicalized children
         // point back to the containing class.  Such nodes have infinite cost
@@ -286,9 +318,13 @@ bool HGOEGuidedOptimizer::scoreClass(ClassId id) {
         // selected as bestNode via the nodes.front() fallback in extractBest.
         bool selfRef = false;
         for (ClassId child : node.children) {
-            if (graph_.find(child) == canonical) { selfRef = true; break; }
+            if (graph_.find(child) == canonical) {
+                selfRef = true;
+                break;
+            }
         }
-        if (selfRef) continue;
+        if (selfRef)
+            continue;
         MultiCost cost = computeNodeCost(node, canonical);
         if (scalar(cost) < scalar(cls.bestCost)) {
             cls.bestCost = cost;
@@ -319,11 +355,11 @@ FeatureVec HGOEGuidedOptimizer::buildFeatureVec(ClassId id) {
         NodeMeta m = nodeMetaFor(node);
         fv.addNode(m);
     }
-    if (cls.constVal.has_value()) fv.isConstant = true;
+    if (cls.constVal.has_value())
+        fv.isConstant = true;
     if (cls.bestNode.has_value()) {
         fv.depth = static_cast<uint16_t>(cls.bestCost.latency);
-        fv.regPressure = static_cast<uint16_t>(
-            std::min(cls.bestCost.registerPressure, 65535.0));
+        fv.regPressure = static_cast<uint16_t>(std::min(cls.bestCost.registerPressure, 65535.0));
     }
     return fv;
 }
@@ -339,9 +375,8 @@ void HGOEGuidedOptimizer::updateLowerBound(ClassId id) {
     // Initialize to +∞ so the first nodeLB always wins; a zero initialization
     // means the comparison `scalar(nodeLB) < scalar(lb)` never fires for
     // multi-node classes since all costs are non-negative.
-    lb.cycles = lb.uops = lb.latency = lb.throughputPressure =
-        lb.registerPressure = lb.memoryPressure = lb.branchPenalty =
-            std::numeric_limits<double>::infinity();
+    lb.cycles = lb.uops = lb.latency = lb.throughputPressure = lb.registerPressure = lb.memoryPressure =
+        lb.branchPenalty = std::numeric_limits<double>::infinity();
 
     for (const ENode& node : cls.nodes) {
         MultiCost nodeLB = baselineCost(node); // leaf cost only
@@ -352,11 +387,11 @@ void HGOEGuidedOptimizer::updateLowerBound(ClassId id) {
             // Critical-path lower bound for latency
             nodeLB.latency += clb.latency;
             // Sum for the rest
-            nodeLB.cycles             += clb.cycles;
-            nodeLB.registerPressure   += clb.registerPressure;
-            nodeLB.memoryPressure     += clb.memoryPressure;
+            nodeLB.cycles += clb.cycles;
+            nodeLB.registerPressure += clb.registerPressure;
+            nodeLB.memoryPressure += clb.memoryPressure;
             nodeLB.throughputPressure += clb.throughputPressure;
-            nodeLB.branchPenalty      += clb.branchPenalty;
+            nodeLB.branchPenalty += clb.branchPenalty;
         }
         // The best possible lower bound across all nodes in this class
         if (scalar(nodeLB) < scalar(lb) || cls.nodes.size() == 1) {
@@ -368,13 +403,13 @@ void HGOEGuidedOptimizer::updateLowerBound(ClassId id) {
 
 // ── propagateCosts ───────────────────────────────────────────────────────────
 
-void HGOEGuidedOptimizer::propagateCosts(
-        const std::vector<ClassId>& dirtyClasses) {
+void HGOEGuidedOptimizer::propagateCosts(const std::vector<ClassId>& dirtyClasses) {
     // Simple BFS upward through the parent use-list exposed by EGraph.
     // We use the graph's getClass + nodes to find parents implicitly by
     // scanning all classes (for simplicity given the existing EGraph API).
     // This is bounded by the total node count which is capped by nodeLimit.
-    if (dirtyClasses.empty()) return;
+    if (dirtyClasses.empty())
+        return;
 
     std::unordered_set<ClassId> todo(dirtyClasses.begin(), dirtyClasses.end());
     std::unordered_set<ClassId> nextTodo;
@@ -389,7 +424,8 @@ void HGOEGuidedOptimizer::propagateCosts(
             // some may be merged away. find() canonicalises them.
             ClassId cid = static_cast<ClassId>(i);
             ClassId canonical = graph_.find(cid);
-            if (canonical != cid) continue; // merged into another class
+            if (canonical != cid)
+                continue; // merged into another class
 
             const EClass& cls = graph_.getClass(canonical);
             for (const ENode& node : cls.nodes) {
@@ -415,9 +451,11 @@ size_t HGOEGuidedOptimizer::pruneBelow(double threshold) {
     for (size_t i = 0; i < graph_.numClasses(); ++i) {
         ClassId cid = static_cast<ClassId>(i);
         ClassId canonical = graph_.find(cid);
-        if (canonical != cid) continue;
+        if (canonical != cid)
+            continue;
         EClass& cls = graph_.getClass(canonical);
-        if (cls.hgoePruned) continue;
+        if (cls.hgoePruned)
+            continue;
         if (scalar(cls.lowerBound) > threshold) {
             cls.hgoePruned = true;
             ++count;
@@ -428,9 +466,7 @@ size_t HGOEGuidedOptimizer::pruneBelow(double threshold) {
 
 // ── optimize ─────────────────────────────────────────────────────────────────
 
-HGOEGuidedStats HGOEGuidedOptimizer::optimize(
-        const std::vector<RewriteRule>& rules,
-        ClassId root) {
+HGOEGuidedStats HGOEGuidedOptimizer::optimize(const std::vector<RewriteRule>& rules, ClassId root) {
     HGOEGuidedStats stats;
     const bool haveRoot = (root != static_cast<ClassId>(-1));
 
@@ -451,17 +487,19 @@ HGOEGuidedStats HGOEGuidedOptimizer::optimize(
     if (haveRoot) {
         ClassId canonical = graph_.find(root);
         const EClass& rootCls = graph_.getClass(canonical);
-        globalBest_  = scalar(rootCls.bestCost);
+        globalBest_ = scalar(rootCls.bestCost);
         initialCost_ = globalBest_;
     } else {
         // Fallback: use min across all classes (may over-prune, acceptable
         // when the caller has not provided a root).
         for (size_t i = 0; i < graph_.numClasses(); ++i) {
             ClassId cid = static_cast<ClassId>(i);
-            if (graph_.find(cid) != cid) continue;
+            if (graph_.find(cid) != cid)
+                continue;
             const EClass& cls = graph_.getClass(cid);
             double s = scalar(cls.bestCost);
-            if (s < globalBest_) globalBest_ = s;
+            if (s < globalBest_)
+                globalBest_ = s;
         }
         initialCost_ = globalBest_;
     }
@@ -489,7 +527,8 @@ HGOEGuidedStats HGOEGuidedOptimizer::optimize(
         std::vector<ClassId> dirty;
         for (size_t i = 0; i < graph_.numClasses(); ++i) {
             ClassId cid = static_cast<ClassId>(i);
-            if (graph_.find(cid) != cid) continue;
+            if (graph_.find(cid) != cid)
+                continue;
             const EClass& cls = graph_.getClass(cid);
             if (!cls.hgoePruned && !cls.hgoeState.valid) {
                 if (scoreClass(cid)) {
@@ -502,12 +541,14 @@ HGOEGuidedStats HGOEGuidedOptimizer::optimize(
             ClassId canonical = graph_.find(root);
             const EClass& rootCls = graph_.getClass(canonical);
             double s = scalar(rootCls.bestCost);
-            if (s < globalBest_) globalBest_ = s;
+            if (s < globalBest_)
+                globalBest_ = s;
         } else {
             for (ClassId cid : dirty) {
                 const EClass& cls = graph_.getClass(graph_.find(cid));
                 double s = scalar(cls.bestCost);
-                if (s < globalBest_) globalBest_ = s;
+                if (s < globalBest_)
+                    globalBest_ = s;
             }
         }
 
@@ -517,7 +558,8 @@ HGOEGuidedStats HGOEGuidedOptimizer::optimize(
         // 1d. Update lower bounds
         for (size_t i = 0; i < graph_.numClasses(); ++i) {
             ClassId cid = static_cast<ClassId>(i);
-            if (graph_.find(cid) == cid) updateLowerBound(cid);
+            if (graph_.find(cid) == cid)
+                updateLowerBound(cid);
         }
 
         // 1e. Prune dominated branches
@@ -527,15 +569,18 @@ HGOEGuidedStats HGOEGuidedOptimizer::optimize(
         ++stats.iterations;
 
         // Throttle: stop this round if we already added enough nodes
-        if (nodesAdded >= cfg_.nodesPerIter) break;
+        if (nodesAdded >= cfg_.nodesPerIter)
+            break;
     }
 
-    if (stats.iterations >= cfg_.iterLimit) stats.hitIterLimit = true;
+    if (stats.iterations >= cfg_.iterLimit)
+        stats.hitIterLimit = true;
 
     // Phase 2: final scoring sweep to ensure all best-nodes are up to date
     for (size_t i = 0; i < graph_.numClasses(); ++i) {
         ClassId cid = static_cast<ClassId>(i);
-        if (graph_.find(cid) == cid) scoreClass(cid);
+        if (graph_.find(cid) == cid)
+            scoreClass(cid);
     }
 
     // Compute estimated speedup
@@ -550,9 +595,11 @@ HGOEGuidedStats HGOEGuidedOptimizer::optimize(
 ENode HGOEGuidedOptimizer::extractBest(ClassId root) {
     ClassId canonical = graph_.find(root);
     const EClass& cls = graph_.getClass(canonical);
-    if (cls.bestNode.has_value()) return *cls.bestNode;
+    if (cls.bestNode.has_value())
+        return *cls.bestNode;
     // Fallback: return first node
-    if (!cls.nodes.empty()) return cls.nodes.front();
+    if (!cls.nodes.empty())
+        return cls.nodes.front();
     return ENode(Op::Const, 0LL);
 }
 
@@ -567,7 +614,8 @@ double HGOEGuidedOptimizer::bestScalarCost(ClassId root) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 static ClassId astToEGraph(HGOEGuidedOptimizer& opt, const Expression* expr) {
-    if (!expr) return opt.seedConst(0);
+    if (!expr)
+        return opt.seedConst(0);
 
     switch (expr->type) {
     case ASTNodeType::LITERAL_EXPR: {
@@ -596,26 +644,46 @@ static ClassId astToEGraph(HGOEGuidedOptimizer& opt, const Expression* expr) {
         ClassId rhs = astToEGraph(opt, bin->right.get());
 
         Op op = Op::Nop;
-        if      (bin->op == "+")  op = Op::Add;
-        else if (bin->op == "-")  op = Op::Sub;
-        else if (bin->op == "*")  op = Op::Mul;
-        else if (bin->op == "/")  op = Op::Div;
-        else if (bin->op == "%")  op = Op::Mod;
-        else if (bin->op == "**") op = Op::Pow;
-        else if (bin->op == "&")  op = Op::BitAnd;
-        else if (bin->op == "|")  op = Op::BitOr;
-        else if (bin->op == "^")  op = Op::BitXor;
-        else if (bin->op == "<<") op = Op::Shl;
-        else if (bin->op == ">>") op = Op::Shr;
-        else if (bin->op == "==") op = Op::Eq;
-        else if (bin->op == "!=") op = Op::Ne;
-        else if (bin->op == "<")  op = Op::Lt;
-        else if (bin->op == "<=") op = Op::Le;
-        else if (bin->op == ">")  op = Op::Gt;
-        else if (bin->op == ">=") op = Op::Ge;
-        else if (bin->op == "&&") op = Op::LogAnd;
-        else if (bin->op == "||") op = Op::LogOr;
-        else return opt.seedVar("__binop_" + bin->op);
+        if (bin->op == "+")
+            op = Op::Add;
+        else if (bin->op == "-")
+            op = Op::Sub;
+        else if (bin->op == "*")
+            op = Op::Mul;
+        else if (bin->op == "/")
+            op = Op::Div;
+        else if (bin->op == "%")
+            op = Op::Mod;
+        else if (bin->op == "**")
+            op = Op::Pow;
+        else if (bin->op == "&")
+            op = Op::BitAnd;
+        else if (bin->op == "|")
+            op = Op::BitOr;
+        else if (bin->op == "^")
+            op = Op::BitXor;
+        else if (bin->op == "<<")
+            op = Op::Shl;
+        else if (bin->op == ">>")
+            op = Op::Shr;
+        else if (bin->op == "==")
+            op = Op::Eq;
+        else if (bin->op == "!=")
+            op = Op::Ne;
+        else if (bin->op == "<")
+            op = Op::Lt;
+        else if (bin->op == "<=")
+            op = Op::Le;
+        else if (bin->op == ">")
+            op = Op::Gt;
+        else if (bin->op == ">=")
+            op = Op::Ge;
+        else if (bin->op == "&&")
+            op = Op::LogAnd;
+        else if (bin->op == "||")
+            op = Op::LogOr;
+        else
+            return opt.seedVar("__binop_" + bin->op);
 
         return opt.seedBinOp(op, lhs, rhs);
     }
@@ -624,17 +692,21 @@ static ClassId astToEGraph(HGOEGuidedOptimizer& opt, const Expression* expr) {
         auto* un = static_cast<const UnaryExpr*>(expr);
         ClassId operand = astToEGraph(opt, un->operand.get());
         Op op = Op::Nop;
-        if      (un->op == "-") op = Op::Neg;
-        else if (un->op == "~") op = Op::BitNot;
-        else if (un->op == "!") op = Op::LogNot;
-        else return opt.seedVar("__unop_" + un->op);
+        if (un->op == "-")
+            op = Op::Neg;
+        else if (un->op == "~")
+            op = Op::BitNot;
+        else if (un->op == "!")
+            op = Op::LogNot;
+        else
+            return opt.seedVar("__unop_" + un->op);
         ENode n(op, std::vector<ClassId>{operand});
         return opt.seed(std::move(n));
     }
 
     case ASTNodeType::TERNARY_EXPR: {
         auto* tern = static_cast<const TernaryExpr*>(expr);
-        ClassId cond  = astToEGraph(opt, tern->condition.get());
+        ClassId cond = astToEGraph(opt, tern->condition.get());
         ClassId thenE = astToEGraph(opt, tern->thenExpr.get());
         ClassId elseE = astToEGraph(opt, tern->elseExpr.get());
         ENode n(Op::Ternary);
@@ -662,36 +734,84 @@ static ClassId astToEGraph(HGOEGuidedOptimizer& opt, const Expression* expr) {
 /// Map enode Op → OmScript operator string (binary).
 static std::string opToString(Op op) {
     switch (op) {
-    case Op::Add: return "+";    case Op::Sub: return "-";
-    case Op::Mul: return "*";    case Op::Div: return "/";
-    case Op::Mod: return "%";    case Op::Pow: return "**";
-    case Op::BitAnd: return "&"; case Op::BitOr: return "|";
-    case Op::BitXor: return "^"; case Op::Shl: return "<<";
-    case Op::Shr: return ">>";   case Op::Eq: return "==";
-    case Op::Ne: return "!=";    case Op::Lt: return "<";
-    case Op::Le: return "<=";    case Op::Gt: return ">";
-    case Op::Ge: return ">=";    case Op::LogAnd: return "&&";
-    case Op::LogOr: return "||";
-    default: return "";
+    case Op::Add:
+        return "+";
+    case Op::Sub:
+        return "-";
+    case Op::Mul:
+        return "*";
+    case Op::Div:
+        return "/";
+    case Op::Mod:
+        return "%";
+    case Op::Pow:
+        return "**";
+    case Op::BitAnd:
+        return "&";
+    case Op::BitOr:
+        return "|";
+    case Op::BitXor:
+        return "^";
+    case Op::Shl:
+        return "<<";
+    case Op::Shr:
+        return ">>";
+    case Op::Eq:
+        return "==";
+    case Op::Ne:
+        return "!=";
+    case Op::Lt:
+        return "<";
+    case Op::Le:
+        return "<=";
+    case Op::Gt:
+        return ">";
+    case Op::Ge:
+        return ">=";
+    case Op::LogAnd:
+        return "&&";
+    case Op::LogOr:
+        return "||";
+    default:
+        return "";
     }
 }
 
 static bool isBinaryOp(Op op) {
     switch (op) {
-    case Op::Add: case Op::Sub: case Op::Mul: case Op::Div: case Op::Mod:
-    case Op::BitAnd: case Op::BitOr: case Op::BitXor:
-    case Op::Shl: case Op::Shr:
-    case Op::Eq: case Op::Ne: case Op::Lt: case Op::Le: case Op::Gt: case Op::Ge:
-    case Op::LogAnd: case Op::LogOr: case Op::Pow:
+    case Op::Add:
+    case Op::Sub:
+    case Op::Mul:
+    case Op::Div:
+    case Op::Mod:
+    case Op::BitAnd:
+    case Op::BitOr:
+    case Op::BitXor:
+    case Op::Shl:
+    case Op::Shr:
+    case Op::Eq:
+    case Op::Ne:
+    case Op::Lt:
+    case Op::Le:
+    case Op::Gt:
+    case Op::Ge:
+    case Op::LogAnd:
+    case Op::LogOr:
+    case Op::Pow:
         return true;
-    default: return false;
+    default:
+        return false;
     }
 }
 
 static bool isUnaryOp(Op op) {
     switch (op) {
-    case Op::Neg: case Op::BitNot: case Op::LogNot: return true;
-    default: return false;
+    case Op::Neg:
+    case Op::BitNot:
+    case Op::LogNot:
+        return true;
+    default:
+        return false;
     }
 }
 
@@ -700,10 +820,8 @@ static bool isUnaryOp(Op op) {
 /// Returns nullptr if extraction fails (e.g. due to a structural cycle in the
 /// E-graph caused by incorrect merges), signalling to the caller that the
 /// optimisation should be abandoned.
-static std::unique_ptr<Expression> eNodeToAST(
-        HGOEGuidedOptimizer& opt,
-        ClassId cls,
-        std::unordered_map<ClassId, ENode>& visited) {
+static std::unique_ptr<Expression> eNodeToAST(HGOEGuidedOptimizer& opt, ClassId cls,
+                                              std::unordered_map<ClassId, ENode>& visited) {
 
     ClassId canonical = opt.graph().find(cls);
     // Cycle guard: if we are currently building this class (it's in-progress),
@@ -752,32 +870,32 @@ static std::unique_ptr<Expression> eNodeToAST(
         if (isBinaryOp(best.op) && best.children.size() == 2) {
             auto lhs = eNodeToAST(opt, best.children[0], visited);
             auto rhs = eNodeToAST(opt, best.children[1], visited);
-            if (!lhs || !rhs) return nullptr;
-            return std::make_unique<BinaryExpr>(
-                    opToString(best.op), std::move(lhs), std::move(rhs));
+            if (!lhs || !rhs)
+                return nullptr;
+            return std::make_unique<BinaryExpr>(opToString(best.op), std::move(lhs), std::move(rhs));
         }
         if (isUnaryOp(best.op) && best.children.size() == 1) {
             auto operand = eNodeToAST(opt, best.children[0], visited);
-            if (!operand) return nullptr;
-            std::string uop = (best.op == Op::Neg ? "-" :
-                               best.op == Op::BitNot ? "~" : "!");
+            if (!operand)
+                return nullptr;
+            std::string uop = (best.op == Op::Neg ? "-" : best.op == Op::BitNot ? "~" : "!");
             return std::make_unique<UnaryExpr>(uop, std::move(operand));
         }
         if (best.op == Op::Ternary && best.children.size() == 3) {
-            auto cond  = eNodeToAST(opt, best.children[0], visited);
+            auto cond = eNodeToAST(opt, best.children[0], visited);
             auto thenE = eNodeToAST(opt, best.children[1], visited);
             auto elseE = eNodeToAST(opt, best.children[2], visited);
             if (!cond || !thenE || !elseE)
                 return nullptr;
-            return std::make_unique<TernaryExpr>(
-                    std::move(cond), std::move(thenE), std::move(elseE));
+            return std::make_unique<TernaryExpr>(std::move(cond), std::move(thenE), std::move(elseE));
         }
         if (best.op == Op::Call) {
             std::vector<std::unique_ptr<Expression>> args;
             args.reserve(best.children.size());
             for (ClassId child : best.children) {
                 auto arg = eNodeToAST(opt, child, visited);
-                if (!arg) return nullptr;
+                if (!arg)
+                    return nullptr;
                 args.push_back(std::move(arg));
             }
             return std::make_unique<CallExpr>(best.name, std::move(args));
@@ -793,21 +911,16 @@ static std::unique_ptr<Expression> eNodeToAST(
 
 static std::vector<RewriteRule> getAllGuidedRules() {
     auto rules = getAlgebraicRules();
-    auto adv   = getAdvancedAlgebraicRules();
-    auto cmp   = getComparisonRules();
-    auto advC  = getAdvancedComparisonRules();
-    auto bw    = getBitwiseRules();
-    auto advB  = getAdvancedBitwiseRules();
-    rules.insert(rules.end(), std::make_move_iterator(adv.begin()),
-                               std::make_move_iterator(adv.end()));
-    rules.insert(rules.end(), std::make_move_iterator(cmp.begin()),
-                               std::make_move_iterator(cmp.end()));
-    rules.insert(rules.end(), std::make_move_iterator(advC.begin()),
-                               std::make_move_iterator(advC.end()));
-    rules.insert(rules.end(), std::make_move_iterator(bw.begin()),
-                               std::make_move_iterator(bw.end()));
-    rules.insert(rules.end(), std::make_move_iterator(advB.begin()),
-                               std::make_move_iterator(advB.end()));
+    auto adv = getAdvancedAlgebraicRules();
+    auto cmp = getComparisonRules();
+    auto advC = getAdvancedComparisonRules();
+    auto bw = getBitwiseRules();
+    auto advB = getAdvancedBitwiseRules();
+    rules.insert(rules.end(), std::make_move_iterator(adv.begin()), std::make_move_iterator(adv.end()));
+    rules.insert(rules.end(), std::make_move_iterator(cmp.begin()), std::make_move_iterator(cmp.end()));
+    rules.insert(rules.end(), std::make_move_iterator(advC.begin()), std::make_move_iterator(advC.end()));
+    rules.insert(rules.end(), std::make_move_iterator(bw.begin()), std::make_move_iterator(bw.end()));
+    rules.insert(rules.end(), std::make_move_iterator(advB.begin()), std::make_move_iterator(advB.end()));
     return rules;
 }
 
@@ -824,7 +937,8 @@ static std::vector<RewriteRule> getAllGuidedRules() {
 /// be represented (IndexExpr, FieldExpr, etc.) map to the opaque sentinel and
 /// would produce an unknown-variable error after extraction.
 static bool isRoundTrippable(const Expression* expr) {
-    if (!expr) return false;
+    if (!expr)
+        return false;
     switch (expr->type) {
     case ASTNodeType::LITERAL_EXPR: {
         // String literals map to a Var by prefix convention — acceptable only
@@ -837,8 +951,7 @@ static bool isRoundTrippable(const Expression* expr) {
         return true;
     case ASTNodeType::BINARY_EXPR: {
         auto* bin = static_cast<const BinaryExpr*>(expr);
-        return isRoundTrippable(bin->left.get()) &&
-               isRoundTrippable(bin->right.get());
+        return isRoundTrippable(bin->left.get()) && isRoundTrippable(bin->right.get());
     }
     case ASTNodeType::UNARY_EXPR: {
         auto* un = static_cast<const UnaryExpr*>(expr);
@@ -846,14 +959,14 @@ static bool isRoundTrippable(const Expression* expr) {
     }
     case ASTNodeType::TERNARY_EXPR: {
         auto* tern = static_cast<const TernaryExpr*>(expr);
-        return isRoundTrippable(tern->condition.get()) &&
-               isRoundTrippable(tern->thenExpr.get()) &&
+        return isRoundTrippable(tern->condition.get()) && isRoundTrippable(tern->thenExpr.get()) &&
                isRoundTrippable(tern->elseExpr.get());
     }
     case ASTNodeType::CALL_EXPR: {
         auto* call = static_cast<const CallExpr*>(expr);
         for (const auto& arg : call->arguments)
-            if (!isRoundTrippable(arg.get())) return false;
+            if (!isRoundTrippable(arg.get()))
+                return false;
         return true;
     }
     default:
@@ -865,17 +978,16 @@ static bool isRoundTrippable(const Expression* expr) {
 
 /// Optimise a single expression in-place.  Returns the new (possibly
 /// different) AST expression, or nullptr if no improvement found.
-static std::unique_ptr<Expression> optimiseExpr(
-        Expression* expr,
-        const std::vector<RewriteRule>& rules,
-        const HGOEGuidedConfig& cfg,
-        HGOEGuidedStats& stats) {
-    if (!expr) return nullptr;
+static std::unique_ptr<Expression> optimiseExpr(Expression* expr, const std::vector<RewriteRule>& rules,
+                                                const HGOEGuidedConfig& cfg, HGOEGuidedStats& stats) {
+    if (!expr)
+        return nullptr;
 
     // Guard: only optimise expressions whose entire subtree can be faithfully
     // round-tripped through the e-graph.  Complex sub-trees (IndexExpr, etc.)
     // would be lost and replaced with an undefined __opaque variable.
-    if (!isRoundTrippable(expr)) return nullptr;
+    if (!isRoundTrippable(expr))
+        return nullptr;
 
     HGOEGuidedOptimizer opt(cfg);
 
@@ -886,7 +998,7 @@ static std::unique_ptr<Expression> optimiseExpr(
     // the pruning threshold is set relative to this expression's cost).
     double origCost = 0.0;
     {
-        HGOEGuidedStats pre = opt.optimize({}, root);  // no rules → just scoring
+        HGOEGuidedStats pre = opt.optimize({}, root); // no rules → just scoring
         origCost = opt.bestScalarCost(root);
         (void)pre;
     }
@@ -897,11 +1009,11 @@ static std::unique_ptr<Expression> optimiseExpr(
     HGOEGuidedStats s = opt2.optimize(rules, root2);
     double bestCost = opt2.bestScalarCost(root2);
 
-    stats.iterations    += s.iterations;
-    stats.nodesAdded    += s.nodesAdded;
+    stats.iterations += s.iterations;
+    stats.nodesAdded += s.nodesAdded;
     stats.classesPruned += s.classesPruned;
-    stats.rewrites      += s.rewrites;
-    stats.merges        += s.merges;
+    stats.rewrites += s.rewrites;
+    stats.merges += s.merges;
 
     if (bestCost >= origCost * 0.99) {
         // Not meaningfully cheaper — skip
@@ -911,11 +1023,10 @@ static std::unique_ptr<Expression> optimiseExpr(
     // Convert best back to AST
     std::unordered_map<ClassId, ENode> visited;
     auto result = eNodeToAST(opt2, root2, visited);
-    if (!result) return nullptr;
+    if (!result)
+        return nullptr;
 
-    stats.estimatedSpeedup += (origCost > 0)
-        ? (origCost - bestCost) / origCost * 100.0
-        : 0.0;
+    stats.estimatedSpeedup += (origCost > 0) ? (origCost - bestCost) / origCost * 100.0 : 0.0;
 
     return result;
 }
@@ -927,18 +1038,17 @@ static std::unique_ptr<Expression> optimiseExpr(
 /// Replace `*exprPtr` in-place with the HGOE-optimised form.
 /// The statement/declaration owning the expression holds a unique_ptr<Expression>;
 /// we receive a pointer-to-that-pointer so we can reassign it.
-static void visitExpr(std::unique_ptr<Expression>& exprPtr,
-                      const std::vector<RewriteRule>& rules,
-                      const HGOEGuidedConfig& cfg,
-                      HGOEGuidedStats& stats) {
-    if (!exprPtr) return;
+static void visitExpr(std::unique_ptr<Expression>& exprPtr, const std::vector<RewriteRule>& rules,
+                      const HGOEGuidedConfig& cfg, HGOEGuidedStats& stats) {
+    if (!exprPtr)
+        return;
     Expression* expr = exprPtr.get();
 
     // Recurse into children first (bottom-up)
     switch (expr->type) {
     case ASTNodeType::BINARY_EXPR: {
         auto* bin = static_cast<BinaryExpr*>(expr);
-        visitExpr(bin->left,  rules, cfg, stats);
+        visitExpr(bin->left, rules, cfg, stats);
         visitExpr(bin->right, rules, cfg, stats);
         break;
     }
@@ -950,8 +1060,8 @@ static void visitExpr(std::unique_ptr<Expression>& exprPtr,
     case ASTNodeType::TERNARY_EXPR: {
         auto* tern = static_cast<TernaryExpr*>(expr);
         visitExpr(tern->condition, rules, cfg, stats);
-        visitExpr(tern->thenExpr,  rules, cfg, stats);
-        visitExpr(tern->elseExpr,  rules, cfg, stats);
+        visitExpr(tern->thenExpr, rules, cfg, stats);
+        visitExpr(tern->elseExpr, rules, cfg, stats);
         break;
     }
     case ASTNodeType::CALL_EXPR: {
@@ -984,7 +1094,7 @@ static void visitExpr(std::unique_ptr<Expression>& exprPtr,
     case ASTNodeType::FIELD_ASSIGN_EXPR: {
         auto* fa = static_cast<FieldAssignExpr*>(expr);
         visitExpr(fa->object, rules, cfg, stats);
-        visitExpr(fa->value,  rules, cfg, stats);
+        visitExpr(fa->value, rules, cfg, stats);
         break;
     }
     case ASTNodeType::SPREAD_EXPR:
@@ -1002,7 +1112,8 @@ static void visitExpr(std::unique_ptr<Expression>& exprPtr,
     case ASTNodeType::REBORROW_EXPR: {
         auto* rb = static_cast<ReborrowExpr*>(expr);
         visitExpr(rb->source, rules, cfg, stats);
-        if (rb->indexExpr) visitExpr(rb->indexExpr, rules, cfg, stats);
+        if (rb->indexExpr)
+            visitExpr(rb->indexExpr, rules, cfg, stats);
         break;
     }
     case ASTNodeType::RANGE_ANNOT_EXPR:
@@ -1017,7 +1128,7 @@ static void visitExpr(std::unique_ptr<Expression>& exprPtr,
     case ASTNodeType::DICT_EXPR: {
         auto* de = static_cast<DictExpr*>(expr);
         for (auto& p : de->pairs) {
-            visitExpr(p.first,  rules, cfg, stats);
+            visitExpr(p.first, rules, cfg, stats);
             visitExpr(p.second, rules, cfg, stats);
         }
         break;
@@ -1039,28 +1150,24 @@ static void visitExpr(std::unique_ptr<Expression>& exprPtr,
 }
 
 /// Walk all statements in a block, calling visitExpr for each expression.
-static void visitStmt(Statement* stmt,
-                      const std::vector<RewriteRule>& rules,
-                      const HGOEGuidedConfig& cfg,
+static void visitStmt(Statement* stmt, const std::vector<RewriteRule>& rules, const HGOEGuidedConfig& cfg,
                       HGOEGuidedStats& stats);
 
 // ── LICM helpers ─────────────────────────────────────────────────────────────
 
 /// Returns true when @p expr references any identifier in @p vars.
-static bool exprRefersToAny(const Expression* expr,
-                             const std::unordered_set<std::string>& vars) {
-    if (!expr) return false;
+static bool exprRefersToAny(const Expression* expr, const std::unordered_set<std::string>& vars) {
+    if (!expr)
+        return false;
     switch (expr->type) {
     case ASTNodeType::IDENTIFIER_EXPR:
         return vars.count(static_cast<const IdentifierExpr*>(expr)->name) > 0;
     case ASTNodeType::BINARY_EXPR: {
         const auto* b = static_cast<const BinaryExpr*>(expr);
-        return exprRefersToAny(b->left.get(), vars)
-            || exprRefersToAny(b->right.get(), vars);
+        return exprRefersToAny(b->left.get(), vars) || exprRefersToAny(b->right.get(), vars);
     }
     case ASTNodeType::UNARY_EXPR:
-        return exprRefersToAny(
-            static_cast<const UnaryExpr*>(expr)->operand.get(), vars);
+        return exprRefersToAny(static_cast<const UnaryExpr*>(expr)->operand.get(), vars);
     case ASTNodeType::CALL_EXPR:
         return true; // conservative: treat all calls as non-invariant
     default:
@@ -1070,7 +1177,8 @@ static bool exprRefersToAny(const Expression* expr,
 
 /// Returns true when @p expr is a pure, side-effect-free expression.
 static bool exprIsPure(const Expression* expr) {
-    if (!expr) return true;
+    if (!expr)
+        return true;
     switch (expr->type) {
     case ASTNodeType::LITERAL_EXPR:
     case ASTNodeType::IDENTIFIER_EXPR:
@@ -1080,8 +1188,7 @@ static bool exprIsPure(const Expression* expr) {
         return exprIsPure(b->left.get()) && exprIsPure(b->right.get());
     }
     case ASTNodeType::UNARY_EXPR:
-        return exprIsPure(
-            static_cast<const UnaryExpr*>(expr)->operand.get());
+        return exprIsPure(static_cast<const UnaryExpr*>(expr)->operand.get());
     case ASTNodeType::CALL_EXPR:
         return false; // calls may have side effects
     default:
@@ -1090,9 +1197,9 @@ static bool exprIsPure(const Expression* expr) {
 }
 
 /// Collect names of all variables written by @p stmt or its descendants.
-static void collectWrittenVars(const Statement* stmt,
-                                std::unordered_set<std::string>& out) {
-    if (!stmt) return;
+static void collectWrittenVars(const Statement* stmt, std::unordered_set<std::string>& out) {
+    if (!stmt)
+        return;
     switch (stmt->type) {
     case ASTNodeType::VAR_DECL:
         out.insert(static_cast<const VarDecl*>(stmt)->name);
@@ -1102,7 +1209,8 @@ static void collectWrittenVars(const Statement* stmt,
         break;
     case ASTNodeType::BLOCK: {
         const auto* blk = static_cast<const BlockStmt*>(stmt);
-        for (const auto& s : blk->statements) collectWrittenVars(s.get(), out);
+        for (const auto& s : blk->statements)
+            collectWrittenVars(s.get(), out);
         break;
     }
     case ASTNodeType::IF_STMT: {
@@ -1153,11 +1261,10 @@ static void collectWrittenVars(const Statement* stmt,
     }
 }
 
-static void visitBlock(BlockStmt* block,
-                       const std::vector<RewriteRule>& rules,
-                       const HGOEGuidedConfig& cfg,
+static void visitBlock(BlockStmt* block, const std::vector<RewriteRule>& rules, const HGOEGuidedConfig& cfg,
                        HGOEGuidedStats& stats) {
-    if (!block) return;
+    if (!block)
+        return;
     for (auto& s : block->statements)
         visitStmt(s.get(), rules, cfg, stats);
 
@@ -1169,9 +1276,15 @@ static void visitBlock(BlockStmt* block,
     size_t i = 0;
     while (i < block->statements.size()) {
         Statement* s = block->statements[i].get();
-        if (!s || s->type != ASTNodeType::FOR_STMT) { ++i; continue; }
+        if (!s || s->type != ASTNodeType::FOR_STMT) {
+            ++i;
+            continue;
+        }
         auto* fs = static_cast<ForStmt*>(s);
-        if (!fs->body || fs->body->type != ASTNodeType::BLOCK) { ++i; continue; }
+        if (!fs->body || fs->body->type != ASTNodeType::BLOCK) {
+            ++i;
+            continue;
+        }
         auto* body = static_cast<BlockStmt*>(fs->body.get());
 
         // Build the set of loop-variant variables (iterator + all written).
@@ -1186,9 +1299,8 @@ static void visitBlock(BlockStmt* block,
             bool doHoist = false;
             if (bodyStmt && bodyStmt->type == ASTNodeType::VAR_DECL) {
                 const auto* vd = static_cast<const VarDecl*>(bodyStmt.get());
-                if (vd->initializer
-                    && exprIsPure(vd->initializer.get())
-                    && !exprRefersToAny(vd->initializer.get(), loopVars)) {
+                if (vd->initializer && exprIsPure(vd->initializer.get()) &&
+                    !exprRefersToAny(vd->initializer.get(), loopVars)) {
                     doHoist = true;
                 }
             }
@@ -1209,9 +1321,7 @@ static void visitBlock(BlockStmt* block,
         // Insert hoisted declarations just before the FOR_STMT at index i.
         const size_t numHoisted = toHoist.size();
         for (size_t h = 0; h < numHoisted; ++h) {
-            block->statements.insert(
-                block->statements.begin() + static_cast<ptrdiff_t>(i + h),
-                std::move(toHoist[h]));
+            block->statements.insert(block->statements.begin() + static_cast<ptrdiff_t>(i + h), std::move(toHoist[h]));
         }
         // The FOR_STMT is now at i + numHoisted; advance past it.
         i += numHoisted + 1;
@@ -1222,51 +1332,60 @@ static void visitBlock(BlockStmt* block,
     }
 }
 
-static void visitStmt(Statement* stmt,
-                      const std::vector<RewriteRule>& rules,
-                      const HGOEGuidedConfig& cfg,
+static void visitStmt(Statement* stmt, const std::vector<RewriteRule>& rules, const HGOEGuidedConfig& cfg,
                       HGOEGuidedStats& stats) {
-    if (!stmt) return;
+    if (!stmt)
+        return;
     switch (stmt->type) {
     case ASTNodeType::VAR_DECL: {
         auto* vd = static_cast<VarDecl*>(stmt);
-        if (vd->initializer) visitExpr(vd->initializer, rules, cfg, stats);
+        if (vd->initializer)
+            visitExpr(vd->initializer, rules, cfg, stats);
         break;
     }
     case ASTNodeType::EXPR_STMT: {
         auto* es = static_cast<ExprStmt*>(stmt);
-        if (es->expression) visitExpr(es->expression, rules, cfg, stats);
+        if (es->expression)
+            visitExpr(es->expression, rules, cfg, stats);
         break;
     }
     case ASTNodeType::RETURN_STMT: {
         auto* rs = static_cast<ReturnStmt*>(stmt);
-        if (rs->value) visitExpr(rs->value, rules, cfg, stats);
+        if (rs->value)
+            visitExpr(rs->value, rules, cfg, stats);
         break;
     }
     case ASTNodeType::IF_STMT: {
         auto* is = static_cast<IfStmt*>(stmt);
-        if (is->condition) visitExpr(is->condition, rules, cfg, stats);
+        if (is->condition)
+            visitExpr(is->condition, rules, cfg, stats);
         visitStmt(is->thenBranch.get(), rules, cfg, stats);
-        if (is->elseBranch) visitStmt(is->elseBranch.get(), rules, cfg, stats);
+        if (is->elseBranch)
+            visitStmt(is->elseBranch.get(), rules, cfg, stats);
         break;
     }
     case ASTNodeType::WHILE_STMT: {
         auto* ws = static_cast<WhileStmt*>(stmt);
-        if (ws->condition) visitExpr(ws->condition, rules, cfg, stats);
+        if (ws->condition)
+            visitExpr(ws->condition, rules, cfg, stats);
         visitStmt(ws->body.get(), rules, cfg, stats);
         break;
     }
     case ASTNodeType::FOR_STMT: {
         auto* fs = static_cast<ForStmt*>(stmt);
-        if (fs->start) visitExpr(fs->start, rules, cfg, stats);
-        if (fs->end)   visitExpr(fs->end,   rules, cfg, stats);
-        if (fs->step)  visitExpr(fs->step,  rules, cfg, stats);
+        if (fs->start)
+            visitExpr(fs->start, rules, cfg, stats);
+        if (fs->end)
+            visitExpr(fs->end, rules, cfg, stats);
+        if (fs->step)
+            visitExpr(fs->step, rules, cfg, stats);
         visitStmt(fs->body.get(), rules, cfg, stats);
         break;
     }
     case ASTNodeType::FOR_EACH_STMT: {
         auto* fes = static_cast<ForEachStmt*>(stmt);
-        if (fes->collection) visitExpr(fes->collection, rules, cfg, stats);
+        if (fes->collection)
+            visitExpr(fes->collection, rules, cfg, stats);
         visitStmt(fes->body.get(), rules, cfg, stats);
         break;
     }
@@ -1276,28 +1395,35 @@ static void visitStmt(Statement* stmt,
     }
     case ASTNodeType::THROW_STMT: {
         auto* ts = static_cast<ThrowStmt*>(stmt);
-        if (ts->value) visitExpr(ts->value, rules, cfg, stats);
+        if (ts->value)
+            visitExpr(ts->value, rules, cfg, stats);
         break;
     }
     case ASTNodeType::DO_WHILE_STMT: {
         auto* dw = static_cast<DoWhileStmt*>(stmt);
         visitStmt(dw->body.get(), rules, cfg, stats);
-        if (dw->condition) visitExpr(dw->condition, rules, cfg, stats);
+        if (dw->condition)
+            visitExpr(dw->condition, rules, cfg, stats);
         break;
     }
     case ASTNodeType::SWITCH_STMT: {
         auto* sw = static_cast<SwitchStmt*>(stmt);
-        if (sw->condition) visitExpr(sw->condition, rules, cfg, stats);
+        if (sw->condition)
+            visitExpr(sw->condition, rules, cfg, stats);
         for (auto& sc : sw->cases) {
-            if (sc.value) visitExpr(sc.value, rules, cfg, stats);
-            for (auto& val : sc.values) visitExpr(val, rules, cfg, stats);
-            for (auto& s : sc.body) visitStmt(s.get(), rules, cfg, stats);
+            if (sc.value)
+                visitExpr(sc.value, rules, cfg, stats);
+            for (auto& val : sc.values)
+                visitExpr(val, rules, cfg, stats);
+            for (auto& s : sc.body)
+                visitStmt(s.get(), rules, cfg, stats);
         }
         break;
     }
     case ASTNodeType::CATCH_STMT: {
         auto* cs = static_cast<CatchStmt*>(stmt);
-        if (cs->body) visitBlock(cs->body.get(), rules, cfg, stats);
+        if (cs->body)
+            visitBlock(cs->body.get(), rules, cfg, stats);
         break;
     }
     case ASTNodeType::DEFER_STMT: {
@@ -1307,7 +1433,8 @@ static void visitStmt(Statement* stmt,
     }
     case ASTNodeType::MOVE_DECL: {
         auto* md = static_cast<MoveDecl*>(stmt);
-        if (md->initializer) visitExpr(md->initializer, rules, cfg, stats);
+        if (md->initializer)
+            visitExpr(md->initializer, rules, cfg, stats);
         break;
     }
     case ASTNodeType::PREFETCH_STMT: {
@@ -1320,15 +1447,19 @@ static void visitStmt(Statement* stmt,
     }
     case ASTNodeType::PIPELINE_STMT: {
         auto* pl = static_cast<PipelineStmt*>(stmt);
-        if (pl->count) visitExpr(pl->count, rules, cfg, stats);
+        if (pl->count)
+            visitExpr(pl->count, rules, cfg, stats);
         for (auto& stage : pl->stages)
-            if (stage.body) visitBlock(stage.body.get(), rules, cfg, stats);
+            if (stage.body)
+                visitBlock(stage.body.get(), rules, cfg, stats);
         break;
     }
     case ASTNodeType::ASSUME_STMT: {
         auto* as = static_cast<AssumeStmt*>(stmt);
-        if (as->condition) visitExpr(as->condition, rules, cfg, stats);
-        if (as->deoptBody) visitStmt(as->deoptBody.get(), rules, cfg, stats);
+        if (as->condition)
+            visitExpr(as->condition, rules, cfg, stats);
+        if (as->deoptBody)
+            visitStmt(as->deoptBody.get(), rules, cfg, stats);
         break;
     }
     default:
@@ -1340,16 +1471,15 @@ static void visitStmt(Statement* stmt,
 // runHGOEGuidedPass — top-level driver
 // ─────────────────────────────────────────────────────────────────────────────
 
-HGOEGuidedStats runHGOEGuidedPass(Program& program,
-                                   const HGOEGuidedConfig& config,
-                                   bool verbose) {
+HGOEGuidedStats runHGOEGuidedPass(Program& program, const HGOEGuidedConfig& config, bool verbose) {
     HGOEGuidedStats total;
 
     // Collect all rules once (expensive: builds 200+ rule objects)
     const std::vector<RewriteRule> rules = getAllGuidedRules();
 
     forEachFunction(&program, [&](FunctionDecl* fn) {
-        if (!fn || !fn->body) return;
+        if (!fn || !fn->body)
+            return;
         visitBlock(fn->body.get(), rules, config, total);
     });
 

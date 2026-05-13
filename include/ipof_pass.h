@@ -76,9 +76,9 @@
 //   Level 2 — all opportunity types, up to 2 iterations (default at O3)
 //   Level 3 — all types, up to 3 iterations, NearVectorizable enabled (@optmax)
 
-#include <llvm/IR/Module.h>
-#include <llvm/Analysis/TargetTransformInfo.h>
 #include <cstdint>
+#include <llvm/Analysis/TargetTransformInfo.h>
+#include <llvm/IR/Module.h>
 
 namespace omscript::ipof {
 
@@ -128,28 +128,30 @@ struct IpofConfig {
 // ─────────────────────────────────────────────────────────────────────────────
 struct IpofStats {
     // Step 1 — detection
-    unsigned opportunitiesFound   = 0; ///< Total missed-op patterns detected
-    unsigned opportunitiesActed   = 0; ///< Patterns for which re-run was attempted
+    unsigned opportunitiesFound = 0; ///< Total missed-op patterns detected
+    unsigned opportunitiesActed = 0; ///< Patterns for which re-run was attempted
 
     // Step 3 — re-runs
-    unsigned rerunsApplied        = 0; ///< Successful re-run sequences applied
+    unsigned rerunsApplied = 0; ///< Successful re-run sequences applied
 
     // Step 4 — cost gate
     unsigned acceptedImprovements = 0; ///< Re-runs accepted (IR improved)
-    unsigned rejectedNoGain       = 0; ///< Re-runs rejected (no improvement)
-    unsigned rejectedOscillation  = 0; ///< Stopped due to repeated IR hash
+    unsigned rejectedNoGain = 0;       ///< Re-runs rejected (no improvement)
+    unsigned rejectedOscillation = 0;  ///< Stopped due to repeated IR hash
 
     // Per-kind accepted improvements
-    unsigned foldedConstants      = 0; ///< ConstantFolding improvements
-    unsigned eliminatedCSE        = 0; ///< CommonSubexpr improvements
-    unsigned eliminatedDead       = 0; ///< DeadCode improvements
-    unsigned eliminatedLoads      = 0; ///< RedundantLoad improvements
-    unsigned inlinedAndFolded     = 0; ///< CallWithConst improvements
+    unsigned foldedConstants = 0;  ///< ConstantFolding improvements
+    unsigned eliminatedCSE = 0;    ///< CommonSubexpr improvements
+    unsigned eliminatedDead = 0;   ///< DeadCode improvements
+    unsigned eliminatedLoads = 0;  ///< RedundantLoad improvements
+    unsigned inlinedAndFolded = 0; ///< CallWithConst improvements
 
     /// Net instruction reduction across all accepted improvements.
-    int64_t  netInstrReduction    = 0;
+    int64_t netInstrReduction = 0;
 
-    unsigned totalAccepted() const noexcept { return acceptedImprovements; }
+    unsigned totalAccepted() const noexcept {
+        return acceptedImprovements;
+    }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

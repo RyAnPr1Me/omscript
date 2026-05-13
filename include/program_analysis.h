@@ -53,7 +53,7 @@
 ///   - After PreIPO (feeds per-function OPTMAX pipeline)
 ///   - After per-function OPTMAX pipeline (feeds PostIPO)
 
-#include "ersl.h"  // EffectSummary
+#include "ersl.h" // EffectSummary
 
 #include <string>
 #include <unordered_map>
@@ -80,9 +80,9 @@ struct FunctionSnapshot {
     std::string name;
 
     // ── Basic metrics ─────────────────────────────────────────────────────
-    unsigned instructionCount = 0;  ///< Total instructions (non-declaration functions)
-    unsigned basicBlockCount  = 0;  ///< Number of basic blocks
-    bool     isDeclaration    = false; ///< True when there is no function body
+    unsigned instructionCount = 0; ///< Total instructions (non-declaration functions)
+    unsigned basicBlockCount = 0;  ///< Number of basic blocks
+    bool isDeclaration = false;    ///< True when there is no function body
 
     // ── Memory/side-effect attributes ────────────────────────────────────
     /// Does not access memory at all (readnone).  Safe for speculative execution
@@ -90,25 +90,25 @@ struct FunctionSnapshot {
     bool doesNotAccessMemory = false;
 
     /// Only reads memory (readonly).  Safe for hoisting above writes.
-    bool onlyReadsMemory     = false;
+    bool onlyReadsMemory = false;
 
     /// Does not free heap memory (nofree).  Loads past calls to this function
     /// can be freely reordered by the alias analyzer.
-    bool doesNotFreeMemory   = false;
+    bool doesNotFreeMemory = false;
 
     /// Always returns to its caller (willreturn).  No infinite loops or
     /// non-local exits; enables call speculation.
-    bool willReturn          = false;
+    bool willReturn = false;
 
     /// Does not throw (nounwind).  Eliminates unwind-path overhead.
-    bool doesNotThrow        = false;
+    bool doesNotThrow = false;
 
     /// Has no synchronization (nosync).  Safe for reordering around atomics.
-    bool noSync              = false;
+    bool noSync = false;
 
     // ── Inlining / specialization potential ──────────────────────────────
-    bool isAlwaysInline      = false; ///< Marked alwaysinline
-    bool isNoInline          = false; ///< Marked noinline
+    bool isAlwaysInline = false; ///< Marked alwaysinline
+    bool isNoInline = false;     ///< Marked noinline
 
     // ── Derived purity flag ───────────────────────────────────────────────
     /// Convenience: true iff doesNotAccessMemory && willReturn && doesNotThrow.
@@ -119,11 +119,11 @@ struct FunctionSnapshot {
     // ── Call-graph metrics ────────────────────────────────────────────────
     unsigned directCallerCount = 0; ///< Number of distinct call sites that call this function
     unsigned directCalleeCount = 0; ///< Number of distinct functions this function calls
-    bool     hasSelfRecursion  = false; ///< Has at least one self-recursive call site
+    bool hasSelfRecursion = false;  ///< Has at least one self-recursive call site
 
     // ── Loop structure ────────────────────────────────────────────────────
     unsigned topLevelLoopCount = 0; ///< Number of outermost loops in this function
-    unsigned maxLoopDepth      = 0; ///< Deepest loop nesting level observed
+    unsigned maxLoopDepth = 0;      ///< Deepest loop nesting level observed
 
     // ── Constant-argument call-site patterns ─────────────────────────────
     /// Number of call sites INSIDE this function (as caller) where all
@@ -168,10 +168,10 @@ struct ProgramFactsSnapshot {
     std::unordered_map<std::string, FunctionSnapshot> functions;
 
     // ── Module-level metrics ──────────────────────────────────────────────
-    unsigned totalFunctions     = 0; ///< All functions (including declarations)
-    unsigned definedFunctions   = 0; ///< Non-declaration functions
+    unsigned totalFunctions = 0;     ///< All functions (including declarations)
+    unsigned definedFunctions = 0;   ///< Non-declaration functions
     unsigned reachableFunctions = 0; ///< Reachable from an entry point
-    unsigned totalInstructions  = 0; ///< Sum of instruction counts across all defined functions
+    unsigned totalInstructions = 0;  ///< Sum of instruction counts across all defined functions
 
     // ── Interprocedural opportunities ────────────────────────────────────
     /// Total const-arg call sites across the module (as callee perspective).
@@ -231,9 +231,7 @@ struct ProgramFactsSnapshot {
 ///       computeProgramFacts is a pure-read operation that must not trigger new
 ///       analysis passes.  Callers that need guaranteed loop structure should
 ///       run a LoopAnalysis pass on the module before calling this function.
-ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
-                                         llvm::ModuleAnalysisManager& MAM,
-                                         unsigned wave);
+ProgramFactsSnapshot computeProgramFacts(llvm::Module& M, llvm::ModuleAnalysisManager& MAM, unsigned wave);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // eliminateDeadFunctions — remove unreachable internal functions from a module
@@ -247,8 +245,7 @@ ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
 /// the BFS was already done by computeProgramFacts(), so we reuse its results.
 ///
 /// @returns The number of functions removed from @p M.
-unsigned eliminateDeadFunctions(llvm::Module& M,
-                                const ProgramFactsSnapshot& snapshot);
+unsigned eliminateDeadFunctions(llvm::Module& M, const ProgramFactsSnapshot& snapshot);
 
 } // namespace omscript
 

@@ -1,3 +1,4 @@
+import std;
 // Optimized sum example using for loop
 fn sum_range(n) {
     var total = 0;

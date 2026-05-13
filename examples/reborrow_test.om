@@ -1,3 +1,4 @@
+import std;
 // Test reborrow: create a new borrow reference from an existing variable.
 fn main() {
     var x = 100;

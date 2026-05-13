@@ -50,8 +50,8 @@
 ///   • WidthOptPass — narrower range → fewer significant bits → smaller type.
 
 #include "ast.h"
-#include "opt_context.h"  // ValueRange
-#include "pass_utils.h"   // isIntLiteral, asIdentifier
+#include "opt_context.h" // ValueRange
+#include "pass_utils.h"  // isIntLiteral, asIdentifier
 
 #include <optional>
 #include <string>
@@ -68,8 +68,7 @@ using VarRangeMap = std::unordered_map<std::string, ValueRange>;
 /// The result is always conservative: if the true range cannot be narrowed
 /// below [INT64_MIN, INT64_MAX], `nullopt` is returned rather than a trivially
 /// wide range (callers can treat absence as "unknown / full range").
-std::optional<ValueRange> evalExprRange(const Expression* expr,
-                                         const VarRangeMap& env);
+std::optional<ValueRange> evalExprRange(const Expression* expr, const VarRangeMap& env);
 
 /// Returns true when the range of @p expr in environment @p env is provably
 /// non-negative (lower bound ≥ 0).

@@ -1,3 +1,4 @@
+import std;
 // Integer edge cases: signed arithmetic boundaries, shift boundaries,
 // division rounding toward zero, modulo sign semantics.  These exercise
 // codegen paths for poison-free semantics and signed-overflow handling

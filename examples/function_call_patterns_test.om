@@ -1,3 +1,4 @@
+import std;
 // Function call conventions: default parameter values, multiple return
 // paths, calls that pass values as both arguments and expressions.
 fn add3(a:i64, b:i64, c:i64) {

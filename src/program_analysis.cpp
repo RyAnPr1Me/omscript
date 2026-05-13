@@ -62,9 +62,11 @@ static bool allArgsConst(const llvm::CallBase* CB) noexcept {
     // A call with no arguments is vacuously "all args constant" — do NOT
     // return false here, otherwise pure zero-argument functions are excluded
     // from const-arg specialisation analysis.
-    if (CB->arg_empty()) return true;
+    if (CB->arg_empty())
+        return true;
     for (unsigned i = 0; i < CB->arg_size(); ++i)
-        if (!llvm::isa<llvm::Constant>(CB->getArgOperand(i))) return false;
+        if (!llvm::isa<llvm::Constant>(CB->getArgOperand(i)))
+            return false;
     return true;
 }
 
@@ -74,11 +76,11 @@ static bool allArgsConst(const llvm::CallBase* CB) noexcept {
 // function whose name is "main".
 // ─────────────────────────────────────────────────────────────────────────────
 
-static std::unordered_set<const llvm::Function*>
-collectEntryPoints(const llvm::Module& M) {
+static std::unordered_set<const llvm::Function*> collectEntryPoints(const llvm::Module& M) {
     std::unordered_set<const llvm::Function*> entries;
     for (const llvm::Function& F : M) {
-        if (F.isDeclaration()) continue;
+        if (F.isDeclaration())
+            continue;
         if (!F.hasLocalLinkage() || F.getName() == "main")
             entries.insert(&F);
     }
@@ -90,8 +92,7 @@ collectEntryPoints(const llvm::Module& M) {
 // Returns the set of reachable functions.
 // ─────────────────────────────────────────────────────────────────────────────
 
-static std::unordered_set<const llvm::Function*>
-computeReachable(const llvm::Module& M) {
+static std::unordered_set<const llvm::Function*> computeReachable(const llvm::Module& M) {
     const auto entries = collectEntryPoints(M);
     std::unordered_set<const llvm::Function*> visited;
     std::deque<const llvm::Function*> worklist(entries.begin(), entries.end());
@@ -104,9 +105,11 @@ computeReachable(const llvm::Module& M) {
         for (const llvm::BasicBlock& BB : *cur) {
             for (const llvm::Instruction& I : BB) {
                 const auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
-                if (!CB) continue;
+                if (!CB)
+                    continue;
                 const llvm::Function* callee = CB->getCalledFunction();
-                if (!callee || callee->isDeclaration()) continue;
+                if (!callee || callee->isDeclaration())
+                    continue;
                 if (visited.insert(callee).second)
                     worklist.push_back(callee);
             }
@@ -128,15 +131,14 @@ computeReachable(const llvm::Module& M) {
 // as an escape — pure functions cannot store the address.
 // ─────────────────────────────────────────────────────────────────────────────
 
-static bool computeHasEscapedLocals(
-    const llvm::Function& F,
-    const std::unordered_set<std::string>& pureFunctions) noexcept
-{
+static bool computeHasEscapedLocals(const llvm::Function& F,
+                                    const std::unordered_set<std::string>& pureFunctions) noexcept {
     for (const llvm::BasicBlock& BB : F) {
         for (const llvm::Instruction& I : BB) {
             // Only track alloca addresses.
             const auto* AI = llvm::dyn_cast<llvm::AllocaInst>(&I);
-            if (!AI) continue;
+            if (!AI)
+                continue;
 
             for (const llvm::User* U : AI->users()) {
                 // (c) Address is returned.
@@ -154,7 +156,8 @@ static bool computeHasEscapedLocals(
                 if (const auto* CB = llvm::dyn_cast<llvm::CallBase>(U)) {
                     const llvm::Function* callee = CB->getCalledFunction();
                     // Unknown callee (indirect call) → conservatively escape.
-                    if (!callee) return true;
+                    if (!callee)
+                        return true;
                     // Declaration or non-pure function → escape.
                     if (!pureFunctions.count(callee->getName().str()))
                         return true;
@@ -171,10 +174,7 @@ static bool computeHasEscapedLocals(
 // computeProgramFacts — public API
 // ─────────────────────────────────────────────────────────────────────────────
 
-ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
-                                         llvm::ModuleAnalysisManager& MAM,
-                                         unsigned wave)
-{
+ProgramFactsSnapshot computeProgramFacts(llvm::Module& M, llvm::ModuleAnalysisManager& MAM, unsigned wave) {
     ProgramFactsSnapshot snapshot;
     snapshot.wave = wave;
 
@@ -197,7 +197,7 @@ ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
 
     for (llvm::Function& F : M) {
         FunctionSnapshot fs;
-        fs.name          = F.getName().str();
+        fs.name = F.getName().str();
         fs.isDeclaration = F.isDeclaration();
 
         snapshot.totalFunctions++;
@@ -215,13 +215,13 @@ ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
 
         // ── Memory/effect attributes (read-only, no analysis needed) ─────
         fs.doesNotAccessMemory = F.doesNotAccessMemory();
-        fs.onlyReadsMemory     = F.onlyReadsMemory();
-        fs.doesNotFreeMemory   = F.hasFnAttribute(llvm::Attribute::NoFree);
-        fs.willReturn          = F.hasFnAttribute(llvm::Attribute::WillReturn);
-        fs.doesNotThrow        = F.doesNotThrow();
-        fs.noSync              = F.hasFnAttribute(llvm::Attribute::NoSync);
-        fs.isAlwaysInline      = F.hasFnAttribute(llvm::Attribute::AlwaysInline);
-        fs.isNoInline          = F.hasFnAttribute(llvm::Attribute::NoInline);
+        fs.onlyReadsMemory = F.onlyReadsMemory();
+        fs.doesNotFreeMemory = F.hasFnAttribute(llvm::Attribute::NoFree);
+        fs.willReturn = F.hasFnAttribute(llvm::Attribute::WillReturn);
+        fs.doesNotThrow = F.doesNotThrow();
+        fs.noSync = F.hasFnAttribute(llvm::Attribute::NoSync);
+        fs.isAlwaysInline = F.hasFnAttribute(llvm::Attribute::AlwaysInline);
+        fs.isNoInline = F.hasFnAttribute(llvm::Attribute::NoInline);
 
         // Derived purity: readnone + willreturn + nounwind
         fs.isPure = fs.doesNotAccessMemory && fs.willReturn && fs.doesNotThrow;
@@ -231,7 +231,7 @@ ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
         // record, then call deriveEffectSummary() to compute the full ERSL facts.
         {
             FunctionEffects fe;
-            fe.readsMemory  = !fs.doesNotAccessMemory;
+            fe.readsMemory = !fs.doesNotAccessMemory;
             // LLVM's onlyReadsMemory maps to our readonly — no writes.
             fe.writesMemory = !fs.doesNotAccessMemory && !fs.onlyReadsMemory;
             // I/O: a function is treated as having I/O only when it is NOT nosync
@@ -240,18 +240,18 @@ ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
             // indicator of a pure-computation function with no external effects.
             // We avoid flagging allocation/deallocation helpers as I/O — those are
             // captured separately via hasMutation/allocates below.
-            fe.hasIO         = !fs.noSync && !fs.willReturn && !fs.doesNotAccessMemory;
-            fe.hasMutation   = fe.writesMemory;
-            fe.mayThrow      = !fs.doesNotThrow;
-            fe.mayNotReturn  = !fs.willReturn;
+            fe.hasIO = !fs.noSync && !fs.willReturn && !fs.doesNotAccessMemory;
+            fe.hasMutation = fe.writesMemory;
+            fe.mayThrow = !fs.doesNotThrow;
+            fe.mayNotReturn = !fs.willReturn;
             // Allocation / deallocation cannot be inferred from basic attributes
             // without alias analysis; leave them false (conservative: not a concern
             // for max-safe-level computation at the IR level).
-            fe.allocates     = false;
-            fe.deallocates   = false;
+            fe.allocates = false;
+            fe.deallocates = false;
             fe.hasIndirectCall = false;
-            fe.readsGlobal   = false;
-            fe.writesGlobal  = false;
+            fe.readsGlobal = false;
+            fe.writesGlobal = false;
             fs.ersl = deriveEffectSummary(fe);
         }
 
@@ -263,9 +263,11 @@ ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
             for (const llvm::BasicBlock& BB : F) {
                 for (const llvm::Instruction& I : BB) {
                     const auto* CB = llvm::dyn_cast<llvm::CallBase>(&I);
-                    if (!CB) continue;
+                    if (!CB)
+                        continue;
                     llvm::Function* callee = CB->getCalledFunction();
-                    if (!callee) continue;
+                    if (!callee)
+                        continue;
 
                     // Self-recursion
                     if (callee == &F)
@@ -295,8 +297,7 @@ ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
                 if (LI) {
                     for (const llvm::Loop* L : *LI) {
                         fs.topLevelLoopCount++;
-                        fs.maxLoopDepth = std::max(fs.maxLoopDepth,
-                                                   maxDepth(L, 1u));
+                        fs.maxLoopDepth = std::max(fs.maxLoopDepth, maxDepth(L, 1u));
                     }
                 }
             }
@@ -308,7 +309,8 @@ ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
     // ── Post-walk: fill in cross-function counts ──────────────────────────
     for (auto& [fn, fs] : snapshot.functions) {
         const llvm::Function* Fptr = M.getFunction(fn);
-        if (!Fptr) continue;
+        if (!Fptr)
+            continue;
 
         // Callee count (distinct callees from this function)
         if (auto it = calleeMap.find(Fptr); it != calleeMap.end())
@@ -345,8 +347,7 @@ ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
         snapshot.totalConstArgCallSites += fs.constArgCallSitesAsCalleeCount;
 
         // Specialization candidates: ≥2 callers AND ≥1 all-const call site
-        if (!fs.isDeclaration && fs.directCallerCount >= 2 &&
-            fs.constArgCallSitesAsCalleeCount >= 1)
+        if (!fs.isDeclaration && fs.directCallerCount >= 2 && fs.constArgCallSitesAsCalleeCount >= 1)
             snapshot.specializationCandidates.insert(name);
     }
 
@@ -354,9 +355,9 @@ ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
     // Run after the aggregate pass so pureFunctions is complete.
     for (auto& [fn, fs] : snapshot.functions) {
         const llvm::Function* Fptr = M.getFunction(fn);
-        if (!Fptr || Fptr->isDeclaration()) continue;
-        fs.hasEscapedLocals =
-            computeHasEscapedLocals(*Fptr, snapshot.pureFunctions);
+        if (!Fptr || Fptr->isDeclaration())
+            continue;
+        fs.hasEscapedLocals = computeHasEscapedLocals(*Fptr, snapshot.pureFunctions);
     }
 
     return snapshot;
@@ -366,9 +367,7 @@ ProgramFactsSnapshot computeProgramFacts(llvm::Module& M,
 // eliminateDeadFunctions — public API
 // ─────────────────────────────────────────────────────────────────────────────
 
-unsigned eliminateDeadFunctions(llvm::Module& M,
-                                const ProgramFactsSnapshot& snapshot)
-{
+unsigned eliminateDeadFunctions(llvm::Module& M, const ProgramFactsSnapshot& snapshot) {
     unsigned removed = 0;
 
     // Collect functions to erase first; erasing while iterating is unsafe.
@@ -377,12 +376,15 @@ unsigned eliminateDeadFunctions(llvm::Module& M,
 
     for (const std::string& name : snapshot.unreachableFunctions) {
         llvm::Function* F = M.getFunction(name);
-        if (!F) continue;
+        if (!F)
+            continue;
         // Only remove functions with internal or private linkage — externally
         // visible functions may be called from outside the module.
-        if (!F->hasLocalLinkage()) continue;
+        if (!F->hasLocalLinkage())
+            continue;
         // Double-check: no uses remaining (guards against stale snapshots).
-        if (!F->use_empty()) continue;
+        if (!F->use_empty())
+            continue;
         toErase.push_back(F);
     }
 

@@ -1,3 +1,4 @@
+import std;
 // Test trigonometric and transcendental math built-in functions
 fn main() {
     var total = 0;

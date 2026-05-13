@@ -29,7 +29,8 @@ namespace egraph {
 /// Converts an AST Expression to an e-graph node, returning the class ID.
 /// Recursively converts sub-expressions.
 static ClassId astToEGraph(EGraph& graph, const Expression* expr) {
-    if (!expr) return graph.addConst(0);
+    if (!expr)
+        return graph.addConst(0);
 
     switch (expr->type) {
     case ASTNodeType::LITERAL_EXPR: {
@@ -58,25 +59,44 @@ static ClassId astToEGraph(EGraph& graph, const Expression* expr) {
 
         // Map OmScript binary operators to e-graph Ops
         Op op = Op::Nop;
-        if      (bin->op == "+")  op = Op::Add;
-        else if (bin->op == "-")  op = Op::Sub;
-        else if (bin->op == "*")  op = Op::Mul;
-        else if (bin->op == "/")  op = Op::Div;
-        else if (bin->op == "%")  op = Op::Mod;
-        else if (bin->op == "**") op = Op::Pow;
-        else if (bin->op == "&")  op = Op::BitAnd;
-        else if (bin->op == "|")  op = Op::BitOr;
-        else if (bin->op == "^")  op = Op::BitXor;
-        else if (bin->op == "<<") op = Op::Shl;
-        else if (bin->op == ">>") op = Op::Shr;
-        else if (bin->op == "==") op = Op::Eq;
-        else if (bin->op == "!=") op = Op::Ne;
-        else if (bin->op == "<")  op = Op::Lt;
-        else if (bin->op == "<=") op = Op::Le;
-        else if (bin->op == ">")  op = Op::Gt;
-        else if (bin->op == ">=") op = Op::Ge;
-        else if (bin->op == "&&") op = Op::LogAnd;
-        else if (bin->op == "||") op = Op::LogOr;
+        if (bin->op == "+")
+            op = Op::Add;
+        else if (bin->op == "-")
+            op = Op::Sub;
+        else if (bin->op == "*")
+            op = Op::Mul;
+        else if (bin->op == "/")
+            op = Op::Div;
+        else if (bin->op == "%")
+            op = Op::Mod;
+        else if (bin->op == "**")
+            op = Op::Pow;
+        else if (bin->op == "&")
+            op = Op::BitAnd;
+        else if (bin->op == "|")
+            op = Op::BitOr;
+        else if (bin->op == "^")
+            op = Op::BitXor;
+        else if (bin->op == "<<")
+            op = Op::Shl;
+        else if (bin->op == ">>")
+            op = Op::Shr;
+        else if (bin->op == "==")
+            op = Op::Eq;
+        else if (bin->op == "!=")
+            op = Op::Ne;
+        else if (bin->op == "<")
+            op = Op::Lt;
+        else if (bin->op == "<=")
+            op = Op::Le;
+        else if (bin->op == ">")
+            op = Op::Gt;
+        else if (bin->op == ">=")
+            op = Op::Ge;
+        else if (bin->op == "&&")
+            op = Op::LogAnd;
+        else if (bin->op == "||")
+            op = Op::LogOr;
         else {
             // Unknown operator — treat as opaque
             return graph.addVar("__binop_" + bin->op);
@@ -90,9 +110,12 @@ static ClassId astToEGraph(EGraph& graph, const Expression* expr) {
         const ClassId operand = astToEGraph(graph, un->operand.get());
 
         Op op = Op::Nop;
-        if      (un->op == "-") op = Op::Neg;
-        else if (un->op == "~") op = Op::BitNot;
-        else if (un->op == "!") op = Op::LogNot;
+        if (un->op == "-")
+            op = Op::Neg;
+        else if (un->op == "~")
+            op = Op::BitNot;
+        else if (un->op == "!")
+            op = Op::LogNot;
         else {
             return graph.addVar("__unop_" + un->op);
         }
@@ -134,39 +157,77 @@ static ClassId astToEGraph(EGraph& graph, const Expression* expr) {
 /// Map e-graph Op back to OmScript operator string.
 static std::string opToString(Op op) {
     switch (op) {
-    case Op::Add: return "+";
-    case Op::Sub: return "-";
-    case Op::Mul: return "*";
-    case Op::Div: return "/";
-    case Op::Mod: return "%";
-    case Op::Pow: return "**";
-    case Op::BitAnd: return "&";
-    case Op::BitOr:  return "|";
-    case Op::BitXor: return "^";
-    case Op::Shl: return "<<";
-    case Op::Shr: return ">>";
-    case Op::Eq: return "==";
-    case Op::Ne: return "!=";
-    case Op::Lt: return "<";
-    case Op::Le: return "<=";
-    case Op::Gt: return ">";
-    case Op::Ge: return ">=";
-    case Op::LogAnd: return "&&";
-    case Op::LogOr:  return "||";
-    case Op::Neg: return "-";
-    case Op::BitNot: return "~";
-    case Op::LogNot: return "!";
-    default: return "";
+    case Op::Add:
+        return "+";
+    case Op::Sub:
+        return "-";
+    case Op::Mul:
+        return "*";
+    case Op::Div:
+        return "/";
+    case Op::Mod:
+        return "%";
+    case Op::Pow:
+        return "**";
+    case Op::BitAnd:
+        return "&";
+    case Op::BitOr:
+        return "|";
+    case Op::BitXor:
+        return "^";
+    case Op::Shl:
+        return "<<";
+    case Op::Shr:
+        return ">>";
+    case Op::Eq:
+        return "==";
+    case Op::Ne:
+        return "!=";
+    case Op::Lt:
+        return "<";
+    case Op::Le:
+        return "<=";
+    case Op::Gt:
+        return ">";
+    case Op::Ge:
+        return ">=";
+    case Op::LogAnd:
+        return "&&";
+    case Op::LogOr:
+        return "||";
+    case Op::Neg:
+        return "-";
+    case Op::BitNot:
+        return "~";
+    case Op::LogNot:
+        return "!";
+    default:
+        return "";
     }
 }
 
 /// Check if an Op is a binary operation.
 static bool isBinaryOp(Op op) {
     switch (op) {
-    case Op::Add: case Op::Sub: case Op::Mul: case Op::Div: case Op::Mod:
-    case Op::BitAnd: case Op::BitOr: case Op::BitXor: case Op::Shl: case Op::Shr:
-    case Op::Eq: case Op::Ne: case Op::Lt: case Op::Le: case Op::Gt: case Op::Ge:
-    case Op::LogAnd: case Op::LogOr: case Op::Pow:
+    case Op::Add:
+    case Op::Sub:
+    case Op::Mul:
+    case Op::Div:
+    case Op::Mod:
+    case Op::BitAnd:
+    case Op::BitOr:
+    case Op::BitXor:
+    case Op::Shl:
+    case Op::Shr:
+    case Op::Eq:
+    case Op::Ne:
+    case Op::Lt:
+    case Op::Le:
+    case Op::Gt:
+    case Op::Ge:
+    case Op::LogAnd:
+    case Op::LogOr:
+    case Op::Pow:
         return true;
     default:
         return false;
@@ -176,7 +237,9 @@ static bool isBinaryOp(Op op) {
 /// Check if an Op is a unary operation.
 static bool isUnaryOp(Op op) {
     switch (op) {
-    case Op::Neg: case Op::BitNot: case Op::LogNot:
+    case Op::Neg:
+    case Op::BitNot:
+    case Op::LogNot:
         return true;
     default:
         return false;
@@ -194,8 +257,7 @@ static bool isUnaryOp(Op op) {
 /// in the size of the e-graph.  Reusing one `bestMap` makes AST
 /// conversion strictly linear in the size of the extracted tree.
 static std::unique_ptr<Expression> eNodeToAST(EGraph& graph, ClassId cls,
-                                               const std::unordered_map<ClassId,
-                                                   EGraph::ExtractionResult>& bestMap) {
+                                              const std::unordered_map<ClassId, EGraph::ExtractionResult>& bestMap) {
     cls = graph.find(cls);
 
     ENode node;
@@ -236,7 +298,7 @@ static std::unique_ptr<Expression> eNodeToAST(EGraph& graph, ClassId cls,
 
     // Binary operations
     if (isBinaryOp(node.op) && node.children.size() == 2) {
-        auto left  = eNodeToAST(graph, node.children[0], bestMap);
+        auto left = eNodeToAST(graph, node.children[0], bestMap);
         auto right = eNodeToAST(graph, node.children[1], bestMap);
         return makeBinary(opToString(node.op), std::move(left), std::move(right));
     }
@@ -249,11 +311,10 @@ static std::unique_ptr<Expression> eNodeToAST(EGraph& graph, ClassId cls,
 
     // Ternary
     if (node.op == Op::Ternary && node.children.size() == 3) {
-        auto cond  = eNodeToAST(graph, node.children[0], bestMap);
+        auto cond = eNodeToAST(graph, node.children[0], bestMap);
         auto thenE = eNodeToAST(graph, node.children[1], bestMap);
         auto elseE = eNodeToAST(graph, node.children[2], bestMap);
-        return std::make_unique<TernaryExpr>(std::move(cond), std::move(thenE),
-                                              std::move(elseE));
+        return std::make_unique<TernaryExpr>(std::move(cond), std::move(thenE), std::move(elseE));
     }
 
     // Function call
@@ -276,8 +337,7 @@ static std::unique_ptr<Expression> eNodeToAST(EGraph& graph, ClassId cls,
 /// Returns the optimized expression (may be the same if no improvement found).
 /// Core implementation: optimize an expression using a provided EGraphOptContext.
 /// This is the single implementation used by all public entry points.
-static std::unique_ptr<Expression> optimizeExpressionImpl(const Expression* expr,
-                                                           const EGraphOptContext& ctx);
+static std::unique_ptr<Expression> optimizeExpressionImpl(const Expression* expr, const EGraphOptContext& ctx);
 
 /// Recursively optimize all expressions within a statement.
 static void optimizeStatementImpl(Statement* stmt, const EGraphOptContext& ctx);
@@ -287,7 +347,8 @@ static void optimizeStatementImpl(Statement* stmt, const EGraphOptContext& ctx);
 /// (e.g. IndexExpr, unsupported binary operators like ??), which would cause
 /// the reconstructed AST to reference non-existent variables like __opaque.
 static bool canRepresentInEGraph(const Expression* expr, const EGraphOptContext& ctx) {
-    if (!expr) return true;
+    if (!expr)
+        return true;
 
     switch (expr->type) {
     case ASTNodeType::LITERAL_EXPR:
@@ -298,17 +359,17 @@ static bool canRepresentInEGraph(const Expression* expr, const EGraphOptContext&
         auto* bin = static_cast<const BinaryExpr*>(expr);
         // Only operators that have a corresponding e-graph Op are safe.
         static const std::unordered_set<std::string> supported = {
-            "+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>",
-            "==", "!=", "<", "<=", ">", ">=", "&&", "||"
-        };
-        if (supported.find(bin->op) == supported.end()) return false;
+            "+", "-", "*", "/", "%", "**", "&", "|", "^", "<<", ">>", "==", "!=", "<", "<=", ">", ">=", "&&", "||"};
+        if (supported.find(bin->op) == supported.end())
+            return false;
         // String operands with * or + have different semantics (repetition,
         // concatenation) than integer arithmetic.  The e-graph's algebraic
         // rules (e.g. x*0→0, x*1→x) are not valid for string operations,
         // so we must exclude them.
         if (bin->op == "*" || bin->op == "+") {
             auto isStringLit = [](const Expression* e) -> bool {
-                if (!e) return false;
+                if (!e)
+                    return false;
                 if (auto* lit = dynamic_cast<const LiteralExpr*>(e))
                     return lit->literalType == LiteralExpr::LiteralType::STRING;
                 return false;
@@ -316,20 +377,19 @@ static bool canRepresentInEGraph(const Expression* expr, const EGraphOptContext&
             if (isStringLit(bin->left.get()) || isStringLit(bin->right.get()))
                 return false;
         }
-        return canRepresentInEGraph(bin->left.get(), ctx) &&
-               canRepresentInEGraph(bin->right.get(), ctx);
+        return canRepresentInEGraph(bin->left.get(), ctx) && canRepresentInEGraph(bin->right.get(), ctx);
     }
 
     case ASTNodeType::UNARY_EXPR: {
         auto* un = static_cast<const UnaryExpr*>(expr);
-        if (un->op != "-" && un->op != "~" && un->op != "!") return false;
+        if (un->op != "-" && un->op != "~" && un->op != "!")
+            return false;
         return canRepresentInEGraph(un->operand.get(), ctx);
     }
 
     case ASTNodeType::TERNARY_EXPR: {
         auto* tern = static_cast<const TernaryExpr*>(expr);
-        return canRepresentInEGraph(tern->condition.get(), ctx) &&
-               canRepresentInEGraph(tern->thenExpr.get(), ctx) &&
+        return canRepresentInEGraph(tern->condition.get(), ctx) && canRepresentInEGraph(tern->thenExpr.get(), ctx) &&
                canRepresentInEGraph(tern->elseExpr.get(), ctx);
     }
 
@@ -337,13 +397,13 @@ static bool canRepresentInEGraph(const Expression* expr, const EGraphOptContext&
         auto* call = static_cast<const CallExpr*>(expr);
         // Allow known-pure builtins (no side effects, no I/O) as classified
         // by BuiltinEffectTable, plus user functions confirmed pure by analysis.
-        const bool isKnownPure =
-            BuiltinEffectTable::isPure(call->callee) ||
-            (ctx.pureUserFuncs && ctx.pureUserFuncs->count(call->callee) > 0);
+        const bool isKnownPure = BuiltinEffectTable::isPure(call->callee) ||
+                                 (ctx.pureUserFuncs && ctx.pureUserFuncs->count(call->callee) > 0);
         if (!isKnownPure)
             return false;
         for (const auto& arg : call->arguments) {
-            if (!canRepresentInEGraph(arg.get(), ctx)) return false;
+            if (!canRepresentInEGraph(arg.get(), ctx))
+                return false;
         }
         return true;
     }
@@ -365,9 +425,9 @@ static bool canRepresentInEGraph(const Expression* expr, const EGraphOptContext&
 }
 
 /// Core implementation: optimize one expression using the provided context.
-static std::unique_ptr<Expression> optimizeExpressionImpl(const Expression* expr,
-                                                           const EGraphOptContext& ctx) {
-    if (!expr) return nullptr;
+static std::unique_ptr<Expression> optimizeExpressionImpl(const Expression* expr, const EGraphOptContext& ctx) {
+    if (!expr)
+        return nullptr;
 
     EGraph graph(ctx.config);
     const ClassId root = astToEGraph(graph, expr);
@@ -388,9 +448,9 @@ static std::unique_ptr<Expression> optimizeExpressionImpl(const Expression* expr
 }
 
 /// Optimize an expression in-place by replacing with the e-graph result.
-static std::unique_ptr<Expression> tryOptimize(std::unique_ptr<Expression> expr,
-                                                const EGraphOptContext& ctx) {
-    if (!expr) return nullptr;
+static std::unique_ptr<Expression> tryOptimize(std::unique_ptr<Expression> expr, const EGraphOptContext& ctx) {
+    if (!expr)
+        return nullptr;
 
     switch (expr->type) {
     case ASTNodeType::BINARY_EXPR:
@@ -403,12 +463,12 @@ static std::unique_ptr<Expression> tryOptimize(std::unique_ptr<Expression> expr,
         if (!canRepresentInEGraph(expr.get(), ctx))
             return expr;
         // Preserve source location so error messages keep line/column info.
-        const int origLine   = expr->line;
+        const int origLine = expr->line;
         const int origColumn = expr->column;
         auto optimized = optimizeExpressionImpl(expr.get(), ctx);
         if (optimized) {
             if (optimized->line == 0) {
-                optimized->line   = origLine;
+                optimized->line = origLine;
                 optimized->column = origColumn;
             }
             return optimized;
@@ -421,7 +481,8 @@ static std::unique_ptr<Expression> tryOptimize(std::unique_ptr<Expression> expr,
 }
 
 static void optimizeStatementImpl(Statement* stmt, const EGraphOptContext& ctx) {
-    if (!stmt) return;
+    if (!stmt)
+        return;
 
     switch (stmt->type) {
     case ASTNodeType::VAR_DECL: {
@@ -494,49 +555,65 @@ static void optimizeStatementImpl(Statement* stmt, const EGraphOptContext& ctx) 
     }
     case ASTNodeType::FOR_STMT: {
         auto* fs = static_cast<ForStmt*>(stmt);
-        if (fs->start) fs->start = tryOptimize(std::move(fs->start), ctx);
-        if (fs->end)   fs->end   = tryOptimize(std::move(fs->end),   ctx);
-        if (fs->step)  fs->step  = tryOptimize(std::move(fs->step),  ctx);
-        if (fs->body)  optimizeStatementImpl(fs->body.get(), ctx);
+        if (fs->start)
+            fs->start = tryOptimize(std::move(fs->start), ctx);
+        if (fs->end)
+            fs->end = tryOptimize(std::move(fs->end), ctx);
+        if (fs->step)
+            fs->step = tryOptimize(std::move(fs->step), ctx);
+        if (fs->body)
+            optimizeStatementImpl(fs->body.get(), ctx);
         break;
     }
     case ASTNodeType::FOR_EACH_STMT: {
         auto* fe = static_cast<ForEachStmt*>(stmt);
-        if (fe->collection) fe->collection = tryOptimize(std::move(fe->collection), ctx);
-        if (fe->body) optimizeStatementImpl(fe->body.get(), ctx);
+        if (fe->collection)
+            fe->collection = tryOptimize(std::move(fe->collection), ctx);
+        if (fe->body)
+            optimizeStatementImpl(fe->body.get(), ctx);
         break;
     }
     case ASTNodeType::SWITCH_STMT: {
         auto* sw = static_cast<SwitchStmt*>(stmt);
-        if (sw->condition) sw->condition = tryOptimize(std::move(sw->condition), ctx);
+        if (sw->condition)
+            sw->condition = tryOptimize(std::move(sw->condition), ctx);
         for (auto& sc : sw->cases) {
-            if (sc.value) sc.value = tryOptimize(std::move(sc.value), ctx);
-            for (auto& val : sc.values) val = tryOptimize(std::move(val), ctx);
-            for (auto& s : sc.body) optimizeStatementImpl(s.get(), ctx);
+            if (sc.value)
+                sc.value = tryOptimize(std::move(sc.value), ctx);
+            for (auto& val : sc.values)
+                val = tryOptimize(std::move(val), ctx);
+            for (auto& s : sc.body)
+                optimizeStatementImpl(s.get(), ctx);
         }
         break;
     }
     case ASTNodeType::CATCH_STMT: {
         auto* cs = static_cast<CatchStmt*>(stmt);
-        if (cs->body) optimizeStatementImpl(cs->body.get(), ctx);
+        if (cs->body)
+            optimizeStatementImpl(cs->body.get(), ctx);
         break;
     }
     case ASTNodeType::DEFER_STMT: {
         auto* ds = static_cast<DeferStmt*>(stmt);
-        if (ds->body) optimizeStatementImpl(ds->body.get(), ctx);
+        if (ds->body)
+            optimizeStatementImpl(ds->body.get(), ctx);
         break;
     }
     case ASTNodeType::PIPELINE_STMT: {
         auto* pl = static_cast<PipelineStmt*>(stmt);
-        if (pl->count) pl->count = tryOptimize(std::move(pl->count), ctx);
+        if (pl->count)
+            pl->count = tryOptimize(std::move(pl->count), ctx);
         for (auto& stage : pl->stages)
-            if (stage.body) optimizeStatementImpl(stage.body.get(), ctx);
+            if (stage.body)
+                optimizeStatementImpl(stage.body.get(), ctx);
         break;
     }
     case ASTNodeType::ASSUME_STMT: {
         auto* as = static_cast<AssumeStmt*>(stmt);
-        if (as->condition) as->condition = tryOptimize(std::move(as->condition), ctx);
-        if (as->deoptBody) optimizeStatementImpl(as->deoptBody.get(), ctx);
+        if (as->condition)
+            as->condition = tryOptimize(std::move(as->condition), ctx);
+        if (as->deoptBody)
+            optimizeStatementImpl(as->deoptBody.get(), ctx);
         break;
     }
     case ASTNodeType::INVALIDATE_STMT:
@@ -550,24 +627,24 @@ static void optimizeStatementImpl(Statement* stmt, const EGraphOptContext& ctx) 
 // Public API — context-aware overloads
 // ─────────────────────────────────────────────────────────────────────────────
 
-std::unique_ptr<Expression> optimizeExpression(const Expression* expr,
-                                                const EGraphOptContext& ctx) {
-    if (!expr) return nullptr;
-    if (!canRepresentInEGraph(expr, ctx)) return nullptr;
+std::unique_ptr<Expression> optimizeExpression(const Expression* expr, const EGraphOptContext& ctx) {
+    if (!expr)
+        return nullptr;
+    if (!canRepresentInEGraph(expr, ctx))
+        return nullptr;
     return optimizeExpressionImpl(expr, ctx);
 }
 
 void optimizeFunction(FunctionDecl* func, const EGraphOptContext& ctx) {
-    if (!func || !func->body) return;
+    if (!func || !func->body)
+        return;
     for (auto& stmt : func->body->statements) {
         optimizeStatementImpl(stmt.get(), ctx);
     }
 }
 
 void optimizeProgram(Program* program, const EGraphOptContext& ctx) {
-    forEachFunction(program, [&](FunctionDecl* func) {
-        optimizeFunction(func, ctx);
-    });
+    forEachFunction(program, [&](FunctionDecl* func) { optimizeFunction(func, ctx); });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

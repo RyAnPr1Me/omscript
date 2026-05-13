@@ -6,7 +6,7 @@
 
 // Apply maximum compiler optimizations to this hot path.
 #ifdef __GNUC__
-#  pragma GCC optimize("O3,unroll-loops,tree-vectorize")
+#pragma GCC optimize("O3,unroll-loops,tree-vectorize")
 #endif
 #include <iostream>
 #include <llvm/ADT/SmallString.h>
@@ -45,17 +45,16 @@ namespace omscript {
 
 // ═══════════════════════════════════════════════════════════════════════════
 
-bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
-                                         Expression* indexExpr,
-                                         llvm::Value* basePtr,
-                                         bool isStr,
-                                         const char* prefix) {
+bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr, Expression* indexExpr, llvm::Value* basePtr, bool isStr,
+                                        const char* prefix) {
     // Always elide in OPTMAX functions or @hot functions at O2+.
     if (inOptMaxFunction) {
         // v2 config: respect safety level
         if (currentOptMaxConfig_.enabled) {
-            if (currentOptMaxConfig_.safety == SafetyLevel::Off) return true;
-            if (currentOptMaxConfig_.safety == SafetyLevel::Relaxed && !isStr) return true;
+            if (currentOptMaxConfig_.safety == SafetyLevel::Off)
+                return true;
+            if (currentOptMaxConfig_.safety == SafetyLevel::Relaxed && !isStr)
+                return true;
             // SafetyLevel::On: don't elide bounds checks, fall through
         } else {
             // legacy optmax block: elide all bounds checks (original behavior)
@@ -80,8 +79,7 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
                     if (endIt != loopIterEndBound_.end()) {
                         auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endIt->second);
                         auto* sizeCI = llvm::dyn_cast<llvm::ConstantInt>(sizeIt->second);
-                        if (endCI && sizeCI &&
-                            endCI->getSExtValue() <= sizeCI->getSExtValue()) {
+                        if (endCI && sizeCI && endCI->getSExtValue() <= sizeCI->getSExtValue()) {
                             return true;
                         }
                     }
@@ -91,8 +89,8 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
     }
 
     // ── Safe loop iterator checks ────────────────────────────────────
-    IdentifierExpr* idxIdent = (indexExpr->type == ASTNodeType::IDENTIFIER_EXPR)
-        ? static_cast<IdentifierExpr*>(indexExpr) : nullptr;
+    IdentifierExpr* idxIdent =
+        (indexExpr->type == ASTNodeType::IDENTIFIER_EXPR) ? static_cast<IdentifierExpr*>(indexExpr) : nullptr;
     if (idxIdent && safeIndexVars_.count(idxIdent->name)) {
         // ── Elision A: for(i in 0...len(arr)) { arr[i] } ────────────
         if (arrayExpr->type == ASTNodeType::IDENTIFIER_EXPR) {
@@ -130,9 +128,8 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
             if (cacheIt != loopArrayLenCache_.end()) {
                 lenVal = cacheIt->second;
             } else {
-                auto* lenLoadElim = builder->CreateAlignedLoad(
-                    getDefaultType(), basePtr, llvm::MaybeAlign(8),
-                    llvm::Twine(prefix) + ".len.elim");
+                auto* lenLoadElim = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8),
+                                                               llvm::Twine(prefix) + ".len.elim");
                 lenLoadElim->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                 lenLoadElim->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                 lenVal = lenLoadElim;
@@ -154,10 +151,8 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
 
             // Fallback: emit llvm.assume(endBound <= len) for CVP
             if (optimizationLevel >= OptimizationLevel::O2) {
-                llvm::Value* endLELen = builder->CreateICmpSLE(
-                    endBound, lenVal, llvm::Twine(prefix) + ".endlelen");
-                llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
-                    module.get(), llvm::Intrinsic::assume, {});
+                llvm::Value* endLELen = builder->CreateICmpSLE(endBound, lenVal, llvm::Twine(prefix) + ".endlelen");
+                llvm::Function* assumeFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::assume, {});
                 builder->CreateCall(assumeFn, {endLELen});
             }
         }
@@ -168,13 +163,14 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
         auto* idxBinary = static_cast<BinaryExpr*>(indexExpr);
         if (idxBinary->op == "+" || idxBinary->op == "-") {
             IdentifierExpr* iterIdent = (idxBinary->left->type == ASTNodeType::IDENTIFIER_EXPR)
-                ? static_cast<IdentifierExpr*>(idxBinary->left.get()) : nullptr;
+                                            ? static_cast<IdentifierExpr*>(idxBinary->left.get())
+                                            : nullptr;
             LiteralExpr* offsetLit = (idxBinary->right->type == ASTNodeType::LITERAL_EXPR)
-                ? static_cast<LiteralExpr*>(idxBinary->right.get()) : nullptr;
+                                         ? static_cast<LiteralExpr*>(idxBinary->right.get())
+                                         : nullptr;
             if (iterIdent && offsetLit && safeIndexVars_.count(iterIdent->name)) {
                 auto endIt = loopIterEndBound_.find(iterIdent->name);
-                if (endIt != loopIterEndBound_.end()
-                    && offsetLit->literalType == LiteralExpr::LiteralType::INTEGER) {
+                if (endIt != loopIterEndBound_.end() && offsetLit->literalType == LiteralExpr::LiteralType::INTEGER) {
                     const int64_t offset = offsetLit->intValue;
                     const int64_t effectiveOffset = (idxBinary->op == "-") ? -offset : offset;
 
@@ -186,8 +182,7 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
                             arithLenVal = arithCacheIt->second;
                         } else {
                             auto* arithLenLoad = builder->CreateAlignedLoad(
-                                getDefaultType(), basePtr, llvm::MaybeAlign(8),
-                                llvm::Twine(prefix) + ".len.arith");
+                                getDefaultType(), basePtr, llvm::MaybeAlign(8), llvm::Twine(prefix) + ".len.arith");
                             arithLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                             arithLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                             arithLenVal = arithLenLoad;
@@ -205,14 +200,11 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
                         // Emit assume hint for LLVM's CVP pass
                         if (optimizationLevel >= OptimizationLevel::O2) {
                             llvm::Value* adjustedEnd = builder->CreateAdd(
-                                endIt->second,
-                                llvm::ConstantInt::get(getDefaultType(), effectiveOffset),
+                                endIt->second, llvm::ConstantInt::get(getDefaultType(), effectiveOffset),
                                 llvm::Twine(prefix) + ".adjend");
-                            llvm::Value* cmp = builder->CreateICmpSLE(
-                                adjustedEnd, arithLenVal,
-                                llvm::Twine(prefix) + ".arith.safe");
-                            llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
-                                module.get(), llvm::Intrinsic::assume, {});
+                            llvm::Value* cmp =
+                                builder->CreateICmpSLE(adjustedEnd, arithLenVal, llvm::Twine(prefix) + ".arith.safe");
+                            llvm::Function* assumeFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::assume, {});
                             builder->CreateCall(assumeFn, {cmp});
                         }
                     }
@@ -233,9 +225,9 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
                                 if (negCacheIt != loopArrayLenCache_.end()) {
                                     negLenVal = negCacheIt->second;
                                 } else {
-                                    auto* negLenLoad = builder->CreateAlignedLoad(
-                                        getDefaultType(), basePtr, llvm::MaybeAlign(8),
-                                        llvm::Twine(prefix) + ".len.arith.neg");
+                                    auto* negLenLoad =
+                                        builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8),
+                                                                   llvm::Twine(prefix) + ".len.arith.neg");
                                     negLenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
                                     negLenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                                     negLenVal = negLenLoad;
@@ -243,25 +235,20 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
                                         loopArrayLenCache_[basePtr] = negLenVal;
                                 }
                                 llvm::Value* adjustedStart = builder->CreateSub(
-                                    startIt->second,
-                                    llvm::ConstantInt::get(getDefaultType(), absOffset),
+                                    startIt->second, llvm::ConstantInt::get(getDefaultType(), absOffset),
                                     llvm::Twine(prefix) + ".adjstart");
-                                llvm::Value* geZero = builder->CreateICmpSGE(
-                                    adjustedStart,
-                                    llvm::ConstantInt::get(getDefaultType(), 0),
-                                    llvm::Twine(prefix) + ".negoff.ge0");
+                                llvm::Value* geZero =
+                                    builder->CreateICmpSGE(adjustedStart, llvm::ConstantInt::get(getDefaultType(), 0),
+                                                           llvm::Twine(prefix) + ".negoff.ge0");
                                 llvm::Value* adjustedEnd = builder->CreateSub(
-                                    endIt->second,
-                                    llvm::ConstantInt::get(getDefaultType(), absOffset),
+                                    endIt->second, llvm::ConstantInt::get(getDefaultType(), absOffset),
                                     llvm::Twine(prefix) + ".adjend.neg");
-                                llvm::Value* leLen = builder->CreateICmpSLE(
-                                    adjustedEnd, negLenVal,
-                                    llvm::Twine(prefix) + ".negoff.safe");
-                                llvm::Value* bothSafe = builder->CreateAnd(
-                                    geZero, leLen,
-                                    llvm::Twine(prefix) + ".negoff.both");
-                                llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
-                                    module.get(), llvm::Intrinsic::assume, {});
+                                llvm::Value* leLen = builder->CreateICmpSLE(adjustedEnd, negLenVal,
+                                                                            llvm::Twine(prefix) + ".negoff.safe");
+                                llvm::Value* bothSafe =
+                                    builder->CreateAnd(geZero, leLen, llvm::Twine(prefix) + ".negoff.both");
+                                llvm::Function* assumeFn =
+                                    OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::assume, {});
                                 builder->CreateCall(assumeFn, {bothSafe});
                             }
                         }
@@ -274,17 +261,11 @@ bool CodeGenerator::canElideBoundsCheck(Expression* arrayExpr,
     return false;
 }
 
-void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
-                                     llvm::Value* basePtr,
-                                     bool isStr,
-                                     bool isBorrowed,
-                                     const char* prefix,
-                                     int line) {
+void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal, llvm::Value* basePtr, bool isStr, bool isBorrowed,
+                                    const char* prefix, int line) {
     llvm::Function* function = builder->GetInsertBlock()->getParent();
-    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(
-        *context, llvm::Twine(prefix) + ".ok", function);
-    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(
-        *context, llvm::Twine(prefix) + ".fail", function);
+    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, llvm::Twine(prefix) + ".ok", function);
+    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, llvm::Twine(prefix) + ".fail", function);
 
     llvm::Value* lenVal;
     if (isStr) {
@@ -296,14 +277,12 @@ void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
         if (cacheIt != loopArrayLenCache_.end()) {
             lenVal = cacheIt->second;
         } else {
-            auto* lenLoad = builder->CreateAlignedLoad(
-                getDefaultType(), basePtr, llvm::MaybeAlign(8),
-                llvm::Twine(prefix) + ".len");
+            auto* lenLoad = builder->CreateAlignedLoad(getDefaultType(), basePtr, llvm::MaybeAlign(8),
+                                                       llvm::Twine(prefix) + ".len");
             lenLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
             lenLoad->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             if (isBorrowed) {
-                lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load,
-                                     llvm::MDNode::get(*context, {}));
+                lenLoad->setMetadata(llvm::LLVMContext::MD_invariant_load, llvm::MDNode::get(*context, {}));
             }
             lenVal = lenLoad;
             // Cache for subsequent bounds checks within the same loop body.
@@ -315,8 +294,7 @@ void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
 
     // Single unsigned compare: (unsigned)idx < len checks both non-negativity
     // and upper bound simultaneously.
-    llvm::Value* valid = builder->CreateICmpULT(idxVal, lenVal,
-                                                  llvm::Twine(prefix) + ".valid");
+    llvm::Value* valid = builder->CreateICmpULT(idxVal, lenVal, llvm::Twine(prefix) + ".valid");
 
     // Bounds checks almost never fail — mark the success path hot.
     llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
@@ -325,15 +303,14 @@ void CodeGenerator::emitBoundsCheck(llvm::Value* idxVal,
     // Out-of-bounds path: print error and abort
     builder->SetInsertPoint(failBB);
     {
-        std::string strMsg = line > 0
-            ? std::string("Runtime error: string index out of bounds at line ") + std::to_string(line) + "\n"
-            : "Runtime error: string index out of bounds\n";
-        std::string arrMsg = line > 0
-            ? std::string("Runtime error: array index out of bounds at line ") + std::to_string(line) + "\n"
-            : "Runtime error: array index out of bounds\n";
-        llvm::Value* errMsg =
-            isStr ? builder->CreateGlobalString(strMsg, llvm::Twine(prefix) + "_str_oob_msg")
-                  : builder->CreateGlobalString(arrMsg, llvm::Twine(prefix) + "_arr_oob_msg");
+        std::string strMsg =
+            line > 0 ? std::string("Runtime error: string index out of bounds at line ") + std::to_string(line) + "\n"
+                     : "Runtime error: string index out of bounds\n";
+        std::string arrMsg =
+            line > 0 ? std::string("Runtime error: array index out of bounds at line ") + std::to_string(line) + "\n"
+                     : "Runtime error: array index out of bounds\n";
+        llvm::Value* errMsg = isStr ? builder->CreateGlobalString(strMsg, llvm::Twine(prefix) + "_str_oob_msg")
+                                    : builder->CreateGlobalString(arrMsg, llvm::Twine(prefix) + "_arr_oob_msg");
         builder->CreateCall(getPrintfFunction(), {errMsg});
     }
     builder->CreateCall(getOrDeclareAbort());
@@ -354,11 +331,8 @@ llvm::Value* CodeGenerator::generateLiteral(LiteralExpr* expr) {
         // start (offset 0 = len field), which is the OmScript string value.
         llvm::GlobalVariable* gv = internString(expr->stringValue);
         return llvm::ConstantExpr::getInBoundsGetElementPtr(
-            gv->getValueType(),
-            gv,
-            llvm::ArrayRef<llvm::Constant*>{
-                llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
-            });
+            gv->getValueType(), gv,
+            llvm::ArrayRef<llvm::Constant*>{llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
     }
 }
 
@@ -382,7 +356,8 @@ llvm::Value* CodeGenerator::generateScopeResolution(ScopeResolutionExpr* expr) {
             // Build helpful error: list valid members
             std::string msg = "Enum '" + scope + "' has no member '" + member + "'. Valid members: ";
             for (size_t i = 0; i < members.size(); i++) {
-                if (i > 0) msg += ", ";
+                if (i > 0)
+                    msg += ", ";
                 msg += members[i];
             }
             codegenError(msg, expr);
@@ -403,8 +378,10 @@ llvm::Value* CodeGenerator::generateScopeResolution(ScopeResolutionExpr* expr) {
     // Check if the scope is a known struct (for future extensibility)
     auto structIt = structDefs_.find(scope);
     if (structIt != structDefs_.end()) {
-        codegenError("Scope resolution on struct '" + scope + "' is not yet supported. "
-                     "Use field access with '.' instead", expr);
+        codegenError("Scope resolution on struct '" + scope +
+                         "' is not yet supported. "
+                         "Use field access with '.' instead",
+                     expr);
     }
 
     // Check if this is a cross-file global variable reference (foo::varname).
@@ -417,7 +394,8 @@ llvm::Value* CodeGenerator::generateScopeResolution(ScopeResolutionExpr* expr) {
     }
 
     // Unknown scope: provide a helpful error message
-    std::string msg = "'" + scope + "' is not a valid scope for '::' operator. "
+    std::string msg = "'" + scope +
+                      "' is not a valid scope for '::' operator. "
                       "Expected an enum name";
     // Suggest similar enum names
     std::vector<std::string> candidates;
@@ -444,8 +422,7 @@ llvm::Value* CodeGenerator::generateScopeResolution(ScopeResolutionExpr* expr) {
 //   UINT_MAX            — alias  for U64_MAX
 //   INT{N}_MAX / INT{N}_MIN / UINT{N}_MAX  — C-style aliases (N in bits)
 // ---------------------------------------------------------------------------
-llvm::Value* CodeGenerator::tryResolvePredefinedConstant(const std::string& name,
-                                                          ASTNode* ctx) {
+llvm::Value* CodeGenerator::tryResolvePredefinedConstant(const std::string& name, ASTNode* ctx) {
     // Helper: build a constant with the right bit width, auto-widening to i64
     // for narrow types so callers get a usable value in normal arithmetic.
     // Wide types (>64 bits) keep their native width so the caller can use them
@@ -453,42 +430,81 @@ llvm::Value* CodeGenerator::tryResolvePredefinedConstant(const std::string& name
     auto makeConst = [&](unsigned bits, llvm::APInt value, bool unsign) -> llvm::Value* {
         llvm::IntegerType* ty = llvm::IntegerType::get(*context, bits);
         auto* c = llvm::ConstantInt::get(ty, value);
-        if (value.isNonNegative() || unsign) nonNegValues_.insert(c);
-        if (unsign) unsignedExprs_.insert(c);
+        if (value.isNonNegative() || unsign)
+            nonNegValues_.insert(c);
+        if (unsign)
+            unsignedExprs_.insert(c);
         return c;
     };
 
     // ── Resolve name to (bits, isSigned, isMax) ────────────────────────────
     unsigned bits = 0;
     bool isSigned = true;
-    bool isMax    = true; // false → MIN
+    bool isMax = true; // false → MIN
 
     const std::string n = name; // local alias
 
     // BOOL_MAX / BOOL_MIN — booleans are unsigned i1 (0 or 1)
-    if (n == "BOOL_MAX") { bits = 1; isSigned = false; isMax = true;  goto build; }
-    if (n == "BOOL_MIN") { bits = 1; isSigned = false; isMax = false; goto build; }
+    if (n == "BOOL_MAX") {
+        bits = 1;
+        isSigned = false;
+        isMax = true;
+        goto build;
+    }
+    if (n == "BOOL_MIN") {
+        bits = 1;
+        isSigned = false;
+        isMax = false;
+        goto build;
+    }
 
     // INT_MAX / INT_MIN / UINT_MAX / UINT_MIN — 64-bit aliases
-    if (n == "INT_MAX")  { bits = 64; isSigned = true;  isMax = true;  goto build; }
-    if (n == "INT_MIN")  { bits = 64; isSigned = true;  isMax = false; goto build; }
-    if (n == "UINT_MAX") { bits = 64; isSigned = false; isMax = true;  goto build; }
-    if (n == "UINT_MIN") { bits = 64; isSigned = false; isMax = false; goto build; }
+    if (n == "INT_MAX") {
+        bits = 64;
+        isSigned = true;
+        isMax = true;
+        goto build;
+    }
+    if (n == "INT_MIN") {
+        bits = 64;
+        isSigned = true;
+        isMax = false;
+        goto build;
+    }
+    if (n == "UINT_MAX") {
+        bits = 64;
+        isSigned = false;
+        isMax = true;
+        goto build;
+    }
+    if (n == "UINT_MIN") {
+        bits = 64;
+        isSigned = false;
+        isMax = false;
+        goto build;
+    }
 
     // I{N}_MAX / I{N}_MIN  (signed)
     if (n.size() >= 6 && n[0] == 'I') {
         // find _MAX or _MIN suffix
         auto suffixPos = n.rfind("_MAX");
         bool isMaxSuffix = (suffixPos != std::string::npos);
-        if (!isMaxSuffix) suffixPos = n.rfind("_MIN");
+        if (!isMaxSuffix)
+            suffixPos = n.rfind("_MIN");
         if (suffixPos != std::string::npos && suffixPos > 1) {
             const std::string numStr = n.substr(1, suffixPos - 1);
             bool allDig = !numStr.empty();
             int bitsI = 0;
             for (char c : numStr) {
-                if (!std::isdigit((unsigned char)c)) { allDig = false; break; }
+                if (!std::isdigit((unsigned char)c)) {
+                    allDig = false;
+                    break;
+                }
                 bitsI = bitsI * 10 + (c - '0');
-                if (bitsI > 256) { allDig = false; break; }
+                if (bitsI > 256) {
+                    allDig = false;
+                    break;
+                }
             }
             if (allDig && bitsI >= 1 && bitsI <= 256) {
                 bits = static_cast<unsigned>(bitsI);
@@ -503,15 +519,22 @@ llvm::Value* CodeGenerator::tryResolvePredefinedConstant(const std::string& name
     if (n.size() >= 6 && n[0] == 'U') {
         auto suffixPos = n.rfind("_MAX");
         bool isMaxSuffix = (suffixPos != std::string::npos);
-        if (!isMaxSuffix) suffixPos = n.rfind("_MIN");
+        if (!isMaxSuffix)
+            suffixPos = n.rfind("_MIN");
         if (suffixPos != std::string::npos && suffixPos > 1) {
             const std::string numStr = n.substr(1, suffixPos - 1);
             bool allDig = !numStr.empty();
             int bitsI = 0;
             for (char c : numStr) {
-                if (!std::isdigit((unsigned char)c)) { allDig = false; break; }
+                if (!std::isdigit((unsigned char)c)) {
+                    allDig = false;
+                    break;
+                }
                 bitsI = bitsI * 10 + (c - '0');
-                if (bitsI > 256) { allDig = false; break; }
+                if (bitsI > 256) {
+                    allDig = false;
+                    break;
+                }
             }
             if (allDig && bitsI >= 1 && bitsI <= 256) {
                 bits = static_cast<unsigned>(bitsI);
@@ -531,15 +554,22 @@ llvm::Value* CodeGenerator::tryResolvePredefinedConstant(const std::string& name
             const size_t pfxLen = isU ? 4 : 3; // "UINT" vs "INT"
             auto suffixPos = n.rfind("_MAX");
             bool isMaxSuffix = (suffixPos != std::string::npos);
-            if (!isMaxSuffix) suffixPos = n.rfind("_MIN");
+            if (!isMaxSuffix)
+                suffixPos = n.rfind("_MIN");
             if (suffixPos != std::string::npos && suffixPos > pfxLen) {
                 const std::string numStr = n.substr(pfxLen, suffixPos - pfxLen);
                 bool allDig = !numStr.empty();
                 int bitsI = 0;
                 for (char c : numStr) {
-                    if (!std::isdigit((unsigned char)c)) { allDig = false; break; }
+                    if (!std::isdigit((unsigned char)c)) {
+                        allDig = false;
+                        break;
+                    }
                     bitsI = bitsI * 10 + (c - '0');
-                    if (bitsI > 256) { allDig = false; break; }
+                    if (bitsI > 256) {
+                        allDig = false;
+                        break;
+                    }
                 }
                 if (allDig && bitsI >= 1 && bitsI <= 256) {
                     bits = static_cast<unsigned>(bitsI);
@@ -553,30 +583,29 @@ llvm::Value* CodeGenerator::tryResolvePredefinedConstant(const std::string& name
 
     return nullptr; // not a predefined constant
 
-build:
-    {
-        llvm::APInt val;
-        if (!isMax) {
-            // MIN value
-            if (!isSigned) {
-                // unsigned MIN is always 0
-                val = llvm::APInt(bits, 0);
-            } else {
-                // signed MIN = -2^(bits-1) = 10...0 in two's complement
-                val = llvm::APInt::getSignedMinValue(bits);
-            }
+build: {
+    llvm::APInt val;
+    if (!isMax) {
+        // MIN value
+        if (!isSigned) {
+            // unsigned MIN is always 0
+            val = llvm::APInt(bits, 0);
         } else {
-            // MAX value
-            if (!isSigned) {
-                // unsigned MAX = 2^bits - 1 = 11...1
-                val = llvm::APInt::getMaxValue(bits);
-            } else {
-                // signed MAX = 2^(bits-1) - 1 = 011...1
-                val = llvm::APInt::getSignedMaxValue(bits);
-            }
+            // signed MIN = -2^(bits-1) = 10...0 in two's complement
+            val = llvm::APInt::getSignedMinValue(bits);
         }
-        return makeConst(bits, val, !isSigned);
+    } else {
+        // MAX value
+        if (!isSigned) {
+            // unsigned MAX = 2^bits - 1 = 11...1
+            val = llvm::APInt::getMaxValue(bits);
+        } else {
+            // signed MAX = 2^(bits-1) - 1 = 011...1
+            val = llvm::APInt::getSignedMaxValue(bits);
+        }
     }
+    return makeConst(bits, val, !isSigned);
+}
 }
 
 llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
@@ -612,7 +641,8 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         // BOOL_MAX, BOOL_MIN, and common aliases (INT8_MAX etc.).
         {
             llvm::Value* rangeConst = tryResolvePredefinedConstant(expr->name, expr);
-            if (rangeConst) return rangeConst;
+            if (rangeConst)
+                return rangeConst;
         }
         // Build "did you mean?" suggestion from known variables.
         std::string msg = "Unknown variable: " + expr->name;
@@ -668,15 +698,12 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         auto rit = refVarElemTypes_.find(expr->name);
         if (rit != refVarElemTypes_.end()) {
             llvm::Type* ptrTy = llvm::PointerType::getUnqual(*context);
-            auto* ptrLoad = builder->CreateAlignedLoad(
-                ptrTy, it->second, llvm::MaybeAlign(8),
-                (expr->name + ".ref.ptr").c_str());
+            auto* ptrLoad =
+                builder->CreateAlignedLoad(ptrTy, it->second, llvm::MaybeAlign(8), (expr->name + ".ref.ptr").c_str());
             llvm::Type* elemTy = resolveAnnotatedType(rit->second);
-            const llvm::Align elemAlign =
-                module->getDataLayout().getABITypeAlign(elemTy);
-            auto* valLoad = builder->CreateAlignedLoad(
-                elemTy, ptrLoad, llvm::MaybeAlign(elemAlign.value()),
-                (expr->name + ".ref.val").c_str());
+            const llvm::Align elemAlign = module->getDataLayout().getABITypeAlign(elemTy);
+            auto* valLoad = builder->CreateAlignedLoad(elemTy, ptrLoad, llvm::MaybeAlign(elemAlign.value()),
+                                                       (expr->name + ".ref.val").c_str());
             return liftFieldLoad(valLoad, rit->second);
         }
     }
@@ -686,30 +713,26 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
 
     llvm::Type* loadType = alloca ? alloca->getAllocatedType() : getDefaultType();
 
-    const bool isVol  = volatileVars_.count(expr->name) != 0;
+    const bool isVol = volatileVars_.count(expr->name) != 0;
     const bool isAtom = atomicVars_.count(expr->name) != 0;
 
     llvm::LoadInst* load;
-    if (isAtom && (loadType->isIntegerTy() || loadType->isFloatTy() ||
-                   loadType->isDoubleTy()  || loadType->isPointerTy())) {
+    if (isAtom &&
+        (loadType->isIntegerTy() || loadType->isFloatTy() || loadType->isDoubleTy() || loadType->isPointerTy())) {
         // Atomic load — emit with seq-cst ordering at natural alignment.
-        const llvm::Align atomAlign =
-            module->getDataLayout().getABITypeAlign(loadType);
-        load = builder->CreateAlignedLoad(loadType, it->second,
-                                          llvm::MaybeAlign(atomAlign),
-                                          expr->name.c_str());
-        load->setAtomic(llvm::AtomicOrdering::SequentiallyConsistent,
-                        llvm::SyncScope::System);
-        if (isVol) load->setVolatile(true);
+        const llvm::Align atomAlign = module->getDataLayout().getABITypeAlign(loadType);
+        load = builder->CreateAlignedLoad(loadType, it->second, llvm::MaybeAlign(atomAlign), expr->name.c_str());
+        load->setAtomic(llvm::AtomicOrdering::SequentiallyConsistent, llvm::SyncScope::System);
+        if (isVol)
+            load->setVolatile(true);
     } else {
-        load = builder->CreateAlignedLoad(loadType, it->second,
-                                          llvm::MaybeAlign(8), expr->name.c_str());
-        if (isVol) load->setVolatile(true);
+        load = builder->CreateAlignedLoad(loadType, it->second, llvm::MaybeAlign(8), expr->name.c_str());
+        if (isVol)
+            load->setVolatile(true);
         // Tag non-volatile scalar loads from named variable slots with the
         // scalar TBAA node so LLVM AA distinguishes them from heap data.
         if (!isVol && tbaaScalar_ &&
-            (loadType->isIntegerTy() || loadType->isFloatTy() ||
-             loadType->isDoubleTy()  || loadType->isPointerTy()))
+            (loadType->isIntegerTy() || loadType->isFloatTy() || loadType->isDoubleTy() || loadType->isPointerTy()))
             load->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
     }
 
@@ -726,23 +749,21 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         isInvariant = true;
     }
     // volatile/atomic variables must never be treated as invariant.
-    if (isVol || isAtom) isInvariant = false;
+    if (isVol || isAtom)
+        isInvariant = false;
     // Register variables are mutable; do not mark loads as invariant.
     if (isInvariant) {
-        load->setMetadata(llvm::LLVMContext::MD_invariant_load,
-                          llvm::MDNode::get(*context, {}));
+        load->setMetadata(llvm::LLVMContext::MD_invariant_load, llvm::MDNode::get(*context, {}));
     }
     // OmScript variables are always initialized before use (the ownership
     // system prevents use-before-init).  volatile/atomic loads may return
     // any value written by another thread; skip !noundef for them.
     if (optimizationLevel >= OptimizationLevel::O1 && !isVol && !isAtom) {
-        load->setMetadata(llvm::LLVMContext::MD_noundef,
-                          llvm::MDNode::get(*context, {}));
+        load->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
         // !nonnull on pointer-typed loads: when the loaded value is a
         if (load->getType()->isPointerTy()) {
             if (stringVars_.count(expr->name) || arrayVars_.count(expr->name)) {
-                load->setMetadata(llvm::LLVMContext::MD_nonnull,
-                                  llvm::MDNode::get(*context, {}));
+                load->setMetadata(llvm::LLVMContext::MD_nonnull, llvm::MDNode::get(*context, {}));
             }
         }
     }
@@ -752,15 +773,13 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
         nonNegValues_.insert(load);
         // Add !range [0, INT64_MAX) metadata so LLVM IR-level passes (LVI,
         if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(load)) {
-            if (loadInst->getType()->isIntegerTy(64)
-                    && optimizationLevel >= OptimizationLevel::O1) {
+            if (loadInst->getType()->isIntegerTy(64) && optimizationLevel >= OptimizationLevel::O1) {
                 // If we have a tighter upper bound from modular arithmetic,
                 auto bit = allocaUpperBound_.find(it->second);
                 if (bit != allocaUpperBound_.end()) {
                     llvm::MDBuilder mdB(*context);
                     loadInst->setMetadata(llvm::LLVMContext::MD_range,
-                        mdB.createRange(llvm::APInt(64, 0),
-                                        llvm::APInt(64, bit->second)));
+                                          mdB.createRange(llvm::APInt(64, 0), llvm::APInt(64, bit->second)));
                 } else {
                     loadInst->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
                 }
@@ -800,15 +819,17 @@ bool CodeGenerator::tryFoldStringConcat(Expression* expr, std::string& out) cons
         auto* call = static_cast<CallExpr*>(expr);
         if (call->arguments.empty() && optCtx_) {
             auto v = optCtx_->constStringReturn(call->callee);
-            if (v) { out += *v; return true; }
+            if (v) {
+                out += *v;
+                return true;
+            }
         }
         return false;
     }
     if (expr->type == ASTNodeType::BINARY_EXPR) {
         auto* bin = static_cast<BinaryExpr*>(expr);
         if (bin->op == "+") {
-            return tryFoldStringConcat(bin->left.get(), out) &&
-                   tryFoldStringConcat(bin->right.get(), out);
+            return tryFoldStringConcat(bin->left.get(), out) && tryFoldStringConcat(bin->right.get(), out);
         }
     }
     return false;
@@ -822,12 +843,14 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         const std::string& targetType = typeExpr->name;
         llvm::Value* val = generateExpression(expr->left.get());
         llvm::Type* dstTy = resolveAnnotatedType(targetType);
-        if (!dstTy) dstTy = getDefaultType();
+        if (!dstTy)
+            dstTy = getDefaultType();
         llvm::Type* srcTy = val->getType();
         // byte[] must be checked BEFORE the srcTy==dstTy early-return because
         // both strings and arrays have pointer (ptr) LLVM type — if we returned
         // early here, a string as byte[] would just hand back the string pointer.
-        if (targetType != "byte[]" && srcTy == dstTy) return val;
+        if (targetType != "byte[]" && srcTy == dstTy)
+            return val;
         // Integer widening / narrowing
         if (srcTy->isIntegerTy() && dstTy->isIntegerTy()) {
             unsigned srcBits = srcTy->getIntegerBitWidth();
@@ -861,7 +884,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     // signed).  We communicate non-negativity via nonNegValues_
                     // for OmScript-level alias analysis instead.
                     auto* z = builder->CreateZExt(val, dstTy, "as.zext",
-                                                   /*IsNonNeg=*/false);
+                                                  /*IsNonNeg=*/false);
                     nonNegValues_.insert(z);
                     return z;
                 }
@@ -914,9 +937,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (targetType == "string") {
             // Float → string
             if (srcTy->isFloatingPointTy()) {
-                llvm::Value* fval = srcTy->isDoubleTy()
-                    ? val
-                    : builder->CreateFPExt(val, getFloatType(), "as.str.fpext");
+                llvm::Value* fval =
+                    srcTy->isDoubleTy() ? val : builder->CreateFPExt(val, getFloatType(), "as.str.fpext");
                 llvm::Value* maxLen = llvm::ConstantInt::get(getDefaultType(), 31);
                 llvm::Value* hdr = emitAllocString(maxLen, maxLen, "as.tostr");
                 llvm::Value* bufData = emitStringData(hdr, "as.tostr.data");
@@ -924,8 +946,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 llvm::GlobalVariable* fmtStr = module->getGlobalVariable("as_tostr_float_fmt", true);
                 if (!fmtStr)
                     fmtStr = builder->CreateGlobalString("%g", "as_tostr_float_fmt");
-                llvm::Value* written = builder->CreateCall(getOrDeclareSnprintf(),
-                    {bufData, bufSize, fmtStr, fval}, "as.tostr.written");
+                llvm::Value* written =
+                    builder->CreateCall(getOrDeclareSnprintf(), {bufData, bufSize, fmtStr, fval}, "as.tostr.written");
                 llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "as.tostr.len", false);
                 nonNegValues_.insert(actualLen);
                 emitStoreStringLen(actualLen, hdr);
@@ -942,8 +964,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 llvm::GlobalVariable* fmtStr = module->getGlobalVariable("as_tostr_ptr_fmt", true);
                 if (!fmtStr)
                     fmtStr = builder->CreateGlobalString("%llu", "as_tostr_ptr_fmt");
-                llvm::Value* written = builder->CreateCall(getOrDeclareSnprintf(),
-                    {bufData, bufSize, fmtStr, asInt}, "as.tostr.written");
+                llvm::Value* written =
+                    builder->CreateCall(getOrDeclareSnprintf(), {bufData, bufSize, fmtStr, asInt}, "as.tostr.written");
                 llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "as.tostr.len", false);
                 nonNegValues_.insert(actualLen);
                 emitStoreStringLen(actualLen, hdr);
@@ -966,8 +988,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             llvm::GlobalVariable* fmtStr = module->getGlobalVariable("as_tostr_int_fmt", true);
             if (!fmtStr)
                 fmtStr = builder->CreateGlobalString("%lld", "as_tostr_int_fmt");
-            llvm::Value* written = builder->CreateCall(getOrDeclareSnprintf(),
-                {bufData, bufSize, fmtStr, ival}, "as.tostr.written");
+            llvm::Value* written =
+                builder->CreateCall(getOrDeclareSnprintf(), {bufData, bufSize, fmtStr, ival}, "as.tostr.written");
             llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "as.tostr.len", false);
             nonNegValues_.insert(actualLen);
             emitStoreStringLen(actualLen, hdr);
@@ -986,9 +1008,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 unsigned bits = srcTy->getIntegerBitWidth();
                 numBytes = (bits + 7) / 8;
                 if (bits <= 64) {
-                    asInt = (bits < 64)
-                        ? builder->CreateZExt(val, getDefaultType(), "as.bytes.zext")
-                        : val;
+                    asInt = (bits < 64) ? builder->CreateZExt(val, getDefaultType(), "as.bytes.zext") : val;
                 } else {
                     // Wide integers (i128, i256…): keep the full value so
                     // all bytes are extracted.  The shift/mask loop below uses
@@ -1000,9 +1020,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 numBytes = bits / 8;
                 llvm::Type* intTy = llvm::IntegerType::get(*context, bits);
                 llvm::Value* bitInt = builder->CreateBitCast(val, intTy, "as.bytes.bitcast");
-                asInt = (bits < 64)
-                    ? builder->CreateZExt(bitInt, getDefaultType(), "as.bytes.zext")
-                    : (llvm::Value*)bitInt;
+                asInt =
+                    (bits < 64) ? builder->CreateZExt(bitInt, getDefaultType(), "as.bytes.zext") : (llvm::Value*)bitInt;
             } else if (srcTy->isPointerTy()) {
                 // Check source annotation: if it's a string, emit per-char copy.
                 // Use isStringExpr() which checks stringVars_ (populated from the
@@ -1012,13 +1031,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 if (isStr) {
                     // String → byte[]: one element per UTF-8 byte of the string data.
                     llvm::Value* strData = emitStringData(val, "as.bytes.data");
-                    llvm::Value* strLen  = builder->CreateCall(getOrDeclareStrlen(), {strData},
-                                                                "as.bytes.strlen");
+                    llvm::Value* strLen = builder->CreateCall(getOrDeclareStrlen(), {strData}, "as.bytes.strlen");
                     nonNegValues_.insert(llvm::cast<llvm::CallInst>(strLen));
                     llvm::Value* buf = emitAllocArray(strLen, "as.bytes.str");
                     llvm::Function* curFn = builder->GetInsertBlock()->getParent();
                     llvm::BasicBlock* preheader = builder->GetInsertBlock();
-                    llvm::BasicBlock* loopHdr  = llvm::BasicBlock::Create(*context, "as.bytes.lhdr", curFn);
+                    llvm::BasicBlock* loopHdr = llvm::BasicBlock::Create(*context, "as.bytes.lhdr", curFn);
                     llvm::BasicBlock* loopBody = llvm::BasicBlock::Create(*context, "as.bytes.lbody", curFn);
                     llvm::BasicBlock* loopExit = llvm::BasicBlock::Create(*context, "as.bytes.lexit", curFn);
                     builder->CreateBr(loopHdr);
@@ -1028,23 +1046,20 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     llvm::Value* cond = builder->CreateICmpSLT(phi, strLen, "as.bytes.cond");
                     builder->CreateCondBr(cond, loopBody, loopExit);
                     builder->SetInsertPoint(loopBody);
-                    llvm::Value* charPtr = builder->CreateInBoundsGEP(
-                        llvm::Type::getInt8Ty(*context), strData, phi, "as.bytes.cp");
-                    llvm::LoadInst* charByte = builder->CreateLoad(
-                        llvm::Type::getInt8Ty(*context), charPtr, "as.bytes.cb");
+                    llvm::Value* charPtr =
+                        builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strData, phi, "as.bytes.cp");
+                    llvm::LoadInst* charByte =
+                        builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "as.bytes.cb");
                     charByte->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
-                    llvm::Value* charExt = builder->CreateZExt(charByte, getDefaultType(),
-                                                                "as.bytes.cext", /*IsNonNeg=*/false);
+                    llvm::Value* charExt =
+                        builder->CreateZExt(charByte, getDefaultType(), "as.bytes.cext", /*IsNonNeg=*/false);
                     nonNegValues_.insert(charExt);
-                    llvm::Value* arrIdx = builder->CreateAdd(phi,
-                        llvm::ConstantInt::get(getDefaultType(), 1),
-                        "as.bytes.ai", /*nuw=*/true, /*nsw=*/true);
-                    llvm::Value* ep = builder->CreateInBoundsGEP(getDefaultType(), buf, arrIdx,
-                                                                   "as.bytes.ep");
+                    llvm::Value* arrIdx = builder->CreateAdd(phi, llvm::ConstantInt::get(getDefaultType(), 1),
+                                                             "as.bytes.ai", /*nuw=*/true, /*nsw=*/true);
+                    llvm::Value* ep = builder->CreateInBoundsGEP(getDefaultType(), buf, arrIdx, "as.bytes.ep");
                     emitStoreArrayElem(charExt, ep);
-                    llvm::Value* next = builder->CreateAdd(phi,
-                        llvm::ConstantInt::get(getDefaultType(), 1),
-                        "as.bytes.next", /*nuw=*/true, /*nsw=*/true);
+                    llvm::Value* next = builder->CreateAdd(phi, llvm::ConstantInt::get(getDefaultType(), 1),
+                                                           "as.bytes.next", /*nuw=*/true, /*nsw=*/true);
                     phi->addIncoming(next, loopBody);
                     builder->CreateBr(loopHdr);
                     builder->SetInsertPoint(loopExit);
@@ -1058,30 +1073,25 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
             if (asInt && numBytes > 0) {
                 llvm::Value* lenV = llvm::ConstantInt::get(getDefaultType(), numBytes);
-                llvm::Value* buf  = emitAllocArray(lenV, "as.bytes");
+                llvm::Value* buf = emitAllocArray(lenV, "as.bytes");
                 llvm::Value* mask = llvm::ConstantInt::get(asInt->getType(), 0xFF);
                 for (unsigned i = 0; i < numBytes; ++i) {
-                    llvm::Value* shifted = (i == 0)
-                        ? asInt
-                        : builder->CreateLShr(asInt,
-                              llvm::ConstantInt::get(asInt->getType(),
-                                                      static_cast<uint64_t>(i) * 8),
-                              "as.bytes.shr");
+                    llvm::Value* shifted =
+                        (i == 0) ? asInt
+                                 : builder->CreateLShr(
+                                       asInt, llvm::ConstantInt::get(asInt->getType(), static_cast<uint64_t>(i) * 8),
+                                       "as.bytes.shr");
                     llvm::Value* byteVal = builder->CreateAnd(shifted, mask, "as.bytes.mask");
                     if (byteVal->getType() != getDefaultType()) {
                         // After masking with 0xFF the value fits in 8 bits; the
                         // containing type may be narrower than i64 (use ZExt) or
                         // wider than i64 — e.g. i128/i256 — (use Trunc).
-                        const unsigned byteValBits =
-                            byteVal->getType()->getIntegerBitWidth();
-                        byteVal = (byteValBits > 64)
-                            ? builder->CreateTrunc(byteVal, getDefaultType(), "as.bytes.ext")
-                            : builder->CreateZExt(byteVal, getDefaultType(), "as.bytes.ext");
+                        const unsigned byteValBits = byteVal->getType()->getIntegerBitWidth();
+                        byteVal = (byteValBits > 64) ? builder->CreateTrunc(byteVal, getDefaultType(), "as.bytes.ext")
+                                                     : builder->CreateZExt(byteVal, getDefaultType(), "as.bytes.ext");
                     }
-                    llvm::Value* idxV = llvm::ConstantInt::get(getDefaultType(),
-                                                                static_cast<uint64_t>(i) + 1);
-                    llvm::Value* ep = builder->CreateInBoundsGEP(getDefaultType(), buf, idxV,
-                                                                   "as.bytes.ep");
+                    llvm::Value* idxV = llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(i) + 1);
+                    llvm::Value* ep = builder->CreateInBoundsGEP(getDefaultType(), buf, idxV, "as.bytes.ep");
                     emitStoreArrayElem(byteVal, ep);
                 }
                 arrayVars_.insert("as");
@@ -1108,22 +1118,19 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             // Use interned string for folded concatenation result too.
             llvm::GlobalVariable* gv = internString(folded);
             return llvm::ConstantExpr::getInBoundsGetElementPtr(
-                gv->getValueType(),
-                gv,
-                llvm::ArrayRef<llvm::Constant*>{
-                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
-                    llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)
-                });
+                gv->getValueType(), gv,
+                llvm::ArrayRef<llvm::Constant*>{llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                                                llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
         }
     }
     // --- End string constant folding ---
 
     // For comparison operators, set inComparisonContext_ so that any non-pow2
-    const bool isComparisonOp = (expr->op == "==" || expr->op == "!=" ||
-                                 expr->op == "<"  || expr->op == ">"  ||
+    const bool isComparisonOp = (expr->op == "==" || expr->op == "!=" || expr->op == "<" || expr->op == ">" ||
                                  expr->op == "<=" || expr->op == ">=");
     const bool savedInComparison = inComparisonContext_;
-    if (isComparisonOp) inComparisonContext_ = true;
+    if (isComparisonOp)
+        inComparisonContext_ = true;
 
     llvm::Value* left = generateExpression(expr->left.get());
     if (std::getenv("OMSC_DEBUG_BINARY")) {
@@ -1160,8 +1167,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
         // Branchless optimization: when the right-hand side is a simple
         auto isSideEffectFree = [](Expression* e) -> bool {
-            if (e->type == ASTNodeType::LITERAL_EXPR) return true;
-            if (e->type == ASTNodeType::IDENTIFIER_EXPR) return true;
+            if (e->type == ASTNodeType::LITERAL_EXPR)
+                return true;
+            if (e->type == ASTNodeType::IDENTIFIER_EXPR)
+                return true;
             if (e->type == ASTNodeType::UNARY_EXPR) {
                 auto* un = static_cast<UnaryExpr*>(e);
                 // Arithmetic/logical unary on a simple operand is side-effect-free
@@ -1174,17 +1183,18 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (e->type == ASTNodeType::BINARY_EXPR) {
                 auto* bin = static_cast<BinaryExpr*>(e);
                 const auto& op = bin->op;
-                const bool lhsSimple = bin->left->type == ASTNodeType::IDENTIFIER_EXPR ||
-                                       bin->left->type == ASTNodeType::LITERAL_EXPR;
-                const bool rhsSimple = bin->right->type == ASTNodeType::IDENTIFIER_EXPR ||
-                                       bin->right->type == ASTNodeType::LITERAL_EXPR;
-                if (!lhsSimple || !rhsSimple) return false;
+                const bool lhsSimple =
+                    bin->left->type == ASTNodeType::IDENTIFIER_EXPR || bin->left->type == ASTNodeType::LITERAL_EXPR;
+                const bool rhsSimple =
+                    bin->right->type == ASTNodeType::IDENTIFIER_EXPR || bin->right->type == ASTNodeType::LITERAL_EXPR;
+                if (!lhsSimple || !rhsSimple)
+                    return false;
                 // Comparisons are always side-effect-free on simple operands.
-                if (op == "==" || op == "!=" || op == "<" || op == "<=" ||
-                    op == ">" || op == ">=") return true;
+                if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=")
+                    return true;
                 // Bitwise and shift ops: integer-only, no memory, no traps.
-                if (op == "&" || op == "|" || op == "^" ||
-                    op == "<<" || op == ">>") return true;
+                if (op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>")
+                    return true;
             }
             return false;
         };
@@ -1237,7 +1247,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // Constant folding: when the left side is a known constant, skip branches.
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
             if (!ci->isZero())
-                return left;  // nonzero ?? y → nonzero
+                return left; // nonzero ?? y → nonzero
             // 0 ?? y → y
             llvm::Value* right = generateExpression(expr->right.get());
             return toDefaultType(right);
@@ -1272,8 +1282,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // ── CF-CTRE range-conditioned cheaper rewrites (Q4) ───────────────────
     if (optCtx_) {
         const std::string& altOp = optCtx_->cheaperRewrite(expr);
-        if (!altOp.empty() && !left->getType()->isVectorTy() &&
-            !right->getType()->isVectorTy()) {
+        if (!altOp.empty() && !left->getType()->isVectorTy() && !right->getType()->isVectorTy()) {
             llvm::Value* lI = toDefaultType(left);
             llvm::Value* rI = toDefaultType(right);
             if (altOp == ">>" && expr->op == "/") {
@@ -1282,7 +1291,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 if (auto* rConst = llvm::dyn_cast<llvm::ConstantInt>(rI)) {
                     const uint64_t divisor = rConst->getZExtValue();
                     if (divisor > 0 && (divisor & (divisor - 1)) == 0) {
-                        unsigned k = 0; uint64_t v = divisor; while (v > 1) { v >>= 1; ++k; }
+                        unsigned k = 0;
+                        uint64_t v = divisor;
+                        while (v > 1) {
+                            v >>= 1;
+                            ++k;
+                        }
                         llvm::Value* kVal = llvm::ConstantInt::get(lI->getType(), k);
                         return builder->CreateLShr(lI, kVal, "cdiv.shr");
                     }
@@ -1301,7 +1315,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 if (auto* rConst = llvm::dyn_cast<llvm::ConstantInt>(rI)) {
                     const uint64_t factor = rConst->getZExtValue();
                     if (factor > 0 && (factor & (factor - 1)) == 0) {
-                        unsigned k = 0; uint64_t v = factor; while (v > 1) { v >>= 1; ++k; }
+                        unsigned k = 0;
+                        uint64_t v = factor;
+                        while (v > 1) {
+                            v >>= 1;
+                            ++k;
+                        }
                         llvm::Value* kVal = llvm::ConstantInt::get(lI->getType(), k);
                         return builder->CreateShl(lI, kVal, "cmul.shl");
                     }
@@ -1328,25 +1347,35 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         auto* vecTy = llvm::cast<llvm::FixedVectorType>(left->getType());
         const bool isFloatVec = vecTy->getElementType()->isFloatingPointTy();
 
-        if (expr->op == "+") return isFloatVec ? builder->CreateFAdd(left, right, "simd.fadd")
-                                               : builder->CreateAdd(left, right, "simd.add");
-        if (expr->op == "-") return isFloatVec ? builder->CreateFSub(left, right, "simd.fsub")
-                                               : builder->CreateSub(left, right, "simd.sub");
-        if (expr->op == "*") return isFloatVec ? builder->CreateFMul(left, right, "simd.fmul")
-                                               : builder->CreateMul(left, right, "simd.mul");
-        if (expr->op == "/") return isFloatVec ? builder->CreateFDiv(left, right, "simd.fdiv")
-                                               : builder->CreateSDiv(left, right, "simd.sdiv");
+        if (expr->op == "+")
+            return isFloatVec ? builder->CreateFAdd(left, right, "simd.fadd")
+                              : builder->CreateAdd(left, right, "simd.add");
+        if (expr->op == "-")
+            return isFloatVec ? builder->CreateFSub(left, right, "simd.fsub")
+                              : builder->CreateSub(left, right, "simd.sub");
+        if (expr->op == "*")
+            return isFloatVec ? builder->CreateFMul(left, right, "simd.fmul")
+                              : builder->CreateMul(left, right, "simd.mul");
+        if (expr->op == "/")
+            return isFloatVec ? builder->CreateFDiv(left, right, "simd.fdiv")
+                              : builder->CreateSDiv(left, right, "simd.sdiv");
         if (expr->op == "%") {
-            if (isFloatVec) return builder->CreateFRem(left, right, "simd.frem");
+            if (isFloatVec)
+                return builder->CreateFRem(left, right, "simd.frem");
             return builder->CreateSRem(left, right, "simd.srem");
         }
         // Bitwise operations on integer vectors
         if (!isFloatVec) {
-            if (expr->op == "&") return builder->CreateAnd(left, right, "simd.and");
-            if (expr->op == "|") return builder->CreateOr(left, right, "simd.or");
-            if (expr->op == "^") return builder->CreateXor(left, right, "simd.xor");
-            if (expr->op == "<<") return builder->CreateShl(left, right, "simd.shl");
-            if (expr->op == ">>") return builder->CreateLShr(left, right, "simd.lshr");
+            if (expr->op == "&")
+                return builder->CreateAnd(left, right, "simd.and");
+            if (expr->op == "|")
+                return builder->CreateOr(left, right, "simd.or");
+            if (expr->op == "^")
+                return builder->CreateXor(left, right, "simd.xor");
+            if (expr->op == "<<")
+                return builder->CreateShl(left, right, "simd.shl");
+            if (expr->op == ">>")
+                return builder->CreateLShr(left, right, "simd.lshr");
         }
         codegenError("Unsupported operator '" + expr->op + "' for SIMD vector types", expr);
     }
@@ -1357,7 +1386,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (expr->left->type == ASTNodeType::IDENTIFIER_EXPR) {
             auto* id = static_cast<IdentifierExpr*>(expr->left.get());
             auto vit = structVars_.find(id->name);
-            if (vit != structVars_.end()) leftStructType = vit->second;
+            if (vit != structVars_.end())
+                leftStructType = vit->second;
         } else if (expr->left->type == ASTNodeType::STRUCT_LITERAL_EXPR) {
             leftStructType = static_cast<StructLiteralExpr*>(expr->left.get())->structName;
         }
@@ -1430,9 +1460,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (auto* rc = llvm::dyn_cast<llvm::ConstantFP>(right)) {
             const double rv = rc->getValueAPF().convertToDouble();
             if (rv == 0.0 && (expr->op == "+" || expr->op == "-"))
-                return left;  // x+0.0, x-0.0 → x
+                return left; // x+0.0, x-0.0 → x
             if (rv == 1.0 && (expr->op == "*" || expr->op == "/"))
-                return left;  // x*1.0, x/1.0 → x
+                return left; // x*1.0, x/1.0 → x
             if (rv == -1.0 && expr->op == "*")
                 return builder->CreateFNeg(left, "fnegtmp"); // x*(-1.0) → -x
             if (rv == -1.0 && expr->op == "/")
@@ -1441,11 +1471,11 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             if (rv == 2.0 && expr->op == "*")
                 return builder->CreateFAdd(left, left, "fmul2"); // x*2.0 → x+x
             if (rv == 2.0 && expr->op == "**")
-                return builder->CreateFMul(left, left, "fsq");   // x**2.0 → x*x
+                return builder->CreateFMul(left, left, "fsq"); // x**2.0 → x*x
             if (rv == 0.0 && expr->op == "**")
                 return llvm::ConstantFP::get(getFloatType(), 1.0); // x**0.0 → 1.0
             if (rv == 1.0 && expr->op == "**")
-                return left;  // x**1.0 → x
+                return left; // x**1.0 → x
             // Float division by power-of-2 constant → multiply by reciprocal.
             if (expr->op == "/" && rv != 0.0) {
                 const double abs_rv = rv < 0 ? -rv : rv;
@@ -1633,7 +1663,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             left = ensureStrPtr(left, leftIsStr);
             right = ensureStrPtr(right, rightIsStr);
 
-            llvm::Value* len1 = emitStringLen(left,  "concat.len1");
+            llvm::Value* len1 = emitStringLen(left, "concat.len1");
             llvm::Value* len2 = emitStringLen(right, "concat.len2");
             // strlen results are always non-negative and bounded by addressable
             llvm::Value* totalLen = builder->CreateAdd(len1, len2, "totallen", /*HasNUW=*/true, /*HasNSW=*/true);
@@ -1641,15 +1671,14 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             // Allocate fat-pointer header + data (capacity = totalLen, len = totalLen)
             llvm::Value* buf = emitAllocString(totalLen, totalLen, "concat");
             llvm::Value* data = emitStringData(buf, "concat.data");
-            llvm::Value* data1 = emitStringData(left,  "concat.src1");
+            llvm::Value* data1 = emitStringData(left, "concat.src1");
             llvm::Value* data2 = emitStringData(right, "concat.src2");
             // Use memcpy instead of strcpy+strcat: strcat must scan for the NUL
             builder->CreateCall(getOrDeclareMemcpy(), {data, data1, len1});
-            llvm::Value* dest2 = builder->CreateInBoundsGEP(
-                llvm::Type::getInt8Ty(*context), data, len1, "concat.dst2");
+            llvm::Value* dest2 = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), data, len1, "concat.dst2");
             // Copy len2+1 bytes from right to include the null terminator.
-            llvm::Value* len2Plus1 = builder->CreateAdd(
-                len2, llvm::ConstantInt::get(getDefaultType(), 1), "len2p1", /*HasNUW=*/true, /*HasNSW=*/true);
+            llvm::Value* len2Plus1 = builder->CreateAdd(len2, llvm::ConstantInt::get(getDefaultType(), 1), "len2p1",
+                                                        /*HasNUW=*/true, /*HasNSW=*/true);
             builder->CreateCall(getOrDeclareMemcpy(), {dest2, data2, len2Plus1});
             return buf;
         }
@@ -1672,8 +1701,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* strData = emitStringData(strPtr, "strmul.data");
 
         // Guard against multiplication overflow: strLen * countVal could wrap
-        llvm::Function* overflowIntrinsic = OMSC_GET_INTRINSIC(
-            module.get(), llvm::Intrinsic::umul_with_overflow, {getDefaultType()});
+        llvm::Function* overflowIntrinsic =
+            OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::umul_with_overflow, {getDefaultType()});
         llvm::Value* mulResult = builder->CreateCall(overflowIntrinsic, {strLen, countVal}, "strmul.ovf");
         llvm::Value* totalLen = builder->CreateExtractValue(mulResult, 0, "strmul.total");
         llvm::Value* overflowed = builder->CreateExtractValue(mulResult, 1, "strmul.ovflag");
@@ -1688,13 +1717,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         builder->SetInsertPoint(ovfBB);
         {
             std::string ovfMsgStr = expr->line > 0
-                ? std::string("Runtime error: string repetition size overflow at line ") + std::to_string(expr->line) + "\n"
-                : "Runtime error: string repetition size overflow\n";
+                                        ? std::string("Runtime error: string repetition size overflow at line ") +
+                                              std::to_string(expr->line) + "\n"
+                                        : "Runtime error: string repetition size overflow\n";
             llvm::Value* ovfMsg = builder->CreateGlobalString(ovfMsgStr, "strmul_ovf_msg");
             builder->CreateCall(getPrintfFunction(), {ovfMsg});
         }
-        builder->CreateCall(getOrDeclareExit(),
-            {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1)});
+        builder->CreateCall(getOrDeclareExit(), {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1)});
         builder->CreateUnreachable();
 
         builder->SetInsertPoint(okBB);
@@ -1709,9 +1738,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
         builder->CreateBr(loopBB);
         builder->SetInsertPoint(loopBB);
-        llvm::PHINode* idx     = builder->CreatePHI(getDefaultType(), 2, "strmul.idx");
-        llvm::PHINode* writePtr = builder->CreatePHI(
-            llvm::PointerType::getUnqual(*context), 2, "strmul.wptr");
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "strmul.idx");
+        llvm::PHINode* writePtr = builder->CreatePHI(llvm::PointerType::getUnqual(*context), 2, "strmul.wptr");
         idx->addIncoming(zero, preHdr);
         writePtr->addIncoming(bufData, preHdr);
         builder->CreateCondBr(builder->CreateICmpSLT(idx, countVal, "strmul.cond"), bodyBB, doneBB);
@@ -1728,16 +1756,16 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             llvm::BasicBlock* copyBB = llvm::BasicBlock::Create(*context, "strmul.copy", curFn);
             llvm::BasicBlock* skipBB = llvm::BasicBlock::Create(*context, "strmul.skip", curFn);
             builder->CreateCondBr(
-                builder->CreateICmpNE(strLen, llvm::ConstantInt::get(getDefaultType(), 0), "strmul.nonempty"),
-                copyBB, skipBB);
+                builder->CreateICmpNE(strLen, llvm::ConstantInt::get(getDefaultType(), 0), "strmul.nonempty"), copyBB,
+                skipBB);
             builder->SetInsertPoint(copyBB);
             builder->CreateCall(getOrDeclareMemcpy(), {writePtr, strData, strLen});
             builder->CreateBr(skipBB);
             builder->SetInsertPoint(skipBB);
         }
         // Advance the write pointer by strLen bytes (nuw+nsw: no wrap possible)
-        llvm::Value* nextWrite = builder->CreateInBoundsGEP(
-            llvm::Type::getInt8Ty(*context), writePtr, strLen, "strmul.nwptr");
+        llvm::Value* nextWrite =
+            builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), writePtr, strLen, "strmul.nwptr");
         llvm::Value* nextIdx = builder->CreateAdd(idx, one, "strmul.next", /*HasNUW=*/true, /*HasNSW=*/true);
         // Use GetInsertBlock() — not bodyBB — because the dynamic strLen guard above
         // may have moved the insert point to a new 'skip' block.
@@ -1767,7 +1795,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (expr->op == "==" || expr->op == "!=") {
             llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
             auto* ptrEqBB = llvm::BasicBlock::Create(*context, "streq.ptreq", parentFn);
-            auto* slowBB  = llvm::BasicBlock::Create(*context, "streq.slow", parentFn);
+            auto* slowBB = llvm::BasicBlock::Create(*context, "streq.slow", parentFn);
             auto* mergeBB = llvm::BasicBlock::Create(*context, "streq.merge", parentFn);
 
             llvm::Value* samePtr = builder->CreateICmpEQ(lPtr, rPtr, "streq.sameptr");
@@ -1778,9 +1806,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
             // Fast path: pointers match → strings are equal
             builder->SetInsertPoint(ptrEqBB);
-            llvm::Value* fastResult = (expr->op == "==")
-                ? llvm::ConstantInt::get(getDefaultType(), 1)
-                : llvm::ConstantInt::get(getDefaultType(), 0);
+            llvm::Value* fastResult = (expr->op == "==") ? llvm::ConstantInt::get(getDefaultType(), 1)
+                                                         : llvm::ConstantInt::get(getDefaultType(), 0);
             builder->CreateBr(mergeBB);
 
             // Slow path: call strcmp on char data pointers
@@ -1789,8 +1816,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             llvm::Value* rData = emitStringData(rPtr, "streq.rdata");
             llvm::Value* cmpResult = builder->CreateCall(getOrDeclareStrcmp(), {lData, rData}, "strcmp.res");
             llvm::Value* slowBool = (expr->op == "==")
-                ? builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "scmp.eq")
-                : builder->CreateICmpNE(cmpResult, builder->getInt32(0), "scmp.ne");
+                                        ? builder->CreateICmpEQ(cmpResult, builder->getInt32(0), "scmp.eq")
+                                        : builder->CreateICmpNE(cmpResult, builder->getInt32(0), "scmp.ne");
             llvm::Value* slowResult = emitBoolZExt(slowBool, "scmp.zext");
             builder->CreateBr(mergeBB);
 
@@ -1851,51 +1878,60 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             return emitBoolZExt(cmpBool, "pcmp.result");
         }
         // Non-comparison ops on two pointers: fall through to ptrtoint path.
-        left  = builder->CreatePtrToInt(left,  getDefaultType(), "ptoi");
+        left = builder->CreatePtrToInt(left, getDefaultType(), "ptoi");
         right = builder->CreatePtrToInt(right, getDefaultType(), "ptoi");
     } else {
         // Mixed ptr/int: for comparison operators, convert the integer operand
         // to a pointer (inttoptr) so the comparison stays in pointer space and
         // preserves alias-analysis provenance.  For non-comparison ops, keep
         // the legacy ptrtoint path (arithmetic needs integer operands).
-        const bool isCmpOp = (expr->op == "==" || expr->op == "!=" ||
-                               expr->op == "<"  || expr->op == "<=" ||
-                               expr->op == ">"  || expr->op == ">=");
+        const bool isCmpOp = (expr->op == "==" || expr->op == "!=" || expr->op == "<" || expr->op == "<=" ||
+                              expr->op == ">" || expr->op == ">=");
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         if (isCmpOp) {
             if (left->getType()->isPointerTy() && right->getType()->isIntegerTy()) {
                 // Integer 0 → null pointer (common null-check idiom); others inttoptr.
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-                    right = ci->isZero()
-                        ? llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ptrTy))
-                        : builder->CreateIntToPtr(right, ptrTy, "pcmp.itop");
+                    right = ci->isZero() ? llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ptrTy))
+                                         : builder->CreateIntToPtr(right, ptrTy, "pcmp.itop");
                 } else {
                     right = builder->CreateIntToPtr(right, ptrTy, "pcmp.itop");
                 }
                 llvm::Value* cmpBool = nullptr;
-                if (expr->op == "==")       cmpBool = builder->CreateICmpEQ (left, right, "pcmp.eq");
-                else if (expr->op == "!=")  cmpBool = builder->CreateICmpNE (left, right, "pcmp.ne");
-                else if (expr->op == "<")   cmpBool = builder->CreateICmpULT(left, right, "pcmp.lt");
-                else if (expr->op == "<=")  cmpBool = builder->CreateICmpULE(left, right, "pcmp.le");
-                else if (expr->op == ">")   cmpBool = builder->CreateICmpUGT(left, right, "pcmp.gt");
-                else if (expr->op == ">=")  cmpBool = builder->CreateICmpUGE(left, right, "pcmp.ge");
+                if (expr->op == "==")
+                    cmpBool = builder->CreateICmpEQ(left, right, "pcmp.eq");
+                else if (expr->op == "!=")
+                    cmpBool = builder->CreateICmpNE(left, right, "pcmp.ne");
+                else if (expr->op == "<")
+                    cmpBool = builder->CreateICmpULT(left, right, "pcmp.lt");
+                else if (expr->op == "<=")
+                    cmpBool = builder->CreateICmpULE(left, right, "pcmp.le");
+                else if (expr->op == ">")
+                    cmpBool = builder->CreateICmpUGT(left, right, "pcmp.gt");
+                else if (expr->op == ">=")
+                    cmpBool = builder->CreateICmpUGE(left, right, "pcmp.ge");
                 if (cmpBool)
                     return emitBoolZExt(cmpBool, "pcmp.result");
             } else if (right->getType()->isPointerTy() && left->getType()->isIntegerTy()) {
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
-                    left = ci->isZero()
-                        ? llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ptrTy))
-                        : builder->CreateIntToPtr(left, ptrTy, "pcmp.itop");
+                    left = ci->isZero() ? llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(ptrTy))
+                                        : builder->CreateIntToPtr(left, ptrTy, "pcmp.itop");
                 } else {
                     left = builder->CreateIntToPtr(left, ptrTy, "pcmp.itop");
                 }
                 llvm::Value* cmpBool = nullptr;
-                if (expr->op == "==")       cmpBool = builder->CreateICmpEQ (left, right, "pcmp.eq");
-                else if (expr->op == "!=")  cmpBool = builder->CreateICmpNE (left, right, "pcmp.ne");
-                else if (expr->op == "<")   cmpBool = builder->CreateICmpULT(left, right, "pcmp.lt");
-                else if (expr->op == "<=")  cmpBool = builder->CreateICmpULE(left, right, "pcmp.le");
-                else if (expr->op == ">")   cmpBool = builder->CreateICmpUGT(left, right, "pcmp.gt");
-                else if (expr->op == ">=")  cmpBool = builder->CreateICmpUGE(left, right, "pcmp.ge");
+                if (expr->op == "==")
+                    cmpBool = builder->CreateICmpEQ(left, right, "pcmp.eq");
+                else if (expr->op == "!=")
+                    cmpBool = builder->CreateICmpNE(left, right, "pcmp.ne");
+                else if (expr->op == "<")
+                    cmpBool = builder->CreateICmpULT(left, right, "pcmp.lt");
+                else if (expr->op == "<=")
+                    cmpBool = builder->CreateICmpULE(left, right, "pcmp.le");
+                else if (expr->op == ">")
+                    cmpBool = builder->CreateICmpUGT(left, right, "pcmp.gt");
+                else if (expr->op == ">=")
+                    cmpBool = builder->CreateICmpUGE(left, right, "pcmp.ge");
                 if (cmpBool)
                     return emitBoolZExt(cmpBool, "pcmp.result");
             }
@@ -1912,31 +1948,32 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     // narrower width if it fits exactly.  This preserves the annotated type of
     // expressions like `var x: i32 = 5; x + 3` → i32 rather than promoting x
     // to i64 to match the literal.
-    if (left->getType()->isIntegerTy() && right->getType()->isIntegerTy() &&
-        left->getType() != right->getType()) {
+    if (left->getType()->isIntegerTy() && right->getType()->isIntegerTy() && left->getType() != right->getType()) {
         auto tryNarrowLiteral = [&](llvm::Value*& constVal, llvm::Value* otherVal) {
             auto* ci = llvm::dyn_cast<llvm::ConstantInt>(constVal);
-            if (!ci) return;
+            if (!ci)
+                return;
             auto* intTy = llvm::dyn_cast<llvm::IntegerType>(otherVal->getType());
-            if (!intTy) return; // otherVal is not an integer (e.g. pointer); skip
+            if (!intTy)
+                return; // otherVal is not an integer (e.g. pointer); skip
             const unsigned constBits = constVal->getType()->getIntegerBitWidth();
             const unsigned otherBits = intTy->getBitWidth();
-            if (constBits <= otherBits) return; // already narrower/same
+            if (constBits <= otherBits)
+                return; // already narrower/same
             // Narrow the constant only when the value round-trips exactly.
             auto* narrowed = llvm::ConstantInt::getSigned(intTy, ci->getSExtValue());
             if (narrowed->getSExtValue() == ci->getSExtValue())
                 constVal = narrowed;
         };
-        tryNarrowLiteral(left,  right);
+        tryNarrowLiteral(left, right);
         tryNarrowLiteral(right, left);
     }
 
     // Normalize integer widths: when operands have different integer bit widths
-    if (left->getType()->isIntegerTy() && right->getType()->isIntegerTy() &&
-        left->getType() != right->getType()) {
+    if (left->getType()->isIntegerTy() && right->getType()->isIntegerTy() && left->getType() != right->getType()) {
         const unsigned leftBits = left->getType()->getIntegerBitWidth();
         const unsigned rightBits = right->getType()->getIntegerBitWidth();
-        const bool leftUnsigned  = unsignedExprs_.count(left) || isUnsignedValue(left);
+        const bool leftUnsigned = unsignedExprs_.count(left) || isUnsignedValue(left);
         const bool rightUnsigned = unsignedExprs_.count(right) || isUnsignedValue(right);
         if (leftBits < rightBits) {
             if (leftUnsigned) {
@@ -2048,9 +2085,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 for (int64_t i = 0; i < rval; i++) {
                     if (lval != 0 && lval != 1 && lval != -1) {
                         const uint64_t ab = (lval < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(lval))
-                                                 : static_cast<uint64_t>(lval);
+                                                       : static_cast<uint64_t>(lval);
                         const uint64_t ar = (result < 0) ? static_cast<uint64_t>(-static_cast<uint64_t>(result))
-                                                   : static_cast<uint64_t>(result);
+                                                         : static_cast<uint64_t>(result);
                         if (ar > static_cast<uint64_t>(INT64_MAX) / ab) {
                             overflow = true;
                             break;
@@ -2097,14 +2134,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (rv == -1 && expr->op == "*") {
             // x*(-1) → -x; use nsw when x >= 0 (negating a non-negative value can't
             // overflow signed, since INT64_MIN is excluded by the non-negative proof).
-            return nonNegValues_.count(left)
-                ? builder->CreateNSWNeg(left, "negtmp")
-                : builder->CreateNeg(left, "negtmp");
+            return nonNegValues_.count(left) ? builder->CreateNSWNeg(left, "negtmp")
+                                             : builder->CreateNeg(left, "negtmp");
         }
         if (rv == -1 && expr->op == "/") {
-            return nonNegValues_.count(left)
-                ? builder->CreateNSWNeg(left, "negtmp")
-                : builder->CreateNeg(left, "negtmp"); // x/(-1) → -x
+            return nonNegValues_.count(left) ? builder->CreateNSWNeg(left, "negtmp")
+                                             : builder->CreateNeg(left, "negtmp"); // x/(-1) → -x
         }
         // x & -1 (all ones) → x
         if (rv == -1 && expr->op == "&")
@@ -2119,9 +2154,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (rv == -1 && expr->op == "-") {
             llvm::Value* one = llvm::ConstantInt::get(opTy, 1);
             bool lnn = nonNegValues_.count(left);
-            auto* r = lnn ? builder->CreateNSWAdd(left, one, "inc")
-                          : builder->CreateAdd(left, one, "inc");
-            if (lnn) nonNegValues_.insert(r);
+            auto* r = lnn ? builder->CreateNSWAdd(left, one, "inc") : builder->CreateAdd(left, one, "inc");
+            if (lnn)
+                nonNegValues_.insert(r);
             return r;
         }
     }
@@ -2135,9 +2170,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return llvm::ConstantInt::get(opTy, 0); // 0*x, 0&x, 0<<x, 0>>x → 0
             if (expr->op == "-") {
                 // 0-x → -x; nsw safe when x >= 0 (result is non-positive, can't be INT64_MIN)
-                return nonNegValues_.count(right)
-                    ? builder->CreateNSWNeg(right, "negtmp")
-                    : builder->CreateNeg(right, "negtmp");
+                return nonNegValues_.count(right) ? builder->CreateNSWNeg(right, "negtmp")
+                                                  : builder->CreateNeg(right, "negtmp");
             }
         }
         if (lv == 1 && expr->op == "*")
@@ -2145,9 +2179,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         if (lv == 1 && expr->op == "**")
             return llvm::ConstantInt::get(opTy, 1); // 1**x → 1
         if (lv == -1 && expr->op == "*") {
-            return nonNegValues_.count(right)
-                ? builder->CreateNSWNeg(right, "negtmp")
-                : builder->CreateNeg(right, "negtmp"); // (-1)*x → -x
+            return nonNegValues_.count(right) ? builder->CreateNSWNeg(right, "negtmp")
+                                              : builder->CreateNeg(right, "negtmp"); // (-1)*x → -x
         }
         if (lv == -1 && expr->op == "**") {
             // (-1)**x → 1 if x is even, -1 if x is odd
@@ -2191,11 +2224,15 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     if (expr->op == "==" || expr->op == "!=") {
         llvm::Value* testVal = nullptr;
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
-            if (ci->isZero()) { testVal = left; }
+            if (ci->isZero()) {
+                testVal = left;
+            }
         }
         if (!testVal) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(left)) {
-                if (ci->isZero()) { testVal = right; }
+                if (ci->isZero()) {
+                    testVal = right;
+                }
             }
         }
         // x * N == 0  →  x == 0  (when N is a nonzero constant)
@@ -2207,17 +2244,23 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     llvm::Value* mulRight = mulInst->getOperand(1);
                     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(mulRight)) {
                         if (!ci->isZero()) {
-                            llvm::Value* cmp = (expr->op == "==")
-                                ? builder->CreateICmpEQ(mulLeft, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp")
-                                : builder->CreateICmpNE(mulLeft, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp");
+                            llvm::Value* cmp =
+                                (expr->op == "==")
+                                    ? builder->CreateICmpEQ(mulLeft, llvm::ConstantInt::get(getDefaultType(), 0),
+                                                            "cmptmp")
+                                    : builder->CreateICmpNE(mulLeft, llvm::ConstantInt::get(getDefaultType(), 0),
+                                                            "cmptmp");
                             return emitBoolZExt(cmp, "booltmp");
                         }
                     }
                     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(mulLeft)) {
                         if (!ci->isZero()) {
-                            llvm::Value* cmp = (expr->op == "==")
-                                ? builder->CreateICmpEQ(mulRight, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp")
-                                : builder->CreateICmpNE(mulRight, llvm::ConstantInt::get(getDefaultType(), 0), "cmptmp");
+                            llvm::Value* cmp =
+                                (expr->op == "==")
+                                    ? builder->CreateICmpEQ(mulRight, llvm::ConstantInt::get(getDefaultType(), 0),
+                                                            "cmptmp")
+                                    : builder->CreateICmpNE(mulRight, llvm::ConstantInt::get(getDefaultType(), 0),
+                                                            "cmptmp");
                             return emitBoolZExt(cmp);
                         }
                     }
@@ -2233,9 +2276,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 if (ci->isZero()) {
                     if (auto* subInst = llvm::dyn_cast<llvm::BinaryOperator>(lhs)) {
                         if (subInst->getOpcode() == llvm::Instruction::Sub) {
-                            llvm::Value* cmp = (expr->op == "==")
-                                ? builder->CreateICmpEQ(subInst->getOperand(0), subInst->getOperand(1), "cmptmp")
-                                : builder->CreateICmpNE(subInst->getOperand(0), subInst->getOperand(1), "cmptmp");
+                            llvm::Value* cmp =
+                                (expr->op == "==")
+                                    ? builder->CreateICmpEQ(subInst->getOperand(0), subInst->getOperand(1), "cmptmp")
+                                    : builder->CreateICmpNE(subInst->getOperand(0), subInst->getOperand(1), "cmptmp");
                             return emitBoolZExt(cmp);
                         }
                     }
@@ -2253,13 +2297,10 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     if (expr->op == "+" || expr->op == "-") {
         if (auto* ciRight = llvm::dyn_cast<llvm::ConstantInt>(right)) {
             if (auto* binLeft = llvm::dyn_cast<llvm::BinaryOperator>(left)) {
-                const bool isAddSub = (binLeft->getOpcode() == llvm::Instruction::Add &&
-                                 expr->op == "-") ||
-                                (binLeft->getOpcode() == llvm::Instruction::Sub &&
-                                 expr->op == "+");
+                const bool isAddSub = (binLeft->getOpcode() == llvm::Instruction::Add && expr->op == "-") ||
+                                      (binLeft->getOpcode() == llvm::Instruction::Sub && expr->op == "+");
                 if (isAddSub) {
-                    if (auto* ciInner = llvm::dyn_cast<llvm::ConstantInt>(
-                            binLeft->getOperand(1))) {
+                    if (auto* ciInner = llvm::dyn_cast<llvm::ConstantInt>(binLeft->getOperand(1))) {
                         if (ciInner->getValue() == ciRight->getValue()) {
                             return binLeft->getOperand(0);
                         }
@@ -2277,7 +2318,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     if (expr->op == "-" && left->getType()->isPointerTy() && right->getType()->isPointerTy()) {
         const llvm::DataLayout& DL = module->getDataLayout();
         llvm::Type* intptrTy = DL.getIntPtrType(*context);
-        auto* lInt = builder->CreatePtrToInt(left,  intptrTy, "ptrdiff.l");
+        auto* lInt = builder->CreatePtrToInt(left, intptrTy, "ptrdiff.l");
         auto* rInt = builder->CreatePtrToInt(right, intptrTy, "ptrdiff.r");
         auto* diff = builder->CreateSub(lInt, rInt, "ptrdiff");
         // Widen to default i64 if the target uses a narrower pointer type.
@@ -2330,18 +2371,15 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // KnownBits fallback: when nonNegValues_ doesn't track both operands
         bool kbNSWNUW = false;
         if (!canNSWNUW && !canNSW) {
-            const llvm::KnownBits lhsKB = llvm::computeKnownBits(
-                left, module->getDataLayout());
-            const llvm::KnownBits rhsKB = llvm::computeKnownBits(
-                right, module->getDataLayout());
+            const llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
+            const llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
             if (lhsKB.isNonNegative() && rhsKB.isNonNegative())
                 kbNSWNUW = true;
         }
         auto* result = (canNSWNUW || kbNSWNUW)
-            ? builder->CreateAdd(left, right, "addtmp", /*HasNUW=*/true, /*HasNSW=*/true)
-            : canNSW
-                ? builder->CreateNSWAdd(left, right, "addtmp")
-                : builder->CreateAdd(left, right, "addtmp");
+                           ? builder->CreateAdd(left, right, "addtmp", /*HasNUW=*/true, /*HasNSW=*/true)
+                       : canNSW ? builder->CreateNSWAdd(left, right, "addtmp")
+                                : builder->CreateAdd(left, right, "addtmp");
         // Track non-negativity: if both operands are known non-negative
         if (canNSWNUW || kbNSWNUW)
             nonNegValues_.insert(result);
@@ -2362,15 +2400,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // KnownBits fallback: detect non-negativity through PHI/value-range.
         bool kbNSW = false;
         if (!bothNonNeg && !constNSW && !inOptMaxFunction) {
-            const llvm::KnownBits lhsKB = llvm::computeKnownBits(
-                left, module->getDataLayout());
-            const llvm::KnownBits rhsKB = llvm::computeKnownBits(
-                right, module->getDataLayout());
+            const llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
+            const llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
             kbNSW = lhsKB.isNonNegative() && rhsKB.isNonNegative();
         }
         const bool canNSW = bothNonNeg || constNSW || kbNSW || inOptMaxFunction;
-        return canNSW ? builder->CreateNSWSub(left, right, "subtmp")
-                      : builder->CreateSub(left, right, "subtmp");
+        return canNSW ? builder->CreateNSWSub(left, right, "subtmp") : builder->CreateSub(left, right, "subtmp");
     } else if (expr->op == "*") {
         // Strength reduction: multiply by power of 2 → left shift
         if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right)) {
@@ -2402,7 +2437,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         }
         // Strength reduction: multiply by small non-power-of-2 constants
         auto emitShiftAdd = [&](llvm::Value* base, int64_t multiplier, bool baseNonNeg = false) -> llvm::Value* {
-            const bool ns = baseNonNeg || inOptMaxFunction;  // nsw: safe when base >= 0 or @optmax
+            const bool ns = baseNonNeg || inOptMaxFunction; // nsw: safe when base >= 0 or @optmax
             // nuw: safe exactly when nsw is safe for non-negative base (base>=0 ⇒
             // base*K ≤ INT64_MAX < UINT64_MAX, so no unsigned wrap either).
             const bool nuw = ns;
@@ -2880,50 +2915,50 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             case 43: {
                 // n*43 → (n<<6) - (n<<5) + (n<<3) + n  is 4-instr; use:
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul43.shl2");
-                auto* n5   = builder->CreateAdd(shl2, base, "mul43.n5", nuw, ns);  // 5n
-                auto* n40  = builder->CreateShl(n5, mkShift(3), "mul43.n40");     // 40n
+                auto* n5 = builder->CreateAdd(shl2, base, "mul43.n5", nuw, ns); // 5n
+                auto* n40 = builder->CreateShl(n5, mkShift(3), "mul43.n40");    // 40n
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul43.shl1");
-                auto* t    = builder->CreateAdd(n40, shl1, "mul43.t", nuw, ns);    // 42n
-                return builder->CreateAdd(t, base, "mul43", nuw, ns);              // 43n
+                auto* t = builder->CreateAdd(n40, shl1, "mul43.t", nuw, ns); // 42n
+                return builder->CreateAdd(t, base, "mul43", nuw, ns);        // 43n
             }
             case 45: {
                 // n*45 → (n<<6) - (n<<5) + (n<<3) + n  but simpler:
                 // n*45 = (n*5)*9 = ((n<<2)+n)*9 = ((n<<2)+n)<<3 + ((n<<2)+n)
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul45.shl2");
-                auto* n5   = builder->CreateAdd(shl2, base, "mul45.n5", nuw, ns);  // 5n
-                auto* n40  = builder->CreateShl(n5, mkShift(3), "mul45.n40");     // 40n
-                return builder->CreateAdd(n40, n5, "mul45", nuw, ns);              // 45n
+                auto* n5 = builder->CreateAdd(shl2, base, "mul45.n5", nuw, ns); // 5n
+                auto* n40 = builder->CreateShl(n5, mkShift(3), "mul45.n40");    // 40n
+                return builder->CreateAdd(n40, n5, "mul45", nuw, ns);           // 45n
             }
             case 53: {
                 // n*53 = (n*54) - n = ((n*27)<<1) - n
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul53.shl6");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul53.shl3");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul53.shl1");
-                auto* t    = builder->CreateSub(shl6, shl3, "mul53.t", nuw, ns);   // 56n
-                auto* t2   = builder->CreateSub(t, shl1, "mul53.t2", nuw, ns);     // 54n
-                return builder->CreateSub(t2, base, "mul53", nuw, ns);             // 53n
+                auto* t = builder->CreateSub(shl6, shl3, "mul53.t", nuw, ns); // 56n
+                auto* t2 = builder->CreateSub(t, shl1, "mul53.t2", nuw, ns);  // 54n
+                return builder->CreateSub(t2, base, "mul53", nuw, ns);        // 53n
             }
             case 58: {
                 // n*58 = (n<<6) - (n<<2) - (n<<1)  = 64n-4n-2n = 58n (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul58.shl6");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul58.shl2");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul58.shl1");
-                auto* t    = builder->CreateSub(shl6, shl2, "mul58.t", nuw, ns);   // 60n
-                return builder->CreateSub(t, shl1, "mul58", nuw, ns);              // 58n
+                auto* t = builder->CreateSub(shl6, shl2, "mul58.t", nuw, ns); // 60n
+                return builder->CreateSub(t, shl1, "mul58", nuw, ns);         // 58n
             }
             case 59: {
                 // n*59 = (n<<6) - (n<<2) - n  = 64n-4n-n = 59n (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul59.shl6");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul59.shl2");
-                auto* t    = builder->CreateSub(shl6, shl2, "mul59.t", nuw, ns);   // 60n
-                return builder->CreateSub(t, base, "mul59", nuw, ns);              // 59n
+                auto* t = builder->CreateSub(shl6, shl2, "mul59.t", nuw, ns); // 60n
+                return builder->CreateSub(t, base, "mul59", nuw, ns);         // 59n
             }
             case 61: {
                 // n*61 = (n<<6) - (n<<1) - n  = 64n-2n-n = 61n (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul61.shl6");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul61.shl1");
-                auto* t    = builder->CreateSub(shl6, shl1, "mul61.t", nuw, ns);   // 62n
-                return builder->CreateSub(t, base, "mul61", nuw, ns);              // 61n
+                auto* t = builder->CreateSub(shl6, shl1, "mul61.t", nuw, ns); // 62n
+                return builder->CreateSub(t, base, "mul61", nuw, ns);         // 61n
             }
             case 57: {
                 // n*57 → (n<<6) - (n<<3) + n  (= 64n - 8n + n)
@@ -2936,63 +2971,63 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 // n*67 = (n<<6) + (n<<1) + n  = 64n+2n+n = 67n (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul67.shl6");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul67.shl1");
-                auto* t    = builder->CreateAdd(shl6, shl1, "mul67.t", nuw, ns);   // 66n
-                return builder->CreateAdd(t, base, "mul67", nuw, ns);              // 67n
+                auto* t = builder->CreateAdd(shl6, shl1, "mul67.t", nuw, ns); // 66n
+                return builder->CreateAdd(t, base, "mul67", nuw, ns);         // 67n
             }
             case 69: {
                 // n*69 = (n<<6) + (n<<2) + n  = 64n+4n+n = 69n (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul69.shl6");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul69.shl2");
-                auto* t    = builder->CreateAdd(shl6, shl2, "mul69.t", nuw, ns);   // 68n
-                return builder->CreateAdd(t, base, "mul69", nuw, ns);              // 69n
+                auto* t = builder->CreateAdd(shl6, shl2, "mul69.t", nuw, ns); // 68n
+                return builder->CreateAdd(t, base, "mul69", nuw, ns);         // 69n
             }
             case 71: {
                 // n*71 = (n<<6) + (n<<3) - n  = 64n+8n-n = 71n (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul71.shl6");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul71.shl3");
-                auto* t    = builder->CreateAdd(shl6, shl3, "mul71.t", nuw, ns);   // 72n
-                return builder->CreateSub(t, base, "mul71", nuw, ns);              // 71n
+                auto* t = builder->CreateAdd(shl6, shl3, "mul71.t", nuw, ns); // 72n
+                return builder->CreateSub(t, base, "mul71", nuw, ns);         // 71n
             }
             case 73: {
                 // n*73 = (n<<6) + (n<<3) + n  = 64n+8n+n = 73n (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul73.shl6");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul73.shl3");
-                auto* t    = builder->CreateAdd(shl6, shl3, "mul73.t", nuw, ns);   // 72n
-                return builder->CreateAdd(t, base, "mul73", nuw, ns);              // 73n
+                auto* t = builder->CreateAdd(shl6, shl3, "mul73.t", nuw, ns); // 72n
+                return builder->CreateAdd(t, base, "mul73", nuw, ns);         // 73n
             }
             case 74: {
                 // n*74 = (n<<6) + (n<<3) + (n<<1)  = 64n+8n+2n = 74n (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul74.shl6");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul74.shl3");
                 auto* shl1 = builder->CreateShl(base, mkShift(1), "mul74.shl1");
-                auto* t    = builder->CreateAdd(shl6, shl3, "mul74.t", nuw, ns);   // 72n
-                return builder->CreateAdd(t, shl1, "mul74", nuw, ns);              // 74n
+                auto* t = builder->CreateAdd(shl6, shl3, "mul74.t", nuw, ns); // 72n
+                return builder->CreateAdd(t, shl1, "mul74", nuw, ns);         // 74n
             }
             case 75: {
                 // n*75 = (n*25)*3 = ((n<<5)-(n<<3)+n)*3  but also:
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul75.shl6");
                 auto* shl4 = builder->CreateShl(base, mkShift(4), "mul75.shl4");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul75.shl2");
-                auto* t    = builder->CreateAdd(shl6, shl4, "mul75.t", nuw, ns);   // 80n
-                auto* t2   = builder->CreateSub(t, shl2, "mul75.t2", nuw, ns);     // 76n
-                return builder->CreateSub(t2, base, "mul75", nuw, ns);             // 75n
+                auto* t = builder->CreateAdd(shl6, shl4, "mul75.t", nuw, ns); // 80n
+                auto* t2 = builder->CreateSub(t, shl2, "mul75.t2", nuw, ns);  // 76n
+                return builder->CreateSub(t2, base, "mul75", nuw, ns);        // 75n
             }
             case 76: {
                 // n*76 = (n<<6) + (n<<4) - (n<<2) = 64+16-4=76 (3-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul76.shl6");
                 auto* shl4 = builder->CreateShl(base, mkShift(4), "mul76.shl4");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul76.shl2");
-                auto* t    = builder->CreateAdd(shl6, shl4, "mul76.t", nuw, ns);   // 80n
-                return builder->CreateSub(t, shl2, "mul76", nuw, ns);              // 76n
+                auto* t = builder->CreateAdd(shl6, shl4, "mul76.t", nuw, ns); // 80n
+                return builder->CreateSub(t, shl2, "mul76", nuw, ns);         // 76n
             }
             case 77: {
                 // n*77 = (n<<6) + (n<<4) - (n<<2) + n = 64+16-4+1=77 (4-instr)
                 auto* shl6 = builder->CreateShl(base, mkShift(6), "mul77.shl6");
                 auto* shl3 = builder->CreateShl(base, mkShift(3), "mul77.shl3");
                 auto* shl2 = builder->CreateShl(base, mkShift(2), "mul77.shl2");
-                auto* t    = builder->CreateAdd(shl6, shl3, "mul77.t", nuw, ns);   // 72n
-                auto* t2   = builder->CreateAdd(t, shl2, "mul77.t2", nuw, ns);     // 76n
-                return builder->CreateAdd(t2, base, "mul77", nuw, ns);             // 77n
+                auto* t = builder->CreateAdd(shl6, shl3, "mul77.t", nuw, ns); // 72n
+                auto* t2 = builder->CreateAdd(t, shl2, "mul77.t2", nuw, ns);  // 76n
+                return builder->CreateAdd(t2, base, "mul77", nuw, ns);        // 77n
             }
             case 1023: {
                 // n*1023 → (n<<10) - n  (= 1024n - n)
@@ -3141,170 +3176,170 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             case 960: {
                 // n*960 → (n<<10) - (n<<6)  (= 1024n - 64n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul960.shl10");
-                auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul960.shl6");
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul960.shl6");
                 return builder->CreateSub(shl10, shl6, "mul960", nuw, ns);
             }
             case 992: {
                 // n*992 → (n<<10) - (n<<5)  (= 1024n - 32n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul992.shl10");
-                auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul992.shl5");
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul992.shl5");
                 return builder->CreateSub(shl10, shl5, "mul992", nuw, ns);
             }
             case 1008: {
                 // n*1008 → (n<<10) - (n<<4)  (= 1024n - 16n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1008.shl10");
-                auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul1008.shl4");
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul1008.shl4");
                 return builder->CreateSub(shl10, shl4, "mul1008", nuw, ns);
             }
             case 1016: {
                 // n*1016 → (n<<10) - (n<<3)  (= 1024n - 8n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1016.shl10");
-                auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul1016.shl3");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul1016.shl3");
                 return builder->CreateSub(shl10, shl3, "mul1016", nuw, ns);
             }
             case 1020: {
                 // n*1020 → (n<<10) - (n<<2)  (= 1024n - 4n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1020.shl10");
-                auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul1020.shl2");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul1020.shl2");
                 return builder->CreateSub(shl10, shl2, "mul1020", nuw, ns);
             }
             case 1022: {
                 // n*1022 → (n<<10) - (n<<1)  (= 1024n - 2n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1022.shl10");
-                auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul1022.shl1");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul1022.shl1");
                 return builder->CreateSub(shl10, shl1, "mul1022", nuw, ns);
             }
             case 1026: {
                 // n*1026 → (n<<10) + (n<<1)  (= 1024n + 2n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1026.shl10");
-                auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul1026.shl1");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul1026.shl1");
                 return builder->CreateAdd(shl10, shl1, "mul1026", nuw, ns);
             }
             case 1028: {
                 // n*1028 → (n<<10) + (n<<2)  (= 1024n + 4n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1028.shl10");
-                auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul1028.shl2");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul1028.shl2");
                 return builder->CreateAdd(shl10, shl2, "mul1028", nuw, ns);
             }
             case 1032: {
                 // n*1032 → (n<<10) + (n<<3)  (= 1024n + 8n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1032.shl10");
-                auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul1032.shl3");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul1032.shl3");
                 return builder->CreateAdd(shl10, shl3, "mul1032", nuw, ns);
             }
             case 1040: {
                 // n*1040 → (n<<10) + (n<<4)  (= 1024n + 16n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1040.shl10");
-                auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul1040.shl4");
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul1040.shl4");
                 return builder->CreateAdd(shl10, shl4, "mul1040", nuw, ns);
             }
             case 1056: {
                 // n*1056 → (n<<10) + (n<<5)  (= 1024n + 32n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1056.shl10");
-                auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul1056.shl5");
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul1056.shl5");
                 return builder->CreateAdd(shl10, shl5, "mul1056", nuw, ns);
             }
             case 1088: {
                 // n*1088 → (n<<10) + (n<<6)  (= 1024n + 64n)
                 auto* shl10 = builder->CreateShl(base, mkShift(10), "mul1088.shl10");
-                auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul1088.shl6");
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul1088.shl6");
                 return builder->CreateAdd(shl10, shl6, "mul1088", nuw, ns);
             }
             // ── n×2048 family ────────────────────────────────────────────────────
             case 1920: {
                 // n*1920 → (n<<11) - (n<<7)  (= 2048n - 128n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul1920.shl11");
-                auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul1920.shl7");
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul1920.shl7");
                 return builder->CreateSub(shl11, shl7, "mul1920", nuw, ns);
             }
             case 1984: {
                 // n*1984 → (n<<11) - (n<<6)  (= 2048n - 64n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul1984.shl11");
-                auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul1984.shl6");
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul1984.shl6");
                 return builder->CreateSub(shl11, shl6, "mul1984", nuw, ns);
             }
             case 2016: {
                 // n*2016 → (n<<11) - (n<<5)  (= 2048n - 32n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2016.shl11");
-                auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul2016.shl5");
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul2016.shl5");
                 return builder->CreateSub(shl11, shl5, "mul2016", nuw, ns);
             }
             case 2032: {
                 // n*2032 → (n<<11) - (n<<4)  (= 2048n - 16n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2032.shl11");
-                auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul2032.shl4");
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul2032.shl4");
                 return builder->CreateSub(shl11, shl4, "mul2032", nuw, ns);
             }
             case 2040: {
                 // n*2040 → (n<<11) - (n<<3)  (= 2048n - 8n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2040.shl11");
-                auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul2040.shl3");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul2040.shl3");
                 return builder->CreateSub(shl11, shl3, "mul2040", nuw, ns);
             }
             case 2044: {
                 // n*2044 → (n<<11) - (n<<2)  (= 2048n - 4n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2044.shl11");
-                auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul2044.shl2");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul2044.shl2");
                 return builder->CreateSub(shl11, shl2, "mul2044", nuw, ns);
             }
             case 2046: {
                 // n*2046 → (n<<11) - (n<<1)  (= 2048n - 2n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2046.shl11");
-                auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul2046.shl1");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul2046.shl1");
                 return builder->CreateSub(shl11, shl1, "mul2046", nuw, ns);
             }
             case 2050: {
                 // n*2050 → (n<<11) + (n<<1)  (= 2048n + 2n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2050.shl11");
-                auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul2050.shl1");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul2050.shl1");
                 return builder->CreateAdd(shl11, shl1, "mul2050", nuw, ns);
             }
             case 2052: {
                 // n*2052 → (n<<11) + (n<<2)  (= 2048n + 4n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2052.shl11");
-                auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul2052.shl2");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul2052.shl2");
                 return builder->CreateAdd(shl11, shl2, "mul2052", nuw, ns);
             }
             case 2056: {
                 // n*2056 → (n<<11) + (n<<3)  (= 2048n + 8n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2056.shl11");
-                auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul2056.shl3");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul2056.shl3");
                 return builder->CreateAdd(shl11, shl3, "mul2056", nuw, ns);
             }
             case 2064: {
                 // n*2064 → (n<<11) + (n<<4)  (= 2048n + 16n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2064.shl11");
-                auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul2064.shl4");
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul2064.shl4");
                 return builder->CreateAdd(shl11, shl4, "mul2064", nuw, ns);
             }
             case 2080: {
                 // n*2080 → (n<<11) + (n<<5)  (= 2048n + 32n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2080.shl11");
-                auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul2080.shl5");
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul2080.shl5");
                 return builder->CreateAdd(shl11, shl5, "mul2080", nuw, ns);
             }
             case 2112: {
                 // n*2112 → (n<<11) + (n<<6)  (= 2048n + 64n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2112.shl11");
-                auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul2112.shl6");
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul2112.shl6");
                 return builder->CreateAdd(shl11, shl6, "mul2112", nuw, ns);
             }
             case 2176: {
                 // n*2176 → (n<<11) + (n<<7)  (= 2048n + 128n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2176.shl11");
-                auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul2176.shl7");
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul2176.shl7");
                 return builder->CreateAdd(shl11, shl7, "mul2176", nuw, ns);
             }
             case 2304: {
                 // n*2304 → (n<<11) + (n<<8)  (= 2048n + 256n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2304.shl11");
-                auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul2304.shl8");
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul2304.shl8");
                 return builder->CreateAdd(shl11, shl8, "mul2304", nuw, ns);
             }
             case 2560: {
                 // n*2560 → (n<<11) + (n<<9)  (= 2048n + 512n)
                 auto* shl11 = builder->CreateShl(base, mkShift(11), "mul2560.shl11");
-                auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul2560.shl9");
+                auto* shl9 = builder->CreateShl(base, mkShift(9), "mul2560.shl9");
                 return builder->CreateAdd(shl11, shl9, "mul2560", nuw, ns);
             }
             case 3072: {
@@ -3317,55 +3352,55 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             case 3584: {
                 // n*3584 → (n<<12) - (n<<9)  (= 4096n - 512n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul3584.shl12");
-                auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul3584.shl9");
+                auto* shl9 = builder->CreateShl(base, mkShift(9), "mul3584.shl9");
                 return builder->CreateSub(shl12, shl9, "mul3584", nuw, ns);
             }
             case 3840: {
                 // n*3840 → (n<<12) - (n<<8)  (= 4096n - 256n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul3840.shl12");
-                auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul3840.shl8");
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul3840.shl8");
                 return builder->CreateSub(shl12, shl8, "mul3840", nuw, ns);
             }
             case 3968: {
                 // n*3968 → (n<<12) - (n<<7)  (= 4096n - 128n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul3968.shl12");
-                auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul3968.shl7");
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul3968.shl7");
                 return builder->CreateSub(shl12, shl7, "mul3968", nuw, ns);
             }
             case 4032: {
                 // n*4032 → (n<<12) - (n<<6)  (= 4096n - 64n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4032.shl12");
-                auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul4032.shl6");
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul4032.shl6");
                 return builder->CreateSub(shl12, shl6, "mul4032", nuw, ns);
             }
             case 4064: {
                 // n*4064 → (n<<12) - (n<<5)  (= 4096n - 32n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4064.shl12");
-                auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul4064.shl5");
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul4064.shl5");
                 return builder->CreateSub(shl12, shl5, "mul4064", nuw, ns);
             }
             case 4080: {
                 // n*4080 → (n<<12) - (n<<4)  (= 4096n - 16n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4080.shl12");
-                auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul4080.shl4");
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul4080.shl4");
                 return builder->CreateSub(shl12, shl4, "mul4080", nuw, ns);
             }
             case 4088: {
                 // n*4088 → (n<<12) - (n<<3)  (= 4096n - 8n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4088.shl12");
-                auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul4088.shl3");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul4088.shl3");
                 return builder->CreateSub(shl12, shl3, "mul4088", nuw, ns);
             }
             case 4092: {
                 // n*4092 → (n<<12) - (n<<2)  (= 4096n - 4n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4092.shl12");
-                auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul4092.shl2");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul4092.shl2");
                 return builder->CreateSub(shl12, shl2, "mul4092", nuw, ns);
             }
             case 4094: {
                 // n*4094 → (n<<12) - (n<<1)  (= 4096n - 2n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4094.shl12");
-                auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul4094.shl1");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul4094.shl1");
                 return builder->CreateSub(shl12, shl1, "mul4094", nuw, ns);
             }
             case 4095: {
@@ -3381,55 +3416,55 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             case 4098: {
                 // n*4098 → (n<<12) + (n<<1)  (= 4096n + 2n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4098.shl12");
-                auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul4098.shl1");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul4098.shl1");
                 return builder->CreateAdd(shl12, shl1, "mul4098", nuw, ns);
             }
             case 4100: {
                 // n*4100 → (n<<12) + (n<<2)  (= 4096n + 4n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4100.shl12");
-                auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul4100.shl2");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul4100.shl2");
                 return builder->CreateAdd(shl12, shl2, "mul4100", nuw, ns);
             }
             case 4104: {
                 // n*4104 → (n<<12) + (n<<3)  (= 4096n + 8n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4104.shl12");
-                auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul4104.shl3");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul4104.shl3");
                 return builder->CreateAdd(shl12, shl3, "mul4104", nuw, ns);
             }
             case 4112: {
                 // n*4112 → (n<<12) + (n<<4)  (= 4096n + 16n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4112.shl12");
-                auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul4112.shl4");
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul4112.shl4");
                 return builder->CreateAdd(shl12, shl4, "mul4112", nuw, ns);
             }
             case 4128: {
                 // n*4128 → (n<<12) + (n<<5)  (= 4096n + 32n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4128.shl12");
-                auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul4128.shl5");
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul4128.shl5");
                 return builder->CreateAdd(shl12, shl5, "mul4128", nuw, ns);
             }
             case 4160: {
                 // n*4160 → (n<<12) + (n<<6)  (= 4096n + 64n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4160.shl12");
-                auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul4160.shl6");
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul4160.shl6");
                 return builder->CreateAdd(shl12, shl6, "mul4160", nuw, ns);
             }
             case 4224: {
                 // n*4224 → (n<<12) + (n<<7)  (= 4096n + 128n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4224.shl12");
-                auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul4224.shl7");
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul4224.shl7");
                 return builder->CreateAdd(shl12, shl7, "mul4224", nuw, ns);
             }
             case 4352: {
                 // n*4352 → (n<<12) + (n<<8)  (= 4096n + 256n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4352.shl12");
-                auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul4352.shl8");
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul4352.shl8");
                 return builder->CreateAdd(shl12, shl8, "mul4352", nuw, ns);
             }
             case 4608: {
                 // n*4608 → (n<<12) + (n<<9)  (= 4096n + 512n)
                 auto* shl12 = builder->CreateShl(base, mkShift(12), "mul4608.shl12");
-                auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul4608.shl9");
+                auto* shl9 = builder->CreateShl(base, mkShift(9), "mul4608.shl9");
                 return builder->CreateAdd(shl12, shl9, "mul4608", nuw, ns);
             }
             case 5120: {
@@ -3454,55 +3489,55 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             case 7680: {
                 // n*7680 → (n<<13) - (n<<9)  (= 8192n - 512n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul7680.shl13");
-                auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul7680.shl9");
+                auto* shl9 = builder->CreateShl(base, mkShift(9), "mul7680.shl9");
                 return builder->CreateSub(shl13, shl9, "mul7680");
             }
             case 7936: {
                 // n*7936 → (n<<13) - (n<<8)  (= 8192n - 256n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul7936.shl13");
-                auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul7936.shl8");
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul7936.shl8");
                 return builder->CreateSub(shl13, shl8, "mul7936");
             }
             case 8064: {
                 // n*8064 → (n<<13) - (n<<7)  (= 8192n - 128n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8064.shl13");
-                auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul8064.shl7");
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul8064.shl7");
                 return builder->CreateSub(shl13, shl7, "mul8064");
             }
             case 8128: {
                 // n*8128 → (n<<13) - (n<<6)  (= 8192n - 64n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8128.shl13");
-                auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul8128.shl6");
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul8128.shl6");
                 return builder->CreateSub(shl13, shl6, "mul8128");
             }
             case 8160: {
                 // n*8160 → (n<<13) - (n<<5)  (= 8192n - 32n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8160.shl13");
-                auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul8160.shl5");
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul8160.shl5");
                 return builder->CreateSub(shl13, shl5, "mul8160");
             }
             case 8176: {
                 // n*8176 → (n<<13) - (n<<4)  (= 8192n - 16n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8176.shl13");
-                auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul8176.shl4");
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul8176.shl4");
                 return builder->CreateSub(shl13, shl4, "mul8176");
             }
             case 8184: {
                 // n*8184 → (n<<13) - (n<<3)  (= 8192n - 8n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8184.shl13");
-                auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul8184.shl3");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul8184.shl3");
                 return builder->CreateSub(shl13, shl3, "mul8184");
             }
             case 8188: {
                 // n*8188 → (n<<13) - (n<<2)  (= 8192n - 4n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8188.shl13");
-                auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul8188.shl2");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul8188.shl2");
                 return builder->CreateSub(shl13, shl2, "mul8188");
             }
             case 8190: {
                 // n*8190 → (n<<13) - (n<<1)  (= 8192n - 2n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8190.shl13");
-                auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul8190.shl1");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul8190.shl1");
                 return builder->CreateSub(shl13, shl1, "mul8190");
             }
             case 8191: {
@@ -3518,55 +3553,55 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             case 8194: {
                 // n*8194 → (n<<13) + (n<<1)  (= 8192n + 2n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8194.shl13");
-                auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul8194.shl1");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul8194.shl1");
                 return builder->CreateAdd(shl13, shl1, "mul8194", nuw, ns);
             }
             case 8196: {
                 // n*8196 → (n<<13) + (n<<2)  (= 8192n + 4n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8196.shl13");
-                auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul8196.shl2");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul8196.shl2");
                 return builder->CreateAdd(shl13, shl2, "mul8196", nuw, ns);
             }
             case 8200: {
                 // n*8200 → (n<<13) + (n<<3)  (= 8192n + 8n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8200.shl13");
-                auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul8200.shl3");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul8200.shl3");
                 return builder->CreateAdd(shl13, shl3, "mul8200", nuw, ns);
             }
             case 8208: {
                 // n*8208 → (n<<13) + (n<<4)  (= 8192n + 16n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8208.shl13");
-                auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul8208.shl4");
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul8208.shl4");
                 return builder->CreateAdd(shl13, shl4, "mul8208", nuw, ns);
             }
             case 8224: {
                 // n*8224 → (n<<13) + (n<<5)  (= 8192n + 32n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8224.shl13");
-                auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul8224.shl5");
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul8224.shl5");
                 return builder->CreateAdd(shl13, shl5, "mul8224", nuw, ns);
             }
             case 8256: {
                 // n*8256 → (n<<13) + (n<<6)  (= 8192n + 64n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8256.shl13");
-                auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul8256.shl6");
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul8256.shl6");
                 return builder->CreateAdd(shl13, shl6, "mul8256", nuw, ns);
             }
             case 8320: {
                 // n*8320 → (n<<13) + (n<<7)  (= 8192n + 128n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8320.shl13");
-                auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul8320.shl7");
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul8320.shl7");
                 return builder->CreateAdd(shl13, shl7, "mul8320", nuw, ns);
             }
             case 8448: {
                 // n*8448 → (n<<13) + (n<<8)  (= 8192n + 256n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8448.shl13");
-                auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul8448.shl8");
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul8448.shl8");
                 return builder->CreateAdd(shl13, shl8, "mul8448", nuw, ns);
             }
             case 8704: {
                 // n*8704 → (n<<13) + (n<<9)  (= 8192n + 512n)
                 auto* shl13 = builder->CreateShl(base, mkShift(13), "mul8704.shl13");
-                auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul8704.shl9");
+                auto* shl9 = builder->CreateShl(base, mkShift(9), "mul8704.shl9");
                 return builder->CreateAdd(shl13, shl9, "mul8704", nuw, ns);
             }
             case 9216: {
@@ -3612,55 +3647,55 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             case 16386: {
                 // n*16386 → (n<<14) + (n<<1)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16386.shl14");
-                auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul16386.shl1");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul16386.shl1");
                 return builder->CreateAdd(shl14, shl1, "mul16386", nuw, ns);
             }
             case 16388: {
                 // n*16388 → (n<<14) + (n<<2)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16388.shl14");
-                auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul16388.shl2");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul16388.shl2");
                 return builder->CreateAdd(shl14, shl2, "mul16388", nuw, ns);
             }
             case 16392: {
                 // n*16392 → (n<<14) + (n<<3)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16392.shl14");
-                auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul16392.shl3");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul16392.shl3");
                 return builder->CreateAdd(shl14, shl3, "mul16392", nuw, ns);
             }
             case 16400: {
                 // n*16400 → (n<<14) + (n<<4)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16400.shl14");
-                auto* shl4  = builder->CreateShl(base, mkShift(4),  "mul16400.shl4");
+                auto* shl4 = builder->CreateShl(base, mkShift(4), "mul16400.shl4");
                 return builder->CreateAdd(shl14, shl4, "mul16400", nuw, ns);
             }
             case 16416: {
                 // n*16416 → (n<<14) + (n<<5)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16416.shl14");
-                auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul16416.shl5");
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul16416.shl5");
                 return builder->CreateAdd(shl14, shl5, "mul16416", nuw, ns);
             }
             case 16448: {
                 // n*16448 → (n<<14) + (n<<6)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16448.shl14");
-                auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul16448.shl6");
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul16448.shl6");
                 return builder->CreateAdd(shl14, shl6, "mul16448", nuw, ns);
             }
             case 16512: {
                 // n*16512 → (n<<14) + (n<<7)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16512.shl14");
-                auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul16512.shl7");
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul16512.shl7");
                 return builder->CreateAdd(shl14, shl7, "mul16512", nuw, ns);
             }
             case 16640: {
                 // n*16640 → (n<<14) + (n<<8)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16640.shl14");
-                auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul16640.shl8");
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul16640.shl8");
                 return builder->CreateAdd(shl14, shl8, "mul16640", nuw, ns);
             }
             case 16896: {
                 // n*16896 → (n<<14) + (n<<9)
                 auto* shl14 = builder->CreateShl(base, mkShift(14), "mul16896.shl14");
-                auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul16896.shl9");
+                auto* shl9 = builder->CreateShl(base, mkShift(9), "mul16896.shl9");
                 return builder->CreateAdd(shl14, shl9, "mul16896", nuw, ns);
             }
             case 17408: {
@@ -3712,43 +3747,43 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             case 32770: {
                 // n*32770 → (n<<15) + (n<<1)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32770.shl15");
-                auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul32770.shl1");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul32770.shl1");
                 return builder->CreateAdd(shl15, shl1, "mul32770", nuw, ns);
             }
             case 32772: {
                 // n*32772 → (n<<15) + (n<<2)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32772.shl15");
-                auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul32772.shl2");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul32772.shl2");
                 return builder->CreateAdd(shl15, shl2, "mul32772", nuw, ns);
             }
             case 32776: {
                 // n*32776 → (n<<15) + (n<<3)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32776.shl15");
-                auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul32776.shl3");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul32776.shl3");
                 return builder->CreateAdd(shl15, shl3, "mul32776", nuw, ns);
             }
             case 32800: {
                 // n*32800 → (n<<15) + (n<<5)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32800.shl15");
-                auto* shl5  = builder->CreateShl(base, mkShift(5),  "mul32800.shl5");
+                auto* shl5 = builder->CreateShl(base, mkShift(5), "mul32800.shl5");
                 return builder->CreateAdd(shl15, shl5, "mul32800", nuw, ns);
             }
             case 32896: {
                 // n*32896 → (n<<15) + (n<<7)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul32896.shl15");
-                auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul32896.shl7");
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul32896.shl7");
                 return builder->CreateAdd(shl15, shl7, "mul32896", nuw, ns);
             }
             case 33024: {
                 // n*33024 → (n<<15) + (n<<8)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul33024.shl15");
-                auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul33024.shl8");
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul33024.shl8");
                 return builder->CreateAdd(shl15, shl8, "mul33024", nuw, ns);
             }
             case 33280: {
                 // n*33280 → (n<<15) + (n<<9)
                 auto* shl15 = builder->CreateShl(base, mkShift(15), "mul33280.shl15");
-                auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul33280.shl9");
+                auto* shl9 = builder->CreateShl(base, mkShift(9), "mul33280.shl9");
                 return builder->CreateAdd(shl15, shl9, "mul33280", nuw, ns);
             }
             case 33792: {
@@ -3806,43 +3841,43 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             case 65538: {
                 // n*65538 → (n<<16) + (n<<1)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul65538.shl16");
-                auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul65538.shl1");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul65538.shl1");
                 return builder->CreateAdd(shl16, shl1, "mul65538", nuw, ns);
             }
             case 65540: {
                 // n*65540 → (n<<16) + (n<<2)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul65540.shl16");
-                auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul65540.shl2");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul65540.shl2");
                 return builder->CreateAdd(shl16, shl2, "mul65540", nuw, ns);
             }
             case 65544: {
                 // n*65544 → (n<<16) + (n<<3)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul65544.shl16");
-                auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul65544.shl3");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul65544.shl3");
                 return builder->CreateAdd(shl16, shl3, "mul65544", nuw, ns);
             }
             case 65600: {
                 // n*65600 → (n<<16) + (n<<6)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul65600.shl16");
-                auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul65600.shl6");
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul65600.shl6");
                 return builder->CreateAdd(shl16, shl6, "mul65600", nuw, ns);
             }
             case 65664: {
                 // n*65664 → (n<<16) + (n<<7)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul65664.shl16");
-                auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul65664.shl7");
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul65664.shl7");
                 return builder->CreateAdd(shl16, shl7, "mul65664", nuw, ns);
             }
             case 65792: {
                 // n*65792 → (n<<16) + (n<<8)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul65792.shl16");
-                auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul65792.shl8");
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul65792.shl8");
                 return builder->CreateAdd(shl16, shl8, "mul65792", nuw, ns);
             }
             case 66048: {
                 // n*66048 → (n<<16) + (n<<9)
                 auto* shl16 = builder->CreateShl(base, mkShift(16), "mul66048.shl16");
-                auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul66048.shl9");
+                auto* shl9 = builder->CreateShl(base, mkShift(9), "mul66048.shl9");
                 return builder->CreateAdd(shl16, shl9, "mul66048", nuw, ns);
             }
             case 66560: {
@@ -3905,43 +3940,43 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             case 131074: {
                 // n*131074 → (n<<17) + (n<<1)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul131074.shl17");
-                auto* shl1  = builder->CreateShl(base, mkShift(1),  "mul131074.shl1");
+                auto* shl1 = builder->CreateShl(base, mkShift(1), "mul131074.shl1");
                 return builder->CreateAdd(shl17, shl1, "mul131074", nuw, ns);
             }
             case 131076: {
                 // n*131076 → (n<<17) + (n<<2)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul131076.shl17");
-                auto* shl2  = builder->CreateShl(base, mkShift(2),  "mul131076.shl2");
+                auto* shl2 = builder->CreateShl(base, mkShift(2), "mul131076.shl2");
                 return builder->CreateAdd(shl17, shl2, "mul131076", nuw, ns);
             }
             case 131080: {
                 // n*131080 → (n<<17) + (n<<3)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul131080.shl17");
-                auto* shl3  = builder->CreateShl(base, mkShift(3),  "mul131080.shl3");
+                auto* shl3 = builder->CreateShl(base, mkShift(3), "mul131080.shl3");
                 return builder->CreateAdd(shl17, shl3, "mul131080", nuw, ns);
             }
             case 131136: {
                 // n*131136 → (n<<17) + (n<<6)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul131136.shl17");
-                auto* shl6  = builder->CreateShl(base, mkShift(6),  "mul131136.shl6");
+                auto* shl6 = builder->CreateShl(base, mkShift(6), "mul131136.shl6");
                 return builder->CreateAdd(shl17, shl6, "mul131136", nuw, ns);
             }
             case 131200: {
                 // n*131200 → (n<<17) + (n<<7)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul131200.shl17");
-                auto* shl7  = builder->CreateShl(base, mkShift(7),  "mul131200.shl7");
+                auto* shl7 = builder->CreateShl(base, mkShift(7), "mul131200.shl7");
                 return builder->CreateAdd(shl17, shl7, "mul131200", nuw, ns);
             }
             case 131328: {
                 // n*131328 → (n<<17) + (n<<8)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul131328.shl17");
-                auto* shl8  = builder->CreateShl(base, mkShift(8),  "mul131328.shl8");
+                auto* shl8 = builder->CreateShl(base, mkShift(8), "mul131328.shl8");
                 return builder->CreateAdd(shl17, shl8, "mul131328", nuw, ns);
             }
             case 131584: {
                 // n*131584 → (n<<17) + (n<<9)
                 auto* shl17 = builder->CreateShl(base, mkShift(17), "mul131584.shl17");
-                auto* shl9  = builder->CreateShl(base, mkShift(9),  "mul131584.shl9");
+                auto* shl9 = builder->CreateShl(base, mkShift(9), "mul131584.shl9");
                 return builder->CreateAdd(shl17, shl9, "mul131584", nuw, ns);
             }
             case 132096: {
@@ -4062,15 +4097,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     // x*x: result is always non-negative.
                     bool xNonNeg = nonNegValues_.count(left) > 0;
                     if (!xNonNeg) {
-                        const llvm::KnownBits KB = llvm::computeKnownBits(
-                            left, module->getDataLayout());
+                        const llvm::KnownBits KB = llvm::computeKnownBits(left, module->getDataLayout());
                         xNonNeg = KB.isNonNegative();
                     }
                     llvm::Value* result;
                     if (xNonNeg) {
                         // x >= 0: x*x cannot signed-overflow (max = (2^63-1)^2 > 2^63
-                        const llvm::KnownBits KB = llvm::computeKnownBits(
-                            left, module->getDataLayout());
+                        const llvm::KnownBits KB = llvm::computeKnownBits(left, module->getDataLayout());
                         const unsigned lz = KB.countMinLeadingZeros();
                         if (lz >= 33) {
                             // x < 2^31: x*x < 2^62 → fits in signed i64, nsw+nuw safe.
@@ -4091,14 +4124,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             // SSA-level squaring: same LLVM Value multiplied by itself.
             bool xNonNeg = nonNegValues_.count(left) > 0;
             if (!xNonNeg) {
-                const llvm::KnownBits KB = llvm::computeKnownBits(
-                    left, module->getDataLayout());
+                const llvm::KnownBits KB = llvm::computeKnownBits(left, module->getDataLayout());
                 xNonNeg = KB.isNonNegative();
             }
             llvm::Value* result;
             if (xNonNeg) {
-                const llvm::KnownBits KB = llvm::computeKnownBits(
-                    left, module->getDataLayout());
+                const llvm::KnownBits KB = llvm::computeKnownBits(left, module->getDataLayout());
                 const unsigned lz = KB.countMinLeadingZeros();
                 if (lz >= 33)
                     result = builder->CreateMul(left, right, "sqtmp",
@@ -4118,24 +4149,22 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
         // KnownBits analysis: use leading-zero counts to prove the product
         {
-            const llvm::KnownBits lhsKB = llvm::computeKnownBits(
-                left, module->getDataLayout());
-            const llvm::KnownBits rhsKB = llvm::computeKnownBits(
-                right, module->getDataLayout());
+            const llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
+            const llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
             unsigned lhsLZ = lhsKB.countMinLeadingZeros();
             unsigned rhsLZ = rhsKB.countMinLeadingZeros();
             unsigned totalLZ = lhsLZ + rhsLZ;
             if (totalLZ >= 65) {
                 // Product provably < 2^63 → fits in signed i64 → nsw+nuw safe.
                 auto* result = builder->CreateMul(left, right, "multmp",
-                                                   /*HasNUW=*/true, /*HasNSW=*/true);
+                                                  /*HasNUW=*/true, /*HasNSW=*/true);
                 nonNegValues_.insert(result);
                 return result;
             }
             if (totalLZ >= 64) {
                 // Product provably < 2^64 → fits in unsigned i64 → nuw safe.
                 auto* result = builder->CreateMul(left, right, "multmp",
-                                                   /*HasNUW=*/true, /*HasNSW=*/false);
+                                                  /*HasNUW=*/true, /*HasNSW=*/false);
                 if (lhsKB.isNonNegative() && rhsKB.isNonNegative())
                     nonNegValues_.insert(result);
                 return result;
@@ -4155,8 +4184,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     if (rv > 0) {
                         const int s = log2IfPowerOf2(rv);
                         if (s > 0) {
-                            auto* result = builder->CreateLShr(left,
-                                llvm::ConstantInt::get(left->getType(), s), "udiv.lshr");
+                            auto* result =
+                                builder->CreateLShr(left, llvm::ConstantInt::get(left->getType(), s), "udiv.lshr");
                             nonNegValues_.insert(result);
                             return result;
                         }
@@ -4170,8 +4199,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     if (rv > 0) {
                         const int s = log2IfPowerOf2(rv);
                         if (s > 0) {
-                            auto* result = builder->CreateAnd(left,
-                                llvm::ConstantInt::get(left->getType(), (1LL << s) - 1), "umod.and");
+                            auto* result = builder->CreateAnd(
+                                left, llvm::ConstantInt::get(left->getType(), (1LL << s) - 1), "umod.and");
                             nonNegValues_.insert(result);
                             return result;
                         }
@@ -4189,28 +4218,26 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 if (s > 0) {
                     bool leftNonNeg = nonNegValues_.count(left) > 0;
                     if (!leftNonNeg) {
-                        const llvm::KnownBits KB = llvm::computeKnownBits(
-                            left, module->getDataLayout());
+                        const llvm::KnownBits KB = llvm::computeKnownBits(left, module->getDataLayout());
                         leftNonNeg = KB.isNonNegative();
                     }
                     if (leftNonNeg) {
                         // Non-negative dividend: no sign correction needed.
                         if (isDivision) {
-                            auto* result = builder->CreateLShr(left,
-                                llvm::ConstantInt::get(left->getType(), s), "div.lshr");
+                            auto* result =
+                                builder->CreateLShr(left, llvm::ConstantInt::get(left->getType(), s), "div.lshr");
                             nonNegValues_.insert(result);
                             return result;
                         } else {
-                            auto* result = builder->CreateAnd(left,
-                                llvm::ConstantInt::get(left->getType(), (1LL << s) - 1), "mod.and");
+                            auto* result = builder->CreateAnd(
+                                left, llvm::ConstantInt::get(left->getType(), (1LL << s) - 1), "mod.and");
                             nonNegValues_.insert(result);
                             return result;
                         }
                     }
                     // Dividend sign unknown: emit sdiv/srem instead of the
-                    return isDivision
-                        ? builder->CreateSDiv(left, right, "divtmp")
-                        : builder->CreateSRem(left, right, "modtmp");
+                    return isDivision ? builder->CreateSDiv(left, right, "divtmp")
+                                      : builder->CreateSRem(left, right, "modtmp");
                 }
             }
         }
@@ -4223,22 +4250,17 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     // using codegen-level tracking or LLVM's KnownBits analysis.
                     bool leftNonNeg = nonNegValues_.count(left) > 0;
                     if (!leftNonNeg) {
-                        const llvm::KnownBits KB = llvm::computeKnownBits(
-                            left, module->getDataLayout());
+                        const llvm::KnownBits KB = llvm::computeKnownBits(left, module->getDataLayout());
                         leftNonNeg = KB.isNonNegative();
                     }
                     if (leftNonNeg) {
-                        auto* result = isDivision
-                            ? builder->CreateUDiv(left, right, "udivtmp")
-                            : builder->CreateURem(left, right, "uremtmp");
+                        auto* result = isDivision ? builder->CreateUDiv(left, right, "udivtmp")
+                                                  : builder->CreateURem(left, right, "uremtmp");
                         // urem/udiv result is always non-negative.
                         nonNegValues_.insert(result);
-                        if (!isDivision && loopNestDepth_ > 0
-                                && optimizationLevel >= OptimizationLevel::O2) {
-                            auto* assumeFn = OMSC_GET_INTRINSIC(module.get(),
-                                llvm::Intrinsic::assume, {});
-                            llvm::Value* cmp = builder->CreateICmpULT(
-                                result, right, "urem.ult");
+                        if (!isDivision && loopNestDepth_ > 0 && optimizationLevel >= OptimizationLevel::O2) {
+                            auto* assumeFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::assume, {});
+                            llvm::Value* cmp = builder->CreateICmpULT(result, right, "urem.ult");
                             builder->CreateCall(assumeFn, {cmp});
                             // Flag non-pow2 modulo.  Also classify whether the
                             bodyHasNonPow2Modulo_ = true;
@@ -4279,11 +4301,12 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
 
         builder->SetInsertPoint(zeroBB);
         {
-            std::string msg = isDivision
-                ? (expr->line > 0 ? std::string("Runtime error: division by zero at line ") + std::to_string(expr->line) + "\n"
-                                  : "Runtime error: division by zero\n")
-                : (expr->line > 0 ? std::string("Runtime error: modulo by zero at line ") + std::to_string(expr->line) + "\n"
-                                  : "Runtime error: modulo by zero\n");
+            std::string msg = isDivision ? (expr->line > 0 ? std::string("Runtime error: division by zero at line ") +
+                                                                 std::to_string(expr->line) + "\n"
+                                                           : "Runtime error: division by zero\n")
+                                         : (expr->line > 0 ? std::string("Runtime error: modulo by zero at line ") +
+                                                                 std::to_string(expr->line) + "\n"
+                                                           : "Runtime error: modulo by zero\n");
             const char* messageName = isDivision ? "divzero_msg" : "modzero_msg";
             llvm::Value* message = builder->CreateGlobalString(msg, messageName);
             builder->CreateCall(getPrintfFunction(), {message});
@@ -4307,9 +4330,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     rightNonNeg = KB.isNonNegative();
                 }
                 if (rightNonNeg) {
-                    auto* result = isDivision
-                        ? builder->CreateUDiv(left, right, "udivtmp")
-                        : builder->CreateURem(left, right, "uremtmp");
+                    auto* result = isDivision ? builder->CreateUDiv(left, right, "udivtmp")
+                                              : builder->CreateURem(left, right, "uremtmp");
                     nonNegValues_.insert(result);
                     return result;
                 }
@@ -4337,7 +4359,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // When both operands are provably non-negative, use unsigned comparison.
         bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
         // Explicit unsigned type annotation always selects unsigned comparison.
-        if (!bothNonNeg) bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
+        if (!bothNonNeg)
+            bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
         if (!bothNonNeg) {
             // Also check for non-negative constant operands.
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
@@ -4351,9 +4374,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             const llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
             bothNonNeg = lhsKB.isNonNegative() && rhsKB.isNonNegative();
         }
-        llvm::Value* cmp = bothNonNeg
-            ? builder->CreateICmpULT(left, right, "cmptmp")
-            : builder->CreateICmpSLT(left, right, "cmptmp");
+        llvm::Value* cmp =
+            bothNonNeg ? builder->CreateICmpULT(left, right, "cmptmp") : builder->CreateICmpSLT(left, right, "cmptmp");
         return emitBoolZExt(cmp);
     } else if (expr->op == "<=") {
         // Fast path: non-neg value <= negative constant → always false.
@@ -4369,7 +4391,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return llvm::ConstantInt::get(getDefaultType(), 1); // neg <= x >= 0 → true
         }
         bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
-        if (!bothNonNeg) bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
+        if (!bothNonNeg)
+            bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
         if (!bothNonNeg) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
                 bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();
@@ -4381,9 +4404,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             const llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
             bothNonNeg = lhsKB.isNonNegative() && rhsKB.isNonNegative();
         }
-        llvm::Value* cmp = bothNonNeg
-            ? builder->CreateICmpULE(left, right, "cmptmp")
-            : builder->CreateICmpSLE(left, right, "cmptmp");
+        llvm::Value* cmp =
+            bothNonNeg ? builder->CreateICmpULE(left, right, "cmptmp") : builder->CreateICmpSLE(left, right, "cmptmp");
         return emitBoolZExt(cmp);
     } else if (expr->op == ">") {
         // Fast path: non-neg value > negative constant → always true.
@@ -4399,7 +4421,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return llvm::ConstantInt::get(getDefaultType(), 0); // neg > x >= 0 → false
         }
         bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
-        if (!bothNonNeg) bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
+        if (!bothNonNeg)
+            bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
         if (!bothNonNeg) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
                 bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();
@@ -4411,9 +4434,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             const llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
             bothNonNeg = lhsKB.isNonNegative() && rhsKB.isNonNegative();
         }
-        llvm::Value* cmp = bothNonNeg
-            ? builder->CreateICmpUGT(left, right, "cmptmp")
-            : builder->CreateICmpSGT(left, right, "cmptmp");
+        llvm::Value* cmp =
+            bothNonNeg ? builder->CreateICmpUGT(left, right, "cmptmp") : builder->CreateICmpSGT(left, right, "cmptmp");
         return emitBoolZExt(cmp);
     } else if (expr->op == ">=") {
         // Fast path: non-neg value >= negative constant → always true.
@@ -4429,7 +4451,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 return llvm::ConstantInt::get(getDefaultType(), 0); // neg >= x >= 0 → false
         }
         bool bothNonNeg = nonNegValues_.count(left) && nonNegValues_.count(right);
-        if (!bothNonNeg) bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
+        if (!bothNonNeg)
+            bothNonNeg = isUnsignedValue(left) || isUnsignedValue(right);
         if (!bothNonNeg) {
             if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(right))
                 bothNonNeg = nonNegValues_.count(left) && !ci->isNegative();
@@ -4441,9 +4464,8 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             const llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
             bothNonNeg = lhsKB.isNonNegative() && rhsKB.isNonNegative();
         }
-        llvm::Value* cmp = bothNonNeg
-            ? builder->CreateICmpUGE(left, right, "cmptmp")
-            : builder->CreateICmpSGE(left, right, "cmptmp");
+        llvm::Value* cmp =
+            bothNonNeg ? builder->CreateICmpUGE(left, right, "cmptmp") : builder->CreateICmpSGE(left, right, "cmptmp");
         return emitBoolZExt(cmp);
     } else if (expr->op == "&") {
         auto* result = builder->CreateAnd(left, right, "andtmp");
@@ -4467,16 +4489,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // analysis at every `|` in @opt(optnone)-equivalent paths is wasteful.
         bool isDisjoint = false;
         if (!inOptMaxFunction && optimizationLevel >= OptimizationLevel::O1) {
-            const llvm::KnownBits lhsKB = llvm::computeKnownBits(
-                left, module->getDataLayout());
-            const llvm::KnownBits rhsKB = llvm::computeKnownBits(
-                right, module->getDataLayout());
+            const llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
+            const llvm::KnownBits rhsKB = llvm::computeKnownBits(right, module->getDataLayout());
             // `or disjoint` is legal when the OR of the two values is the same
             // as their ADD (i.e., no bits are set in both operands simultaneously).
             // KnownBits conservative check: every bit known-one in LHS is known-zero
             // in RHS, and every bit known-one in RHS is known-zero in LHS.
-            isDisjoint = (lhsKB.One & ~rhsKB.Zero).isZero()
-                      && (rhsKB.One & ~lhsKB.Zero).isZero();
+            isDisjoint = (lhsKB.One & ~rhsKB.Zero).isZero() && (rhsKB.One & ~lhsKB.Zero).isZero();
         }
         auto* orInst = builder->CreateOr(left, right, "ortmp");
         if (isDisjoint)
@@ -4528,15 +4547,14 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             const int64_t sv = ci->getSExtValue();
             if (sv >= 0 && sv < 64) {
                 // KnownBits analysis: when the base has enough leading zeros
-                const llvm::KnownBits lhsKB = llvm::computeKnownBits(
-                    left, module->getDataLayout());
+                const llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
                 unsigned lz = lhsKB.countMinLeadingZeros();
                 if (lz > static_cast<unsigned>(sv)) {
                     // (lz - sv) leading zeros remain → no unsigned overflow.
                     // If the base is also non-negative, no signed overflow.
                     const bool baseNonNeg = lhsKB.isNonNegative();
                     auto* result = builder->CreateShl(left, right, "shltmp",
-                                                       /*HasNUW=*/true, /*HasNSW=*/baseNonNeg);
+                                                      /*HasNUW=*/true, /*HasNSW=*/baseNonNeg);
                     if (baseNonNeg)
                         nonNegValues_.insert(result);
                     return result;
@@ -4567,15 +4585,13 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 bool isExact = false;
                 if (sv > 0) {
                     if (auto* shlInst = llvm::dyn_cast<llvm::ShlOperator>(left)) {
-                        if (auto* shlAmt = llvm::dyn_cast<llvm::ConstantInt>(
-                                shlInst->getOperand(1)))
+                        if (auto* shlAmt = llvm::dyn_cast<llvm::ConstantInt>(shlInst->getOperand(1)))
                             isExact = shlAmt->getSExtValue() >= sv;
                     }
                     // KnownBits: if the lowest sv bits of left are provably
                     // zero (e.g., because left == shl of something) then exact.
                     if (!isExact) {
-                        const llvm::KnownBits lhsKB =
-                            llvm::computeKnownBits(left, module->getDataLayout());
+                        const llvm::KnownBits lhsKB = llvm::computeKnownBits(left, module->getDataLayout());
                         isExact = lhsKB.countMinTrailingZeros() >= static_cast<unsigned>(sv);
                     }
                 }
@@ -4597,280 +4613,241 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
             const bool baseNonNeg = nonNegValues_.count(left);
             if (exp == 2) {
                 // x**2 → x*x  (1 mul) — result is always non-negative
-                auto* result = baseNonNeg
-                    ? builder->CreateNSWMul(left, left, "pow2")
-                    : builder->CreateMul(left, left, "pow2");
-                nonNegValues_.insert(result);  // x*x >= 0 always
+                auto* result =
+                    baseNonNeg ? builder->CreateNSWMul(left, left, "pow2") : builder->CreateMul(left, left, "pow2");
+                nonNegValues_.insert(result); // x*x >= 0 always
                 return result;
             }
             if (exp == 3) {
                 // x**3 → x*x*x  (2 muls)
-                auto* sq = baseNonNeg
-                    ? builder->CreateNSWMul(left, left, "pow3.sq")
-                    : builder->CreateMul(left, left, "pow3.sq");
-                auto* result = baseNonNeg
-                    ? builder->CreateNSWMul(sq, left, "pow3")
-                    : builder->CreateMul(sq, left, "pow3");
-                if (baseNonNeg) nonNegValues_.insert(result);
+                auto* sq = baseNonNeg ? builder->CreateNSWMul(left, left, "pow3.sq")
+                                      : builder->CreateMul(left, left, "pow3.sq");
+                auto* result =
+                    baseNonNeg ? builder->CreateNSWMul(sq, left, "pow3") : builder->CreateMul(sq, left, "pow3");
+                if (baseNonNeg)
+                    nonNegValues_.insert(result);
                 return result;
             }
             if (exp == 4) {
                 // x**4 → t=x*x; t*t  (2 muls) — result is always non-negative
-                auto* sq = baseNonNeg
-                    ? builder->CreateNSWMul(left, left, "pow4.sq")
-                    : builder->CreateMul(left, left, "pow4.sq");
-                auto* result = baseNonNeg
-                    ? builder->CreateNSWMul(sq, sq, "pow4")
-                    : builder->CreateMul(sq, sq, "pow4");
-                nonNegValues_.insert(result);  // (x*x)*(x*x) >= 0 always
+                auto* sq = baseNonNeg ? builder->CreateNSWMul(left, left, "pow4.sq")
+                                      : builder->CreateMul(left, left, "pow4.sq");
+                auto* result = baseNonNeg ? builder->CreateNSWMul(sq, sq, "pow4") : builder->CreateMul(sq, sq, "pow4");
+                nonNegValues_.insert(result); // (x*x)*(x*x) >= 0 always
                 return result;
             }
             if (exp == 5) {
                 // x**5 → t=x*x; t*t*x  (3 muls)
-                auto* sq = baseNonNeg
-                    ? builder->CreateNSWMul(left, left, "pow5.sq")
-                    : builder->CreateMul(left, left, "pow5.sq");
-                auto* q4 = baseNonNeg
-                    ? builder->CreateNSWMul(sq, sq, "pow5.q4")
-                    : builder->CreateMul(sq, sq, "pow5.q4");
-                auto* result = baseNonNeg
-                    ? builder->CreateNSWMul(q4, left, "pow5")
-                    : builder->CreateMul(q4, left, "pow5");
-                if (baseNonNeg) nonNegValues_.insert(result);
+                auto* sq = baseNonNeg ? builder->CreateNSWMul(left, left, "pow5.sq")
+                                      : builder->CreateMul(left, left, "pow5.sq");
+                auto* q4 =
+                    baseNonNeg ? builder->CreateNSWMul(sq, sq, "pow5.q4") : builder->CreateMul(sq, sq, "pow5.q4");
+                auto* result =
+                    baseNonNeg ? builder->CreateNSWMul(q4, left, "pow5") : builder->CreateMul(q4, left, "pow5");
+                if (baseNonNeg)
+                    nonNegValues_.insert(result);
                 return result;
             }
             if (exp == 6) {
                 // x**6 → t=x*x; u=t*t; u*t  (3 muls) — result is always non-negative
-                auto* sq = baseNonNeg
-                    ? builder->CreateNSWMul(left, left, "pow6.sq")
-                    : builder->CreateMul(left, left, "pow6.sq");
-                auto* q4 = baseNonNeg
-                    ? builder->CreateNSWMul(sq, sq, "pow6.q4")
-                    : builder->CreateMul(sq, sq, "pow6.q4");
-                auto* result = baseNonNeg
-                    ? builder->CreateNSWMul(q4, sq, "pow6")
-                    : builder->CreateMul(q4, sq, "pow6");
-                nonNegValues_.insert(result);  // even exponent → always non-neg
+                auto* sq = baseNonNeg ? builder->CreateNSWMul(left, left, "pow6.sq")
+                                      : builder->CreateMul(left, left, "pow6.sq");
+                auto* q4 =
+                    baseNonNeg ? builder->CreateNSWMul(sq, sq, "pow6.q4") : builder->CreateMul(sq, sq, "pow6.q4");
+                auto* result = baseNonNeg ? builder->CreateNSWMul(q4, sq, "pow6") : builder->CreateMul(q4, sq, "pow6");
+                nonNegValues_.insert(result); // even exponent → always non-neg
                 return result;
             }
             if (exp == 7) {
                 // x**7 → t=x*x; u=t*t; u*t*x  (4 muls)
-                auto* sq = baseNonNeg
-                    ? builder->CreateNSWMul(left, left, "pow7.sq")
-                    : builder->CreateMul(left, left, "pow7.sq");
-                auto* q4 = baseNonNeg
-                    ? builder->CreateNSWMul(sq, sq, "pow7.q4")
-                    : builder->CreateMul(sq, sq, "pow7.q4");
-                auto* q6 = baseNonNeg
-                    ? builder->CreateNSWMul(q4, sq, "pow7.q6")
-                    : builder->CreateMul(q4, sq, "pow7.q6");
-                auto* result = baseNonNeg
-                    ? builder->CreateNSWMul(q6, left, "pow7")
-                    : builder->CreateMul(q6, left, "pow7");
-                if (baseNonNeg) nonNegValues_.insert(result);
+                auto* sq = baseNonNeg ? builder->CreateNSWMul(left, left, "pow7.sq")
+                                      : builder->CreateMul(left, left, "pow7.sq");
+                auto* q4 =
+                    baseNonNeg ? builder->CreateNSWMul(sq, sq, "pow7.q4") : builder->CreateMul(sq, sq, "pow7.q4");
+                auto* q6 =
+                    baseNonNeg ? builder->CreateNSWMul(q4, sq, "pow7.q6") : builder->CreateMul(q4, sq, "pow7.q6");
+                auto* result =
+                    baseNonNeg ? builder->CreateNSWMul(q6, left, "pow7") : builder->CreateMul(q6, left, "pow7");
+                if (baseNonNeg)
+                    nonNegValues_.insert(result);
                 return result;
             }
             if (exp == 8) {
                 // x**8 → t=x*x; u=t*t; u*u  (3 muls) — result is always non-negative
-                auto* sq = baseNonNeg
-                    ? builder->CreateNSWMul(left, left, "pow8.sq")
-                    : builder->CreateMul(left, left, "pow8.sq");
-                auto* q4 = baseNonNeg
-                    ? builder->CreateNSWMul(sq, sq, "pow8.q4")
-                    : builder->CreateMul(sq, sq, "pow8.q4");
-                auto* result = baseNonNeg
-                    ? builder->CreateNSWMul(q4, q4, "pow8")
-                    : builder->CreateMul(q4, q4, "pow8");
-                nonNegValues_.insert(result);  // even exponent → always non-neg
+                auto* sq = baseNonNeg ? builder->CreateNSWMul(left, left, "pow8.sq")
+                                      : builder->CreateMul(left, left, "pow8.sq");
+                auto* q4 =
+                    baseNonNeg ? builder->CreateNSWMul(sq, sq, "pow8.q4") : builder->CreateMul(sq, sq, "pow8.q4");
+                auto* result = baseNonNeg ? builder->CreateNSWMul(q4, q4, "pow8") : builder->CreateMul(q4, q4, "pow8");
+                nonNegValues_.insert(result); // even exponent → always non-neg
                 return result;
             }
             if (exp == 9) {
                 // x**9 → t=x*x; u=t*t; v=u*u; v*x  (4 muls)
-                auto* sq = baseNonNeg
-                    ? builder->CreateNSWMul(left, left, "pow9.sq")
-                    : builder->CreateMul(left, left, "pow9.sq");
-                auto* q4 = baseNonNeg
-                    ? builder->CreateNSWMul(sq, sq, "pow9.q4")
-                    : builder->CreateMul(sq, sq, "pow9.q4");
-                auto* q8 = baseNonNeg
-                    ? builder->CreateNSWMul(q4, q4, "pow9.q8")
-                    : builder->CreateMul(q4, q4, "pow9.q8");
-                auto* result = baseNonNeg
-                    ? builder->CreateNSWMul(q8, left, "pow9")
-                    : builder->CreateMul(q8, left, "pow9");
-                if (baseNonNeg) nonNegValues_.insert(result);
+                auto* sq = baseNonNeg ? builder->CreateNSWMul(left, left, "pow9.sq")
+                                      : builder->CreateMul(left, left, "pow9.sq");
+                auto* q4 =
+                    baseNonNeg ? builder->CreateNSWMul(sq, sq, "pow9.q4") : builder->CreateMul(sq, sq, "pow9.q4");
+                auto* q8 =
+                    baseNonNeg ? builder->CreateNSWMul(q4, q4, "pow9.q8") : builder->CreateMul(q4, q4, "pow9.q8");
+                auto* result =
+                    baseNonNeg ? builder->CreateNSWMul(q8, left, "pow9") : builder->CreateMul(q8, left, "pow9");
+                if (baseNonNeg)
+                    nonNegValues_.insert(result);
                 return result;
             }
             if (exp == 10) {
                 // x**10 → t=x*x; u=t*t; v=u*u; v*t  (4 muls) — result is always non-negative
-                auto* sq = baseNonNeg
-                    ? builder->CreateNSWMul(left, left, "pow10.sq")
-                    : builder->CreateMul(left, left, "pow10.sq");
-                auto* q4 = baseNonNeg
-                    ? builder->CreateNSWMul(sq, sq, "pow10.q4")
-                    : builder->CreateMul(sq, sq, "pow10.q4");
-                auto* q8 = baseNonNeg
-                    ? builder->CreateNSWMul(q4, q4, "pow10.q8")
-                    : builder->CreateMul(q4, q4, "pow10.q8");
-                auto* result = baseNonNeg
-                    ? builder->CreateNSWMul(q8, sq, "pow10")
-                    : builder->CreateMul(q8, sq, "pow10");
-                nonNegValues_.insert(result);  // even exponent → always non-neg
+                auto* sq = baseNonNeg ? builder->CreateNSWMul(left, left, "pow10.sq")
+                                      : builder->CreateMul(left, left, "pow10.sq");
+                auto* q4 =
+                    baseNonNeg ? builder->CreateNSWMul(sq, sq, "pow10.q4") : builder->CreateMul(sq, sq, "pow10.q4");
+                auto* q8 =
+                    baseNonNeg ? builder->CreateNSWMul(q4, q4, "pow10.q8") : builder->CreateMul(q4, q4, "pow10.q8");
+                auto* result =
+                    baseNonNeg ? builder->CreateNSWMul(q8, sq, "pow10") : builder->CreateMul(q8, sq, "pow10");
+                nonNegValues_.insert(result); // even exponent → always non-neg
                 return result;
             }
             if (exp == 11) {
                 // x**11 → t=x*x; u=t*t; v=u*u; v*t*x  (5 muls)
-                auto* sq = baseNonNeg
-                    ? builder->CreateNSWMul(left, left, "pow11.sq")
-                    : builder->CreateMul(left, left, "pow11.sq");
-                auto* q4 = baseNonNeg
-                    ? builder->CreateNSWMul(sq, sq, "pow11.q4")
-                    : builder->CreateMul(sq, sq, "pow11.q4");
-                auto* q8 = baseNonNeg
-                    ? builder->CreateNSWMul(q4, q4, "pow11.q8")
-                    : builder->CreateMul(q4, q4, "pow11.q8");
-                auto* q10 = baseNonNeg
-                    ? builder->CreateNSWMul(q8, sq, "pow11.q10")
-                    : builder->CreateMul(q8, sq, "pow11.q10");
-                auto* result = baseNonNeg
-                    ? builder->CreateNSWMul(q10, left, "pow11")
-                    : builder->CreateMul(q10, left, "pow11");
-                if (baseNonNeg) nonNegValues_.insert(result);
+                auto* sq = baseNonNeg ? builder->CreateNSWMul(left, left, "pow11.sq")
+                                      : builder->CreateMul(left, left, "pow11.sq");
+                auto* q4 =
+                    baseNonNeg ? builder->CreateNSWMul(sq, sq, "pow11.q4") : builder->CreateMul(sq, sq, "pow11.q4");
+                auto* q8 =
+                    baseNonNeg ? builder->CreateNSWMul(q4, q4, "pow11.q8") : builder->CreateMul(q4, q4, "pow11.q8");
+                auto* q10 =
+                    baseNonNeg ? builder->CreateNSWMul(q8, sq, "pow11.q10") : builder->CreateMul(q8, sq, "pow11.q10");
+                auto* result =
+                    baseNonNeg ? builder->CreateNSWMul(q10, left, "pow11") : builder->CreateMul(q10, left, "pow11");
+                if (baseNonNeg)
+                    nonNegValues_.insert(result);
                 return result;
             }
             if (exp == 12) {
                 // x**12 → t=x*x; u=t*t; v=u*u; v*u  (4 muls) — even exponent
-                auto* sq = baseNonNeg
-                    ? builder->CreateNSWMul(left, left, "pow12.sq")
-                    : builder->CreateMul(left, left, "pow12.sq");
-                auto* q4 = baseNonNeg
-                    ? builder->CreateNSWMul(sq, sq, "pow12.q4")
-                    : builder->CreateMul(sq, sq, "pow12.q4");
-                auto* q8 = baseNonNeg
-                    ? builder->CreateNSWMul(q4, q4, "pow12.q8")
-                    : builder->CreateMul(q4, q4, "pow12.q8");
-                auto* result = baseNonNeg
-                    ? builder->CreateNSWMul(q8, q4, "pow12")
-                    : builder->CreateMul(q8, q4, "pow12");
-                nonNegValues_.insert(result);  // even exponent → always non-neg
+                auto* sq = baseNonNeg ? builder->CreateNSWMul(left, left, "pow12.sq")
+                                      : builder->CreateMul(left, left, "pow12.sq");
+                auto* q4 =
+                    baseNonNeg ? builder->CreateNSWMul(sq, sq, "pow12.q4") : builder->CreateMul(sq, sq, "pow12.q4");
+                auto* q8 =
+                    baseNonNeg ? builder->CreateNSWMul(q4, q4, "pow12.q8") : builder->CreateMul(q4, q4, "pow12.q8");
+                auto* result =
+                    baseNonNeg ? builder->CreateNSWMul(q8, q4, "pow12") : builder->CreateMul(q8, q4, "pow12");
+                nonNegValues_.insert(result); // even exponent → always non-neg
                 return result;
             }
             if (exp == 16) {
                 // x**16 → t=x*x; u=t*t; v=u*u; v*v  (4 muls) — even exponent → always non-neg
                 auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
-                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
-                                     : builder->CreateMul(a, b, nm);
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm) : builder->CreateMul(a, b, nm);
                 };
                 auto* sq = mkMul(left, left, "pow16.sq");
                 auto* q4 = mkMul(sq, sq, "pow16.q4");
                 auto* q8 = mkMul(q4, q4, "pow16.q8");
                 auto* result = mkMul(q8, q8, "pow16");
-                nonNegValues_.insert(result);  // even exponent → always non-neg
+                nonNegValues_.insert(result); // even exponent → always non-neg
                 return result;
             }
             if (exp == 13) {
                 // x**13 → t=x*x; u=t*t; v=u*t; w=v*v; w*x  (5 muls)
                 auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
-                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
-                                     : builder->CreateMul(a, b, nm);
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm) : builder->CreateMul(a, b, nm);
                 };
                 auto* sq = mkMul(left, left, "pow13.sq");
                 auto* q4 = mkMul(sq, sq, "pow13.q4");
                 auto* q6 = mkMul(q4, sq, "pow13.q6");
                 auto* q12 = mkMul(q6, q6, "pow13.q12");
                 auto* result = mkMul(q12, left, "pow13");
-                if (baseNonNeg) nonNegValues_.insert(result);
+                if (baseNonNeg)
+                    nonNegValues_.insert(result);
                 return result;
             }
             if (exp == 14) {
                 // x**14 = x^12 * x^2 → sq; q4=sq*sq; q8=q4*q4; q12=q8*q4; q12*sq  (5 muls)
                 auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
-                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
-                                     : builder->CreateMul(a, b, nm);
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm) : builder->CreateMul(a, b, nm);
                 };
                 auto* sq = mkMul(left, left, "pow14.sq");
                 auto* q4 = mkMul(sq, sq, "pow14.q4");
                 auto* q8 = mkMul(q4, q4, "pow14.q8");
                 auto* q12 = mkMul(q8, q4, "pow14.q12");
                 auto* result = mkMul(q12, sq, "pow14");
-                nonNegValues_.insert(result);  // even exponent → always non-neg
+                nonNegValues_.insert(result); // even exponent → always non-neg
                 return result;
             }
             if (exp == 15) {
                 // x**15 = x^12 * x^3 → sq; q3=sq*x; q6=q3*q3; q12=q6*q6; q12*q3  (5 muls)
                 auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
-                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
-                                     : builder->CreateMul(a, b, nm);
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm) : builder->CreateMul(a, b, nm);
                 };
                 auto* sq = mkMul(left, left, "pow15.sq");
                 auto* q3 = mkMul(sq, left, "pow15.q3");
                 auto* q6 = mkMul(q3, q3, "pow15.q6");
                 auto* q12 = mkMul(q6, q6, "pow15.q12");
                 auto* result = mkMul(q12, q3, "pow15");
-                if (baseNonNeg) nonNegValues_.insert(result);
+                if (baseNonNeg)
+                    nonNegValues_.insert(result);
                 return result;
             }
             if (exp == 17) {
                 // x**17 = x^16 * x  (5 muls)
                 auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
-                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
-                                     : builder->CreateMul(a, b, nm);
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm) : builder->CreateMul(a, b, nm);
                 };
                 auto* sq = mkMul(left, left, "pow17.sq");
                 auto* q4 = mkMul(sq, sq, "pow17.q4");
                 auto* q8 = mkMul(q4, q4, "pow17.q8");
                 auto* q16 = mkMul(q8, q8, "pow17.q16");
                 auto* result = mkMul(q16, left, "pow17");
-                if (baseNonNeg) nonNegValues_.insert(result);
+                if (baseNonNeg)
+                    nonNegValues_.insert(result);
                 return result;
             }
             if (exp == 18) {
                 // x**18 = x^16 * x^2  (5 muls)
                 auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
-                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
-                                     : builder->CreateMul(a, b, nm);
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm) : builder->CreateMul(a, b, nm);
                 };
                 auto* sq = mkMul(left, left, "pow18.sq");
                 auto* q4 = mkMul(sq, sq, "pow18.q4");
                 auto* q8 = mkMul(q4, q4, "pow18.q8");
                 auto* q16 = mkMul(q8, q8, "pow18.q16");
                 auto* result = mkMul(q16, sq, "pow18");
-                nonNegValues_.insert(result);  // even exponent → always non-neg
+                nonNegValues_.insert(result); // even exponent → always non-neg
                 return result;
             }
             if (exp == 20) {
                 // x**20 = x^16 * x^4  (5 muls)
                 auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
-                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
-                                     : builder->CreateMul(a, b, nm);
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm) : builder->CreateMul(a, b, nm);
                 };
                 auto* sq = mkMul(left, left, "pow20.sq");
                 auto* q4 = mkMul(sq, sq, "pow20.q4");
                 auto* q8 = mkMul(q4, q4, "pow20.q8");
                 auto* q16 = mkMul(q8, q8, "pow20.q16");
                 auto* result = mkMul(q16, q4, "pow20");
-                nonNegValues_.insert(result);  // even exponent → always non-neg
+                nonNegValues_.insert(result); // even exponent → always non-neg
                 return result;
             }
             if (exp == 24) {
                 // x**24 = x^16 * x^8  (5 muls)
                 auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
-                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
-                                     : builder->CreateMul(a, b, nm);
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm) : builder->CreateMul(a, b, nm);
                 };
                 auto* sq = mkMul(left, left, "pow24.sq");
                 auto* q4 = mkMul(sq, sq, "pow24.q4");
                 auto* q8 = mkMul(q4, q4, "pow24.q8");
                 auto* q16 = mkMul(q8, q8, "pow24.q16");
                 auto* result = mkMul(q16, q8, "pow24");
-                nonNegValues_.insert(result);  // even exponent → always non-neg
+                nonNegValues_.insert(result); // even exponent → always non-neg
                 return result;
             }
             if (exp == 25) {
                 // x**25 = x^24 * x = x^16 * x^8 * x  (6 muls)
                 auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
-                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
-                                     : builder->CreateMul(a, b, nm);
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm) : builder->CreateMul(a, b, nm);
                 };
                 auto* sq = mkMul(left, left, "pow25.sq");
                 auto* q4 = mkMul(sq, sq, "pow25.q4");
@@ -4878,28 +4855,27 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* q16 = mkMul(q8, q8, "pow25.q16");
                 auto* q24 = mkMul(q16, q8, "pow25.q24");
                 auto* result = mkMul(q24, left, "pow25");
-                if (baseNonNeg) nonNegValues_.insert(result);
+                if (baseNonNeg)
+                    nonNegValues_.insert(result);
                 return result;
             }
             if (exp == 32) {
                 // x**32 → ((((x*x)^2)^2)^2)^2  (5 muls)
                 auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
-                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
-                                     : builder->CreateMul(a, b, nm);
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm) : builder->CreateMul(a, b, nm);
                 };
                 auto* sq = mkMul(left, left, "pow32.sq");
                 auto* q4 = mkMul(sq, sq, "pow32.q4");
                 auto* q8 = mkMul(q4, q4, "pow32.q8");
                 auto* q16 = mkMul(q8, q8, "pow32.q16");
                 auto* result = mkMul(q16, q16, "pow32");
-                nonNegValues_.insert(result);  // even exponent → always non-neg
+                nonNegValues_.insert(result); // even exponent → always non-neg
                 return result;
             }
             if (exp == 64) {
                 // x**64 → (((((x*x)^2)^2)^2)^2)^2  (6 muls)
                 auto mkMul = [&](llvm::Value* a, llvm::Value* b, const char* nm) -> llvm::Value* {
-                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm)
-                                     : builder->CreateMul(a, b, nm);
+                    return baseNonNeg ? builder->CreateNSWMul(a, b, nm) : builder->CreateMul(a, b, nm);
                 };
                 auto* sq = mkMul(left, left, "pow64.sq");
                 auto* q4 = mkMul(sq, sq, "pow64.q4");
@@ -4907,7 +4883,7 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                 auto* q16 = mkMul(q8, q8, "pow64.q16");
                 auto* q32 = mkMul(q16, q16, "pow64.q32");
                 auto* result = mkMul(q32, q32, "pow64");
-                nonNegValues_.insert(result);  // even exponent → always non-neg
+                nonNegValues_.insert(result); // even exponent → always non-neg
                 return result;
             }
         }
@@ -4964,17 +4940,15 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         llvm::Value* isOdd = builder->CreateICmpNE(expBit, zero, "pow.isodd");
         // Use NSWMul when the base is known non-negative: result stays in
         // [0, INT64_MAX], so multiplication cannot produce signed overflow.
-        llvm::Value* newResult = baseNonNeg
-            ? builder->CreateNSWMul(result, base, "pow.mul")
-            : builder->CreateMul(result, base, "pow.mul");
+        llvm::Value* newResult =
+            baseNonNeg ? builder->CreateNSWMul(result, base, "pow.mul") : builder->CreateMul(result, base, "pow.mul");
         llvm::Value* resultSel = builder->CreateSelect(isOdd, newResult, result, "pow.rsel");
         builder->CreateBr(squareBB);
 
         // Square the base and halve the exponent
         builder->SetInsertPoint(squareBB);
-        llvm::Value* newBase = baseNonNeg
-            ? builder->CreateNSWMul(base, base, "pow.sq")
-            : builder->CreateMul(base, base, "pow.sq");
+        llvm::Value* newBase =
+            baseNonNeg ? builder->CreateNSWMul(base, base, "pow.sq") : builder->CreateMul(base, base, "pow.sq");
         llvm::Value* newExp = builder->CreateAShr(exp, one, "pow.halve");
         result->addIncoming(resultSel, squareBB);
         base->addIncoming(newBase, squareBB);
@@ -5027,9 +5001,8 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
         }
         // Use nsw when operand is proven non-negative: negating a value >= 0 cannot
         // produce INT64_MIN (the only signed overflow case for negation).
-        return nonNegValues_.count(operand)
-            ? builder->CreateNSWNeg(operand, "negtmp")
-            : builder->CreateNeg(operand, "negtmp");
+        return nonNegValues_.count(operand) ? builder->CreateNSWNeg(operand, "negtmp")
+                                            : builder->CreateNeg(operand, "negtmp");
     } else if (expr->op == "!") {
         llvm::Value* boolVal = toBool(operand);
         llvm::Value* notVal = builder->CreateNot(boolVal, "nottmp");
@@ -5058,14 +5031,12 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
             // Retrieve the base pointer for the array.
             llvm::Value* base = nullptr;
             if (idxExpr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
-                const std::string& arrName =
-                    static_cast<IdentifierExpr*>(idxExpr->array.get())->name;
+                const std::string& arrName = static_cast<IdentifierExpr*>(idxExpr->array.get())->name;
                 auto it = namedValues.find(arrName);
                 if (it != namedValues.end() && it->second) {
                     // Load the array base pointer from the alloca.
                     auto* alloca = it->second;
-                    base = builder->CreateLoad(
-                        llvm::PointerType::getUnqual(*context), alloca, "arr.base");
+                    base = builder->CreateLoad(llvm::PointerType::getUnqual(*context), alloca, "arr.base");
                 }
             }
             if (!base)
@@ -5086,14 +5057,13 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
             if (funcptrVarNames_.count(id->name)) {
                 // funcptr alloca is now ptr-typed, so `operand` is already a
                 // native LLVM pointer — no inttoptr needed.
-                llvm::Value* fnPtr = operand->getType()->isPointerTy()
-                    ? operand
-                    : builder->CreateIntToPtr(
-                          toDefaultType(operand),
-                          llvm::PointerType::getUnqual(*context), "funcptr.deref.itop");
+                llvm::Value* fnPtr =
+                    operand->getType()->isPointerTy()
+                        ? operand
+                        : builder->CreateIntToPtr(toDefaultType(operand), llvm::PointerType::getUnqual(*context),
+                                                  "funcptr.deref.itop");
                 // Build the function type: () -> i64
-                llvm::FunctionType* fnTy = llvm::FunctionType::get(
-                    getDefaultType(), /*Params=*/{}, /*isVarArg=*/false);
+                llvm::FunctionType* fnTy = llvm::FunctionType::get(getDefaultType(), /*Params=*/{}, /*isVarArg=*/false);
                 llvm::CallInst* ci = builder->CreateCall(fnTy, fnPtr, {}, "funcptr.call");
                 ci->addFnAttr(llvm::Attribute::NoUnwind);
                 return ci;
@@ -5134,36 +5104,35 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
             llvm::AllocaInst* rmwAlloca = llvm::dyn_cast<llvm::AllocaInst>(it0->second);
             if (rmwAlloca) {
                 llvm::Type* rmwTy = rmwAlloca->getAllocatedType();
-                if (rmwTy->isIntegerTy() && expr->value &&
-                    expr->value->type == ASTNodeType::BINARY_EXPR) {
+                if (rmwTy->isIntegerTy() && expr->value && expr->value->type == ASTNodeType::BINARY_EXPR) {
                     auto* bin = static_cast<BinaryExpr*>(expr->value.get());
                     // Confirm LHS of the binary expr is the same identifier.
                     bool lhsMatch = (bin->left->type == ASTNodeType::IDENTIFIER_EXPR &&
-                        static_cast<IdentifierExpr*>(bin->left.get())->name == expr->name);
+                                     static_cast<IdentifierExpr*>(bin->left.get())->name == expr->name);
                     static constexpr struct {
                         const char* op;
                         llvm::AtomicRMWInst::BinOp rmwOp;
                     } kRMWOps[] = {
-                        {"+",  llvm::AtomicRMWInst::Add},
-                        {"-",  llvm::AtomicRMWInst::Sub},
-                        {"&",  llvm::AtomicRMWInst::And},
-                        {"|",  llvm::AtomicRMWInst::Or},
-                        {"^",  llvm::AtomicRMWInst::Xor},
+                        {"+", llvm::AtomicRMWInst::Add}, {"-", llvm::AtomicRMWInst::Sub},
+                        {"&", llvm::AtomicRMWInst::And}, {"|", llvm::AtomicRMWInst::Or},
+                        {"^", llvm::AtomicRMWInst::Xor},
                     };
                     llvm::AtomicRMWInst::BinOp rmwOp = llvm::AtomicRMWInst::Add;
                     bool opFound = false;
                     for (const auto& kv : kRMWOps) {
-                        if (bin->op == kv.op) { rmwOp = kv.rmwOp; opFound = true; break; }
+                        if (bin->op == kv.op) {
+                            rmwOp = kv.rmwOp;
+                            opFound = true;
+                            break;
+                        }
                     }
                     if (lhsMatch && opFound) {
                         llvm::Value* rhs = generateExpression(bin->right.get());
                         rhs = convertTo(rhs, rmwTy);
-                        const llvm::Align rmwAlign =
-                            module->getDataLayout().getABITypeAlign(rmwTy);
-                        auto* rmwInst = builder->CreateAtomicRMW(
-                            rmwOp, it0->second, rhs, llvm::MaybeAlign(rmwAlign),
-                            llvm::AtomicOrdering::SequentiallyConsistent,
-                            llvm::SyncScope::System);
+                        const llvm::Align rmwAlign = module->getDataLayout().getABITypeAlign(rmwTy);
+                        auto* rmwInst = builder->CreateAtomicRMW(rmwOp, it0->second, rhs, llvm::MaybeAlign(rmwAlign),
+                                                                 llvm::AtomicOrdering::SequentiallyConsistent,
+                                                                 llvm::SyncScope::System);
                         if (volatileVars_.count(expr->name))
                             rmwInst->setVolatile(true);
                         // The expression value of the assignment is the NEW value
@@ -5206,25 +5175,20 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     // emit       realloc(x, len(x)+len(rhs)+1) + memcpy(rhs only).
     // This saves the O(n) copy of x's existing content every iteration,
     // turning a string-building loop from O(n²) to O(n).
-    if (optimizationLevel >= OptimizationLevel::O1 &&
-        !atomicVars_.count(expr->name) &&
-        !volatileVars_.count(expr->name) &&
-        uniqueStringVars_.count(expr->name) &&
-        stringVars_.count(expr->name) &&
-        !staticStringVars_.count(expr->name) &&
-        expr->value && expr->value->type == ASTNodeType::BINARY_EXPR) {
+    if (optimizationLevel >= OptimizationLevel::O1 && !atomicVars_.count(expr->name) &&
+        !volatileVars_.count(expr->name) && uniqueStringVars_.count(expr->name) && stringVars_.count(expr->name) &&
+        !staticStringVars_.count(expr->name) && expr->value && expr->value->type == ASTNodeType::BINARY_EXPR) {
         auto* bin = static_cast<BinaryExpr*>(expr->value.get());
         // Must be   x + rhs   where LHS is the same variable and both are strings.
-        if (bin->op == "+" &&
-            isStringExpr(expr->value.get()) &&
-            isStringExpr(bin->right.get()) &&
+        if (bin->op == "+" && isStringExpr(expr->value.get()) && isStringExpr(bin->right.get()) &&
             bin->left->type == ASTNodeType::IDENTIFIER_EXPR &&
             static_cast<IdentifierExpr*>(bin->left.get())->name == expr->name) {
             // Safety: RHS must not reference x (no overlapping realloc read).
             bool rhsRefersToX = false;
             std::function<bool(const Expression*)> refsX;
             refsX = [&](const Expression* e) -> bool {
-                if (!e) return false;
+                if (!e)
+                    return false;
                 if (e->type == ASTNodeType::IDENTIFIER_EXPR)
                     return static_cast<const IdentifierExpr*>(e)->name == expr->name;
                 if (e->type == ASTNodeType::BINARY_EXPR) {
@@ -5235,7 +5199,8 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
                     return refsX(static_cast<const UnaryExpr*>(e)->operand.get());
                 if (e->type == ASTNodeType::CALL_EXPR) {
                     for (const auto& arg : static_cast<const CallExpr*>(e)->arguments)
-                        if (refsX(arg.get())) return true;
+                        if (refsX(arg.get()))
+                            return true;
                 }
                 return false;
             };
@@ -5258,9 +5223,8 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         if (rit != refVarElemTypes_.end()) {
             auto bm = borrowMap_.find(expr->name);
             if (bm == borrowMap_.end() || !bm->second.isMut) {
-                codegenError("Cannot assign through immutable reference '" +
-                             expr->name +
-                             "' — declare with `borrow mut` for write-through",
+                codegenError("Cannot assign through immutable reference '" + expr->name +
+                                 "' — declare with `borrow mut` for write-through",
                              expr);
             }
             // A live (active) ref var was just written to; revive any
@@ -5268,9 +5232,8 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
             deadVars_.erase(expr->name);
             deadVarReason_.erase(expr->name);
             llvm::Type* ptrTy = llvm::PointerType::getUnqual(*context);
-            auto* ptrLoad = builder->CreateAlignedLoad(
-                ptrTy, it->second, llvm::MaybeAlign(8),
-                (expr->name + ".ref.ptr").c_str());
+            auto* ptrLoad =
+                builder->CreateAlignedLoad(ptrTy, it->second, llvm::MaybeAlign(8), (expr->name + ".ref.ptr").c_str());
             llvm::Type* elemTy = resolveAnnotatedType(rit->second);
             llvm::Value* coerced = value;
             if (coerced->getType() != elemTy) {
@@ -5289,10 +5252,8 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
                 else if (elemTy->isIntegerTy() && coerced->getType()->isIntegerTy())
                     coerced = convertTo(coerced, elemTy);
             }
-            const llvm::Align elemAlign =
-                module->getDataLayout().getABITypeAlign(elemTy);
-            builder->CreateAlignedStore(coerced, ptrLoad,
-                                        llvm::MaybeAlign(elemAlign.value()));
+            const llvm::Align elemAlign = module->getDataLayout().getABITypeAlign(elemTy);
+            builder->CreateAlignedStore(coerced, ptrLoad, llvm::MaybeAlign(elemAlign.value()));
             // The expression value of an assignment is the (original) RHS
             // value, matching what the standard path returns below.
             return value;
@@ -5321,8 +5282,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
             value = builder->CreatePtrToInt(value, targetType, "ptoi");
         } else if (targetType->isPointerTy() && value->getType()->isIntegerTy()) {
             value = builder->CreateIntToPtr(value, llvm::PointerType::getUnqual(*context), "itop");
-        } else if (targetType->isIntegerTy() && value->getType()->isIntegerTy() &&
-                   targetType != value->getType()) {
+        } else if (targetType->isIntegerTy() && value->getType()->isIntegerTy() && targetType != value->getType()) {
             value = convertTo(value, targetType);
         }
     }
@@ -5331,23 +5291,21 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
     // Apply volatile / atomic ordering to the store if needed.
     {
         // Retrieve the just-created store (the most recently inserted instruction).
-        auto* storeInst = llvm::dyn_cast<llvm::StoreInst>(
-            &builder->GetInsertBlock()->back());
+        auto* storeInst = llvm::dyn_cast<llvm::StoreInst>(&builder->GetInsertBlock()->back());
         if (storeInst) {
             // Tag alloca/global scalar-variable stores with the scalar TBAA node so
             // LLVM AA can distinguish these from heap-allocated array/struct/map data.
             if (tbaaScalar_)
                 storeInst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
-            const bool storeVol  = volatileVars_.count(expr->name) != 0;
+            const bool storeVol = volatileVars_.count(expr->name) != 0;
             const bool storeAtom = atomicVars_.count(expr->name) != 0;
-            if (storeVol)  storeInst->setVolatile(true);
+            if (storeVol)
+                storeInst->setVolatile(true);
             if (storeAtom && storeInst->getValueOperand()->getType()->isSingleValueType() &&
                 !storeInst->getValueOperand()->getType()->isVectorTy()) {
                 const llvm::Align atomAlign =
-                    module->getDataLayout().getABITypeAlign(
-                        storeInst->getValueOperand()->getType());
-                storeInst->setAtomic(llvm::AtomicOrdering::SequentiallyConsistent,
-                                     llvm::SyncScope::System);
+                    module->getDataLayout().getABITypeAlign(storeInst->getValueOperand()->getType());
+                storeInst->setAtomic(llvm::AtomicOrdering::SequentiallyConsistent, llvm::SyncScope::System);
                 storeInst->setAlignment(atomAlign);
             }
         }
@@ -5383,8 +5341,7 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
                     }
                 }
                 if (ri->getOpcode() == llvm::Instruction::Load) {
-                    auto* srcAlloca = llvm::dyn_cast<llvm::AllocaInst>(
-                        ri->getOperand(0));
+                    auto* srcAlloca = llvm::dyn_cast<llvm::AllocaInst>(ri->getOperand(0));
                     auto it2 = allocaUpperBound_.find(srcAlloca);
                     if (srcAlloca && it2 != allocaUpperBound_.end()) {
                         allocaUpperBound_[allocaInst] = it2->second;
@@ -5415,19 +5372,18 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
             isArr = true;
         } else if (expr->value->type == ASTNodeType::CALL_EXPR) {
             auto* call = static_cast<CallExpr*>(expr->value.get());
-            if (call->callee == "array_fill" || call->callee == "array_concat" ||
-                call->callee == "array_copy" || call->callee == "array_map" ||
-                call->callee == "array_filter" || call->callee == "array_slice" ||
-                call->callee == "push" || call->callee == "pop" ||
-                call->callee == "shift" || call->callee == "unshift" ||
-                call->callee == "sort" || call->callee == "reverse" ||
-                call->callee == "array_remove" || call->callee == "array_reduce" ||
-                call->callee == "str_split" || call->callee == "str_chars" ||
-                arrayReturningFunctions_.count(call->callee))
+            if (call->callee == "array_fill" || call->callee == "array_concat" || call->callee == "array_copy" ||
+                call->callee == "array_map" || call->callee == "array_filter" || call->callee == "array_slice" ||
+                call->callee == "push" || call->callee == "pop" || call->callee == "shift" ||
+                call->callee == "unshift" || call->callee == "sort" || call->callee == "reverse" ||
+                call->callee == "array_remove" || call->callee == "array_reduce" || call->callee == "str_split" ||
+                call->callee == "str_chars" || arrayReturningFunctions_.count(call->callee))
                 isArr = true;
         }
-        if (isArr) arrayVars_.insert(expr->name);
-        else       arrayVars_.erase(expr->name);
+        if (isArr)
+            arrayVars_.insert(expr->name);
+        else
+            arrayVars_.erase(expr->name);
     }
     // When a variable is reassigned, its previous knownArraySize(Allocas) entry
     // is no longer valid — the new value may have a different length.
@@ -5444,15 +5400,11 @@ llvm::Value* CodeGenerator::generateAssign(AssignExpr* expr) {
         if (!isConcat) {
             auto cacheIt = stringLenCache_.find(expr->name);
             if (cacheIt != stringLenCache_.end()) {
-                builder->CreateStore(
-                    llvm::ConstantInt::get(getDefaultType(), -1, true),
-                    cacheIt->second);
+                builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), -1, true), cacheIt->second);
             }
             auto capIt = stringCapCache_.find(expr->name);
             if (capIt != stringCapCache_.end()) {
-                builder->CreateStore(
-                    llvm::ConstantInt::get(getDefaultType(), 0),
-                    capIt->second);
+                builder->CreateStore(llvm::ConstantInt::get(getDefaultType(), 0), capIt->second);
             }
         }
     }
@@ -5471,8 +5423,8 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
     if (operandExpr->type != ASTNodeType::INDEX_EXPR && operandExpr->type != ASTNodeType::IDENTIFIER_EXPR) {
         codegenError("Increment/decrement operators require an lvalue operand", errorNode);
     }
-    IndexExpr* indexExpr = (operandExpr->type == ASTNodeType::INDEX_EXPR)
-        ? static_cast<IndexExpr*>(operandExpr) : nullptr;
+    IndexExpr* indexExpr =
+        (operandExpr->type == ASTNodeType::INDEX_EXPR) ? static_cast<IndexExpr*>(operandExpr) : nullptr;
     if (indexExpr) {
         llvm::Value* arrVal = generateExpression(indexExpr->array.get());
         llvm::Value* idxVal = generateExpression(indexExpr->index.get());
@@ -5486,16 +5438,14 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
             arrVal->getType()->isPointerTy() ? arrVal : builder->CreateIntToPtr(arrVal, ptrTy, "incdec.arrptr");
 
         // Bounds check — elided when canElideBoundsCheck proves safety.
-        const bool boundsCheckElidedID = canElideBoundsCheck(
-            indexExpr->array.get(), indexExpr->index.get(),
-            arrPtr, /*isStr=*/false, "incdec");
+        const bool boundsCheckElidedID =
+            canElideBoundsCheck(indexExpr->array.get(), indexExpr->index.get(), arrPtr, /*isStr=*/false, "incdec");
 
         if (!boundsCheckElidedID) {
-            emitBoundsCheck(idxVal, arrPtr, /*isStr=*/false, /*isBorrowed=*/false, "incdec",
-                            indexExpr->line);
+            emitBoundsCheck(idxVal, arrPtr, /*isStr=*/false, /*isBorrowed=*/false, "incdec", indexExpr->line);
         }
         llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
-            llvm::ConstantInt::get(getDefaultType(), 1), "incdec.data");
+                                                          llvm::ConstantInt::get(getDefaultType(), 1), "incdec.data");
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "incdec.elem.ptr");
         auto* elemLoad = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "incdec.elem");
         // TBAA: array element slots (index 1+) never alias the length header
@@ -5505,9 +5455,9 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
         llvm::Value* current = elemLoad;
 
         llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
-        llvm::Value* updated =
-            (op == "++") ? builder->CreateAdd(current, delta, "inc", /*HasNUW=*/false, /*HasNSW=*/true)
-                         : builder->CreateSub(current, delta, "dec", /*HasNUW=*/false, /*HasNSW=*/true);
+        llvm::Value* updated = (op == "++")
+                                   ? builder->CreateAdd(current, delta, "inc", /*HasNUW=*/false, /*HasNSW=*/true)
+                                   : builder->CreateSub(current, delta, "dec", /*HasNUW=*/false, /*HasNSW=*/true);
         emitStoreArrayElem(updated, elemPtr);
         return isPostfix ? current : updated;
     }
@@ -5529,21 +5479,17 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
 
     // ── Atomic inc/dec: use atomicrmw add/sub ──────────────────────────────
     if (atomicVars_.count(identifier->name) && loadType->isIntegerTy()) {
-        const llvm::Align rmwAlign =
-            module->getDataLayout().getABITypeAlign(loadType);
+        const llvm::Align rmwAlign = module->getDataLayout().getABITypeAlign(loadType);
         llvm::Value* one = llvm::ConstantInt::get(loadType, 1, true);
-        const llvm::AtomicRMWInst::BinOp rmwOp =
-            (op == "++") ? llvm::AtomicRMWInst::Add : llvm::AtomicRMWInst::Sub;
-        auto* rmwInst = builder->CreateAtomicRMW(
-            rmwOp, it->second, one, llvm::MaybeAlign(rmwAlign),
-            llvm::AtomicOrdering::SequentiallyConsistent,
-            llvm::SyncScope::System);
-        if (volatileVars_.count(identifier->name)) rmwInst->setVolatile(true);
+        const llvm::AtomicRMWInst::BinOp rmwOp = (op == "++") ? llvm::AtomicRMWInst::Add : llvm::AtomicRMWInst::Sub;
+        auto* rmwInst = builder->CreateAtomicRMW(rmwOp, it->second, one, llvm::MaybeAlign(rmwAlign),
+                                                 llvm::AtomicOrdering::SequentiallyConsistent, llvm::SyncScope::System);
+        if (volatileVars_.count(identifier->name))
+            rmwInst->setVolatile(true);
         // Pre-increment/decrement: add/sub 1 to the returned *old* value.
         if (!isPostfix) {
-            return (op == "++")
-                ? builder->CreateAdd(rmwInst, one, "ainc.new")
-                : builder->CreateSub(rmwInst, one, "adec.new");
+            return (op == "++") ? builder->CreateAdd(rmwInst, one, "ainc.new")
+                                : builder->CreateSub(rmwInst, one, "adec.new");
         }
         return rmwInst; // postfix: return the old value
     }
@@ -5551,30 +5497,26 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
     // ── Normal (non-atomic) inc/dec ─────────────────────────────────────────
     // Use aligned load (all variable allocas are 8-byte aligned) so the
     // load instruction matches what generateIdentifier emits.
-    auto* loadInst = builder->CreateAlignedLoad(loadType, it->second,
-        llvm::MaybeAlign(8), identifier->name.c_str());
+    auto* loadInst = builder->CreateAlignedLoad(loadType, it->second, llvm::MaybeAlign(8), identifier->name.c_str());
     const bool isIncDecVol = volatileVars_.count(identifier->name) != 0;
-    if (isIncDecVol) loadInst->setVolatile(true);
+    if (isIncDecVol)
+        loadInst->setVolatile(true);
     // Tag non-volatile scalar variable loads with the scalar TBAA node.
     if (!isIncDecVol && tbaaScalar_ &&
-        (loadType->isIntegerTy() || loadType->isFloatTy() ||
-         loadType->isDoubleTy()  || loadType->isPointerTy()))
+        (loadType->isIntegerTy() || loadType->isFloatTy() || loadType->isDoubleTy() || loadType->isPointerTy()))
         loadInst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
     // OmScript guarantees variables are initialized before use → !noundef.
     if (optimizationLevel >= OptimizationLevel::O1 && !isIncDecVol) {
-        loadInst->setMetadata(llvm::LLVMContext::MD_noundef,
-                              llvm::MDNode::get(*context, {}));
+        loadInst->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
     }
     // Propagate non-negativity: if the alloca is known non-negative, the
     const bool allocaNonNeg = allocaInst && nonNegValues_.count(allocaInst);
-    if (allocaNonNeg && loadType->isIntegerTy(64)
-            && optimizationLevel >= OptimizationLevel::O1) {
+    if (allocaNonNeg && loadType->isIntegerTy(64) && optimizationLevel >= OptimizationLevel::O1) {
         auto bit = allocaUpperBound_.find(allocaInst);
         if (bit != allocaUpperBound_.end()) {
             llvm::MDBuilder mdB(*context);
             loadInst->setMetadata(llvm::LLVMContext::MD_range,
-                mdB.createRange(llvm::APInt(64, 0),
-                                llvm::APInt(64, bit->second)));
+                                  mdB.createRange(llvm::APInt(64, 0), llvm::APInt(64, bit->second)));
         } else {
             loadInst->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
         }
@@ -5599,11 +5541,11 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
 
     {
         llvm::StoreInst* storeInst = builder->CreateAlignedStore(updated, it->second, llvm::MaybeAlign(8));
-        if (isIncDecVol) storeInst->setVolatile(true);
+        if (isIncDecVol)
+            storeInst->setVolatile(true);
         // Tag non-volatile scalar stores with the scalar TBAA node.
         if (!isIncDecVol && tbaaScalar_ &&
-            (loadType->isIntegerTy() || loadType->isFloatTy() ||
-             loadType->isDoubleTy()  || loadType->isPointerTy()))
+            (loadType->isIntegerTy() || loadType->isFloatTy() || loadType->isDoubleTy() || loadType->isPointerTy()))
             storeInst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
     }
 
@@ -5648,10 +5590,8 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
 
         // Helper: check if two AST expressions refer to the same identifier
         auto sameIdent = [](Expression* a, Expression* b) -> bool {
-            if (a->type == ASTNodeType::IDENTIFIER_EXPR &&
-                b->type == ASTNodeType::IDENTIFIER_EXPR) {
-                return static_cast<IdentifierExpr*>(a)->name ==
-                       static_cast<IdentifierExpr*>(b)->name;
+            if (a->type == ASTNodeType::IDENTIFIER_EXPR && b->type == ASTNodeType::IDENTIFIER_EXPR) {
+                return static_cast<IdentifierExpr*>(a)->name == static_cast<IdentifierExpr*>(b)->name;
             }
             return false;
         };
@@ -5665,65 +5605,77 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
             return false;
         };
 
-        auto* condLeft  = binCond->left.get();
+        auto* condLeft = binCond->left.get();
         auto* condRight = binCond->right.get();
         const std::string& op = binCond->op;
 
         // --- MIN pattern: (a < b) ? a : b  or  (a <= b) ? a : b ---
-        if ((op == "<" || op == "<=") &&
-            sameIdent(condLeft, thenE) && sameIdent(condRight, elseE)) {
+        if ((op == "<" || op == "<=") && sameIdent(condLeft, thenE) && sameIdent(condRight, elseE)) {
             llvm::Value* a = generateExpression(condLeft);
             llvm::Value* b = generateExpression(condRight);
-            a = toDefaultType(a); b = toDefaultType(b);
-            const bool aNonNeg = nonNegValues_.count(a) || (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
-            const bool bNonNeg = nonNegValues_.count(b) || (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
+            a = toDefaultType(a);
+            b = toDefaultType(b);
+            const bool aNonNeg = nonNegValues_.count(a) ||
+                                 (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
+            const bool bNonNeg = nonNegValues_.count(b) ||
+                                 (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
             const llvm::Intrinsic::ID id = (aNonNeg && bNonNeg) ? llvm::Intrinsic::umin : llvm::Intrinsic::smin;
             auto* fn = OMSC_GET_INTRINSIC(module.get(), id, {getDefaultType()});
             auto* result = builder->CreateCall(fn, {a, b}, "tern.min");
-            if (aNonNeg && bNonNeg) nonNegValues_.insert(result);
+            if (aNonNeg && bNonNeg)
+                nonNegValues_.insert(result);
             return result;
         }
         // --- MIN pattern: (a > b) ? b : a  or  (a >= b) ? b : a ---
-        if ((op == ">" || op == ">=") &&
-            sameIdent(condLeft, elseE) && sameIdent(condRight, thenE)) {
+        if ((op == ">" || op == ">=") && sameIdent(condLeft, elseE) && sameIdent(condRight, thenE)) {
             llvm::Value* a = generateExpression(condLeft);
             llvm::Value* b = generateExpression(condRight);
-            a = toDefaultType(a); b = toDefaultType(b);
-            const bool aNonNeg = nonNegValues_.count(a) || (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
-            const bool bNonNeg = nonNegValues_.count(b) || (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
+            a = toDefaultType(a);
+            b = toDefaultType(b);
+            const bool aNonNeg = nonNegValues_.count(a) ||
+                                 (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
+            const bool bNonNeg = nonNegValues_.count(b) ||
+                                 (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
             const llvm::Intrinsic::ID id = (aNonNeg && bNonNeg) ? llvm::Intrinsic::umin : llvm::Intrinsic::smin;
             auto* fn = OMSC_GET_INTRINSIC(module.get(), id, {getDefaultType()});
             auto* result = builder->CreateCall(fn, {a, b}, "tern.min");
-            if (aNonNeg && bNonNeg) nonNegValues_.insert(result);
+            if (aNonNeg && bNonNeg)
+                nonNegValues_.insert(result);
             return result;
         }
 
         // --- MAX pattern: (a > b) ? a : b  or  (a >= b) ? a : b ---
-        if ((op == ">" || op == ">=") &&
-            sameIdent(condLeft, thenE) && sameIdent(condRight, elseE)) {
+        if ((op == ">" || op == ">=") && sameIdent(condLeft, thenE) && sameIdent(condRight, elseE)) {
             llvm::Value* a = generateExpression(condLeft);
             llvm::Value* b = generateExpression(condRight);
-            a = toDefaultType(a); b = toDefaultType(b);
-            const bool aNonNeg = nonNegValues_.count(a) || (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
-            const bool bNonNeg = nonNegValues_.count(b) || (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
+            a = toDefaultType(a);
+            b = toDefaultType(b);
+            const bool aNonNeg = nonNegValues_.count(a) ||
+                                 (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
+            const bool bNonNeg = nonNegValues_.count(b) ||
+                                 (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
             const llvm::Intrinsic::ID id = (aNonNeg && bNonNeg) ? llvm::Intrinsic::umax : llvm::Intrinsic::smax;
             auto* fn = OMSC_GET_INTRINSIC(module.get(), id, {getDefaultType()});
             auto* result = builder->CreateCall(fn, {a, b}, "tern.max");
-            if (aNonNeg || bNonNeg) nonNegValues_.insert(result);
+            if (aNonNeg || bNonNeg)
+                nonNegValues_.insert(result);
             return result;
         }
         // --- MAX pattern: (a < b) ? b : a  or  (a <= b) ? b : a ---
-        if ((op == "<" || op == "<=") &&
-            sameIdent(condLeft, elseE) && sameIdent(condRight, thenE)) {
+        if ((op == "<" || op == "<=") && sameIdent(condLeft, elseE) && sameIdent(condRight, thenE)) {
             llvm::Value* a = generateExpression(condLeft);
             llvm::Value* b = generateExpression(condRight);
-            a = toDefaultType(a); b = toDefaultType(b);
-            const bool aNonNeg = nonNegValues_.count(a) || (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
-            const bool bNonNeg = nonNegValues_.count(b) || (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
+            a = toDefaultType(a);
+            b = toDefaultType(b);
+            const bool aNonNeg = nonNegValues_.count(a) ||
+                                 (llvm::isa<llvm::ConstantInt>(a) && !llvm::cast<llvm::ConstantInt>(a)->isNegative());
+            const bool bNonNeg = nonNegValues_.count(b) ||
+                                 (llvm::isa<llvm::ConstantInt>(b) && !llvm::cast<llvm::ConstantInt>(b)->isNegative());
             const llvm::Intrinsic::ID id = (aNonNeg && bNonNeg) ? llvm::Intrinsic::umax : llvm::Intrinsic::smax;
             auto* fn = OMSC_GET_INTRINSIC(module.get(), id, {getDefaultType()});
             auto* result = builder->CreateCall(fn, {a, b}, "tern.max");
-            if (aNonNeg || bNonNeg) nonNegValues_.insert(result);
+            if (aNonNeg || bNonNeg)
+                nonNegValues_.insert(result);
             return result;
         }
 
@@ -5731,14 +5683,12 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
         auto isZeroLit = [](Expression* e) -> bool {
             if (e->type == ASTNodeType::LITERAL_EXPR) {
                 auto* lit = static_cast<LiteralExpr*>(e);
-                return lit->literalType == LiteralExpr::LiteralType::INTEGER &&
-                       lit->intValue == 0;
+                return lit->literalType == LiteralExpr::LiteralType::INTEGER && lit->intValue == 0;
             }
             return false;
         };
         // (x >= 0) ? x : -x
-        if (op == ">=" && isZeroLit(condRight) &&
-            sameIdent(condLeft, thenE) && isNegOf(elseE, condLeft)) {
+        if (op == ">=" && isZeroLit(condRight) && sameIdent(condLeft, thenE) && isNegOf(elseE, condLeft)) {
             llvm::Value* x = generateExpression(condLeft);
             x = toDefaultType(x);
             auto* absFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::abs, {getDefaultType()});
@@ -5747,8 +5697,7 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
             return result;
         }
         // (x < 0) ? -x : x
-        if (op == "<" && isZeroLit(condRight) &&
-            sameIdent(condLeft, elseE) && isNegOf(thenE, condLeft)) {
+        if (op == "<" && isZeroLit(condRight) && sameIdent(condLeft, elseE) && isNegOf(thenE, condLeft)) {
             llvm::Value* x = generateExpression(condLeft);
             x = toDefaultType(x);
             auto* absFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::abs, {getDefaultType()});
@@ -5757,8 +5706,7 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
             return result;
         }
         // (x > 0) ? x : -x  (equivalent to abs for all but x==0)
-        if (op == ">" && isZeroLit(condRight) &&
-            sameIdent(condLeft, thenE) && isNegOf(elseE, condLeft)) {
+        if (op == ">" && isZeroLit(condRight) && sameIdent(condLeft, thenE) && isNegOf(elseE, condLeft)) {
             llvm::Value* x = generateExpression(condLeft);
             x = toDefaultType(x);
             auto* absFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::abs, {getDefaultType()});
@@ -5767,8 +5715,7 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
             return result;
         }
         // (x <= 0) ? -x : x
-        if (op == "<=" && isZeroLit(condRight) &&
-            sameIdent(condLeft, elseE) && isNegOf(thenE, condLeft)) {
+        if (op == "<=" && isZeroLit(condRight) && sameIdent(condLeft, elseE) && isNegOf(thenE, condLeft)) {
             llvm::Value* x = generateExpression(condLeft);
             x = toDefaultType(x);
             auto* absFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::abs, {getDefaultType()});
@@ -5784,24 +5731,22 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
             return true;
         // Allow binary ops like `ident OP const` or `const OP ident` — these
         if (auto* bin = dynamic_cast<BinaryExpr*>(e)) {
-            const bool leftSimple  = bin->left->type  == ASTNodeType::IDENTIFIER_EXPR ||
-                                     bin->left->type  == ASTNodeType::LITERAL_EXPR;
-            const bool rightSimple = bin->right->type == ASTNodeType::IDENTIFIER_EXPR ||
-                                     bin->right->type == ASTNodeType::LITERAL_EXPR;
+            const bool leftSimple =
+                bin->left->type == ASTNodeType::IDENTIFIER_EXPR || bin->left->type == ASTNodeType::LITERAL_EXPR;
+            const bool rightSimple =
+                bin->right->type == ASTNodeType::IDENTIFIER_EXPR || bin->right->type == ASTNodeType::LITERAL_EXPR;
             // Allow arithmetic/bitwise ops AND comparisons — all are
             const std::string& op = bin->op;
-            const bool isSafeOp = (op == "+" || op == "-" || op == "*" || op == "/" ||
-                                   op == "%" || op == "&" || op == "|" || op == "^" ||
-                                   op == "<<" || op == ">>" ||
-                                   op == "==" || op == "!=" || op == "<" || op == ">" ||
-                                   op == "<=" || op == ">=");
+            const bool isSafeOp = (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" || op == "&" ||
+                                   op == "|" || op == "^" || op == "<<" || op == ">>" || op == "==" || op == "!=" ||
+                                   op == "<" || op == ">" || op == "<=" || op == ">=");
             if (leftSimple && rightSimple && isSafeOp)
                 return true;
         }
         // Allow unary negation/bitwise-NOT on a simple operand — these are
         if (auto* un = dynamic_cast<UnaryExpr*>(e)) {
-            const bool operandSimple = un->operand->type == ASTNodeType::IDENTIFIER_EXPR ||
-                                       un->operand->type == ASTNodeType::LITERAL_EXPR;
+            const bool operandSimple =
+                un->operand->type == ASTNodeType::IDENTIFIER_EXPR || un->operand->type == ASTNodeType::LITERAL_EXPR;
             if (operandSimple && (un->op == "-" || un->op == "~"))
                 return true;
         }
@@ -5832,15 +5777,11 @@ llvm::Value* CodeGenerator::generateTernary(TernaryExpr* expr) {
         if (tNonNeg && eNonNeg) {
             nonNegValues_.insert(sel);
             // Inject @llvm.assume(sel >= 0) at O2+: !range is not valid on
-            if (optimizationLevel >= OptimizationLevel::O2 &&
-                sel->getType()->isIntegerTy(64) &&
+            if (optimizationLevel >= OptimizationLevel::O2 && sel->getType()->isIntegerTy(64) &&
                 !llvm::isa<llvm::ConstantInt>(sel)) {
-                llvm::Function* assumeFn = OMSC_GET_INTRINSIC(
-                    module.get(), llvm::Intrinsic::assume, {});
-                llvm::Value* isNN = builder->CreateICmpSGE(
-                    sel,
-                    llvm::ConstantInt::get(getDefaultType(), 0),
-                    "sel.nonneg");
+                llvm::Function* assumeFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::assume, {});
+                llvm::Value* isNN =
+                    builder->CreateICmpSGE(sel, llvm::ConstantInt::get(getDefaultType(), 0), "sel.nonneg");
                 builder->CreateCall(assumeFn, {isNN});
             }
         }
@@ -5927,20 +5868,17 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
         const size_t totalBytes = totalSlots * 8;
 
         // ── Read-only global fast path ──────────────────────────────────────
-        if (pendingArrayReadOnlyGlobal_ && numElements >= 2 &&
-            optimizationLevel >= OptimizationLevel::O2) {
+        if (pendingArrayReadOnlyGlobal_ && numElements >= 2 && optimizationLevel >= OptimizationLevel::O2) {
             std::vector<llvm::Constant*> initVals;
             initVals.reserve(totalSlots);
-            initVals.push_back(llvm::ConstantInt::get(getDefaultType(),
-                                                     static_cast<int64_t>(numElements)));
+            initVals.push_back(llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(numElements)));
             for (const auto& elem : expr->elements) {
                 int64_t v = 0;
                 if (elem->type == ASTNodeType::LITERAL_EXPR) {
                     v = static_cast<LiteralExpr*>(elem.get())->intValue;
                 } else if (elem->type == ASTNodeType::UNARY_EXPR) {
                     auto* un = static_cast<UnaryExpr*>(elem.get());
-                    if (un->op == "-" && un->operand &&
-                        un->operand->type == ASTNodeType::LITERAL_EXPR) {
+                    if (un->op == "-" && un->operand && un->operand->type == ASTNodeType::LITERAL_EXPR) {
                         v = -static_cast<LiteralExpr*>(un->operand.get())->intValue;
                     }
                 }
@@ -5948,17 +5886,15 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             }
             auto* arrTy = llvm::ArrayType::get(getDefaultType(), totalSlots);
             auto* initArray = llvm::ConstantArray::get(arrTy, initVals);
-            auto* gv = new llvm::GlobalVariable(
-                *module, arrTy, /*isConstant=*/true,
-                llvm::GlobalValue::PrivateLinkage, initArray, "arr.ro.const");
+            auto* gv = new llvm::GlobalVariable(*module, arrTy, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
+                                                initArray, "arr.ro.const");
             gv->setAlignment(llvm::Align(16));
             gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
             return gv;
         }
 
         llvm::Value* arrPtr;
-        if (pendingArrayStackAlloc_ &&
-            numElements <= kMaxStackArrayElements &&
+        if (pendingArrayStackAlloc_ && numElements <= kMaxStackArrayElements &&
             optimizationLevel >= OptimizationLevel::O1) {
             // Stack-allocate: use alloca in the entry block for small non-escaping arrays.
             llvm::Function* function = builder->GetInsertBlock()->getParent();
@@ -5966,11 +5902,10 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             llvm::AllocaInst* alloca = createEntryBlockAlloca(function, "arr.stack", arrTy);
             alloca->setAlignment(llvm::Align(16));
             // Bitcast the array alloca to an i64* for element access.
-            arrPtr = builder->CreateInBoundsGEP(
-                arrTy, alloca,
-                {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0),
-                 llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0)},
-                "arr.stack.ptr");
+            arrPtr = builder->CreateInBoundsGEP(arrTy, alloca,
+                                                {llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0),
+                                                 llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0)},
+                                                "arr.stack.ptr");
         } else {
             // For empty arrays (numElements == 0) that land on the heap, pre-
             // allocate at least kMinArrayCapacity slots so that:
@@ -5979,9 +5914,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             //      then mismatches the first-push realloc,
             //  (b) the first 15 push() calls never trigger a realloc at all,
             //      reducing branching inside push loops.
-            const size_t allocBytes = (numElements == 0)
-                ? kMinArrayCapacity * 8
-                : totalBytes;
+            const size_t allocBytes = (numElements == 0) ? kMinArrayCapacity * 8 : totalBytes;
             llvm::Value* byteSize = llvm::ConstantInt::get(getDefaultType(), allocBytes);
             arrPtr = builder->CreateCall(getOrDeclareMalloc(), {byteSize}, "arr");
             // Advertise the actual capacity to LLVM's alias/bounds analysis.
@@ -6005,8 +5938,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             // Check for negative integer literal: unary minus on integer
             if (elem->type == ASTNodeType::UNARY_EXPR) {
                 auto* unary = static_cast<UnaryExpr*>(elem);
-                if (unary->op == "-" && unary->operand &&
-                    unary->operand->type == ASTNodeType::LITERAL_EXPR) {
+                if (unary->op == "-" && unary->operand && unary->operand->type == ASTNodeType::LITERAL_EXPR) {
                     auto* lit = static_cast<LiteralExpr*>(unary->operand.get());
                     if (lit->literalType == LiteralExpr::LiteralType::INTEGER) {
                         constVals.push_back(-lit->intValue);
@@ -6027,27 +5959,25 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             }
             auto* arrTy = llvm::ArrayType::get(getDefaultType(), totalSlots);
             auto* initArray = llvm::ConstantArray::get(arrTy, initVals);
-            auto* gv = new llvm::GlobalVariable(
-                *module, arrTy, /*isConstant=*/true,
-                llvm::GlobalValue::PrivateLinkage, initArray, "arr.const");
+            auto* gv = new llvm::GlobalVariable(*module, arrTy, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
+                                                initArray, "arr.const");
             gv->setAlignment(llvm::Align(16));
             gv->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
 
             // memcpy(arrPtr, @arr.const, totalBytes)
-            builder->CreateMemCpy(arrPtr, llvm::MaybeAlign(8),
-                                  gv, llvm::MaybeAlign(16), totalBytes);
+            builder->CreateMemCpy(arrPtr, llvm::MaybeAlign(8), gv, llvm::MaybeAlign(16), totalBytes);
         } else {
             // Mixed constant/dynamic elements: store individually
-            auto* lenHdrSt = builder->CreateAlignedStore(
-                llvm::ConstantInt::get(getDefaultType(), numElements), arrPtr, llvm::MaybeAlign(8));
+            auto* lenHdrSt = builder->CreateAlignedStore(llvm::ConstantInt::get(getDefaultType(), numElements), arrPtr,
+                                                         llvm::MaybeAlign(8));
             lenHdrSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayLen_);
 
             for (size_t i = 0; i < numElements; i++) {
                 llvm::Value* elemVal = generateExpression(expr->elements[i].get());
                 elemVal = toDefaultType(elemVal);
                 // inbounds: malloc'd (1+numElements)*8 bytes, slots [0,numElements] all within.
-                llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr,
-                                                          llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
+                llvm::Value* elemPtr = builder->CreateInBoundsGEP(
+                    getDefaultType(), arrPtr, llvm::ConstantInt::get(getDefaultType(), i + 1), "arr.elem.ptr");
                 // AlignedStore(8) + tbaaArrayElem_: element slots are 8-byte aligned.
                 emitStoreArrayElem(elemVal, elemPtr);
             }
@@ -6084,7 +6014,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
                 arrVal = toDefaultType(arrVal);
                 arrPtr = builder->CreateIntToPtr(arrVal, llvm::PointerType::getUnqual(*context), "spread.arrptr");
             }
-                        llvm::Value* spreadLenLoad = emitLoadArrayLen(arrPtr, "spread.len");
+            llvm::Value* spreadLenLoad = emitLoadArrayLen(arrPtr, "spread.len");
             llvm::Value* arrLen = spreadLenLoad;
             totalLen = builder->CreateAdd(totalLen, arrLen, "spread.addlen");
             evalElems.push_back({arrVal, true, arrLen});
@@ -6108,8 +6038,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
         llvm::cast<llvm::CallInst>(buf)->addRetAttr(
             llvm::Attribute::getWithDereferenceableBytes(*context, constBytes->getZExtValue()));
     } else {
-        llvm::cast<llvm::CallInst>(buf)->addRetAttr(
-            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::getWithDereferenceableBytes(*context, 8));
     }
     // AlignedStore(8) + tbaaArrayLen_: length header in slot 0 is 8-byte aligned.
     auto* totalLenSt = builder->CreateAlignedStore(totalLen, buf, llvm::MaybeAlign(8));
@@ -6125,8 +6054,10 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
         if (ei.isSpread) {
             // Copy all elements from the spread array
             llvm::Value* srcVal = ei.val;
-            llvm::Value* srcPtr = srcVal->getType()->isPointerTy()
-                ? srcVal : builder->CreateIntToPtr(srcVal, llvm::PointerType::getUnqual(*context), "spread.src");
+            llvm::Value* srcPtr =
+                srcVal->getType()->isPointerTy()
+                    ? srcVal
+                    : builder->CreateIntToPtr(srcVal, llvm::PointerType::getUnqual(*context), "spread.src");
             llvm::Value* srcLen = ei.len;
 
             // Loop: copy srcLen elements
@@ -6147,10 +6078,12 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             // Load element from source: srcPtr[i + 1] (nsw+nuw: i < srcLen ≤ INT64_MAX-1)
             llvm::Value* srcIdx = builder->CreateAdd(i, one, "spread.srcidx", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* srcElemPtr = builder->CreateInBoundsGEP(getDefaultType(), srcPtr, srcIdx, "spread.srcelem");
-            llvm::Value* elem = builder->CreateAlignedLoad(getDefaultType(), srcElemPtr, llvm::MaybeAlign(8), "spread.elem");
+            llvm::Value* elem =
+                builder->CreateAlignedLoad(getDefaultType(), srcElemPtr, llvm::MaybeAlign(8), "spread.elem");
             llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
             // Store in dest: buf[writeIdx + 1] (nsw+nuw: curIdx starts at 0 and grows < totalLen ≤ INT64_MAX-1)
-            llvm::Value* curIdx = builder->CreateAlignedLoad(getDefaultType(), writeIdx, llvm::MaybeAlign(8), "spread.curidx");
+            llvm::Value* curIdx =
+                builder->CreateAlignedLoad(getDefaultType(), writeIdx, llvm::MaybeAlign(8), "spread.curidx");
             llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
             emitStoreArrayElem(elem, dstPtr);
@@ -6163,7 +6096,8 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
             builder->SetInsertPoint(doneBB);
         } else {
             // Single element: store at buf[writeIdx + 1] (nsw+nuw)
-            llvm::Value* curIdx = builder->CreateAlignedLoad(getDefaultType(), writeIdx, llvm::MaybeAlign(8), "spread.curidx");
+            llvm::Value* curIdx =
+                builder->CreateAlignedLoad(getDefaultType(), writeIdx, llvm::MaybeAlign(8), "spread.curidx");
             llvm::Value* dstIdx = builder->CreateAdd(curIdx, one, "spread.dstidx", /*HasNUW=*/true, /*HasNSW=*/true);
             llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "spread.dstptr");
             auto* singleSt = builder->CreateAlignedStore(ei.val, dstPtr, llvm::MaybeAlign(8));
@@ -6178,8 +6112,7 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
 
 llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     // --- Compile-time dict literal constant propagation ---
-    if (expr->array->type == ASTNodeType::DICT_EXPR &&
-        expr->index->type == ASTNodeType::LITERAL_EXPR) {
+    if (expr->array->type == ASTNodeType::DICT_EXPR && expr->index->type == ASTNodeType::LITERAL_EXPR) {
         auto* dict = static_cast<DictExpr*>(expr->array.get());
         auto* keyLit = static_cast<LiteralExpr*>(expr->index.get());
         bool canFold = false;
@@ -6191,8 +6124,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
             for (auto& [k, v] : dict->pairs) {
                 if (k->type == ASTNodeType::LITERAL_EXPR) {
                     auto* kl = static_cast<LiteralExpr*>(k.get());
-                    if (kl->literalType == LiteralExpr::LiteralType::STRING &&
-                        kl->stringValue == keyLit->stringValue) {
+                    if (kl->literalType == LiteralExpr::LiteralType::STRING && kl->stringValue == keyLit->stringValue) {
                         matchedValue = v.get();
                     }
                 } else {
@@ -6206,8 +6138,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
             for (auto& [k, v] : dict->pairs) {
                 if (k->type == ASTNodeType::LITERAL_EXPR) {
                     auto* kl = static_cast<LiteralExpr*>(k.get());
-                    if (kl->literalType == LiteralExpr::LiteralType::INTEGER &&
-                        kl->intValue == keyLit->intValue) {
+                    if (kl->literalType == LiteralExpr::LiteralType::INTEGER && kl->intValue == keyLit->intValue) {
                         matchedValue = v.get();
                     }
                 } else {
@@ -6274,8 +6205,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     // when both i and the slice length are constants; otherwise emits a runtime
     // bounds check (printf + abort on OOB, matching the existing array style).
     if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
-        const std::string& sliceName =
-            static_cast<IdentifierExpr*>(expr->array.get())->name;
+        const std::string& sliceName = static_cast<IdentifierExpr*>(expr->array.get())->name;
         if (psliceVarNames_.count(sliceName)) {
             // Load the stored pointer directly — alloca type is ptr (native LLVM
             // pointer), so no ptrtoint/inttoptr cast is needed here.
@@ -6283,8 +6213,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
             if (ptrAllocaIt == namedValues.end())
                 codegenError("pslice: undefined variable '" + sliceName + "'", expr);
             auto* ptrTy = llvm::PointerType::getUnqual(*context);
-            auto* basePtr2 = builder->CreateAlignedLoad(
-                ptrTy, ptrAllocaIt->second, llvm::MaybeAlign(8), "pslice.ptr");
+            auto* basePtr2 = builder->CreateAlignedLoad(ptrTy, ptrAllocaIt->second, llvm::MaybeAlign(8), "pslice.ptr");
             if (tbaaScalar_)
                 basePtr2->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
 
@@ -6296,8 +6225,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
             // Bounds check.
             auto ctLenIt = psliceCompTimeLens_.find(sliceName);
-            const bool hasCtLen = (ctLenIt != psliceCompTimeLens_.end() &&
-                                   ctLenIt->second >= 0);
+            const bool hasCtLen = (ctLenIt != psliceCompTimeLens_.end() && ctLenIt->second >= 0);
             if (hasCtLen) {
                 const int64_t ctLen = ctLenIt->second;
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(idxVal)) {
@@ -6305,26 +6233,24 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
                     const int64_t idx = ci->getSExtValue();
                     if (idx < 0 || idx >= ctLen)
                         codegenError("pslice index " + std::to_string(idx) +
-                                     " is out of bounds (slice length=" +
-                                     std::to_string(ctLen) + ")", expr);
+                                         " is out of bounds (slice length=" + std::to_string(ctLen) + ")",
+                                     expr);
                     // Proven in-bounds at compile time — skip runtime check.
                 } else {
                     // Runtime index, compile-time length → constant upper bound check.
                     auto* limitVal = llvm::ConstantInt::get(getDefaultType(), ctLen);
                     llvm::Function* fn = builder->GetInsertBlock()->getParent();
-                    llvm::BasicBlock* okBB  = llvm::BasicBlock::Create(*context, "pslice.ok",   fn);
-                    llvm::BasicBlock* failBB= llvm::BasicBlock::Create(*context, "pslice.fail", fn);
+                    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "pslice.ok", fn);
+                    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "pslice.fail", fn);
                     auto* valid = builder->CreateICmpULT(idxVal, limitVal, "pslice.valid");
                     llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
                     builder->CreateCondBr(valid, okBB, failBB, brW);
                     builder->SetInsertPoint(failBB);
                     {
-                        std::string msg = expr->line > 0
-                            ? "Runtime error: pslice index out of bounds at line " +
-                              std::to_string(expr->line) + "\n"
-                            : "Runtime error: pslice index out of bounds\n";
-                        builder->CreateCall(getPrintfFunction(),
-                            {builder->CreateGlobalString(msg, "pslice_oob_msg")});
+                        std::string msg = expr->line > 0 ? "Runtime error: pslice index out of bounds at line " +
+                                                               std::to_string(expr->line) + "\n"
+                                                         : "Runtime error: pslice index out of bounds\n";
+                        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(msg, "pslice_oob_msg")});
                     }
                     builder->CreateCall(getOrDeclareAbort());
                     builder->CreateUnreachable();
@@ -6334,24 +6260,22 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
                 // Runtime length: load from the len alloca and check.
                 auto lenAllocaIt = psliceLenAllocas_.find(sliceName);
                 if (lenAllocaIt != psliceLenAllocas_.end()) {
-                    auto* lenVal = builder->CreateAlignedLoad(
-                        getDefaultType(), lenAllocaIt->second, llvm::MaybeAlign(8), "pslice.dynlen");
+                    auto* lenVal = builder->CreateAlignedLoad(getDefaultType(), lenAllocaIt->second,
+                                                              llvm::MaybeAlign(8), "pslice.dynlen");
                     if (tbaaScalar_)
                         lenVal->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
                     llvm::Function* fn = builder->GetInsertBlock()->getParent();
-                    llvm::BasicBlock* okBB  = llvm::BasicBlock::Create(*context, "pslice.ok",   fn);
-                    llvm::BasicBlock* failBB= llvm::BasicBlock::Create(*context, "pslice.fail", fn);
+                    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "pslice.ok", fn);
+                    llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "pslice.fail", fn);
                     auto* valid = builder->CreateICmpULT(idxVal, lenVal, "pslice.valid");
                     llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
                     builder->CreateCondBr(valid, okBB, failBB, brW);
                     builder->SetInsertPoint(failBB);
                     {
-                        std::string msg = expr->line > 0
-                            ? "Runtime error: pslice index out of bounds at line " +
-                              std::to_string(expr->line) + "\n"
-                            : "Runtime error: pslice index out of bounds\n";
-                        builder->CreateCall(getPrintfFunction(),
-                            {builder->CreateGlobalString(msg, "pslice_oob_msg")});
+                        std::string msg = expr->line > 0 ? "Runtime error: pslice index out of bounds at line " +
+                                                               std::to_string(expr->line) + "\n"
+                                                         : "Runtime error: pslice index out of bounds\n";
+                        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(msg, "pslice_oob_msg")});
                     }
                     builder->CreateCall(getOrDeclareAbort());
                     builder->CreateUnreachable();
@@ -6371,27 +6295,19 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     }
 
 
-    if (!isStringExpr(expr->array.get())
-            && !loopPtrModeDataPtrs_.empty()
-            && expr->array->type == ASTNodeType::IDENTIFIER_EXPR
-            && expr->index->type == ASTNodeType::IDENTIFIER_EXPR) {
-        const std::string& arrName =
-            static_cast<IdentifierExpr*>(expr->array.get())->name;
-        const std::string& idxName =
-            static_cast<IdentifierExpr*>(expr->index.get())->name;
+    if (!isStringExpr(expr->array.get()) && !loopPtrModeDataPtrs_.empty() &&
+        expr->array->type == ASTNodeType::IDENTIFIER_EXPR && expr->index->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const std::string& arrName = static_cast<IdentifierExpr*>(expr->array.get())->name;
+        const std::string& idxName = static_cast<IdentifierExpr*>(expr->index.get())->name;
         auto ptrIt = loopPtrModeDataPtrs_.find(arrName);
-        if (ptrIt != loopPtrModeDataPtrs_.end()
-                && idxName == loopPtrModeIterVar_) {
+        if (ptrIt != loopPtrModeDataPtrs_.end() && idxName == loopPtrModeIterVar_) {
             // Direct pointer-arithmetic element access — no bounds check.
-            llvm::Value* elemPtr = builder->CreateInBoundsGEP(
-                getDefaultType(), ptrIt->second, idxVal, "prl.elem.ptr");
+            llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), ptrIt->second, idxVal, "prl.elem.ptr");
             auto* elemLoad = emitLoadArrayElem(elemPtr, "prl.elem");
             if (optimizationLevel >= OptimizationLevel::O1)
-                elemLoad->setMetadata(llvm::LLVMContext::MD_noundef,
-                                      llvm::MDNode::get(*context, {}));
+                elemLoad->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
             if (currentLoopAccessGroup_)
-                elemLoad->setMetadata(llvm::LLVMContext::MD_access_group,
-                                      currentLoopAccessGroup_);
+                elemLoad->setMetadata(llvm::LLVMContext::MD_access_group, currentLoopAccessGroup_);
             return elemLoad;
         }
     }
@@ -6407,17 +6323,15 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     // Bounds check — elided in OPTMAX functions where compile-time
 
     // ── Backward array reference detection (must run BEFORE boundsCheckElided) ──
-    if (!isStr && loopNestDepth_ > 0
-            && expr->index->type == ASTNodeType::BINARY_EXPR) {
+    if (!isStr && loopNestDepth_ > 0 && expr->index->type == ASTNodeType::BINARY_EXPR) {
         auto* idxBin = static_cast<BinaryExpr*>(expr->index.get());
         if (idxBin->op == "-") {
-            if (idxBin->left->type == ASTNodeType::IDENTIFIER_EXPR
-                    && idxBin->right->type == ASTNodeType::LITERAL_EXPR) {
+            if (idxBin->left->type == ASTNodeType::IDENTIFIER_EXPR &&
+                idxBin->right->type == ASTNodeType::LITERAL_EXPR) {
                 auto* binIter = static_cast<IdentifierExpr*>(idxBin->left.get());
                 auto* binOffset = static_cast<LiteralExpr*>(idxBin->right.get());
-                if (loopIterVars_.count(binIter->name)
-                        && binOffset->literalType == LiteralExpr::LiteralType::INTEGER
-                        && binOffset->intValue > 0) {
+                if (loopIterVars_.count(binIter->name) && binOffset->literalType == LiteralExpr::LiteralType::INTEGER &&
+                    binOffset->intValue > 0) {
                     // Record the array name for dependency analysis.
                     if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
                         auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
@@ -6434,16 +6348,15 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
         }
     }
 
-    bool boundsCheckElided = canElideBoundsCheck(
-        expr->array.get(), expr->index.get(), basePtr, isStr, "idx");
+    bool boundsCheckElided = canElideBoundsCheck(expr->array.get(), expr->index.get(), basePtr, isStr, "idx");
 
     // Ownership-aware optimization: borrowed arrays and const arrays cannot be
     bool arrayIsBorrowed = false;
     if (!isStr) {
         if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
             const std::string& arrName = static_cast<IdentifierExpr*>(expr->array.get())->name;
-            arrayIsBorrowed = isVariableBorrowed(arrName)
-                || (constValues.count(arrName) && constValues.find(arrName)->second);
+            arrayIsBorrowed =
+                isVariableBorrowed(arrName) || (constValues.count(arrName) && constValues.find(arrName)->second);
         }
     }
 
@@ -6454,21 +6367,22 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     if (isStr) {
         // Fat-pointer: char data starts at offset 16.  Index into data.
         llvm::Value* dataPtr = emitStringData(basePtr, "idx.strdata");
-        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dataPtr, idxVal, "idx.charptr");
+        llvm::Value* charPtr =
+            builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dataPtr, idxVal, "idx.charptr");
         auto* charLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "idx.char");
         charLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
         // Zero-extend to i64; result is always in [0, 256).
         // Use zext nneg (LLVM 18+) — !range is not valid on zext instructions.
         auto* charExt = builder->CreateZExt(charLoad, getDefaultType(), "idx.charext",
-                                             /*IsNonNeg=*/false);
+                                            /*IsNonNeg=*/false);
         nonNegValues_.insert(charExt);
         return charExt;
     }
     // Array: element is at slot (index + 1) in the i64 buffer.
-    llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr,
-        llvm::ConstantInt::get(getDefaultType(), 1), "idx.data");
+    llvm::Value* dataPtr =
+        builder->CreateInBoundsGEP(getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), 1), "idx.data");
     llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idx.elem.ptr");
-        auto* elemLoad = emitLoadArrayElem(elemPtr, "idx.elem");
+    auto* elemLoad = emitLoadArrayElem(elemPtr, "idx.elem");
     // OmScript arrays are always initialized: array literals set every element,
     if (optimizationLevel >= OptimizationLevel::O1)
         elemLoad->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
@@ -6504,6 +6418,30 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         }
     }
 
+    // ── Dict indexed store: dict["key"] = val → __omsc_hmap_set ─────────────
+    // The hash-map may reallocate on insert, so we must write the new pointer
+    // back into the variable's alloca after each set operation.
+    if (isDictExpr(expr->array.get()) && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+        auto* id = static_cast<IdentifierExpr*>(expr->array.get());
+        auto it = namedValues.find(id->name);
+        if (it != namedValues.end()) {
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            // Load current map pointer from the variable's alloca.
+            llvm::Value* mapPtr = builder->CreateAlignedLoad(ptrTy, it->second, llvm::MaybeAlign(8), "didxs.mapptr");
+            // Evaluate key and value.
+            llvm::Value* keyVal2 = toDefaultType(generateExpression(expr->index.get()));
+            llvm::Value* newVal2 = toDefaultType(generateExpression(expr->value.get()));
+            // Call map_set — returns (possibly reallocated) map pointer.
+            llvm::Value* newMapPtr =
+                builder->CreateCall(getOrEmitHashMapSet(), {mapPtr, keyVal2, newVal2}, "didxs.result");
+            // Write new pointer back into the alloca so future reads use it.
+            auto* st = builder->CreateAlignedStore(newMapPtr, it->second, llvm::MaybeAlign(8));
+            if (tbaaScalar_)
+                st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
+            return newVal2;
+        }
+    }
+
     // Track array writes for backward array reference dependency analysis.
     if (loopNestDepth_ > 0 && expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
         auto* arrId = static_cast<IdentifierExpr*>(expr->array.get());
@@ -6524,16 +6462,15 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
 
     // ── pslice indexed store: p[i] = val with bounds check ───────────────────
     if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
-        const std::string& sliceName =
-            static_cast<IdentifierExpr*>(expr->array.get())->name;
+        const std::string& sliceName = static_cast<IdentifierExpr*>(expr->array.get())->name;
         if (psliceVarNames_.count(sliceName)) {
             // Load the stored pointer directly (native LLVM ptr, no i64 cast).
             auto ptrAllocaIt = namedValues.find(sliceName);
             if (ptrAllocaIt == namedValues.end())
                 codegenError("pslice: undefined variable '" + sliceName + "'", expr);
             auto* ptrTy = llvm::PointerType::getUnqual(*context);
-            auto* basePtr2 = builder->CreateAlignedLoad(
-                ptrTy, ptrAllocaIt->second, llvm::MaybeAlign(8), "pslice.st.ptr");
+            auto* basePtr2 =
+                builder->CreateAlignedLoad(ptrTy, ptrAllocaIt->second, llvm::MaybeAlign(8), "pslice.st.ptr");
             if (tbaaScalar_)
                 basePtr2->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
 
@@ -6544,32 +6481,30 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
 
             // Bounds check (compile-time or runtime, mirroring the load path).
             auto ctLenIt = psliceCompTimeLens_.find(sliceName);
-            const bool hasCtLen = (ctLenIt != psliceCompTimeLens_.end() &&
-                                   ctLenIt->second >= 0);
+            const bool hasCtLen = (ctLenIt != psliceCompTimeLens_.end() && ctLenIt->second >= 0);
             if (hasCtLen) {
                 const int64_t ctLen = ctLenIt->second;
                 if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(idxVal)) {
                     const int64_t idx = ci->getSExtValue();
                     if (idx < 0 || idx >= ctLen)
                         codegenError("pslice index " + std::to_string(idx) +
-                                     " is out of bounds (slice length=" +
-                                     std::to_string(ctLen) + ")", expr);
+                                         " is out of bounds (slice length=" + std::to_string(ctLen) + ")",
+                                     expr);
                 } else {
                     auto* limitVal = llvm::ConstantInt::get(getDefaultType(), ctLen);
                     llvm::Function* fn = builder->GetInsertBlock()->getParent();
-                    llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "pslice.st.ok",   fn);
+                    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "pslice.st.ok", fn);
                     llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "pslice.st.fail", fn);
                     auto* valid = builder->CreateICmpULT(idxVal, limitVal, "pslice.st.valid");
                     llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
                     builder->CreateCondBr(valid, okBB, failBB, brW);
                     builder->SetInsertPoint(failBB);
                     {
-                        std::string msg = expr->line > 0
-                            ? "Runtime error: pslice index out of bounds at line " +
-                              std::to_string(expr->line) + "\n"
-                            : "Runtime error: pslice index out of bounds\n";
+                        std::string msg = expr->line > 0 ? "Runtime error: pslice index out of bounds at line " +
+                                                               std::to_string(expr->line) + "\n"
+                                                         : "Runtime error: pslice index out of bounds\n";
                         builder->CreateCall(getPrintfFunction(),
-                            {builder->CreateGlobalString(msg, "pslice_st_oob_msg")});
+                                            {builder->CreateGlobalString(msg, "pslice_st_oob_msg")});
                     }
                     builder->CreateCall(getOrDeclareAbort());
                     builder->CreateUnreachable();
@@ -6578,24 +6513,23 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
             } else {
                 auto lenAllocaIt = psliceLenAllocas_.find(sliceName);
                 if (lenAllocaIt != psliceLenAllocas_.end()) {
-                    auto* lenVal = builder->CreateAlignedLoad(
-                        getDefaultType(), lenAllocaIt->second, llvm::MaybeAlign(8), "pslice.st.dynlen");
+                    auto* lenVal = builder->CreateAlignedLoad(getDefaultType(), lenAllocaIt->second,
+                                                              llvm::MaybeAlign(8), "pslice.st.dynlen");
                     if (tbaaScalar_)
                         lenVal->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
                     llvm::Function* fn = builder->GetInsertBlock()->getParent();
-                    llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "pslice.st.ok",   fn);
+                    llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "pslice.st.ok", fn);
                     llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "pslice.st.fail", fn);
                     auto* valid = builder->CreateICmpULT(idxVal, lenVal, "pslice.st.valid");
                     llvm::MDNode* brW = llvm::MDBuilder(*context).createBranchWeights(1000000, 1);
                     builder->CreateCondBr(valid, okBB, failBB, brW);
                     builder->SetInsertPoint(failBB);
                     {
-                        std::string msg = expr->line > 0
-                            ? "Runtime error: pslice index out of bounds at line " +
-                              std::to_string(expr->line) + "\n"
-                            : "Runtime error: pslice index out of bounds\n";
+                        std::string msg = expr->line > 0 ? "Runtime error: pslice index out of bounds at line " +
+                                                               std::to_string(expr->line) + "\n"
+                                                         : "Runtime error: pslice index out of bounds\n";
                         builder->CreateCall(getPrintfFunction(),
-                            {builder->CreateGlobalString(msg, "pslice_st_oob_msg")});
+                                            {builder->CreateGlobalString(msg, "pslice_st_oob_msg")});
                     }
                     builder->CreateCall(getOrDeclareAbort());
                     builder->CreateUnreachable();
@@ -6617,23 +6551,16 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         }
     }
 
-    if (!isStringExpr(expr->array.get())
-            && !loopPtrModeDataPtrs_.empty()
-            && expr->array->type == ASTNodeType::IDENTIFIER_EXPR
-            && expr->index->type == ASTNodeType::IDENTIFIER_EXPR) {
-        const std::string& arrName =
-            static_cast<IdentifierExpr*>(expr->array.get())->name;
-        const std::string& idxName =
-            static_cast<IdentifierExpr*>(expr->index.get())->name;
+    if (!isStringExpr(expr->array.get()) && !loopPtrModeDataPtrs_.empty() &&
+        expr->array->type == ASTNodeType::IDENTIFIER_EXPR && expr->index->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const std::string& arrName = static_cast<IdentifierExpr*>(expr->array.get())->name;
+        const std::string& idxName = static_cast<IdentifierExpr*>(expr->index.get())->name;
         auto ptrIt = loopPtrModeDataPtrs_.find(arrName);
-        if (ptrIt != loopPtrModeDataPtrs_.end()
-                && idxName == loopPtrModeIterVar_) {
-            llvm::Value* elemPtr = builder->CreateInBoundsGEP(
-                getDefaultType(), ptrIt->second, idxVal, "prl.elem.ptr");
+        if (ptrIt != loopPtrModeDataPtrs_.end() && idxName == loopPtrModeIterVar_) {
+            llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), ptrIt->second, idxVal, "prl.elem.ptr");
             auto* elemStore = emitStoreArrayElem(newVal, elemPtr);
             if (currentLoopAccessGroup_)
-                elemStore->setMetadata(llvm::LLVMContext::MD_access_group,
-                                       currentLoopAccessGroup_);
+                elemStore->setMetadata(llvm::LLVMContext::MD_access_group, currentLoopAccessGroup_);
             return newVal;
         }
     }
@@ -6646,8 +6573,7 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         arrVal->getType()->isPointerTy() ? arrVal : builder->CreateIntToPtr(arrVal, ptrTy, "idxa.baseptr");
 
     // Bounds check — elided when canElideBoundsCheck proves safety.
-    bool boundsCheckElidedA = canElideBoundsCheck(
-        expr->array.get(), expr->index.get(), basePtr, isStr, "idxa");
+    bool boundsCheckElidedA = canElideBoundsCheck(expr->array.get(), expr->index.get(), basePtr, isStr, "idxa");
 
     // Ownership-aware: borrowed arrays cannot resize, so length is stable.
     bool arrayIsBorrowedA = false;
@@ -6665,13 +6591,14 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
         // Fat-pointer: char data starts at offset 16 (after len + cap i64 fields).
         llvm::Value* byteVal = builder->CreateTrunc(newVal, llvm::Type::getInt8Ty(*context), "idxa.byte");
         llvm::Value* dataPtr = emitStringData(basePtr, "idxa.strdata");
-        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dataPtr, idxVal, "idxa.charptr");
+        llvm::Value* charPtr =
+            builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dataPtr, idxVal, "idxa.charptr");
         auto* charStore = builder->CreateStore(byteVal, charPtr);
         charStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
     } else {
         // Array: store i64 element at slot (index + 1)
         llvm::Value* dataPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr,
-            llvm::ConstantInt::get(getDefaultType(), 1), "idxa.data");
+                                                          llvm::ConstantInt::get(getDefaultType(), 1), "idxa.data");
         llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtr, idxVal, "idxa.elem.ptr");
         auto* elemStore = emitStoreArrayElem(newVal, elemPtr);
         // When inside a parallel loop, attach the access group metadata so
@@ -6703,9 +6630,8 @@ size_t CodeGenerator::resolveFieldIndex(const std::string& structType, const std
     return resolveField(structType, fieldName, errorNode).index;
 }
 
-CodeGenerator::ResolvedField
-CodeGenerator::resolveField(const std::string& structHint, const std::string& fieldName,
-                            const ASTNode* errorNode) {
+CodeGenerator::ResolvedField CodeGenerator::resolveField(const std::string& structHint, const std::string& fieldName,
+                                                         const ASTNode* errorNode) {
     ResolvedField rf{0, "", nullptr, nullptr, ""};
 
     auto fillFrom = [&](const std::string& sname, size_t idx) {
@@ -6781,12 +6707,10 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
     // Stack-allocate the real LLVM struct.  Using a StructType (instead of
     llvm::Function* curFn = builder->GetInsertBlock()->getParent();
     llvm::IRBuilder<> tmpBuilder(&curFn->getEntryBlock(), curFn->getEntryBlock().begin());
-    llvm::AllocaInst* structAlloca =
-        tmpBuilder.CreateAlloca(sty, nullptr, "struct.alloca");
+    llvm::AllocaInst* structAlloca = tmpBuilder.CreateAlloca(sty, nullptr, "struct.alloca");
     // Use the DataLayout's preferred alignment for this struct so subsequent
     // field accesses get the right alignment metadata for free.
-    structAlloca->setAlignment(
-        module->getDataLayout().getPrefTypeAlign(sty));
+    structAlloca->setAlignment(module->getDataLayout().getPrefTypeAlign(sty));
 
     // Build field-name → index map for the named-field initializer loop below.
     std::unordered_map<std::string, size_t> fieldIndex;
@@ -6798,8 +6722,8 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
     // Zero-initialize every field with a single typed store.  Using a memset
     for (size_t i = 0; i < numFields; i++) {
         llvm::Type* elemTy = sty->getElementType(static_cast<unsigned>(i));
-        llvm::Value* fieldPtr = builder->CreateStructGEP(
-            sty, structAlloca, static_cast<unsigned>(i), "struct.field.init.ptr");
+        llvm::Value* fieldPtr =
+            builder->CreateStructGEP(sty, structAlloca, static_cast<unsigned>(i), "struct.field.init.ptr");
         builder->CreateStore(llvm::Constant::getNullValue(elemTy), fieldPtr);
     }
 
@@ -6820,23 +6744,18 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
         // Convert from the expression's natural type to the field's declared
         val = convertTo(val, elemTy);
 
-        llvm::Value* fieldPtr = builder->CreateStructGEP(
-            sty, structAlloca, static_cast<unsigned>(idx), "struct.field.init.ptr");
+        llvm::Value* fieldPtr =
+            builder->CreateStructGEP(sty, structAlloca, static_cast<unsigned>(idx), "struct.field.init.ptr");
         llvm::StoreInst* st = builder->CreateStore(val, fieldPtr);
         // Per-field TBAA so writes to one field don't appear to alias loads
         // from sibling fields.  Mirrors the access path in generateFieldAccess.
-        st->setMetadata(llvm::LLVMContext::MD_tbaa,
-                        getOrCreateFieldTBAA(expr->structName, idx));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, getOrCreateFieldTBAA(expr->structName, idx));
         // If the field is marked `cold`, hint the store as non-temporal so
         // it bypasses the cache, matching generateFieldAssign's behaviour.
-        if (declIt != structFieldDecls_.end() && idx < declIt->second.size() &&
-            declIt->second[idx].attrs.cold) {
+        if (declIt != structFieldDecls_.end() && idx < declIt->second.size() && declIt->second[idx].attrs.cold) {
             llvm::Metadata* one[] = {
-                llvm::ConstantAsMetadata::get(
-                    llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))
-            };
-            st->setMetadata(llvm::LLVMContext::MD_nontemporal,
-                            llvm::MDNode::get(*context, one));
+                llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))};
+            st->setMetadata(llvm::LLVMContext::MD_nontemporal, llvm::MDNode::get(*context, one));
         }
     }
 
@@ -6853,21 +6772,18 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
     // The struct value travels as a pointer.  If we received an integer
     // (legacy ptrtoint round-trip path), convert it back to a pointer.
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
-    llvm::Value* basePtr = objVal->getType()->isPointerTy()
-                               ? objVal
-                               : builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
+    llvm::Value* basePtr =
+        objVal->getType()->isPointerTy() ? objVal : builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
 
     // Use a real StructGEP so DataLayout drives the field offset.  When the
     llvm::Type* elemTy = rf.fieldType ? rf.fieldType : getDefaultType();
     llvm::Value* elemPtr;
     if (rf.structType) {
-        elemPtr = builder->CreateStructGEP(rf.structType, basePtr,
-                                           static_cast<unsigned>(rf.index),
-                                           "struct.field.load.ptr");
+        elemPtr =
+            builder->CreateStructGEP(rf.structType, basePtr, static_cast<unsigned>(rf.index), "struct.field.load.ptr");
     } else {
         elemPtr = builder->CreateInBoundsGEP(
-            getDefaultType(), basePtr,
-            llvm::ConstantInt::get(getDefaultType(), rf.index), "struct.field.load.ptr");
+            getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), rf.index), "struct.field.load.ptr");
     }
 
     // Determine alignment.  Prefer an explicit `align(...)` attribute; else
@@ -6884,36 +6800,31 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
         fieldAlign = module->getDataLayout().getABITypeAlign(elemTy);
     }
 
-    llvm::LoadInst* load = builder->CreateAlignedLoad(elemTy, elemPtr,
-                                                      fieldAlign, "struct.field.val");
+    llvm::LoadInst* load = builder->CreateAlignedLoad(elemTy, elemPtr, fieldAlign, "struct.field.val");
 
     // OmScript structs are always initialized from struct literals (and
     if (optimizationLevel >= OptimizationLevel::O1) {
-        load->setMetadata(llvm::LLVMContext::MD_noundef,
-                          llvm::MDNode::get(*context, {}));
+        load->setMetadata(llvm::LLVMContext::MD_noundef, llvm::MDNode::get(*context, {}));
     }
 
     // TBAA: per-field type node so different fields of the same struct do not
     // alias each other.
-    load->setMetadata(llvm::LLVMContext::MD_tbaa,
-                      getOrCreateFieldTBAA(rf.structName, rf.index));
+    load->setMetadata(llvm::LLVMContext::MD_tbaa, getOrCreateFieldTBAA(rf.structName, rf.index));
 
     // Apply LLVM metadata from struct field attributes.
     if (attrs) {
         if (attrs->immut) {
-            load->setMetadata(llvm::LLVMContext::MD_invariant_load,
-                              llvm::MDNode::get(*context, {}));
+            load->setMetadata(llvm::LLVMContext::MD_invariant_load, llvm::MDNode::get(*context, {}));
         }
         if (attrs->noalias) {
-            llvm::MDNode* domain = llvm::MDNode::getDistinct(*context,
-                {llvm::MDString::get(*context, "struct.noalias.domain")});
+            llvm::MDNode* domain =
+                llvm::MDNode::getDistinct(*context, {llvm::MDString::get(*context, "struct.noalias.domain")});
             domain->replaceOperandWith(0, domain);
             llvm::SmallString<64> scopeBuf;
             llvm::StringRef scopeName =
-                (llvm::Twine("struct.noalias.") + rf.structName + "." + expr->fieldName)
-                    .toStringRef(scopeBuf);
-            llvm::MDNode* scope = llvm::MDNode::getDistinct(*context,
-                {nullptr, domain, llvm::MDString::get(*context, scopeName)});
+                (llvm::Twine("struct.noalias.") + rf.structName + "." + expr->fieldName).toStringRef(scopeBuf);
+            llvm::MDNode* scope =
+                llvm::MDNode::getDistinct(*context, {nullptr, domain, llvm::MDString::get(*context, scopeName)});
             scope->replaceOperandWith(0, scope);
             llvm::MDNode* scopeList = llvm::MDNode::get(*context, {scope});
             load->setMetadata(llvm::LLVMContext::MD_alias_scope, scopeList);
@@ -6923,22 +6834,16 @@ llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
         // The range constants must be the same integer type as the load value.
         if (attrs->hasRange && elemTy->isIntegerTy()) {
             llvm::Metadata* rangeMD[] = {
+                llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(elemTy, static_cast<uint64_t>(attrs->rangeMin))),
                 llvm::ConstantAsMetadata::get(
-                    llvm::ConstantInt::get(elemTy, static_cast<uint64_t>(attrs->rangeMin))),
-                llvm::ConstantAsMetadata::get(
-                    llvm::ConstantInt::get(elemTy, static_cast<uint64_t>(attrs->rangeMax) + 1))
-            };
-            load->setMetadata(llvm::LLVMContext::MD_range,
-                              llvm::MDNode::get(*context, rangeMD));
+                    llvm::ConstantInt::get(elemTy, static_cast<uint64_t>(attrs->rangeMax) + 1))};
+            load->setMetadata(llvm::LLVMContext::MD_range, llvm::MDNode::get(*context, rangeMD));
         }
         // !nontemporal hint for cold fields — tells cache to skip caching
         if (attrs->cold) {
             llvm::Metadata* one[] = {
-                llvm::ConstantAsMetadata::get(
-                    llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))
-            };
-            load->setMetadata(llvm::LLVMContext::MD_nontemporal,
-                              llvm::MDNode::get(*context, one));
+                llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))};
+            load->setMetadata(llvm::LLVMContext::MD_nontemporal, llvm::MDNode::get(*context, one));
         }
     }
     // Lift narrow integer / float field values to the default expression
@@ -6951,9 +6856,8 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
 
     llvm::Value* objVal = generateExpression(expr->object.get());
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
-    llvm::Value* basePtr = objVal->getType()->isPointerTy()
-                               ? objVal
-                               : builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
+    llvm::Value* basePtr =
+        objVal->getType()->isPointerTy() ? objVal : builder->CreateIntToPtr(objVal, ptrTy, "struct.baseptr");
 
     llvm::Value* newVal = generateExpression(expr->value.get());
     llvm::Type* elemTy = rf.fieldType ? rf.fieldType : getDefaultType();
@@ -6963,13 +6867,11 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
 
     llvm::Value* elemPtr;
     if (rf.structType) {
-        elemPtr = builder->CreateStructGEP(rf.structType, basePtr,
-                                           static_cast<unsigned>(rf.index),
-                                           "struct.field.store.ptr");
+        elemPtr =
+            builder->CreateStructGEP(rf.structType, basePtr, static_cast<unsigned>(rf.index), "struct.field.store.ptr");
     } else {
         elemPtr = builder->CreateInBoundsGEP(
-            getDefaultType(), basePtr,
-            llvm::ConstantInt::get(getDefaultType(), rf.index), "struct.field.store.ptr");
+            getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), rf.index), "struct.field.store.ptr");
     }
 
     auto declIt = structFieldDecls_.find(rf.structName);
@@ -6987,17 +6889,13 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
     llvm::StoreInst* store = builder->CreateAlignedStore(newVal, elemPtr, fieldAlign);
 
     // TBAA: per-field type node (matches generateFieldAccess).
-    store->setMetadata(llvm::LLVMContext::MD_tbaa,
-                       getOrCreateFieldTBAA(rf.structName, rf.index));
+    store->setMetadata(llvm::LLVMContext::MD_tbaa, getOrCreateFieldTBAA(rf.structName, rf.index));
 
     // !nontemporal hint for cold fields — bypass cache on write
     if (attrs && attrs->cold) {
         llvm::Metadata* one[] = {
-            llvm::ConstantAsMetadata::get(
-                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))
-        };
-        store->setMetadata(llvm::LLVMContext::MD_nontemporal,
-                           llvm::MDNode::get(*context, one));
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1))};
+        store->setMetadata(llvm::LLVMContext::MD_nontemporal, llvm::MDNode::get(*context, one));
     }
 
     // Field-assign expressions evaluate to the assigned value; lift it back
@@ -7006,9 +6904,11 @@ llvm::Value* CodeGenerator::generateFieldAssign(FieldAssignExpr* expr) {
 }
 
 bool CodeGenerator::isDictExpr(Expression* expr) const {
-    if (!expr) return false;
+    if (!expr)
+        return false;
     // Direct dict literal
-    if (expr->type == ASTNodeType::DICT_EXPR) return true;
+    if (expr->type == ASTNodeType::DICT_EXPR)
+        return true;
     // Known dict variable
     if (expr->type == ASTNodeType::IDENTIFIER_EXPR) {
         auto* id = static_cast<const IdentifierExpr*>(expr);
@@ -7017,8 +6917,7 @@ bool CodeGenerator::isDictExpr(Expression* expr) const {
     // Call returning a dict: map_new(), map_set(), map_remove()
     if (expr->type == ASTNodeType::CALL_EXPR) {
         auto* call = static_cast<const CallExpr*>(expr);
-        return call->callee == "map_new" || call->callee == "map_set" ||
-               call->callee == "map_remove";
+        return call->callee == "map_new" || call->callee == "map_set" || call->callee == "map_remove";
     }
     // NOTE: INDEX_EXPR is intentionally NOT included here.  The value returned
     return false;
@@ -7065,8 +6964,7 @@ llvm::Value* CodeGenerator::generateDict(DictExpr* expr) {
 //   • rhs is a string expression and does not reference x
 //   • x is not atomic or volatile
 
-llvm::Value* CodeGenerator::generateInplaceStringAppend(AssignExpr* assignExpr,
-                                                         Expression* rhsExpr) {
+llvm::Value* CodeGenerator::generateInplaceStringAppend(AssignExpr* assignExpr, Expression* rhsExpr) {
     const std::string& varName = assignExpr->name;
 
     // ── 1. Load current string pointer ───────────────────────────────────
@@ -7074,13 +6972,11 @@ llvm::Value* CodeGenerator::generateInplaceStringAppend(AssignExpr* assignExpr,
     if (it == namedValues.end() || !it->second)
         codegenError("Unknown variable in in-place append: " + varName, assignExpr);
 
-    auto* ptrTy  = llvm::PointerType::getUnqual(*context);
-    auto* xPtr   = builder->CreateAlignedLoad(ptrTy, it->second, llvm::Align(8),
-                                               (varName + ".iap.x").c_str());
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* xPtr = builder->CreateAlignedLoad(ptrTy, it->second, llvm::Align(8), (varName + ".iap.x").c_str());
     if (optimizationLevel >= OptimizationLevel::O1) {
         // x is always initialised before use (ownership guarantee).
-        llvm::cast<llvm::LoadInst>(xPtr)->setMetadata(
-            llvm::LLVMContext::MD_nonnull, llvm::MDNode::get(*context, {}));
+        llvm::cast<llvm::LoadInst>(xPtr)->setMetadata(llvm::LLVMContext::MD_nonnull, llvm::MDNode::get(*context, {}));
     }
 
     // ── 2. Generate rhs string pointer ───────────────────────────────────
@@ -7091,18 +6987,17 @@ llvm::Value* CodeGenerator::generateInplaceStringAppend(AssignExpr* assignExpr,
     }
 
     // ── 3. Compute lengths ────────────────────────────────────────────────
-    auto* len1 = emitStringLen(xPtr,   "iap.len1");
+    auto* len1 = emitStringLen(xPtr, "iap.len1");
     auto* len2 = emitStringLen(rhsPtr, "iap.len2");
 
     // ── 4. Compute new allocation size: 16 (header) + len1+len2 + 1 (NUL) ─
     auto* totalLen = builder->CreateAdd(len1, len2, "iap.totlen",
                                         /*NUW=*/true, /*NSW=*/true);
-    auto* hdrSz   = llvm::ConstantInt::get(getDefaultType(), 16);
-    auto* dataLen = builder->CreateAdd(totalLen,
-                                        llvm::ConstantInt::get(getDefaultType(), 1),
-                                        "iap.datalen", /*NUW=*/true, /*NSW=*/true);
-    auto* newSize  = builder->CreateAdd(dataLen, hdrSz, "iap.newsz",
-                                        /*NUW=*/true, /*NSW=*/true);
+    auto* hdrSz = llvm::ConstantInt::get(getDefaultType(), 16);
+    auto* dataLen = builder->CreateAdd(totalLen, llvm::ConstantInt::get(getDefaultType(), 1), "iap.datalen",
+                                       /*NUW=*/true, /*NSW=*/true);
+    auto* newSize = builder->CreateAdd(dataLen, hdrSz, "iap.newsz",
+                                       /*NUW=*/true, /*NSW=*/true);
     nonNegValues_.insert(totalLen);
     nonNegValues_.insert(dataLen);
     nonNegValues_.insert(newSize);
@@ -7110,8 +7005,7 @@ llvm::Value* CodeGenerator::generateInplaceStringAppend(AssignExpr* assignExpr,
     // ── 5. realloc(xPtr, newSize) ─────────────────────────────────────────
     // realloc extends (or moves) the entire fat-pointer block in-place.
     // After the call, the header fields still hold the old len/cap; update them.
-    auto* newPtr = builder->CreateCall(getOrDeclareRealloc(), {xPtr, newSize},
-                                       "iap.newptr");
+    auto* newPtr = builder->CreateCall(getOrDeclareRealloc(), {xPtr, newSize}, "iap.newptr");
     if (optimizationLevel >= OptimizationLevel::O1) {
         // realloc never returns null in OmScript (OOM = abort convention).
         auto* ci = llvm::cast<llvm::CallInst>(newPtr);
@@ -7123,15 +7017,13 @@ llvm::Value* CodeGenerator::generateInplaceStringAppend(AssignExpr* assignExpr,
     emitStoreStringCap(totalLen, newPtr);
 
     // ── 6. Copy rhs to position data+len1 ────────────────────────────────
-    auto* newData   = emitStringData(newPtr,  "iap.newdata");
-    auto* appendPos = builder->CreateInBoundsGEP(
-        llvm::Type::getInt8Ty(*context), newData, len1, "iap.dst");
+    auto* newData = emitStringData(newPtr, "iap.newdata");
+    auto* appendPos = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), newData, len1, "iap.dst");
     auto* rhsData = emitStringData(rhsPtr, "iap.rhsdata");
     // Copy len2+1 bytes (include null terminator from rhs so the buffer is
     // always null-terminated after the operation).
-    auto* len2p1 = builder->CreateAdd(len2,
-                                       llvm::ConstantInt::get(getDefaultType(), 1),
-                                       "iap.len2p1", /*NUW=*/true, /*NSW=*/true);
+    auto* len2p1 =
+        builder->CreateAdd(len2, llvm::ConstantInt::get(getDefaultType(), 1), "iap.len2p1", /*NUW=*/true, /*NSW=*/true);
     builder->CreateCall(getOrDeclareMemcpy(), {appendPos, rhsData, len2p1});
 
     // ── 7. Store updated pointer back ────────────────────────────────────
@@ -7163,8 +7055,7 @@ llvm::Value* CodeGenerator::generateDerefAssign(DerefAssignExpr* expr) {
 
     // Ensure it is a pointer type.
     if (!ptrVal->getType()->isPointerTy()) {
-        ptrVal = builder->CreateIntToPtr(
-            ptrVal, llvm::PointerType::getUnqual(*context), "derefassign.itop");
+        ptrVal = builder->CreateIntToPtr(ptrVal, llvm::PointerType::getUnqual(*context), "derefassign.itop");
     }
 
     // Evaluate the RHS value.

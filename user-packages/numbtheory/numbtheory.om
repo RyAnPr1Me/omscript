@@ -1,3 +1,4 @@
+import std;
 // numbtheory package - number theory utility functions
 
 fn nt_is_prime(n) {

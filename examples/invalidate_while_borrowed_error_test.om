@@ -1,3 +1,4 @@
+import std;
 // invalidate_while_borrowed_error_test.om — verify E022 invalidate-while-borrowed
 // This test is expected to FAIL at compile time with:
 //   [E022] cannot invalidate 'p' — it still has 1 immutable borrow(s) active

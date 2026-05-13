@@ -1,3 +1,4 @@
+import std;
 // Tests for the three codebase quality improvements:
 // 1. array_mean() compile-time constant folding
 // 2. stdlibFunctions completeness (popcount, clz, ctz, etc. work in @optmax)

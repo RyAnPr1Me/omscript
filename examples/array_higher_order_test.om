@@ -1,3 +1,4 @@
+import std;
 // Test array_map, array_filter, and array_reduce built-in functions
 
 fn double(x) {

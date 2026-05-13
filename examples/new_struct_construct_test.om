@@ -1,0 +1,60 @@
+import std;
+// new_struct_construct_test.om — verify that new T(n) / alloc<T>(n) correctly
+// sizes and auto-constructs struct memory.
+//
+// Bug fixed (Round-51): alloc<T> / new_zero<T> called resolveAnnotatedType(T)
+// for the element type, which returns ptr (8 bytes) for struct types instead of
+// the actual struct LLVM type.  This caused:
+//   - T1/T2 stack allocation of [n x ptr] (8*n bytes) instead of [n x T] (sizeof(T)*n bytes)
+//   - second and later field stores to write past the allocation → LLVM poison after opt
+//
+// Expected exit code: 0
+
+struct Point { x, y }
+struct Vec3 { x, y, z }
+
+fn main() -> int {
+    // 1. alloc<T>(1) + construct: all fields must be correctly set
+    var p: ptr<Point> = alloc<Point>(1);
+    construct p { x: 11, y: 22 };
+    var px = p.x;
+    var py = p.y;
+    if (px != 11) { return 1; }
+    if (py != 22) { return 2; }
+    invalidate p;
+
+    // 2. new T (no args): auto zero-construct — all fields 0
+    var p2: ptr<Point> = new Point;
+    if (p2.x != 0) { return 3; }
+    if (p2.y != 0) { return 4; }
+    invalidate p2;
+
+    // 3. new T(n): auto zero-construct n elements — all fields 0
+    var arr: ptr<Point> = new Point(3);
+    if (arr.x != 0) { return 5; }
+    if (arr.y != 0) { return 6; }
+    invalidate arr;
+
+    // 4. new T { field: val }: allocate + explicit field initialisation
+    var p3: ptr<Point> = new Point { x: 55, y: 66 };
+    if (p3.x != 55) { return 7; }
+    if (p3.y != 66) { return 8; }
+    invalidate p3;
+
+    // 5. Three-field struct: all fields correct after construct
+    var v: ptr<Vec3> = alloc<Vec3>(1);
+    construct v { x: 1, y: 2, z: 3 };
+    if (v.x != 1) { return 9; }
+    if (v.y != 2) { return 10; }
+    if (v.z != 3) { return 11; }
+    invalidate v;
+
+    // 6. new Vec3: all three fields zero
+    var v2: ptr<Vec3> = new Vec3;
+    if (v2.x != 0) { return 12; }
+    if (v2.y != 0) { return 13; }
+    if (v2.z != 0) { return 14; }
+    invalidate v2;
+
+    return 0;
+}

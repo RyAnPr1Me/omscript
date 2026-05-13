@@ -483,6 +483,7 @@ ptest_program "examples/array_fill_negative_test.om" 3
 ptest_program "examples/struct_test.om" 0
 ptest_program "examples/import_test.om" 0
 ptest_program "examples/generic_test.om" 0
+ptest_program "examples/spread_call_test.om" 0
 ptest_program "examples/thread_test.om" 0
 ptest_program "examples/string_fold_test.om" 0
 ptest_program "examples/circular_import_test.om" 0
@@ -811,6 +812,7 @@ echo "--------------------------------------------"
 ptest_program "examples/runtime_div_opt_test.om" 5
 ptest_program "examples/loop_ucmp_test.om" 5
 ptest_program "examples/dict_literal_test.om" 18
+ptest_program "examples/dict_assign_test.om" 0
 ptest_program "examples/preprocessor_test.om" 12
 ptest_program "examples/preprocessor_modern_test.om" 13
 ptest_program "examples/preprocessor_typed_test.om" 6
@@ -849,6 +851,8 @@ ptest_program "examples/expr_fn_swap_test.om" 529
 ptest_program "examples/assume_unreachable_expect_test.om" 125
 ptest_program "examples/array_string_builtins_test.om" 178
 ptest_program "examples/method_call_test.om" 129
+ptest_program "examples/qualified_method_test.om" 12
+ptest_program "examples/packed_struct_test.om" 0
 
 # New syntax and optimization features
 ptest_program "examples/scientific_notation_test.om" 7
@@ -874,6 +878,7 @@ ptest_program "examples/borrow_mut_syntax_test.om" 42
 ptest_program "examples/ref_borrow_test.om" 42
 ptest_program "examples/nullptr_test.om" 42
 ptest_program "examples/alloc_zero_args_test.om" 99
+ptest_program "examples/new_struct_construct_test.om" 0
 ptest_program "examples/shared_ownership_test.om" 55
 ptest_program "examples/ptr_arith_typed_test.om" 77
 ptest_program "examples/comptime_chain_test.om" 45

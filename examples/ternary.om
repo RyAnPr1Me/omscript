@@ -1,3 +1,4 @@
+import std;
 // Test ternary operator: condition ? then : else
 fn main() {
     var a = 10;

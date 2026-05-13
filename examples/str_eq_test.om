@@ -1,3 +1,4 @@
+import std;
 // Test string comparison function
 fn main() {
     var a = "hello";

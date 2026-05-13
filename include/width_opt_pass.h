@@ -53,10 +53,10 @@ class OptimizationContext;
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct WidthOptStats {
-    uint32_t masksEliminated  = 0; ///< `x & M` → `x` eliminations
-    uint32_t shiftsNarrowed   = 0; ///< Shifts with tightened result width
-    uint32_t shiftsZeroed     = 0; ///< `x >> N` → 0 (N >= width(x))
-    uint32_t branchesPruned   = 0; ///< Impossible comparisons folded to literal
+    uint32_t masksEliminated = 0; ///< `x & M` → `x` eliminations
+    uint32_t shiftsNarrowed = 0;  ///< Shifts with tightened result width
+    uint32_t shiftsZeroed = 0;    ///< `x >> N` → 0 (N >= width(x))
+    uint32_t branchesPruned = 0;  ///< Impossible comparisons folded to literal
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -64,25 +64,30 @@ struct WidthOptStats {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class WidthOptPass {
-public:
-    WidthOptPass(OptimizationContext& ctx, bool verbose) noexcept
-        : ctx_(ctx), verbose_(verbose) {}
+  public:
+    WidthOptPass(OptimizationContext& ctx, bool verbose) noexcept : ctx_(ctx), verbose_(verbose) {}
 
     /// Run all three sub-passes over the program.
     /// Returns the number of transformations applied (0 = nothing changed).
     uint32_t run(Program* program);
 
-    const WidthOptStats& stats() const noexcept { return stats_; }
+    const WidthOptStats& stats() const noexcept {
+        return stats_;
+    }
 
     /// Value range: closed interval [lo, hi] with a `known` flag.
     /// When `known` is false, the range covers the full i64 domain.
-    struct Range { int64_t lo; int64_t hi; bool known; };
+    struct Range {
+        int64_t lo;
+        int64_t hi;
+        bool known;
+    };
 
-private:
+  private:
     OptimizationContext& ctx_;
-    bool                 verbose_;
-    WidthOptStats        stats_;
-    WidthAnalyzer*       analyzer_ = nullptr; // borrowed from WidthLegalizationPass
+    bool verbose_;
+    WidthOptStats stats_;
+    WidthAnalyzer* analyzer_ = nullptr; // borrowed from WidthLegalizationPass
 
     // ── Expression transformers ───────────────────────────────────────────
 

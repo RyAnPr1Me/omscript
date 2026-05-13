@@ -1,3 +1,4 @@
+import std;
 // Test borrow mut syntax: exclusive mutable alias
 fn main() {
     var x = 10;

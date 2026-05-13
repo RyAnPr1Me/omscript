@@ -1,3 +1,4 @@
+import std;
 // This program should fail to compile:
 // continue inside a switch without an enclosing loop
 fn main() {

@@ -1,3 +1,4 @@
+import std;
 // http_test.om — Tests for HTTP client builtins.
 //
 // The test verifies:

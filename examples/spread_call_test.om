@@ -1,0 +1,49 @@
+import std;
+// Test spread operator in function call arguments: fn(...arr), fn(a, ...arr, b)
+// Expected exit code: 0
+
+fn add3(a, b, c) {
+    return a + b + c;
+}
+
+fn add2(a, b) {
+    return a + b;
+}
+
+fn identity(x) {
+    return x;
+}
+
+fn main() {
+    // Test 1: spread full array as 3-arg call
+    var args = [10, 20, 30];
+    var r1 = add3(...args);
+    assert(r1 == 60);
+
+    // Test 2: spread partial (prefix + spread)
+    var pair = [5, 7];
+    var r2 = add3(1, ...pair);
+    assert(r2 == 13);
+
+    // Test 3: spread single-element array into 1-arg function
+    var single = [99];
+    var r3 = identity(...single);
+    assert(r3 == 99);
+
+    // Test 4: spread inline literal directly in call
+    var r4 = add2(...[100, 200]);
+    assert(r4 == 300);
+
+    // Test 5: mixed spread + explicit args
+    var twoElems = [20, 30];
+    var r5 = add3(10, ...twoElems);
+    assert(r5 == 60);
+
+    // Test 6: spread as trailing suffix
+    var prefixed = [50, 60];
+    var r6 = add3(...prefixed, 70);
+    assert(r6 == 180);
+
+    println(r1 + r2 + r3 + r4 + r5 + r6);
+    return 0;
+}

@@ -1,3 +1,4 @@
+import std;
 // combinatorics package - combinatorial math utilities
 
 fn comb_factorial(n) {

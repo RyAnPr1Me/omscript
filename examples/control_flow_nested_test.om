@@ -1,3 +1,4 @@
+import std;
 // Loop correctness: break inside nested loops, break with condition,
 // continue skipping only inner iterations.  Verifies control-flow
 // generation for multi-level break/continue without using labels.

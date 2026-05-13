@@ -1,3 +1,4 @@
+import std;
 // math package - utility functions for mathematical operations
 
 fn math_factorial(n) {
