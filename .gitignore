@@ -69,5 +69,4 @@ bench.c
 bench_om_*
 *.o
 build-test/
-build-test/
 build-tests*/
