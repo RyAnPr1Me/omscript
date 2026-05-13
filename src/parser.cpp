@@ -567,7 +567,7 @@ std::unique_ptr<Program> Parser::parse() {
                         const std::string name = advance().lexeme;
                         // defined(NAME) — tests whether the name is recognised by
                         // getComptimeVar (covers built-ins, user constants, and
-                        // CLI-injected -D defines).
+                        // constants pre-populated from -D CLI flags before parse()).
                         if (name == "defined" && check(TokenType::LPAREN)) {
                             advance(); // consume '('
                             std::string dname;

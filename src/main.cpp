@@ -2579,7 +2579,29 @@ int main(int argc, char* argv[]) {
     bool keepTemps = false;
     std::vector<std::string> runArgs;
     // -D NAME[=VALUE] defines injected as comptime constants (Phase 2 comptime flags).
-    std::vector<std::pair<std::string, std::string>> userDefines; // name → string value ("" = integer 1)
+    std::vector<std::pair<std::string, std::string>> userDefines; // name → raw string value ("" = integer 1)
+
+    // Helper: inject all collected -D defines into a Parser instance.
+    // Integer values are stored as comptime int constants; everything else as string constants.
+    auto applyUserDefines = [&](omscript::Parser& p) {
+        for (const auto& [name, value] : userDefines) {
+            if (value.empty()) {
+                p.setComptimeInt(name, 1);
+            } else {
+                try {
+                    size_t pos = 0;
+                    const long long ival = std::stoll(value, &pos);
+                    if (pos == value.size()) {
+                        p.setComptimeInt(name, ival);
+                    } else {
+                        p.setComptimeString(name, value);
+                    }
+                } catch (...) {
+                    p.setComptimeString(name, value);
+                }
+            }
+        }
+    };
 
     // Parse command line arguments
     for (int i = argIndex; i < argc; i++) {
@@ -2888,10 +2910,7 @@ int main(int argc, char* argv[]) {
             auto parseStart = std::chrono::steady_clock::now();
             omscript::Parser parser(tokens);
             parser.setSourceFile(sourceFile);
-            for (const auto& [name, value] : userDefines) {
-                if (value.empty()) { parser.setComptimeInt(name, 1); }
-                else { try { parser.setComptimeInt(name, std::stoll(value)); } catch (...) { parser.setComptimeString(name, value); } }
-            }
+            applyUserDefines(parser);
             auto program = parser.parse();
             for (const auto& w : parser.warnings()) {
                 std::cerr << w << "\n";
@@ -2982,10 +3001,7 @@ int main(int argc, char* argv[]) {
             auto parseStart = std::chrono::steady_clock::now();
             omscript::Parser parser(tokens);
             parser.setSourceFile(sourceFile);
-            for (const auto& [name, value] : userDefines) {
-                if (value.empty()) { parser.setComptimeInt(name, 1); }
-                else { try { parser.setComptimeInt(name, std::stoll(value)); } catch (...) { parser.setComptimeString(name, value); } }
-            }
+            applyUserDefines(parser);
             auto program = parser.parse();
             for (const auto& w : parser.warnings()) {
                 std::cerr << w << "\n";
@@ -3028,10 +3044,7 @@ int main(int argc, char* argv[]) {
             auto tokens = lexer.tokenize();
             omscript::Parser parser(tokens);
             parser.setSourceFile(sourceFile);
-            for (const auto& [name, value] : userDefines) {
-                if (value.empty()) { parser.setComptimeInt(name, 1); }
-                else { try { parser.setComptimeInt(name, std::stoll(value)); } catch (...) { parser.setComptimeString(name, value); } }
-            }
+            applyUserDefines(parser);
             auto program = parser.parse();
             for (const auto& w : parser.warnings()) {
                 std::cerr << w << "\n";
