@@ -433,11 +433,15 @@ jobs:
         shell: bash
         run: |
           LLVM_PREFIX="$(brew --prefix llvm@18)"
+          # Do NOT enable LTO in the instrumentation phase: combining LTO with
+          # -fprofile-generate causes the LLVM profiling runtime initializer to
+          # crash on macOS arm64, so Step 2 would produce zero profile data.
+          # LTO is enabled only in Step 3 (the final PGO-use rebuild).
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER="${LLVM_PREFIX}/bin/clang" \
             -DCMAKE_CXX_COMPILER="${LLVM_PREFIX}/bin/clang++" \
-            -DLTO=ON \
+            -DLTO=OFF \
             -DPGO_GENERATE=ON \
             -DPGO_PROFILE_DIR="$PWD/pgo-profiles" \
             -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)" \

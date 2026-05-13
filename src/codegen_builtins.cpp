@@ -5324,29 +5324,29 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::RANDOM) {
         validateArgCount(expr, "random", 0);
-        // Seed on first call via a global flag
+        // Seed on first call via a global i1 flag (use i1 directly to avoid
+        // globalopt converting i32→i1 which can cause issues on some targets).
         llvm::GlobalVariable* seeded = module->getGlobalVariable("__om_rand_seeded", true);
         if (!seeded) {
             seeded = new llvm::GlobalVariable(
-                *module, llvm::Type::getInt32Ty(*context), false, llvm::GlobalValue::InternalLinkage,
-                llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "__om_rand_seeded");
+                *module, llvm::Type::getInt1Ty(*context), false, llvm::GlobalValue::InternalLinkage,
+                llvm::ConstantInt::getFalse(*context), "__om_rand_seeded");
         }
-        llvm::Value* flag = builder->CreateLoad(llvm::Type::getInt32Ty(*context), seeded, "rand.flag");
-        llvm::Value* isZero =
-            builder->CreateICmpEQ(flag, llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "rand.cmp");
+        llvm::Value* flag = builder->CreateLoad(llvm::Type::getInt1Ty(*context), seeded, "rand.flag");
 
         llvm::Function* function = builder->GetInsertBlock()->getParent();
         llvm::BasicBlock* seedBB = llvm::BasicBlock::Create(*context, "rand.seed", function);
         llvm::BasicBlock* callBB = llvm::BasicBlock::Create(*context, "rand.call", function);
 
-        builder->CreateCondBr(isZero, seedBB, callBB);
+        // Branch: if flag is true (already seeded) → callBB, else → seedBB
+        builder->CreateCondBr(flag, callBB, seedBB);
 
         builder->SetInsertPoint(seedBB);
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
         llvm::Value* t = builder->CreateCall(getOrDeclareTimeFunc(), {nullPtr}, "rand.time");
         llvm::Value* t32 = builder->CreateTrunc(t, llvm::Type::getInt32Ty(*context), "rand.time32");
         builder->CreateCall(getOrDeclareSrand(), {t32});
-        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 1), seeded);
+        builder->CreateStore(llvm::ConstantInt::getTrue(*context), seeded);
         builder->CreateBr(callBB);
 
         builder->SetInsertPoint(callBB);
