@@ -33,7 +33,10 @@ static std::unique_ptr<Program> parseSource(const std::string& source) {
 
 // Helper: generate IR module from source
 static llvm::Module* generateIR(const std::string& source, CodeGenerator& codegen) {
-    Lexer lexer(source);
+    // Prepend "import std;" so all built-in stdlib functions (print, abs,
+    // min, max, …) are resolvable without explicit namespace qualification.
+    const std::string fullSource = "import std;\n" + source;
+    Lexer lexer(fullSource);
     auto tokens = lexer.tokenize();
     Parser parser(tokens);
     auto program = parser.parse();

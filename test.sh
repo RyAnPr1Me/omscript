@@ -470,6 +470,7 @@ echo ""
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━ OM SOURCE ━━━━━━━━━━━━━━━━━━━━━━━
 cat > bench.om << 'OMEOF'
+import std;
 @noalias
 struct Point { hot int x, hot int y }
 
