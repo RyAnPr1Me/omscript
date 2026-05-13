@@ -9,6 +9,10 @@
 
 namespace omscript {
 
+/// Maximum number of hops followed when resolving a transitive type alias chain.
+/// Must match the same constant in codegen.cpp.
+static constexpr int kMaxTypeAliasHops = 32;
+
 Parser::Parser(const std::vector<Token>& tokens)
     : tokens(tokens), current(0), inOptMaxFunction(false),
       importedFiles_(std::make_shared<std::unordered_set<std::string>>()) {
@@ -1501,8 +1505,25 @@ std::unique_ptr<Program> Parser::parse() {
     }
     pendingGlobals_.clear();
 
+    // ── Transitive type alias resolution ─────────────────────────────────────
+    // Replace every alias value that itself names another alias, up to 32 hops.
+    // This turns  type A = B; type B = int;  into  A → "int", B → "int".
+    // If a cycle is detected the original value is kept (the parser already
+    // rejected it as an unknown annotation during parsing).
+    for (auto& entry : typeAliases_) {
+        std::string resolved = entry.second;
+        for (int hop = 0; hop < kMaxTypeAliasHops; ++hop) {
+            auto it = typeAliases_.find(resolved);
+            if (it == typeAliases_.end()) break;
+            if (it->second == resolved) break; // trivial self-cycle guard
+            resolved = it->second;
+        }
+        entry.second = resolved;
+    }
+
     return std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs), fileNoAlias,
-                                     std::move(globals), globallyImportedNamespaces_);
+                                     std::move(globals), globallyImportedNamespaces_,
+                                     typeAliases_);
 }
 
 void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
@@ -1819,11 +1840,14 @@ std::string Parser::parseTypeAnnotation() {
         }
         typeName += "[" + typeParams + "]";
     }
-    // Resolve type aliases (e.g. VEC → u64x2 from a prior `type VEC = u64x{LANES}`)
-    {
+    // Resolve type aliases transitively (e.g. A → B → int from
+    //   type A = B; type B = int;).  Chase up to 32 hops to avoid infinite
+    //   loops on cycles while still catching arbitrarily deep alias chains.
+    for (int hop = 0; hop < kMaxTypeAliasHops; ++hop) {
         auto it = typeAliases_.find(typeName);
-        if (it != typeAliases_.end())
-            typeName = it->second;
+        if (it == typeAliases_.end()) break;
+        if (it->second == typeName) break; // self-cycle guard
+        typeName = it->second;
     }
     return prefix + typeName;
 }

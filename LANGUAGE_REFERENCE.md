@@ -1222,7 +1222,60 @@ OmScript supports **limited type inference**:
 
 ---
 
-## 5. Variables, Constants, and Comptime
+### 4.6 Type Aliases
+
+Declare a name as an alias for an existing type with the `type` keyword. Aliases are resolved transitively and fully at compile time — they have zero overhead and may be used anywhere a type annotation is accepted (variable declarations, struct fields, function parameters, return types, `sizeof()`).
+
+**Syntax:**
+```omscript
+type AliasName = ExistingType;
+```
+
+**Rules:**
+- Aliases are module-scoped (top-level only).
+- Aliases are resolved transitively: if `type A = B` and `type B = int`, then using `A` is exactly the same as using `int`.
+- Up to 32 hops are followed; self-referential or cyclic aliases are silently capped at the current value.
+- Aliases for SIMD vector types may use comptime-sized lane counts: `type V8 = u64x{8};`.
+
+**Example:**
+```omscript
+import std;
+
+type Score  = int;
+type Weight = f64;
+type Name   = string;
+
+// Transitive alias — Alias → Middle → int
+type Middle = int;
+type Alias  = Middle;
+
+struct Player {
+    name:  Name,
+    score: Score,
+}
+
+fn rank(a: Score, b: Score) -> Score {
+    return a - b;
+}
+
+fn main() {
+    var sc: Score  = 100;
+    var wt: Weight = 2.5;
+
+    // Aliases resolve identically to the underlying type.
+    var p: Player = Player { name: "alice", score: sc };
+    var al: Alias = 42;     // same as int
+
+    println(sc + 1);        // 101
+    println(al * 2);        // 84
+    println(sizeof(Score)); // 8  (same as sizeof(int))
+    println(sizeof(Weight));// 8  (same as sizeof(f64))
+}
+```
+
+---
+
+
 
 ### 5.1 `var` Declaration
 
@@ -6788,13 +6841,55 @@ Subtract with INT64_MAX/MIN clamping.
 
 **Deprecated** — emit a compile-time integer tag based on the static type of the argument: `1` = integer, `2` = float, `3` = string. This function is resolved entirely at compile time from static type information; it does not perform any runtime type query. Use explicit type annotations instead.
 
-> **Migration**: Replace `if (typeof(x) == 2)` guards with properly typed function overloads or separate typed variables. `typeof` will be removed in a future version.
+> **Migration**: Replace `if (typeof(x) == 2)` guards with `type_name(x)` comparisons or properly typed function overloads. `typeof` will be removed in a future version.
 
 **Example (legacy):**
 ```omscript
 println(typeof(42));      // 1  (compile-time constant; argument evaluated for side effects only)
 println(typeof(3.14));    // 2
 println(typeof("hello")); // 3
+```
+
+---
+
+#### `type_name(any) → string`
+
+Return a human-readable **compile-time string** describing the OmScript type of the argument expression. Resolved purely from static LLVM IR type information — zero runtime overhead. The argument is evaluated for side-effects but the produced value is not used at runtime.
+
+| Return value | Meaning |
+|---|---|
+| `"int"` | Any integer type: `i64`, `i32`, `i16`, `i8`, `u64`, `u32`, `u8`, `byte`, … |
+| `"float"` | Double-precision float (`f64`) |
+| `"f32"` | Single-precision float |
+| `"bool"` | Boolean (`bool`-annotated variable or `i1` value) |
+| `"string"` | OmScript fat-pointer string |
+| `"array"` | Array / slice pointer |
+| `"dict"` | Hash-map pointer |
+| `"ptr"` | Raw or struct pointer |
+| `"simd"` | LLVM fixed-width vector (SIMD type) |
+| `"void"` | Void / no-value |
+| `"unknown"` | Anything not in the above categories |
+
+**Example:**
+```omscript
+import std;
+
+var iv: int    = 7;
+var fv: float  = 1.5;
+var sv: string = "hello";
+var bv: bool   = true;
+
+println(type_name(42));   // "int"
+println(type_name(3.14)); // "float"
+println(type_name("hi")); // "string"
+println(type_name(iv));   // "int"
+println(type_name(fv));   // "float"
+println(type_name(sv));   // "string"
+println(type_name(bv));   // "bool"
+
+if str_eq(type_name(iv), "int") {
+    println("iv is an integer");
+}
 ```
 
 ---

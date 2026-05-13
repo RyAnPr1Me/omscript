@@ -715,13 +715,19 @@ class Program : public ASTNode {
     /// form).  The codegen uses this to enforce that stdlib functions are called
     /// via `std::` qualification unless the `std` namespace is in this set.
     std::unordered_set<std::string> importedNamespaces;
+    /// All `type Alias = Underlying;` declarations from this translation unit.
+    /// Propagated to the codegen so that `resolveAnnotatedType` can resolve
+    /// user-defined type aliases even when they reach the backend as raw strings
+    /// (e.g., struct field types, function return types).
+    std::unordered_map<std::string, std::string> typeAliases;
 
     Program(std::vector<std::unique_ptr<FunctionDecl>> funcs, std::vector<std::unique_ptr<EnumDecl>> enms = {},
             std::vector<std::unique_ptr<StructDecl>> strcts = {}, bool noAlias = false,
-            std::vector<std::unique_ptr<VarDecl>> globs = {}, std::unordered_set<std::string> importedNs = {})
+            std::vector<std::unique_ptr<VarDecl>> globs = {}, std::unordered_set<std::string> importedNs = {},
+            std::unordered_map<std::string, std::string> typeAliasMap = {})
         : ASTNode(ASTNodeType::PROGRAM), functions(std::move(funcs)), enums(std::move(enms)),
           structs(std::move(strcts)), fileNoAlias(noAlias), globals(std::move(globs)),
-          importedNamespaces(std::move(importedNs)) {}
+          importedNamespaces(std::move(importedNs)), typeAliases(std::move(typeAliasMap)) {}
 };
 
 // ---------------------------------------------------------------------------

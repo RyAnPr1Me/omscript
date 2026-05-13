@@ -294,6 +294,8 @@ enum class BuiltinId : uint8_t {
     PSLICE_PTR, ///< pslice_ptr(s)            → raw pointer from the slice
     // ── Generic boxing builtin ───────────────────────────────────────────────
     STORE_PTR, ///< store_ptr(value)          → box value onto stack, return ptr<typeof(value)>
+    // ── Type introspection ───────────────────────────────────────────────────
+    TYPE_NAME,  ///< type_name(expr)  → compile-time string describing the LLVM type of expr
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -538,6 +540,7 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"pslice_len", BuiltinId::PSLICE_LEN},
     {"pslice_ptr", BuiltinId::PSLICE_PTR},
     {"store_ptr", BuiltinId::STORE_PTR},
+    {"type_name", BuiltinId::TYPE_NAME},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -2380,6 +2383,74 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
         (void)arg;
         return llvm::ConstantInt::get(getDefaultType(), tag);
+    }
+
+    // type_name(x) — returns a human-readable compile-time string describing the
+    // LLVM type of the argument expression.  Unlike the deprecated typeof() which
+    // returns an opaque integer tag, type_name() returns an OmScript string constant:
+    //   "int"     — any integer type (i64, i32, i8, …, bool is "bool")
+    //   "float"   — f64 (double)
+    //   "f32"     — f32 (single-precision float)
+    //   "bool"    — i1 boolean
+    //   "string"  — string fat-pointer
+    //   "array"   — array / slice pointer
+    //   "dict"    — hash-map pointer
+    //   "ptr"     — raw / struct pointer
+    //   "simd"    — LLVM fixed vector type
+    //   "void"    — no-value (unreachable expression)
+    //   "unknown" — anything else
+    // The result is a compile-time string constant; it resolves purely from static
+    // LLVM IR type information and incurs no runtime overhead.
+    if (bid == BuiltinId::TYPE_NAME) {
+        validateArgCount(expr, "type_name", 1);
+        // Evaluate the argument purely for side-effects and type information;
+        // the returned LLVM Value* is not used at runtime.
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        llvm::Type* t = arg->getType();
+        const char* name;
+        if (t->isIntegerTy(1)) {
+            name = "bool";
+        } else if (t->isIntegerTy()) {
+            name = "int";
+        } else if (t->isDoubleTy()) {
+            name = "float";
+        } else if (t->isFloatTy()) {
+            name = "f32";
+        } else if (t->isPointerTy()) {
+            // Distinguish string, array, dict, and plain pointers using the
+            // higher-level expression classifiers the codegen already has.
+            if (isStringExpr(expr->arguments[0].get())) {
+                name = "string";
+            } else if (isDictExpr(expr->arguments[0].get())) {
+                name = "dict";
+            } else if (expr->arguments[0]->type == ASTNodeType::ARRAY_EXPR) {
+                name = "array";
+            } else if (expr->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
+                // Check the arrayVars_ / stringVars_ tracking sets.
+                const auto* id = static_cast<const IdentifierExpr*>(expr->arguments[0].get());
+                if (arrayVars_.count(id->name)) {
+                    name = "array";
+                } else {
+                    name = "ptr";
+                }
+            } else {
+                name = "ptr";
+            }
+        } else if (t->isVectorTy()) {
+            name = "simd";
+        } else if (t->isVoidTy()) {
+            name = "void";
+        } else {
+            name = "unknown";
+        }
+        (void)arg;
+        // Return a proper OmScript fat-pointer string (same format as string literals:
+        // { len:i64, cap:i64, [N+1 x i8] } global with a GEP-0 pointer to offset 0).
+        // This makes the result compatible with str_eq(), println(), etc.
+        llvm::GlobalVariable* gv = internString(name);
+        return llvm::ConstantExpr::getInBoundsGetElementPtr(
+            gv->getValueType(), gv,
+            llvm::ArrayRef<llvm::Constant*>{llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
     }
 
     // assert(condition) — aborts with an error if the condition is falsy.

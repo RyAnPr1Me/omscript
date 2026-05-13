@@ -216,6 +216,11 @@ static bool usesConcurrencyPrimitive(const omscript::FunctionDecl* func) {
 
 namespace omscript {
 
+/// Maximum number of hops followed when resolving a transitive type alias chain.
+/// Caps cycle detection: if the same alias keeps pointing to another alias, we
+/// stop after this many iterations rather than looping forever.
+static constexpr int kMaxTypeAliasHops = 32;
+
 // File-scope SIMD type registry — single source of truth for the
 struct SimdTypeRow {
     const char* name; // OmScript annotation, e.g. "i32x8"
@@ -301,7 +306,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {
     // OPTMAX functions can call them without error.
     "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64", "to_i8", "to_u8", "to_i16", "to_u16", "to_i32",
     "to_u32", "to_i64", "to_u64", "to_f32", "to_f64", "store_ptr", "pslice_len", "pslice_ptr", "funcptr_from",
-    "funcptr_new", "malloc", "free"};
+    "funcptr_new", "malloc", "free", "type_name"};
 
 bool isStdlibFunction(const std::string& name) {
     return stdlibFunctions.find(name) != stdlibFunctions.end();
@@ -506,6 +511,17 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     if (!ann.empty() && ann[0] == '&') {
         ann = ann.substr(1);
     }
+    // ── Type alias resolution ─────────────────────────────────────────────────
+    // Chase the typeAliasMap_ chain up to 32 hops (handles transitive aliases
+    // that were not yet fully resolved when the AST was built, or that come from
+    // imported files).  Stops if the annotation is not a registered alias.
+    for (int hop = 0; hop < kMaxTypeAliasHops; ++hop) {
+        auto it = typeAliasMap_.find(ann);
+        if (it == typeAliasMap_.end()) break;
+        if (it->second == ann) break; // trivial self-alias guard
+        ann = it->second;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
     if (ann == "ptr" || ann == "funcptr" || (ann.rfind("ptr<", 0) == 0 && ann.back() == '>') ||
         (ann.rfind("pslice<", 0) == 0 && ann.back() == '>'))
         return llvm::PointerType::getUnqual(*context);
@@ -570,6 +586,19 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     }
 
     // "int", "uint", generics, and empty annotations map to i64.
+    // Emit a warning for non-empty, non-generic, unrecognized annotation strings
+    // so developers get feedback about typos or missing type definitions instead of
+    // silently getting i64 (which can cause subtle correctness bugs).
+    if (!ann.empty() && ann != "int" && ann != "uint" && ann != "void") {
+        // Only warn for annotations that look like concrete type names (not template
+        // parameters such as single upper-case letters like T, R, K, V).
+        const bool looksGeneric = ann.size() == 1 && std::isupper(static_cast<unsigned char>(ann[0]));
+        if (!looksGeneric) {
+            std::cerr << "[warning] unknown type annotation '" << ann
+                      << "' — falling back to i64 (int). "
+                         "Did you mean 'int', 'i64', or a declared struct/alias?\n";
+        }
+    }
     return getDefaultType();
 }
 
@@ -3954,6 +3983,9 @@ void CodeGenerator::generate(Program* program) {
     irInstructionCount_ = 0;
     fileNoAlias_ = program->fileNoAlias;
     stdImported_ = program->importedNamespaces.count("std") > 0;
+    // Propagate type aliases so resolveAnnotatedType() can expand user-defined
+    // aliases that survive as raw strings in the AST (struct fields, fn returns…).
+    typeAliasMap_ = program->typeAliases;
 
     // Initialize the module's target triple and data layout before any IR is
     // generated so that all DataLayout queries (alignment, type sizes) during

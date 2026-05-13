@@ -1,0 +1,77 @@
+import std;
+// type_system_test.om — Round-57 type system improvements
+//
+// Tests:
+//   1. type_name() on integer literal                → "int"
+//   2. type_name() on float literal                  → "float"
+//   3. type_name() on string literal                 → "string"
+//   4. type_name() on bool variable                  → "bool"
+//   5. type_name() on integer variable               → "int"
+//   6. type_name() on float variable                 → "float"
+//   7. type_name() on string variable                → "string"
+//   8. Simple type alias used in var declaration      (resolves correctly)
+//   9. Transitive type alias  type A = B; type B = int  → variable is int
+//  10. Type alias in struct field  struct Pos { x: Score; }
+//  11. type_name() is different for int vs float vs string
+//
+// Expected exit code = 11 (all tests pass, each contributing 1).
+
+type Score  = int;
+type Weight = f64;
+type Name   = string;
+
+// Transitive: Alias → Middle → int
+type Middle = int;
+type Alias  = Middle;
+
+struct Point {
+    x: Score,
+    y: Score,
+}
+
+fn main() -> int {
+    var score: int = 0;
+
+    // ── 1-7: type_name() ──────────────────────────────────────────────────
+    score = score + str_eq(type_name(42),     "int");    // 1
+    score = score + str_eq(type_name(3.14),   "float");  // 2
+    score = score + str_eq(type_name("hi"),   "string"); // 3
+
+    // bool variable: the type annotation propagates via varTypeAnnotations_,
+    // so the loaded i1 value is correctly reported as "bool".
+    var bv: bool = true;
+    score = score + str_eq(type_name(bv), "bool");       // 4
+
+    var iv: int    = 7;
+    var fv: float  = 1.0;
+    var sv: string = "world";
+    score = score + str_eq(type_name(iv), "int");    // 5
+    score = score + str_eq(type_name(fv), "float");  // 6
+    score = score + str_eq(type_name(sv), "string"); // 7
+
+    // ── 8: Simple type alias ──────────────────────────────────────────────
+    // Score = int; Weight = f64; Name = string — all resolved at parse time.
+    var sc: Score  = 100;
+    var wt: Weight = 2.5;
+    var nm: Name   = "alice";
+    // If aliases are resolved, arithmetic works correctly.
+    score = score + (sc + 1 == 101);    // 8
+
+    // ── 9: Transitive alias  Alias → Middle → int ────────────────────────
+    var al: Alias = 42;
+    score = score + (al * 2 == 84);     // 9
+
+    // ── 10: Struct with alias field types ────────────────────────────────
+    // The struct fields have type 'Score' which is an alias for 'int'.
+    // Construction, GEP, and arithmetic should all work.
+    var p: Point = Point { x: 3, y: 4 };
+    score = score + (p.x + p.y == 7);  // 10
+
+    // ── 11: type_name() returns distinct strings per category ─────────────
+    var ti: string = type_name(1);
+    var tf: string = type_name(1.0);
+    var ts: string = type_name("x");
+    score = score + (!str_eq(ti, tf) && !str_eq(tf, ts) && !str_eq(ti, ts)); // 11
+
+    return score; // expected: 11
+}

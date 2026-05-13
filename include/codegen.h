@@ -483,6 +483,12 @@ class CodeGenerator {
     /// Maps variable name → declared type annotation (empty = untyped/i64).
     llvm::StringMap<std::string> varTypeAnnotations_;
 
+    /// Module-wide type alias map: user alias name → resolved underlying type name.
+    /// Populated from Program::typeAliases at the start of code generation so that
+    /// resolveAnnotatedType() can expand aliases that survive as raw strings in the AST
+    /// (e.g. struct field types, function return types, parameter types).
+    std::unordered_map<std::string, std::string> typeAliasMap_;
+
     // Store AST function declarations for default parameter lookup at call sites.
     llvm::StringMap<const FunctionDecl*> functionDecls_;
 
