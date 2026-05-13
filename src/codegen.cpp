@@ -1421,8 +1421,16 @@ llvm::Function* CodeGenerator::getOrDeclareFputs() {
 
 llvm::Value* CodeGenerator::getOrDeclareStdout() {
     // Get the C library 'stdout' global (extern FILE *stdout).
+    // On macOS, stdout is a C macro that expands to __stdoutp, so the actual
+    // exported symbol is __stdoutp, not stdout.  Use the platform-specific name
+    // so the linker can resolve it on all supported targets.
+#ifdef __APPLE__
+    static constexpr const char* kStdoutSymbol = "__stdoutp";
+#else
+    static constexpr const char* kStdoutSymbol = "stdout";
+#endif
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
-    if (auto* gv = module->getGlobalVariable("stdout")) {
+    if (auto* gv = module->getGlobalVariable(kStdoutSymbol)) {
         auto* load = builder->CreateLoad(ptrTy, gv, "stdout.val");
         // stdout is a process-wide constant — mark as nonnull and invariant
         // so LLVM can hoist/CSE repeated loads.
@@ -1430,7 +1438,7 @@ llvm::Value* CodeGenerator::getOrDeclareStdout() {
         return load;
     }
     auto* gv = new llvm::GlobalVariable(*module, ptrTy, /*isConstant=*/false, llvm::GlobalValue::ExternalLinkage,
-                                        nullptr, "stdout");
+                                        nullptr, kStdoutSymbol);
     auto* load = builder->CreateLoad(ptrTy, gv, "stdout.val");
     load->setMetadata(llvm::LLVMContext::MD_nonnull, llvm::MDNode::get(*context, {}));
     return load;
