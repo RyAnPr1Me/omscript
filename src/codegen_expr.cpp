@@ -636,6 +636,11 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
                 return builder->CreateLoad(gv->getValueType(), gv, expr->name);
             }
         }
+        // NULL — C-style null pointer constant (zero-value ptr)
+        if (expr->name == "NULL" || expr->name == "nullptr") {
+            return llvm::ConstantPointerNull::get(
+                llvm::PointerType::getUnqual(*context));
+        }
         // Predefined integer range constants: INTTYPE_MAX, INTTYPE_MIN, UINTTYPE_MAX.
         // Supported names: I{N}_MAX, I{N}_MIN, U{N}_MAX, INT_MAX, INT_MIN, UINT_MAX,
         // BOOL_MAX, BOOL_MIN, and common aliases (INT8_MAX etc.).

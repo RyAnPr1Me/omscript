@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-58: C-like type system additions** (`src/codegen.cpp`, `src/codegen_expr.cpp`, `src/parser.cpp`):
+  - **`c_FILE`** — opaque pointer type representing C `FILE*`. Lowers to `ptr` (LLVM opaque pointer). `sizeof(c_FILE) == 8`. Use with `fopen`/`fclose`/`fread`/`fwrite`/`fgets`/`fputs` builtins.
+  - **`c_dir` / `c_DIR`** — opaque pointer type for POSIX `DIR*` (returned by `opendir`). Lowers to `ptr`.
+  - **`c_jmp_buf`** — opaque pointer type for `setjmp`/`longjmp` state. Lowers to `ptr`.
+  - **`c_double` / `c_long_double`** — `f64` (C `double` / `long double` on x86-64). Accepted everywhere `f64` is valid; `sizeof(c_double) == 8`.
+  - **`c_float`** — `f32` (C `float`). Accepted everywhere `f32` is valid; `sizeof(c_float) == 4`.
+  - **`intptr_t` / `c_intptr`** — signed pointer-sized integer (C `intptr_t` / `ptrdiff_t`). Lowers to `i64`.
+  - **`uintptr_t` / `c_uintptr`** — unsigned pointer-sized integer (C `uintptr_t`). Lowers to `u64`; treated as unsigned in arithmetic and comparisons.
+  - **`ptrdiff_t` / `c_ptrdiff`** — signed pointer difference type (C `ptrdiff_t`). Lowers to `i64`.
+  - **`NULL` / `nullptr`** — built-in null pointer constants. Resolve to `ConstantPointerNull` (LLVM null ptr). Can be assigned to `ptr`, `c_FILE`, `c_void`, or any pointer-typed variable and compared against pointer values with `==`/`!=`.
+  - All new types are accepted by `sizeof()`, `type_name()`, type annotations on variables/parameters/return types, and type aliases.
+
 - **Round-57: Type system overhaul** (`include/ast.h`, `include/codegen.h`, `src/parser.cpp`, `src/codegen.cpp`, `src/codegen_builtins.cpp`, `LANGUAGE_REFERENCE.md`):
   - **`type_name(expr)` builtin** — returns a human-readable compile-time `string` describing the OmScript type of its argument. Return values: `"int"` (any integer width), `"float"` (f64), `"f32"`, `"bool"` (i1 / bool-annotated variable), `"string"`, `"array"`, `"dict"`, `"ptr"`, `"simd"`, `"void"`, `"unknown"`. Resolves purely from static LLVM IR type information — zero runtime overhead. This replaces the confusing integer-tag `typeof()` (which is still available for backward compatibility but deprecated).
   - **Type aliases propagated end-to-end to codegen** — `Program::typeAliases` (new `std::unordered_map<std::string, std::string>` field on the AST `Program` node) carries the full alias map from parser to code generator. `CodeGenerator::generate()` loads it into a new `typeAliasMap_` field. `resolveAnnotatedType()` now resolves aliases transitively before doing any type dispatch, so struct field types, function return types, and parameter types that survive as raw alias strings in the AST are correctly lowered to the right LLVM types.

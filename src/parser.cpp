@@ -5291,15 +5291,20 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         else if (typeName == "i16" || typeName == "u16" || typeName == "c_short" || typeName == "c_ushort")
             byteSize = 2;
         else if (typeName == "i32" || typeName == "u32" || typeName == "f32" || typeName == "float32" ||
+                 typeName == "c_float" ||
                  typeName == "char" || typeName == "c_int" || typeName == "c_uint")
             byteSize = 4;
         else if (typeName == "i64" || typeName == "u64" || typeName == "int" || typeName == "uint" ||
                  typeName == "float" || typeName == "double" || typeName == "f64" || typeName == "float64" ||
+                 typeName == "c_double" || typeName == "c_long_double" ||
                  typeName == "ptr" || typeName.rfind("ptr<", 0) == 0 || typeName == "string" || typeName == "bigint" ||
                  typeName == "usize" || typeName == "isize" ||
                  typeName == "c_long" || typeName == "c_ulong" ||
                  typeName == "c_longlong" || typeName == "c_ulonglong" ||
-                 typeName == "c_size_t" || typeName == "c_ssize_t")
+                 typeName == "c_size_t" || typeName == "c_ssize_t" ||
+                 typeName == "intptr_t" || typeName == "uintptr_t" || typeName == "ptrdiff_t" ||
+                 typeName == "c_intptr" || typeName == "c_uintptr" || typeName == "c_ptrdiff" ||
+                 typeName == "c_FILE" || typeName == "c_dir" || typeName == "c_DIR" || typeName == "c_jmp_buf")
             byteSize = 8;
         else if (typeName == "i128" || typeName == "u128")
             byteSize = 16;
@@ -5412,8 +5417,11 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                                                                            "c_int", "c_uint", "c_short", "c_ushort",
                                                                            "c_long", "c_ulong", "c_longlong", "c_ulonglong",
                                                                            "c_size_t", "c_ssize_t", "c_char", "c_uchar",
+                                                                           "intptr_t", "uintptr_t", "ptrdiff_t",
+                                                                           "c_intptr", "c_uintptr", "c_ptrdiff",
                                                                            "char"};
-                    static const std::unordered_set<std::string> kFloatTypes{"float", "f64", "f32", "double"};
+                    static const std::unordered_set<std::string> kFloatTypes{"float", "f64", "f32", "double",
+                                                                             "c_float", "c_double", "c_long_double"};
                     static const std::unordered_set<std::string> kStrTypes{"string", "str"};
                     static const std::unordered_set<std::string> kArrTypes{"array", "arr"};
                     static const std::unordered_set<std::string> kBoolTypes{"bool"};

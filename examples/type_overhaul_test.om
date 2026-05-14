@@ -133,6 +133,52 @@ fn test_type_name_tuple() {
     exit_program(0);
 }
 
+// ─── c_FILE / opaque pointer types ───────────────────────────────────────────
+fn test_c_file_type() {
+    // c_FILE is an opaque ptr (like ptr); sizeof must equal 8 (pointer size).
+    if (sizeof(c_FILE) == 8) {
+        exit_program(1);
+    }
+    exit_program(0);
+}
+
+// ─── c_double / c_float float aliases ────────────────────────────────────────
+fn test_c_float_types() {
+    var d: c_double = 3.14;
+    var f: c_float  = 1.5;
+    if (sizeof(c_double) == 8) {
+        if (sizeof(c_float) == 4) {
+            exit_program(1);
+        }
+    }
+    exit_program(0);
+}
+
+// ─── intptr_t / uintptr_t / ptrdiff_t ────────────────────────────────────────
+fn test_intptr_types() {
+    var ip: intptr_t  = 0;
+    var up: uintptr_t = 1;
+    var pd: ptrdiff_t = -1;
+    if (sizeof(intptr_t) == 8) {
+        if (sizeof(uintptr_t) == 8) {
+            if (sizeof(ptrdiff_t) == 8) {
+                exit_program(1);
+            }
+        }
+    }
+    exit_program(0);
+}
+
+// ─── NULL constant ────────────────────────────────────────────────────────────
+fn test_null_constant() {
+    var p: ptr = NULL;
+    // NULL == NULL must be true
+    if (p == NULL) {
+        exit_program(1);
+    }
+    exit_program(0);
+}
+
 fn main() {
     test_usize();
     test_char_literal();
@@ -144,4 +190,8 @@ fn main() {
     test_tuple_mixed();
     test_tuple_return();
     test_type_name_tuple();
+    test_c_file_type();
+    test_c_float_types();
+    test_intptr_types();
+    test_null_constant();
 }

@@ -269,7 +269,8 @@ static constexpr SimdTypeRow kSimdTypeRegistry[] = {
 static bool isUnsignedAnnotation(const std::string& tn) {
     if (tn == "uint" || tn == "byte" || tn == "usize" || tn == "char" ||
         tn == "c_uint" || tn == "c_ushort" || tn == "c_ulong" ||
-        tn == "c_ulonglong" || tn == "c_size_t" || tn == "c_uchar")
+        tn == "c_ulonglong" || tn == "c_size_t" || tn == "c_uchar" ||
+        tn == "uintptr_t" || tn == "c_uintptr")
         return true;
     if (tn.size() >= 2 && tn[0] == 'u') {
         for (size_t j = 1; j < tn.size(); ++j)
@@ -548,6 +549,22 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
         return llvm::Type::getInt64Ty(*context);
     // c_void — void pointer (same as ptr)
     if (ann == "c_void")
+        return llvm::PointerType::getUnqual(*context);
+    // c_double / c_long_double — f64 (C double / long double on x86-64)
+    if (ann == "c_double" || ann == "c_long_double")
+        return llvm::Type::getDoubleTy(*context);
+    // c_float — f32 (C float)
+    if (ann == "c_float")
+        return llvm::Type::getFloatTy(*context);
+    // intptr_t / uintptr_t / ptrdiff_t — pointer-sized integers (64-bit)
+    if (ann == "intptr_t" || ann == "ptrdiff_t" || ann == "c_ptrdiff" || ann == "c_intptr")
+        return llvm::Type::getInt64Ty(*context);
+    if (ann == "uintptr_t" || ann == "c_uintptr")
+        return llvm::Type::getInt64Ty(*context);
+    // c_FILE — opaque pointer representing C FILE* (like ptr)
+    // c_dir  — opaque pointer for POSIX DIR* (like ptr)
+    // c_jmp_buf — opaque pointer for setjmp/longjmp state (like ptr)
+    if (ann == "c_FILE" || ann == "c_dir" || ann == "c_DIR" || ann == "c_jmp_buf")
         return llvm::PointerType::getUnqual(*context);
     // never — bottom type; used as return type of functions that never return.
     // Maps to void in LLVM IR (hintNoReturn is set separately by the parser).
@@ -989,7 +1006,8 @@ void CodeGenerator::bindVariableAnnotated(const std::string& name, llvm::Value* 
 bool CodeGenerator::isUnsignedAnnot(const std::string& annot) {
     if (annot == "uint" || annot == "byte" || annot == "usize" || annot == "char" ||
         annot == "c_uint" || annot == "c_ushort" || annot == "c_ulong" ||
-        annot == "c_ulonglong" || annot == "c_size_t" || annot == "c_uchar")
+        annot == "c_ulonglong" || annot == "c_size_t" || annot == "c_uchar" ||
+        annot == "uintptr_t" || annot == "c_uintptr")
         return true;
     if (annot.size() >= 2 && annot[0] == 'u') {
         for (size_t j = 1; j < annot.size(); ++j)
