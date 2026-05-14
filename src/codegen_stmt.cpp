@@ -546,6 +546,8 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     call->callee == "array_rotate" || call->callee == "array_zip" || call->callee == "array_take" ||
                     call->callee == "array_drop" || call->callee == "range" || call->callee == "range_step" ||
                     call->callee == "str_split" || call->callee == "str_chars" ||
+                    call->callee == "array_sorted" || call->callee == "array_reverse" ||
+                    call->callee == "str_words" ||
                     arrayReturningFunctions_.count(call->callee)) {
                     isArray = true;
                 }

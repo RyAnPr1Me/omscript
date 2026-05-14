@@ -928,6 +928,7 @@ ptest_program "examples/paren_free_test.om" 12
 ptest_program "examples/round71_test.om" 0
 ptest_program "examples/round72_test.om" 23
 ptest_program "examples/round73_test.om" 38
+ptest_program "examples/round74_test.om" 0
 flush_ptests
 
 echo ""

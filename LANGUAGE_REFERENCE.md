@@ -4325,6 +4325,52 @@ println(array_product(a));  // 24
 
 ---
 
+#### `array_sum(array) → i64`
+
+**Signature:** `array_sum(array) → i64`  
+**Semantics:** Return the sum of all integer elements in `array`. Returns `0` for an empty array. Compile-time folded when all elements are constant literals.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+var a = [3, 1, 4, 1, 5];
+println(array_sum(a));  // 14
+```
+
+---
+
+#### `array_sorted(array) → array`
+
+**Signature:** `array_sorted(array) → array`  
+**Semantics:** Return a new array containing the same elements as `array`, sorted in ascending order. The original array is **not** modified. Works for both integer and string arrays. Uses `qsort` internally.  
+**Time:** O(n log n)
+
+**Example:**
+```omscript
+var a = [5, 3, 1, 4, 2];
+var s = array_sorted(a);
+println(s[0]);   // 1
+println(a[0]);   // 5  (original unchanged)
+```
+
+---
+
+#### `array_reverse(array) → array`
+
+**Signature:** `array_reverse(array) → array`  
+**Semantics:** Return a new array with elements in reverse order. The original array is **not** modified.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+var a = [1, 2, 3, 4, 5];
+var r = array_reverse(a);
+println(r[0]);   // 5
+println(a[0]);   // 1  (original unchanged)
+```
+
+---
+
 #### `array_mean(array) → i64` / `array_avg(array) → i64` (alias)
 
 **Signature:** `array_mean(array) → i64`  
@@ -4874,6 +4920,59 @@ println(str_upper("hello"));  // "HELLO"
 **Example:**
 ```omscript
 println(str_lower("HELLO"));  // "hello"
+```
+
+---
+
+#### `str_lower(string) → string`
+
+**Semantics:** Return a NEW string with all uppercase letters converted to lowercase.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+println(str_lower("HELLO"));  // "hello"
+```
+
+---
+
+#### `str_title(string) → string`
+
+**Semantics:** Return a NEW string in "title case": the first character of each whitespace-separated word is uppercased, and all other characters are lowercased. Compile-time folded for literal arguments.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+println(str_title("hello world"));  // "Hello World"
+println(str_title("HELLO WORLD"));  // "Hello World"
+```
+
+---
+
+#### `str_swapcase(string) → string`
+
+**Semantics:** Return a NEW string with uppercase ASCII letters converted to lowercase and lowercase ASCII letters converted to uppercase. Non-alphabetic characters are unchanged. Compile-time folded for literal arguments.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+println(str_swapcase("Hello World"));  // "hELLO wORLD"
+println(str_swapcase("abc123"));       // "ABC123"
+```
+
+---
+
+#### `str_words(string) → array`
+
+**Semantics:** Split `string` on any whitespace (spaces, tabs, newlines), skipping empty tokens, and return the words as a `string[]`. Equivalent to Python's `str.split()` with no argument. Returns an empty array for an all-whitespace or empty string.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+var words = str_words("  hello   world  ");
+println(len(words));   // 2
+println(words[0]);     // "hello"
+println(words[1]);     // "world"
 ```
 
 ---

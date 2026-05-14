@@ -1,0 +1,188 @@
+import std;
+// Round-74 test: array_sum, array_sorted, array_reverse, str_words, str_title, str_swapcase
+
+fn test_array_sum_basic() -> int {
+    var nums = [3, 1, 4, 1, 5, 9, 2, 6];
+    return array_sum(nums);  // 31
+}
+
+fn test_array_sum_empty() -> int {
+    var empty: int[] = [];
+    return array_sum(empty);  // 0
+}
+
+fn test_array_sum_single() -> int {
+    var single = [42];
+    return array_sum(single);  // 42
+}
+
+fn test_array_sum_negatives() -> int {
+    var nums = [-3, -1, 4];
+    return array_sum(nums);  // 0
+}
+
+fn test_array_sorted_basic() -> int {
+    var nums = [5, 3, 1, 4, 2];
+    var s = array_sorted(nums);
+    // verify first element is 1
+    return s[0];  // 1
+}
+
+fn test_array_sorted_nonmutating() -> int {
+    var nums = [5, 3, 1, 4, 2];
+    var s = array_sorted(nums);
+    // original should still start with 5
+    return nums[0];  // 5
+}
+
+fn test_array_sorted_length() -> int {
+    var nums = [5, 3, 1, 4, 2];
+    var s = array_sorted(nums);
+    return len(s);  // 5
+}
+
+fn test_array_sorted_last() -> int {
+    var nums = [5, 3, 1, 4, 2];
+    var s = array_sorted(nums);
+    return s[4];  // 5
+}
+
+fn test_array_reverse_basic() -> int {
+    var nums = [1, 2, 3, 4, 5];
+    var r = array_reverse(nums);
+    return r[0];  // 5
+}
+
+fn test_array_reverse_last() -> int {
+    var nums = [1, 2, 3, 4, 5];
+    var r = array_reverse(nums);
+    return r[4];  // 1
+}
+
+fn test_array_reverse_length() -> int {
+    var nums = [10, 20, 30];
+    var r = array_reverse(nums);
+    return len(r);  // 3
+}
+
+fn test_array_reverse_nonmutating() -> int {
+    var nums = [1, 2, 3];
+    var r = array_reverse(nums);
+    return nums[0];  // 1 (original unchanged)
+}
+
+fn test_str_words_basic() -> int {
+    var words = str_words("hello world foo");
+    return len(words);  // 3
+}
+
+fn test_str_words_first() -> int {
+    var words = str_words("hello world");
+    if str_eq(words[0], "hello") {
+        return 1;
+    }
+    return 0;
+}
+
+fn test_str_words_extra_spaces() -> int {
+    var words = str_words("  one   two  three  ");
+    return len(words);  // 3
+}
+
+fn test_str_words_single() -> int {
+    var words = str_words("only");
+    return len(words);  // 1
+}
+
+fn test_str_title_basic() -> int {
+    var s = str_title("hello world");
+    if str_eq(s, "Hello World") {
+        return 1;
+    }
+    return 0;
+}
+
+fn test_str_title_all_upper() -> int {
+    var s = str_title("HELLO WORLD");
+    if str_eq(s, "Hello World") {
+        return 1;
+    }
+    return 0;
+}
+
+fn test_str_title_empty() -> int {
+    var s = str_title("");
+    return str_len(s);  // 0
+}
+
+fn test_str_swapcase_basic() -> int {
+    var s = str_swapcase("Hello World");
+    if str_eq(s, "hELLO wORLD") {
+        return 1;
+    }
+    return 0;
+}
+
+fn test_str_swapcase_all_lower() -> int {
+    var s = str_swapcase("hello");
+    if str_eq(s, "HELLO") {
+        return 1;
+    }
+    return 0;
+}
+
+fn test_str_swapcase_digits() -> int {
+    var s = str_swapcase("abc123");
+    if str_eq(s, "ABC123") {
+        return 1;
+    }
+    return 0;
+}
+
+fn test_str_swapcase_empty() -> int {
+    var s = str_swapcase("");
+    return str_len(s);  // 0
+}
+
+fn main() -> int {
+    var pass = 0;
+    var fail = 0;
+
+    // array_sum
+    if test_array_sum_basic() == 31 { pass += 1; } else { fail += 1; print("FAIL: array_sum_basic"); }
+    if test_array_sum_empty() == 0  { pass += 1; } else { fail += 1; print("FAIL: array_sum_empty"); }
+    if test_array_sum_single() == 42 { pass += 1; } else { fail += 1; print("FAIL: array_sum_single"); }
+    if test_array_sum_negatives() == 0 { pass += 1; } else { fail += 1; print("FAIL: array_sum_negatives"); }
+
+    // array_sorted
+    if test_array_sorted_basic() == 1 { pass += 1; } else { fail += 1; print("FAIL: array_sorted_basic"); }
+    if test_array_sorted_nonmutating() == 5 { pass += 1; } else { fail += 1; print("FAIL: array_sorted_nonmutating"); }
+    if test_array_sorted_length() == 5 { pass += 1; } else { fail += 1; print("FAIL: array_sorted_length"); }
+    if test_array_sorted_last() == 5 { pass += 1; } else { fail += 1; print("FAIL: array_sorted_last"); }
+
+    // array_reverse
+    if test_array_reverse_basic() == 5 { pass += 1; } else { fail += 1; print("FAIL: array_reverse_basic"); }
+    if test_array_reverse_last() == 1 { pass += 1; } else { fail += 1; print("FAIL: array_reverse_last"); }
+    if test_array_reverse_length() == 3 { pass += 1; } else { fail += 1; print("FAIL: array_reverse_length"); }
+    if test_array_reverse_nonmutating() == 1 { pass += 1; } else { fail += 1; print("FAIL: array_reverse_nonmutating"); }
+
+    // str_words
+    if test_str_words_basic() == 3 { pass += 1; } else { fail += 1; print("FAIL: str_words_basic"); }
+    if test_str_words_first() == 1 { pass += 1; } else { fail += 1; print("FAIL: str_words_first"); }
+    if test_str_words_extra_spaces() == 3 { pass += 1; } else { fail += 1; print("FAIL: str_words_extra_spaces"); }
+    if test_str_words_single() == 1 { pass += 1; } else { fail += 1; print("FAIL: str_words_single"); }
+
+    // str_title
+    if test_str_title_basic() == 1 { pass += 1; } else { fail += 1; print("FAIL: str_title_basic"); }
+    if test_str_title_all_upper() == 1 { pass += 1; } else { fail += 1; print("FAIL: str_title_all_upper"); }
+    if test_str_title_empty() == 0 { pass += 1; } else { fail += 1; print("FAIL: str_title_empty"); }
+
+    // str_swapcase
+    if test_str_swapcase_basic() == 1 { pass += 1; } else { fail += 1; print("FAIL: str_swapcase_basic"); }
+    if test_str_swapcase_all_lower() == 1 { pass += 1; } else { fail += 1; print("FAIL: str_swapcase_all_lower"); }
+    if test_str_swapcase_digits() == 1 { pass += 1; } else { fail += 1; print("FAIL: str_swapcase_digits"); }
+    if test_str_swapcase_empty() == 0 { pass += 1; } else { fail += 1; print("FAIL: str_swapcase_empty"); }
+
+    print($"Round-74: {pass} passed, {fail} failed");
+    return fail;
+}

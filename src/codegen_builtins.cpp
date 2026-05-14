@@ -302,6 +302,13 @@ enum class BuiltinId : uint8_t {
     ARRAY_FIRST,    ///< array_first(arr)      → first element (aborts on empty array)
     MAP_COPY,       ///< map_copy(d)           → shallow copy of a hashmap
     MAP_CLEAR,      ///< map_clear(d)          → return a fresh empty map
+    // ── Round-74 additions ───────────────────────────────────────────────────
+    ARRAY_SUM,      ///< array_sum(arr)        → sum of all integer elements
+    ARRAY_SORTED,   ///< array_sorted(arr)     → sorted copy (non-mutating)
+    ARRAY_REVERSE,  ///< array_reverse(arr)    → reversed copy
+    STR_WORDS,      ///< str_words(s)          → split on whitespace → string[]
+    STR_TITLE,      ///< str_title(s)          → title-case each word
+    STR_SWAPCASE,   ///< str_swapcase(s)       → swap upper↔lower for each ASCII char
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -553,6 +560,13 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"array_first",    BuiltinId::ARRAY_FIRST},
     {"map_copy",       BuiltinId::MAP_COPY},
     {"map_clear",      BuiltinId::MAP_CLEAR},
+    // Round-74
+    {"array_sum",      BuiltinId::ARRAY_SUM},
+    {"array_sorted",   BuiltinId::ARRAY_SORTED},
+    {"array_reverse",  BuiltinId::ARRAY_REVERSE},
+    {"str_words",      BuiltinId::STR_WORDS},
+    {"str_title",      BuiltinId::STR_TITLE},
+    {"str_swapcase",   BuiltinId::STR_SWAPCASE},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -590,7 +604,11 @@ static std::string extractFnName(const Expression* arg) {
 
 llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // O(1) hash map lookup replaces the previous linear chain of ~80
-    const BuiltinId bid = lookupBuiltin(expr->callee);
+    // If a user-defined function has the same name as a builtin, the
+    // user-defined function takes priority (allows test-time overrides).
+    const bool hasUserDef = functions.count(expr->callee) &&
+                            functions.find(expr->callee)->second != nullptr;
+    const BuiltinId bid = hasUserDef ? BuiltinId::NONE : lookupBuiltin(expr->callee);
 
     // ── Mandatory namespace enforcement ──────────────────────────────────────
     // Unless the source file has `import std;`, stdlib functions must be called
@@ -2716,6 +2734,492 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     }
 
     // ── End Round-73 builtins ────────────────────────────────────────────────
+
+    // ── Round-74 builtins ────────────────────────────────────────────────────
+
+    // array_sum(arr) → sum of all integer elements; 0 for empty array
+    if (bid == BuiltinId::ARRAY_SUM) {
+        validateArgCount(expr, "array_sum", 1);
+        // Compile-time fold
+        if (auto cv = tryFoldExprToConst(expr->arguments[0].get())) {
+            if (cv->kind == ConstValue::Kind::Array) {
+                int64_t total = 0;
+                bool allInt = true;
+                for (const auto& elem : cv->arrVal) {
+                    if (elem.kind != ConstValue::Kind::Integer) { allInt = false; break; }
+                    total += elem.intVal;
+                }
+                if (allInt) { optStats_.constFolded++; return llvm::ConstantInt::get(getDefaultType(), total); }
+            }
+        }
+        llvm::Value* sumArg = generateExpression(expr->arguments[0].get());
+        sumArg = toDefaultType(sumArg);
+        llvm::Value* arrPtr = getArrayPtr(sumArg);
+        llvm::Value* asuLenLoad = emitLoadArrayLen(arrPtr, "asum.len");
+        llvm::Value* length = asuLenLoad;
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "asum.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "asum.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "asum.done", function);
+
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+        builder->SetInsertPoint(loopBB);
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::PHINode* acc = builder->CreatePHI(getDefaultType(), 2, "asum.acc");
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "asum.idx");
+        acc->addIncoming(zero, entryBB);
+        idx->addIncoming(zero, entryBB);
+
+        llvm::Value* done = builder->CreateICmpUGE(idx, length, "asum.done");
+        auto* asuCondBr = builder->CreateCondBr(done, doneBB, bodyBB);
+        if (optimizationLevel >= OptimizationLevel::O2)
+            asuCondBr->setMetadata(llvm::LLVMContext::MD_prof,
+                                   llvm::MDBuilder(*context).createBranchWeights(1, 2000));
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* offset  = builder->CreateAdd(idx, one, "asum.offset", true, true);
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, offset, "asum.elemptr");
+        llvm::Value* elem    = emitLoadArrayElem(elemPtr, "asum.elem");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
+                                                             llvm::MDNode::get(*context, {}));
+        llvm::Value* newAcc = (inOptMaxFunction || optimizationLevel >= OptimizationLevel::O2)
+                                  ? builder->CreateNSWAdd(acc, elem, "asum.newacc")
+                                  : builder->CreateAdd(acc, elem, "asum.newacc");
+        acc->addIncoming(newAcc, bodyBB);
+        idx->addIncoming(offset, bodyBB);
+        { attachLoopMetadataVec(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB))); }
+
+        builder->SetInsertPoint(doneBB);
+        return acc;
+    }
+
+    // array_sorted(arr) → return a sorted copy (non-mutating, ascending)
+    if (bid == BuiltinId::ARRAY_SORTED) {
+        validateArgCount(expr, "array_sorted", 1);
+        const bool sortStrings = isStringArrayExpr(expr->arguments[0].get());
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        llvm::Value* arrPtr = getArrayPtr(arrArg);
+        llvm::Value* arrLen = emitLoadArrayLen(arrPtr, "asorted.len");
+        // Total bytes: (arrLen + 1) * 8
+        llvm::Value* one   = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* slots = builder->CreateAdd(arrLen, one, "asorted.slots", true, true);
+        llvm::Value* bytes = builder->CreateMul(slots, eight, "asorted.bytes", true, true);
+        // Allocate copy buffer
+        llvm::Value* copyBuf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "asorted.buf");
+        llvm::cast<llvm::CallInst>(copyBuf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+        // Copy entire array (header + elements)
+        builder->CreateCall(getOrDeclareMemcpy(), {copyBuf, arrPtr, bytes});
+        // Sort the copy (skip if <= 1 element)
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* sortBB = llvm::BasicBlock::Create(*context, "asorted.sort", function);
+        llvm::BasicBlock* skipBB = llvm::BasicBlock::Create(*context, "asorted.skip", function);
+        llvm::Value* needsSort = builder->CreateICmpUGT(arrLen, one, "asorted.needed");
+        builder->CreateCondBr(needsSort, sortBB, skipBB);
+
+        builder->SetInsertPoint(sortBB);
+        // Reuse the same comparator logic as the `sort` builtin
+        auto* localPtrTy = llvm::PointerType::getUnqual(*context);
+        auto getOrEmitIntCmpFn = [&]() -> llvm::Function* {
+            const char* name = "__omsc_cmp_i64_asc";
+            if (auto* fn = module->getFunction(name)) return fn;
+            auto* cmpTy = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {localPtrTy, localPtrTy}, false);
+            auto* fn = llvm::Function::Create(cmpTy, llvm::Function::InternalLinkage, name, module.get());
+            fn->addFnAttr(llvm::Attribute::NoUnwind); fn->addFnAttr(llvm::Attribute::WillReturn);
+            fn->addFnAttr(llvm::Attribute::NoFree);   fn->addFnAttr(llvm::Attribute::NoSync);
+            fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+                *context, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
+            auto savedIP = builder->saveIP();
+            auto* entry = llvm::BasicBlock::Create(*context, "entry", fn);
+            builder->SetInsertPoint(entry);
+            auto* a = builder->CreateAlignedLoad(getDefaultType(), fn->getArg(0), llvm::MaybeAlign(8), "a");
+            auto* b = builder->CreateAlignedLoad(getDefaultType(), fn->getArg(1), llvm::MaybeAlign(8), "b");
+            llvm::cast<llvm::Instruction>(a)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+            llvm::cast<llvm::Instruction>(b)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+            auto* gt = builder->CreateZExt(builder->CreateICmpSGT(a, b), llvm::Type::getInt32Ty(*context), "gt.zext", false);
+            auto* lt = builder->CreateZExt(builder->CreateICmpSLT(a, b), llvm::Type::getInt32Ty(*context), "lt.zext", false);
+            builder->CreateRet(builder->CreateSub(gt, lt, "cmp"));
+            builder->restoreIP(savedIP);
+            return fn;
+        };
+        auto getOrEmitStrCmpFn = [&]() -> llvm::Function* {
+            const char* name = "__omsc_cmp_str_asc";
+            if (auto* fn = module->getFunction(name)) return fn;
+            auto* cmpTy = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {localPtrTy, localPtrTy}, false);
+            auto* fn = llvm::Function::Create(cmpTy, llvm::Function::InternalLinkage, name, module.get());
+            fn->addFnAttr(llvm::Attribute::NoUnwind); fn->addFnAttr(llvm::Attribute::WillReturn);
+            fn->addFnAttr(llvm::Attribute::NoFree);   fn->addFnAttr(llvm::Attribute::NoSync);
+            auto savedIP = builder->saveIP();
+            auto* entry = llvm::BasicBlock::Create(*context, "entry", fn);
+            builder->SetInsertPoint(entry);
+            auto* off16 = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 16);
+            auto* aI64  = builder->CreateAlignedLoad(getDefaultType(), fn->getArg(0), llvm::MaybeAlign(8), "a.i64");
+            auto* bI64  = builder->CreateAlignedLoad(getDefaultType(), fn->getArg(1), llvm::MaybeAlign(8), "b.i64");
+            llvm::cast<llvm::Instruction>(aI64)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+            llvm::cast<llvm::Instruction>(bI64)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+            auto* aFat = builder->CreateIntToPtr(aI64, localPtrTy, "a.fat");
+            auto* bFat = builder->CreateIntToPtr(bI64, localPtrTy, "b.fat");
+            auto* aData = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), aFat, off16, "a.data");
+            auto* bData = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), bFat, off16, "b.data");
+            builder->CreateRet(builder->CreateCall(getOrDeclareStrcmp(), {aData, bData}, "cmp"));
+            builder->restoreIP(savedIP);
+            return fn;
+        };
+        llvm::Function* cmpFn = sortStrings ? getOrEmitStrCmpFn() : getOrEmitIntCmpFn();
+        llvm::Value* dataPtr  = builder->CreateInBoundsGEP(getDefaultType(), copyBuf, one, "asorted.data");
+        builder->CreateCall(getOrDeclareQsort(), {dataPtr, arrLen,
+            llvm::ConstantInt::get(getDefaultType(), 8), cmpFn});
+        builder->CreateBr(skipBB);
+        builder->SetInsertPoint(skipBB);
+        return copyBuf;
+    }
+
+    // array_reverse(arr) → return a reversed copy of the array
+    if (bid == BuiltinId::ARRAY_REVERSE) {
+        validateArgCount(expr, "array_reverse", 1);
+        llvm::Value* arrArg2 = generateExpression(expr->arguments[0].get());
+        arrArg2 = toDefaultType(arrArg2);
+        llvm::Value* arrPtr = getArrayPtr(arrArg2);
+        llvm::Value* arrLen = emitLoadArrayLen(arrPtr, "arev.len");
+        llvm::Value* one   = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* slots = builder->CreateAdd(arrLen, one, "arev.slots", true, true);
+        llvm::Value* bytes = builder->CreateMul(slots, eight, "arev.bytes", true, true);
+        llvm::Value* dstBuf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "arev.buf");
+        llvm::cast<llvm::CallInst>(dstBuf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+        // Store length header
+        builder->CreateStore(arrLen, dstBuf);
+        // Loop: dst[i] = src[len-1-i]  (i in [0, len))
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "arev.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "arev.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "arev.done", function);
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "arev.idx");
+        idx->addIncoming(zero, preBB);
+        llvm::Value* done = builder->CreateICmpUGE(idx, arrLen, "arev.done");
+        auto* arevBr = builder->CreateCondBr(done, doneBB, bodyBB);
+        if (optimizationLevel >= OptimizationLevel::O2)
+            arevBr->setMetadata(llvm::LLVMContext::MD_prof,
+                                llvm::MDBuilder(*context).createBranchWeights(1, 2000));
+        builder->SetInsertPoint(bodyBB);
+        // src element index = arrLen - 1 - idx  (offset into data = arrLen - idx, accounting for header)
+        llvm::Value* srcOff = builder->CreateSub(arrLen, idx, "arev.srcoff", false, true);
+        llvm::Value* srcPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, srcOff, "arev.srcptr");
+        llvm::Value* elem   = emitLoadArrayElem(srcPtr, "arev.elem");
+        // dst slot offset = idx + 1 (skip header)
+        llvm::Value* dstOff = builder->CreateAdd(idx, one, "arev.dstoff", true, true);
+        llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), dstBuf, dstOff, "arev.dstptr");
+        builder->CreateAlignedStore(elem, dstPtr, llvm::MaybeAlign(8))
+            ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "arev.next", true, true);
+        idx->addIncoming(nextIdx, bodyBB);
+        { attachLoopMetadataVec(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB))); }
+        builder->SetInsertPoint(doneBB);
+        return dstBuf;
+    }
+
+    // str_words(s) → split s on whitespace (isspace), skipping empty tokens → string[]
+    if (bid == BuiltinId::STR_WORDS) {
+        validateArgCount(expr, "str_words", 1);
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* strPtr = strArg->getType()->isPointerTy()
+                                  ? strArg
+                                  : builder->CreateIntToPtr(strArg, ptrTy, "sw.ptr");
+        llvm::Value* strLen = emitStringLen(strPtr, "sw.len");
+        llvm::Value* zero   = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one    = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight  = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* srcData = emitStringData(strPtr, "sw.srcdata");
+
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+
+        // ── Pass 1: count words ──────────────────────────────────────────────
+        llvm::BasicBlock* cPreBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* cLoopBB = llvm::BasicBlock::Create(*context, "sw.cnt.loop", function);
+        llvm::BasicBlock* cBodyBB = llvm::BasicBlock::Create(*context, "sw.cnt.body", function);
+        llvm::BasicBlock* cDoneBB = llvm::BasicBlock::Create(*context, "sw.cnt.done", function);
+        builder->CreateBr(cLoopBB);
+
+        builder->SetInsertPoint(cLoopBB);
+        llvm::PHINode* ci     = builder->CreatePHI(getDefaultType(), 2, "sw.ci");
+        llvm::PHINode* cnt    = builder->CreatePHI(getDefaultType(), 2, "sw.cnt");
+        llvm::PHINode* inWord = builder->CreatePHI(llvm::Type::getInt1Ty(*context), 2, "sw.inword");
+        ci->addIncoming(zero, cPreBB);
+        cnt->addIncoming(zero, cPreBB);
+        inWord->addIncoming(llvm::ConstantInt::getFalse(*context), cPreBB);
+        llvm::Value* ccond = builder->CreateICmpULT(ci, strLen, "sw.ccond");
+        builder->CreateCondBr(ccond, cBodyBB, cDoneBB);
+
+        builder->SetInsertPoint(cBodyBB);
+        llvm::Value* cCharPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context),
+                                                            srcData, ci, "sw.ccharptr");
+        auto* cChLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), cCharPtr, "sw.cch");
+        cChLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        llvm::Value* cCh32 = builder->CreateZExt(cChLoad, llvm::Type::getInt32Ty(*context), "sw.cch32", false);
+        nonNegValues_.insert(cCh32);
+        llvm::Value* cIsSpace = builder->CreateICmpNE(
+            builder->CreateCall(getOrDeclareIsspace(), {cCh32}, "sw.issp"),
+            llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "sw.isspace");
+        // inWord transitions: if !isSpace && !prevInWord → new word (cnt++)
+        llvm::Value* enterWord = builder->CreateAnd(
+            builder->CreateNot(cIsSpace, "sw.notsp"),
+            builder->CreateNot(inWord, "sw.notinw"), "sw.enter");
+        llvm::Value* newCnt = builder->CreateAdd(
+            cnt, builder->CreateZExt(enterWord, getDefaultType(), "sw.inc", false), "sw.newcnt", true, true);
+        llvm::Value* newInWord = builder->CreateNot(cIsSpace, "sw.newinword");
+        llvm::Value* nextCi = builder->CreateAdd(ci, one, "sw.nextci", true, true);
+        ci->addIncoming(nextCi, cBodyBB);
+        cnt->addIncoming(newCnt, cBodyBB);
+        inWord->addIncoming(newInWord, cBodyBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(cLoopBB)));
+
+        builder->SetInsertPoint(cDoneBB);
+        // cnt = number of words found
+
+        // Allocate result array: (cnt + 1) * 8
+        llvm::Value* resSlots = builder->CreateAdd(cnt, one, "sw.rslots", true, true);
+        llvm::Value* resBytes = builder->CreateMul(resSlots, eight, "sw.rbytes", true, true);
+        llvm::Value* arrBuf   = builder->CreateCall(getOrDeclareMalloc(), {resBytes}, "sw.arr");
+        llvm::cast<llvm::CallInst>(arrBuf)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+        builder->CreateStore(cnt, arrBuf);
+
+        // ── Pass 2: extract words ────────────────────────────────────────────
+        llvm::BasicBlock* ePreBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* eLoopBB = llvm::BasicBlock::Create(*context, "sw.ext.loop", function);
+        llvm::BasicBlock* eBodyBB = llvm::BasicBlock::Create(*context, "sw.ext.body", function);
+        llvm::BasicBlock* eDoneBB = llvm::BasicBlock::Create(*context, "sw.ext.done", function);
+        builder->CreateBr(eLoopBB);
+
+        builder->SetInsertPoint(eLoopBB);
+        llvm::PHINode* ei      = builder->CreatePHI(getDefaultType(), 2, "sw.ei");
+        llvm::PHINode* ew_idx  = builder->CreatePHI(getDefaultType(), 2, "sw.ew_idx");
+        llvm::PHINode* ew_start= builder->CreatePHI(getDefaultType(), 2, "sw.ew_start");
+        llvm::PHINode* ew_in   = builder->CreatePHI(llvm::Type::getInt1Ty(*context), 2, "sw.ew_in");
+        ei->addIncoming(zero, ePreBB);
+        ew_idx->addIncoming(zero, ePreBB);
+        ew_start->addIncoming(zero, ePreBB);
+        ew_in->addIncoming(llvm::ConstantInt::getFalse(*context), ePreBB);
+        llvm::Value* econd = builder->CreateICmpULE(ei, strLen, "sw.econd");
+        builder->CreateCondBr(econd, eBodyBB, eDoneBB);
+
+        builder->SetInsertPoint(eBodyBB);
+        llvm::Value* atEnd = builder->CreateICmpEQ(ei, strLen, "sw.atend");
+        llvm::Value* eCharPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context),
+                                                            srcData, ei, "sw.echarptr");
+        auto* eChLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), eCharPtr, "sw.ech");
+        eChLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        llvm::Value* eCh32 = builder->CreateZExt(eChLoad, llvm::Type::getInt32Ty(*context), "sw.ech32", false);
+        nonNegValues_.insert(eCh32);
+        // At end: treat as space
+        llvm::Value* eIsSpaceRaw = builder->CreateICmpNE(
+            builder->CreateCall(getOrDeclareIsspace(), {eCh32}, "sw.eissp"),
+            llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "sw.eisspace");
+        llvm::Value* eIsSpace = builder->CreateOr(eIsSpaceRaw, atEnd, "sw.eissporatend");
+        // Was in word, now at space/end → emit substring
+        llvm::Value* emitWord = builder->CreateAnd(ew_in, eIsSpace, "sw.emit");
+
+        // Word emission block
+        llvm::BasicBlock* emitBB = llvm::BasicBlock::Create(*context, "sw.emit", function);
+        llvm::BasicBlock* contBB = llvm::BasicBlock::Create(*context, "sw.cont", function);
+        builder->CreateCondBr(emitWord, emitBB, contBB);
+
+        builder->SetInsertPoint(emitBB);
+        llvm::Value* wordLen  = builder->CreateSub(ei, ew_start, "sw.wlen", false, true);
+        llvm::Value* wSrcData = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context),
+                                                            srcData, ew_start, "sw.wsrc");
+        llvm::Value* wHdr     = emitAllocString(wordLen, wordLen, "sw.whdr");
+        llvm::Value* wDst     = emitStringData(wHdr, "sw.wdst");
+        builder->CreateCall(getOrDeclareMemcpy(), {wDst, wSrcData, wordLen});
+        llvm::Value* wNul = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), wDst, wordLen, "sw.wnul");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), wNul)
+            ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        llvm::Value* wInt  = builder->CreatePtrToInt(wHdr, getDefaultType(), "sw.wint");
+        llvm::Value* wSlot = builder->CreateAdd(ew_idx, one, "sw.wslot", true, true);
+        llvm::Value* wSlotPtr = builder->CreateInBoundsGEP(getDefaultType(), arrBuf, wSlot, "sw.wslotptr");
+        builder->CreateStore(wInt, wSlotPtr);
+        llvm::Value* nextEwIdx = builder->CreateAdd(ew_idx, one, "sw.nwidx", true, true);
+        builder->CreateBr(contBB);
+
+        builder->SetInsertPoint(contBB);
+        // Update tracking state
+        llvm::PHINode* mergedIdx   = builder->CreatePHI(getDefaultType(), 2, "sw.midx");
+        mergedIdx->addIncoming(ew_idx,    eBodyBB);
+        mergedIdx->addIncoming(nextEwIdx, emitBB);
+        // New word start: if entering word (was space, now not space) → ei; else keep ew_start
+        llvm::Value* enteringWord = builder->CreateAnd(builder->CreateNot(ew_in), builder->CreateNot(eIsSpace));
+        llvm::Value* newStart = builder->CreateSelect(enteringWord, ei, ew_start, "sw.newstart");
+        llvm::Value* newIn    = builder->CreateNot(eIsSpace, "sw.newin");
+        llvm::Value* nextEi   = builder->CreateAdd(ei, one, "sw.nextei", true, true);
+        ei->addIncoming(nextEi, contBB);
+        ew_idx->addIncoming(mergedIdx, contBB);
+        ew_start->addIncoming(newStart, contBB);
+        ew_in->addIncoming(newIn, contBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(eLoopBB)));
+
+        builder->SetInsertPoint(eDoneBB);
+        return arrBuf;
+    }
+
+    // str_title(s) → title-case: first char of each word upper, rest lower
+    if (bid == BuiltinId::STR_TITLE) {
+        validateArgCount(expr, "str_title", 1);
+        // Compile-time fold
+        if (auto s = tryFoldStr(expr->arguments[0].get())) {
+            std::string result = *s;
+            bool afterSpace = true;
+            for (size_t i = 0; i < result.size(); ++i) {
+                unsigned char c = static_cast<unsigned char>(result[i]);
+                if (std::isspace(c)) { afterSpace = true; }
+                else if (afterSpace) { result[i] = static_cast<char>(std::toupper(c)); afterSpace = false; }
+                else { result[i] = static_cast<char>(std::tolower(c)); }
+            }
+            llvm::GlobalVariable* gv = internString(result.c_str());
+            stringReturningFunctions_.insert("str_title");
+            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                gv->getValueType(), gv,
+                llvm::ArrayRef<llvm::Constant*>{llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+        }
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* strPtr = strArg->getType()->isPointerTy()
+                                  ? strArg
+                                  : builder->CreateIntToPtr(strArg, ptrTy, "title.ptr");
+        llvm::Value* strLen  = emitStringLen(strPtr, "title.len");
+        llvm::Value* hdr     = emitAllocString(strLen, strLen, "title");
+        llvm::Value* dstData = emitStringData(hdr, "title.data");
+        builder->CreateCall(getOrDeclareStrcpy(), {dstData, emitStringData(strPtr, "title.srcdata")});
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "title.loop", function);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "title.body", function);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "title.done", function);
+
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+        builder->SetInsertPoint(loopBB);
+        // PHI: idx (position), afterSpace (bool: previous char was space or start-of-string)
+        llvm::PHINode* idx        = builder->CreatePHI(getDefaultType(), 2, "title.idx");
+        llvm::PHINode* afterSpace = builder->CreatePHI(llvm::Type::getInt1Ty(*context), 2, "title.aftersp");
+        idx->addIncoming(zero, preBB);
+        afterSpace->addIncoming(llvm::ConstantInt::getTrue(*context), preBB); // start of string counts as "after space"
+
+        llvm::Value* loopDone = builder->CreateICmpUGE(idx, strLen, "title.loopdone");
+        builder->CreateCondBr(loopDone, doneBB, bodyBB);
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context),
+                                                           dstData, idx, "title.charptr");
+        auto* chLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "title.ch");
+        chLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        llvm::Value* ch32 = builder->CreateZExt(chLoad, llvm::Type::getInt32Ty(*context), "title.ch32", false);
+        nonNegValues_.insert(ch32);
+        // isSpace check
+        llvm::Value* isSpaceVal = builder->CreateICmpNE(
+            builder->CreateCall(getOrDeclareIsspace(), {ch32}, "title.issp"),
+            llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "title.isspace");
+        // If afterSpace && !isSpace → toupper; else if !isSpace → tolower; else keep
+        llvm::Value* doUpper = builder->CreateAnd(afterSpace, builder->CreateNot(isSpaceVal), "title.doup");
+        llvm::Value* upper   = builder->CreateCall(getOrDeclareToupper(), {ch32}, "title.upper");
+        llvm::Value* lower   = builder->CreateCall(getOrDeclareTolower(), {ch32}, "title.lower");
+        llvm::Value* upper8  = builder->CreateTrunc(upper, llvm::Type::getInt8Ty(*context), "title.up8");
+        llvm::Value* lower8  = builder->CreateTrunc(lower, llvm::Type::getInt8Ty(*context), "title.lo8");
+        // Choose: if doUpper → upper8; if isSpace → ch (original); else → lower8
+        llvm::Value* notSpace8 = builder->CreateSelect(doUpper, upper8, lower8, "title.notsp8");
+        llvm::Value* final8    = builder->CreateSelect(isSpaceVal, chLoad, notSpace8, "title.final8");
+        auto* st = builder->CreateStore(final8, charPtr);
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+
+        llvm::Value* nextIdx       = builder->CreateAdd(idx, one, "title.next", true, true);
+        llvm::Value* nextAfterSpace = isSpaceVal; // next iteration: afterSpace = isSpace
+        idx->addIncoming(nextIdx, bodyBB);
+        afterSpace->addIncoming(nextAfterSpace, bodyBB);
+        { attachLoopMetadataVec(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB))); }
+
+        builder->SetInsertPoint(doneBB);
+        stringReturningFunctions_.insert("str_title");
+        return hdr;
+    }
+
+    // str_swapcase(s) → swap upper↔lower for each ASCII alphabetic character
+    // Uses the XOR trick: 'A'–'Z' and 'a'–'z' differ by exactly 0x20;
+    // detecting alpha with (c | 0x20) in ['a'..'z'] (unsigned range check)
+    if (bid == BuiltinId::STR_SWAPCASE) {
+        validateArgCount(expr, "str_swapcase", 1);
+        // Compile-time fold
+        if (auto s = tryFoldStr(expr->arguments[0].get())) {
+            std::string result = *s;
+            for (size_t i = 0; i < result.size(); ++i) {
+                unsigned char c = static_cast<unsigned char>(result[i]);
+                if (std::isupper(c))      result[i] = static_cast<char>(std::tolower(c));
+                else if (std::islower(c)) result[i] = static_cast<char>(std::toupper(c));
+            }
+            llvm::GlobalVariable* gv = internString(result.c_str());
+            stringReturningFunctions_.insert("str_swapcase");
+            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                gv->getValueType(), gv,
+                llvm::ArrayRef<llvm::Constant*>{llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+        }
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* strPtr = strArg->getType()->isPointerTy()
+                                  ? strArg
+                                  : builder->CreateIntToPtr(strArg, ptrTy, "swap.ptr");
+        llvm::Value* strLen  = emitStringLen(strPtr, "swap.len");
+        llvm::Value* hdr     = emitAllocString(strLen, strLen, "swap");
+        llvm::Value* dstData = emitStringData(hdr, "swap.data");
+        builder->CreateCall(getOrDeclareStrcpy(), {dstData, emitStringData(strPtr, "swap.srcdata")});
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        // Constants for alpha range check: (c | 0x20) in ['a'=97 .. 'z'=122]
+        llvm::Value* mask97  = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0x20);
+        llvm::Value* alpha_a = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 97);  // 'a'
+        llvm::Value* alpha_z = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 122); // 'z'
+        llvm::Value* xorMask = llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0x20);
+
+        emitCountingLoop("swap", strLen, zero, 4, [&](llvm::PHINode* idx, llvm::BasicBlock* loopBB) {
+            llvm::Value* charPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context),
+                                                               dstData, idx, "swap.charptr");
+            auto* chLoad = builder->CreateLoad(llvm::Type::getInt8Ty(*context), charPtr, "swap.ch");
+            chLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+            llvm::Value* ch32 = builder->CreateZExt(chLoad, llvm::Type::getInt32Ty(*context), "swap.ch32", false);
+            nonNegValues_.insert(ch32);
+            // isAlpha: (ch32 | 0x20) >= 'a' && (ch32 | 0x20) <= 'z'
+            llvm::Value* ch32Masked = builder->CreateOr(ch32, mask97, "swap.masked");
+            llvm::Value* geA = builder->CreateICmpUGE(ch32Masked, alpha_a, "swap.gea");
+            llvm::Value* leZ = builder->CreateICmpULE(ch32Masked, alpha_z, "swap.lez");
+            llvm::Value* isAlpha = builder->CreateAnd(geA, leZ, "swap.isalpha");
+            // flipped = ch ^ 0x20 (swaps case for alpha)
+            llvm::Value* flipped = builder->CreateXor(chLoad, xorMask, "swap.flipped");
+            llvm::Value* final8  = builder->CreateSelect(isAlpha, flipped, chLoad, "swap.final");
+            auto* st = builder->CreateStore(final8, charPtr);
+            st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+            llvm::Value* nextIdx = builder->CreateAdd(idx, one, "swap.next", true, true);
+            idx->addIncoming(nextIdx, builder->GetInsertBlock());
+            attachLoopMetadataVec(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+        });
+        stringReturningFunctions_.insert("str_swapcase");
+        return hdr;
+    }
+
+    // ── End Round-74 builtins ────────────────────────────────────────────────
     if (bid == BuiltinId::ASSERT) {
         validateArgCount(expr, "assert", 1);
         llvm::Value* condVal = generateExpression(expr->arguments[0].get());

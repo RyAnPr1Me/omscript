@@ -3835,7 +3835,8 @@ isPreAnalysisArrayExpr(Expression* expr, const llvm::StringSet<>& arrayReturning
         // Known array-returning builtins
         static const std::unordered_set<std::string> arrayBuiltins = {
             "array_fill", "array_concat", "array_copy", "array_map", "array_filter", "array_slice", "sort",
-            "reverse",    "str_split",    "str_chars",  "push",      "pop",          "unshift",     "array_remove"};
+            "reverse",    "str_split",    "str_chars",  "push",      "pop",          "unshift",     "array_remove",
+            "array_sorted", "array_reverse"};
         if (arrayBuiltins.count(call->callee))
             return true;
         if (arrayReturningFunctions.count(call->callee))
@@ -4040,12 +4041,15 @@ bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
     // str_split() always returns an array of strings.
     if (expr->type == ASTNodeType::CALL_EXPR) {
         auto* call = static_cast<CallExpr*>(expr);
-        if (call->callee == "str_split")
+        if (call->callee == "str_split" || call->callee == "str_words")
             return true;
         if ((call->callee == "push" || call->callee == "unshift" || call->callee == "array_copy") &&
             !call->arguments.empty())
             return isStringArrayExpr(call->arguments[0].get());
         if (call->callee == "array_concat" && !call->arguments.empty())
+            return isStringArrayExpr(call->arguments[0].get());
+        if ((call->callee == "array_sorted" || call->callee == "array_reverse") &&
+            !call->arguments.empty())
             return isStringArrayExpr(call->arguments[0].get());
         return false;
     }
