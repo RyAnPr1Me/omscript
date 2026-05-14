@@ -924,6 +924,7 @@ ptest_program "examples/global_str_array_test.om" 11
 ptest_program "examples/switch_string_return_test.om" 7
 ptest_program "examples/struct_static_call_test.om" 11
 ptest_program "examples/top_const_test.om" 10
+ptest_program "examples/paren_free_test.om" 12
 flush_ptests
 
 echo ""

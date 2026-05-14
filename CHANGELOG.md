@@ -9,7 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Round-69: `Struct::method(args)` static-call syntax, top-level `const`, and bool comparison fix** (`src/parser.cpp`, `src/codegen_expr.cpp`):
+- **Round-70: Paren-free control flow** (`src/parser.cpp`):
+  - `if COND { }` — parentheses around the condition are now optional. Both `if (x > 0) { }` and `if x > 0 { }` are accepted. Same for `elif`.
+  - `while COND { }` — parentheses around the condition are now optional.
+  - `for x in expr { }` — paren-free for-each over arrays and strings (sugar for `foreach x in expr`). `for idx, x in expr { }` (indexed form) also works paren-free.
+  - `for i in start..end { }` — paren-free half-open (exclusive) integer range. Equivalent to the existing `for (i in start...end)`.
+  - `for i in start..=end { }` — paren-free *inclusive* range. Desugars to `for (i in start...end+1)`. The `step` keyword continues to work after either range form.
+  - All existing paren-based syntax continues to work without change.
+  - `examples/paren_free_test.om` — 12 tests covering: paren-free `if`, `if/else`, `elif`, `while`, `while`+`break`, `for-in` array, `for-in` string array, `..` range, `..=` inclusive range, `step`, nested control flow, and indexed `for idx, v in arr`.
+
+
   - **Static struct method calls**: `Counter::new(start, step)` — calling a function declared as `fn Counter::method(...)` via the `Struct::method(args)` call site — was rejected with "Unknown namespace 'Counter'" because the parser treated the left side of `::` as an imported-file namespace. Fix: before the "Unknown namespace" hard error, the parser checks if `segments[0]` is in `structNames_`. If so, it constructs the fully-qualified callee name (e.g. `"Counter::new"`) and emits a `CallExpr` directly. Spread args (`...arr`) are forwarded correctly.
   - **Top-level `const`**: Bare `const NAME [: TYPE] = VALUE;` at program scope was rejected with "Expected 'fn'". It is now accepted as a shorthand for `global const NAME [: TYPE] = VALUE;`.
   - **Bool `i1` zero-extension in comparisons**: When a `bool` variable (LLVM `i1` type) was compared with a non-i1 integer (e.g. `flag == true`), the `i1 1` was *sign-extended* to `i64 -1` causing `-1 == 1 = false`. Fix: the "Normalize integer widths" section in `generateBinaryExpr` now treats `i1` operands as unsigned (zero-extends them), consistent with `toDefaultType()`.

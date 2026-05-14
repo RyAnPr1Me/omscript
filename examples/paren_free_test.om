@@ -1,0 +1,130 @@
+import std;
+
+// Round-70: paren-free control flow
+// Tests: if/elif/else, while, for-in array, for-in range (.. and ..=)
+// Each test returns 1 for pass; main counts passes and returns the count.
+
+fn test_paren_free_if() -> int {
+    var x: int = 7;
+    if x > 5 {
+        return 1;
+    }
+    return 0;
+}
+
+fn test_paren_free_if_else() -> int {
+    var x: int = 3;
+    if x > 5 {
+        return 0;
+    } else {
+        return 1;
+    }
+}
+
+fn test_paren_free_elif() -> int {
+    var x: int = 5;
+    if x > 10 {
+        return 0;
+    } elif x == 5 {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+fn test_paren_free_while() -> int {
+    var n: int = 10;
+    while n > 0 {
+        n -= 1;
+    }
+    return n == 0;
+}
+
+fn test_paren_free_while_break() -> int {
+    var n: int = 100;
+    while n > 0 {
+        n -= 1;
+        if n == 42 { break; }
+    }
+    return n == 42;
+}
+
+fn test_paren_free_for_array() -> int {
+    var arr: int[] = [1, 2, 3, 4, 5];
+    var sum: int = 0;
+    for v in arr {
+        sum += v;
+    }
+    return sum == 15;
+}
+
+fn test_paren_free_for_string() -> int {
+    var words: string[] = ["hello", "world"];
+    var count: int = 0;
+    for w in words {
+        count += len(w);
+    }
+    return count == 10;  // 5 + 5
+}
+
+fn test_paren_free_for_range() -> int {
+    var sum: int = 0;
+    for i in 1..5 {
+        sum += i;
+    }
+    return sum == 10;  // 1+2+3+4
+}
+
+fn test_paren_free_for_range_inclusive() -> int {
+    var sum: int = 0;
+    for i in 1..=5 {
+        sum += i;
+    }
+    return sum == 15;  // 1+2+3+4+5
+}
+
+fn test_paren_free_for_range_step() -> int {
+    var sum: int = 0;
+    for i in 0..10 step 2 {
+        sum += i;
+    }
+    return sum == 20;  // 0+2+4+6+8
+}
+
+fn test_nested_paren_free() -> int {
+    var result: int = 0;
+    for i in 1..4 {
+        if i % 2 == 0 {
+            result += i;
+        }
+    }
+    return result == 2;  // only i=2 is even in 1..4
+}
+
+fn test_paren_free_for_indexed() -> int {
+    var arr: int[] = [10, 20, 30];
+    var last_idx: int = 0;
+    var last_val: int = 0;
+    for idx, v in arr {
+        last_idx = idx;
+        last_val = v;
+    }
+    return last_idx == 2 && last_val == 30;
+}
+
+fn main() -> int {
+    var pass: int = 0;
+    pass += test_paren_free_if();
+    pass += test_paren_free_if_else();
+    pass += test_paren_free_elif();
+    pass += test_paren_free_while();
+    pass += test_paren_free_while_break();
+    pass += test_paren_free_for_array();
+    pass += test_paren_free_for_string();
+    pass += test_paren_free_for_range();
+    pass += test_paren_free_for_range_inclusive();
+    pass += test_paren_free_for_range_step();
+    pass += test_nested_paren_free();
+    pass += test_paren_free_for_indexed();
+    return pass;
+}

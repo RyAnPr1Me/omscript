@@ -3068,9 +3068,11 @@ std::unique_ptr<VarDecl> Parser::parseGlobalDecl() {
 }
 
 std::unique_ptr<Statement> Parser::parseIfStmt() {
-    consume(TokenType::LPAREN, "Expected '(' after 'if'");
+    // Allow optional parentheses: `if (cond) { }` and `if cond { }` both work.
+    const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
-    consume(TokenType::RPAREN, "Expected ')' after condition");
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after condition");
 
     auto thenBranch = parseStatement();
     std::unique_ptr<Statement> elseBranch = nullptr;
@@ -3089,9 +3091,11 @@ std::unique_ptr<Statement> Parser::parseIfStmt() {
 }
 
 std::unique_ptr<Statement> Parser::parseWhileStmt() {
-    consume(TokenType::LPAREN, "Expected '(' after 'while'");
+    // Allow optional parentheses: `while (cond) { }` and `while cond { }` both work.
+    const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
-    consume(TokenType::RPAREN, "Expected ')' after condition");
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after condition");
 
     LoopConfig loopHints;
     if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
@@ -3139,7 +3143,13 @@ std::unique_ptr<Statement> Parser::parseDoWhileStmt() {
 }
 
 std::unique_ptr<Statement> Parser::parseForStmt() {
-    consume(TokenType::LPAREN, "Expected '(' after 'for'");
+    // Allow optional parentheses: `for (var in ...)` and `for var in ...` both work.
+    // Also support:
+    //   for x in arr { }           -- paren-free for-each over array/string
+    //   for i in start..end { }    -- paren-free half-open range (exclusive end)
+    //   for i in start..=end { }   -- paren-free inclusive range
+    //   for i in start...end { }   -- classic OmScript range (exclusive, parens optional)
+    const bool hasParen = match(TokenType::LPAREN);
 
     // Parse: for (var in start...end) or for (var in start...end...step)
     //    or: for (var in collection)  -- for-each over array
@@ -3151,7 +3161,8 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         const Token itemName = consume(TokenType::IDENTIFIER, "Expected item variable after ',' in for");
         consume(TokenType::IN, "Expected 'in' after for variables");
         auto collection = parseExpression();
-        consume(TokenType::RPAREN, "Expected ')' after for-each collection");
+        if (hasParen)
+            consume(TokenType::RPAREN, "Expected ')' after for-each collection");
         auto body = parseStatement();
 
         // Desugar to: { var __arr = collection; for (idx in 0...len(__arr)) { var item = __arr[idx]; body } }
@@ -3206,6 +3217,35 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
 
     auto firstExpr = parseExpression();
 
+    // `..=` inclusive range: for i in start..=end  => for (i in start...end+1)
+    // Peek ahead to detect `..=` before consuming anything.
+    if (check(TokenType::DOT_DOT) && peek(1).type == TokenType::ASSIGN) {
+        advance(); // consume '..'
+        advance(); // consume '='
+        auto endExpr = parseExpression();
+        // Desugar: end+1
+        auto one = std::make_unique<LiteralExpr>(static_cast<long long>(1));
+        auto endPlusOne = std::make_unique<BinaryExpr>("+", std::move(endExpr), std::move(one));
+
+        std::unique_ptr<Expression> step = nullptr;
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "step") {
+            advance(); // consume 'step'
+            step = parseExpression();
+        }
+        if (hasParen)
+            consume(TokenType::RPAREN, "Expected ')' after for range");
+        LoopConfig loopHints;
+        if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
+            advance(); advance();
+            loopHints = parseLoopAnnotation();
+        }
+        auto body = parseStatement();
+        auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(endPlusOne),
+                                                 std::move(step), std::move(body), iteratorType);
+        forStmt->loopHints = loopHints;
+        return forStmt;
+    }
+
     // If next token is '...' or '..', this is a range-based for loop
     if (match(TokenType::RANGE) || match(TokenType::DOT_DOT)) {
         auto end = parseExpression();
@@ -3219,7 +3259,8 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
             step = parseExpression();
         }
 
-        consume(TokenType::RPAREN, "Expected ')' after for range");
+        if (hasParen)
+            consume(TokenType::RPAREN, "Expected ')' after for range");
         LoopConfig loopHints;
         if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
             advance(); // @
@@ -3244,7 +3285,8 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
             auto stepExpr = parseExpression();
             // The step is positive in user syntax, we negate it for downto
             // Desugar to: for (i in start...end...-step)
-            consume(TokenType::RPAREN, "Expected ')' after for downto range");
+            if (hasParen)
+                consume(TokenType::RPAREN, "Expected ')' after for downto range");
             LoopConfig loopHints;
             if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
                 advance(); // @
@@ -3259,7 +3301,8 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
             return forStmt;
         }
 
-        consume(TokenType::RPAREN, "Expected ')' after for downto range");
+        if (hasParen)
+            consume(TokenType::RPAREN, "Expected ')' after for downto range");
         LoopConfig loopHints;
         if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
             advance(); // @
@@ -3275,7 +3318,8 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
     }
 
     // Otherwise this is a for-each loop: for (var in collection)
-    consume(TokenType::RPAREN, "Expected ')' after for-each collection");
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after for-each collection");
     auto body = parseStatement();
     return std::make_unique<ForEachStmt>(varName.lexeme, std::move(firstExpr), std::move(body));
 }
@@ -3656,9 +3700,11 @@ std::unique_ptr<Statement> Parser::parseForEachStmt() {
 // elif (condition) { ... } [elif (...) { ... }] [else { ... }]
 // Desugars to: if (condition) { ... } [else if (...) { ... }] [else { ... }]
 std::unique_ptr<Statement> Parser::parseElifStmt() {
-    consume(TokenType::LPAREN, "Expected '(' after 'elif'");
+    // Allow optional parentheses: `elif (cond)` and `elif cond` both work.
+    const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
-    consume(TokenType::RPAREN, "Expected ')' after elif condition");
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after elif condition");
 
     auto thenBranch = parseStatement();
     std::unique_ptr<Statement> elseBranch = nullptr;
