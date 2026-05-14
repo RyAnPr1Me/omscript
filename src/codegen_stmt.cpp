@@ -253,6 +253,26 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 }
             }
             initValue = generateExpression(stmt->initializer.get());
+            // Fix: if this is a funcptr variable and the initializer is a string
+            // literal (from a lambda desugaring, e.g. |x| x*2 → "__lambda_0"),
+            // resolve the string name to the actual LLVM Function* so that the
+            // variable holds a callable function pointer rather than a data pointer.
+            // Use stmt->typeName directly since funcptrVarNames_ is populated later.
+            if (stmt->typeName == "funcptr" && initValue &&
+                stmt->initializer->type == ASTNodeType::LITERAL_EXPR) {
+                auto* lit = static_cast<LiteralExpr*>(stmt->initializer.get());
+                if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+                    const std::string& fnName = lit->stringValue;
+                    llvm::Function* targetFn = module->getFunction(fnName);
+                    if (!targetFn && functionDecls_.count(fnName)) {
+                        llvm::FunctionType* fty =
+                            llvm::FunctionType::get(getDefaultType(), /*Params=*/{}, /*isVarArg=*/false);
+                        targetFn = llvm::Function::Create(fty, llvm::Function::ExternalLinkage, fnName, module.get());
+                    }
+                    if (targetFn)
+                        initValue = targetFn;
+                }
+            }
             if (useReadOnlyGlobal) {
                 pendingArrayReadOnlyGlobal_ = false;
                 readOnlyGlobalArrays_.insert(stmt->name);
@@ -275,7 +295,8 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         // fat-pointer layout ([ len | cap | data... ]) we cannot use strdup
         // (which interprets the header bytes as a C string).  Instead allocate
         // a new fat-pointer block and memcpy the data.
-        if (!stmt->isConst && stmt->initializer->type == ASTNodeType::LITERAL_EXPR &&
+        if (!stmt->isConst && stmt->typeName != "funcptr" &&
+            stmt->initializer->type == ASTNodeType::LITERAL_EXPR &&
             static_cast<LiteralExpr*>(stmt->initializer.get())->literalType == LiteralExpr::LiteralType::STRING) {
             if (doesVarHaveOnlyReadOnlyUses(stmt->name)) {
                 // Static: use the literal pointer directly — no allocation.

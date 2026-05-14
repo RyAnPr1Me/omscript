@@ -3362,9 +3362,11 @@ std::unique_ptr<Statement> Parser::parseLabelStmt() {
 }
 
 std::unique_ptr<Statement> Parser::parseSwitchStmt() {
-    consume(TokenType::LPAREN, "Expected '(' after 'switch'");
+    // Paren-free form: switch x { ... }  (same as if/while/for Round-70)
+    const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
-    consume(TokenType::RPAREN, "Expected ')' after switch condition");
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after switch condition");
     consume(TokenType::LBRACE, "Expected '{' after switch condition");
 
     std::vector<SwitchCase> cases;
@@ -3570,9 +3572,11 @@ std::unique_ptr<Statement> Parser::parseGuardStmt() {
 // when (expr) { val1 => { stmts }, val2, val3 => { stmts }, _ => { stmts } }
 // Desugars to a switch statement with fat-arrow syntax
 std::unique_ptr<Statement> Parser::parseWhenStmt() {
-    consume(TokenType::LPAREN, "Expected '(' after 'when'");
+    // Paren-free form: when x { ... }  (same as if/while/for Round-70)
+    const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
-    consume(TokenType::RPAREN, "Expected ')' after when expression");
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after when expression");
     consume(TokenType::LBRACE, "Expected '{' after when expression");
 
     std::vector<SwitchCase> cases;
@@ -6186,6 +6190,13 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             advance(); // consume ':'
             advance(); // consume type name
         }
+        // Single-parameter arrow lambda without parentheses: x => expr
+        // Only trigger when '=>' immediately follows the identifier (no type
+        // annotation consumed above) to avoid ambiguity with ternary / when arms.
+        if (check(TokenType::FAT_ARROW)) {
+            const Token arrowTok = advance(); // consume '=>'
+            return parseArrowLambda({token.lexeme}, {"i64"}, arrowTok);
+        }
         return expr;
     }
 
@@ -6197,6 +6208,41 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         expr->line = token.line;
         expr->column = token.column;
         return expr;
+    }
+
+    // Switch expression: switch(cond) { case v: expr, default: expr }
+    // Also supports paren-free form: switch cond { ... }
+    // Desugared at parse time to an IIFE call (see parseSwitchExpr).
+    if (check(TokenType::SWITCH)) {
+        advance(); // consume 'switch'
+        return parseSwitchExpr();
+    }
+
+    // Arrow lambda: (params) => expr  or  () => expr
+    // Detected via look-ahead: LPAREN...RPAREN FAT_ARROW
+    if (isArrowLambdaParens()) {
+        const Token lpTok = tokens[current]; // '(' not yet consumed
+        advance(); // consume '('
+
+        std::vector<std::string> params;
+        std::vector<std::string> paramTypes;
+
+        if (!check(TokenType::RPAREN)) {
+            // Parse comma-separated  name[:type]  entries
+            do {
+                if (check(TokenType::RPAREN))
+                    break; // trailing comma
+                const Token pname = consume(TokenType::IDENTIFIER, "Expected parameter name in arrow lambda");
+                std::string ptype = "i64"; // default
+                if (match(TokenType::COLON))
+                    ptype = parseTypeAnnotation();
+                params.push_back(pname.lexeme);
+                paramTypes.push_back(ptype);
+            } while (match(TokenType::COMMA));
+        }
+        consume(TokenType::RPAREN, "Expected ')' after arrow lambda parameters");
+        const Token arrowTok = consume(TokenType::FAT_ARROW, "Expected '=>' in arrow lambda");
+        return parseArrowLambda(params, paramTypes, arrowTok);
     }
 
     if (match(TokenType::LPAREN)) {
@@ -6332,10 +6378,12 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         fnDecl->column = orToken.column;
         lambdaFunctions_.push_back(std::move(fnDecl));
 
-        auto nameLit = std::make_unique<LiteralExpr>(lambdaName);
-        nameLit->line = orToken.line;
-        nameLit->column = orToken.column;
-        return nameLit;
+        // Return the lambda name as an identifier (generates LLVM Function* in codegen,
+        // works for both funcptr stores and array_map/filter/reduce via extractFnName).
+        auto nameId = std::make_unique<IdentifierExpr>(lambdaName);
+        nameId->line = orToken.line;
+        nameId->column = orToken.column;
+        return nameId;
     }
 
     error("Expected expression");
@@ -6438,11 +6486,184 @@ std::unique_ptr<Expression> Parser::parseLambda() {
 
     lambdaFunctions_.push_back(std::move(fnDecl));
 
-    // Return the lambda name as a string literal (for use with array_map, etc.)
-    auto nameLit = std::make_unique<LiteralExpr>(lambdaName);
-    nameLit->line = pipeToken.line;
-    nameLit->column = pipeToken.column;
-    return nameLit;
+    // Return the lambda name as an identifier (generates LLVM Function* in codegen,
+    // works for both funcptr stores and array_map/filter/reduce via extractFnName).
+    auto nameId = std::make_unique<IdentifierExpr>(lambdaName);
+    nameId->line = pipeToken.line;
+    nameId->column = pipeToken.column;
+    return nameId;
+}
+
+// ── isArrowLambdaParens ──────────────────────────────────────────────────────
+// Look-ahead predicate: returns true when tokens[current] is '(' and the
+// matching ')' is immediately followed by '=>' (FAT_ARROW).
+// Used in parsePrimary to disambiguate  (expr)  from  (params) => body .
+bool Parser::isArrowLambdaParens() const {
+    if (tokens[current].type != TokenType::LPAREN)
+        return false;
+    size_t pos = current + 1; // first token inside the '('
+    int depth = 1;
+    while (pos < tokens.size() && depth > 0) {
+        if (tokens[pos].type == TokenType::LPAREN)
+            ++depth;
+        else if (tokens[pos].type == TokenType::RPAREN)
+            --depth;
+        ++pos;
+    }
+    // pos now points to the token immediately after the closing ')'
+    return pos < tokens.size() && tokens[pos].type == TokenType::FAT_ARROW;
+}
+
+// ── parseArrowLambda ─────────────────────────────────────────────────────────
+// Shared desugar helper: given an already-collected param name / type list
+// and the source location token, parse the body expression (after '=>') and
+// emit an anonymous named function + return its name as a string literal
+// (identical to parseLambda desugar so array_map etc. continue to work).
+std::unique_ptr<Expression> Parser::parseArrowLambda(const std::vector<std::string>& params,
+                                                      const std::vector<std::string>& paramTypes,
+                                                      const Token& arrowTok) {
+    // Body: the expression after '=>'
+    auto body = parseExpression();
+
+    // Desugar: generate a named function and return its name as a string literal
+    const std::string lambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
+
+    std::vector<Parameter> fnParams;
+    for (size_t i = 0; i < params.size(); ++i) {
+        Parameter p(params[i]);
+        p.typeName = (i < paramTypes.size() && !paramTypes[i].empty()) ? paramTypes[i] : "i64";
+        fnParams.push_back(std::move(p));
+    }
+    auto returnStmt = std::make_unique<ReturnStmt>(std::move(body));
+    returnStmt->line = arrowTok.line;
+    returnStmt->column = arrowTok.column;
+    std::vector<std::unique_ptr<Statement>> stmts;
+    stmts.push_back(std::move(returnStmt));
+    auto block = std::make_unique<BlockStmt>(std::move(stmts));
+    block->line = arrowTok.line;
+    block->column = arrowTok.column;
+    auto fnDecl =
+        std::make_unique<FunctionDecl>(lambdaName, std::vector<std::string>{}, std::move(fnParams), std::move(block));
+    fnDecl->line = arrowTok.line;
+    fnDecl->column = arrowTok.column;
+    lambdaFunctions_.push_back(std::move(fnDecl));
+
+    // Return the lambda name as an identifier (generates LLVM Function* in codegen,
+    // works for both funcptr stores and array_map/filter/reduce via extractFnName).
+    auto nameId = std::make_unique<IdentifierExpr>(lambdaName);
+    nameId->line = arrowTok.line;
+    nameId->column = arrowTok.column;
+    return nameId;
+}
+
+// ── parseSwitchExpr ──────────────────────────────────────────────────────────
+// switch(cond) { case v: expr, case v2, v3: expr, default: expr }
+//
+// Desugars at parse time to an IIFE: a helper function __switch_N(__sw: i64)
+// is generated with a proper switch statement where each arm returns the
+// corresponding expression.  The call __switch_N(cond) is returned.
+// This strategy cleanly handles side-effectful conditions and is optimised
+// by LLVM (the call is inlined and the switch statement is lowered).
+std::unique_ptr<Expression> Parser::parseSwitchExpr() {
+    const Token kw = tokens[current - 1]; // the 'switch' token
+
+    // Optional parens — paren-free or paren form both accepted.
+    const bool hasParen = match(TokenType::LPAREN);
+    auto condition = parseExpression();
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after switch expression condition");
+    consume(TokenType::LBRACE, "Expected '{' after switch expression condition");
+
+    const std::string switchName = "__switch_" + std::to_string(lambdaCounter_++);
+    const std::string paramName  = "__sw";
+
+    std::vector<SwitchCase> cases;
+    bool hasDefault = false;
+
+    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        if (match(TokenType::CASE)) {
+            // One or more comma-separated values followed by ':'
+            std::vector<std::unique_ptr<Expression>> caseValues;
+            caseValues.push_back(parseExpression());
+            while (match(TokenType::COMMA)) {
+                if (check(TokenType::COLON))
+                    break; // trailing comma before ':'
+                caseValues.push_back(parseExpression());
+            }
+            consume(TokenType::COLON, "Expected ':' after case value(s) in switch expression");
+            auto resultExpr = parseExpression();
+            auto retStmt    = std::make_unique<ReturnStmt>(std::move(resultExpr));
+            retStmt->line   = kw.line;
+            retStmt->column = kw.column;
+            std::vector<std::unique_ptr<Statement>> bodyStmts;
+            bodyStmts.push_back(std::move(retStmt));
+            cases.emplace_back(std::move(caseValues), std::move(bodyStmts), false);
+            match(TokenType::COMMA); // optional trailing comma between arms
+        } else if (match(TokenType::DEFAULT)) {
+            if (hasDefault)
+                error("Duplicate default case in switch expression");
+            hasDefault = true;
+            consume(TokenType::COLON, "Expected ':' after 'default' in switch expression");
+            auto resultExpr = parseExpression();
+            auto retStmt    = std::make_unique<ReturnStmt>(std::move(resultExpr));
+            retStmt->line   = kw.line;
+            retStmt->column = kw.column;
+            std::vector<std::unique_ptr<Statement>> bodyStmts;
+            bodyStmts.push_back(std::move(retStmt));
+            cases.emplace_back(std::vector<std::unique_ptr<Expression>>{}, std::move(bodyStmts), true);
+            match(TokenType::COMMA); // optional trailing comma
+        } else {
+            error("Expected 'case' or 'default' in switch expression");
+        }
+    }
+    consume(TokenType::RBRACE, "Expected '}' after switch expression body");
+
+    // Ensure there is always a default arm (return 0 if unspecified).
+    if (!hasDefault) {
+        auto zeroLit    = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+        zeroLit->line   = kw.line;
+        zeroLit->column = kw.column;
+        auto retStmt    = std::make_unique<ReturnStmt>(std::move(zeroLit));
+        retStmt->line   = kw.line;
+        retStmt->column = kw.column;
+        std::vector<std::unique_ptr<Statement>> bodyStmts;
+        bodyStmts.push_back(std::move(retStmt));
+        cases.emplace_back(std::vector<std::unique_ptr<Expression>>{}, std::move(bodyStmts), true);
+    }
+
+    // Build switch statement: switch(__sw) { case ... }
+    auto swCond = std::make_unique<IdentifierExpr>(paramName);
+    swCond->line   = kw.line;
+    swCond->column = kw.column;
+    auto switchStmt = std::make_unique<SwitchStmt>(std::move(swCond), std::move(cases));
+    switchStmt->line   = kw.line;
+    switchStmt->column = kw.column;
+
+    // Wrap in an IIFE function: fn __switch_N(__sw: i64) { switch(__sw) { ... } }
+    std::vector<std::unique_ptr<Statement>> fnBodyStmts;
+    fnBodyStmts.push_back(std::move(switchStmt));
+    auto fnBlock    = std::make_unique<BlockStmt>(std::move(fnBodyStmts));
+    fnBlock->line   = kw.line;
+    fnBlock->column = kw.column;
+
+    std::vector<Parameter> fnParams;
+    Parameter p(paramName);
+    p.typeName = "i64";
+    fnParams.push_back(std::move(p));
+
+    auto fnDecl = std::make_unique<FunctionDecl>(switchName, std::vector<std::string>{}, std::move(fnParams),
+                                                 std::move(fnBlock));
+    fnDecl->line   = kw.line;
+    fnDecl->column = kw.column;
+    lambdaFunctions_.push_back(std::move(fnDecl));
+
+    // Return the call: __switch_N(condition)
+    std::vector<std::unique_ptr<Expression>> callArgs;
+    callArgs.push_back(std::move(condition));
+    auto callExpr    = std::make_unique<CallExpr>(switchName, std::move(callArgs));
+    callExpr->line   = kw.line;
+    callExpr->column = kw.column;
+    return callExpr;
 }
 
 OptMaxConfig Parser::parseOptMaxConfig() {

@@ -276,7 +276,14 @@ class Parser {
     std::unique_ptr<Expression> parsePrimary();
     std::unique_ptr<Expression> parseArrayLiteral();
     std::unique_ptr<Expression> parseLambda();
+    std::unique_ptr<Expression> parseArrowLambda(const std::vector<std::string>& params,
+                                                  const std::vector<std::string>& paramTypes, const Token& arrowTok);
+    std::unique_ptr<Expression> parseSwitchExpr();
     std::unique_ptr<Expression> parsePipe();
+
+    /// Returns true when the current token is '(' and the matching ')'
+    /// is immediately followed by '=>' (FAT_ARROW) — indicating an arrow lambda.
+    bool isArrowLambdaParens() const;
 
     /// Parse a type annotation (e.g. "int", "int[]", "string[][]", "Point").
     std::string parseTypeAnnotation();

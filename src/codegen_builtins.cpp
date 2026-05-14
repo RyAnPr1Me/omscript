@@ -558,6 +558,24 @@ void CodeGenerator::validateArgCount(const CallExpr* expr, const std::string& fu
     }
 }
 
+// ── extractFnName ──────────────────────────────────────────────────────────
+// Extract a function name from an expression that is either:
+//   - LiteralExpr(STRING)  — the traditional lambda-as-string form
+//   - IdentifierExpr       — the modern lambda-as-identifier form (IdentifierExpr)
+// Returns an empty string if the expression does not name a function.
+static std::string extractFnName(const Expression* arg) {
+    if (!arg)
+        return "";
+    if (arg->type == ASTNodeType::LITERAL_EXPR) {
+        const auto* lit = static_cast<const LiteralExpr*>(arg);
+        if (lit->literalType == LiteralExpr::LiteralType::STRING)
+            return lit->stringValue;
+    } else if (arg->type == ASTNodeType::IDENTIFIER_EXPR) {
+        return static_cast<const IdentifierExpr*>(arg)->name;
+    }
+    return "";
+}
+
 llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // O(1) hash map lookup replaces the previous linear chain of ~80
     const BuiltinId bid = lookupBuiltin(expr->callee);
@@ -4609,12 +4627,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::ARRAY_MAP) {
         validateArgCount(expr, "array_map", 2);
-        // The second argument must be a string literal (function name)
-        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
-        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
-            codegenError("array_map: second argument must be a string literal (function name)", expr);
+        // The second argument must be a function name (string literal or identifier)
+        const std::string fnName = extractFnName(expr->arguments[1].get());
+        if (fnName.empty()) {
+            codegenError("array_map: second argument must be a function name (string literal or identifier)", expr);
         }
-        const std::string fnName = fnNameLit->stringValue;
         // Look up the target function in the LLVM module
         auto calleeIt = functions.find(fnName);
         if (calleeIt == functions.end() || !calleeIt->second) {
@@ -4663,11 +4680,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::ARRAY_FILTER) {
         validateArgCount(expr, "array_filter", 2);
-        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
-        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
-            codegenError("array_filter: second argument must be a string literal (function name)", expr);
+        const std::string fnName = extractFnName(expr->arguments[1].get());
+        if (fnName.empty()) {
+            codegenError("array_filter: second argument must be a function name (string literal or identifier)", expr);
         }
-        const std::string fnName = fnNameLit->stringValue;
         auto calleeIt = functions.find(fnName);
         if (calleeIt == functions.end() || !calleeIt->second) {
             codegenError("array_filter: unknown function '" + fnName + "'", expr);
@@ -4761,11 +4777,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::ARRAY_REDUCE) {
         validateArgCount(expr, "array_reduce", 3);
-        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
-        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
-            codegenError("array_reduce: second argument must be a string literal (function name)", expr);
+        const std::string fnName = extractFnName(expr->arguments[1].get());
+        if (fnName.empty()) {
+            codegenError("array_reduce: second argument must be a function name (string literal or identifier)", expr);
         }
-        std::string fnName = fnNameLit->stringValue;
         auto calleeIt = functions.find(fnName);
         if (calleeIt == functions.end() || !calleeIt->second) {
             codegenError("array_reduce: unknown function '" + fnName + "'", expr);
@@ -5022,11 +5037,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::ARRAY_ANY) {
         validateArgCount(expr, "array_any", 2);
-        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
-        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
-            codegenError("array_any: second argument must be a string literal (function name)", expr);
+        const std::string fnName = extractFnName(expr->arguments[1].get());
+        if (fnName.empty()) {
+            codegenError("array_any: second argument must be a function name (string literal or identifier)", expr);
         }
-        std::string fnName = fnNameLit->stringValue;
         auto calleeIt = functions.find(fnName);
         if (calleeIt == functions.end() || !calleeIt->second) {
             codegenError("array_any: unknown function '" + fnName + "'", expr);
@@ -5092,11 +5106,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::ARRAY_EVERY) {
         validateArgCount(expr, "array_every", 2);
-        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
-        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
-            codegenError("array_every: second argument must be a string literal (function name)", expr);
+        const std::string fnName = extractFnName(expr->arguments[1].get());
+        if (fnName.empty()) {
+            codegenError("array_every: second argument must be a function name (string literal or identifier)", expr);
         }
-        std::string fnName = fnNameLit->stringValue;
         auto calleeIt = functions.find(fnName);
         if (calleeIt == functions.end() || !calleeIt->second) {
             codegenError("array_every: unknown function '" + fnName + "'", expr);
@@ -5230,11 +5243,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::ARRAY_COUNT) {
         validateArgCount(expr, "array_count", 2);
-        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
-        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING) {
-            codegenError("array_count: second argument must be a string literal (function name)", expr);
+        const std::string fnName = extractFnName(expr->arguments[1].get());
+        if (fnName.empty()) {
+            codegenError("array_count: second argument must be a function name (string literal or identifier)", expr);
         }
-        std::string fnName = fnNameLit->stringValue;
         auto calleeIt = functions.find(fnName);
         if (calleeIt == functions.end() || !calleeIt->second) {
             codegenError("array_count: unknown function '" + fnName + "'", expr);
@@ -7443,10 +7455,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::STR_FILTER) {
         validateArgCount(expr, "str_filter", 2);
-        auto* fnNameLit = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
-        if (!fnNameLit || fnNameLit->literalType != LiteralExpr::LiteralType::STRING)
-            codegenError("str_filter: second argument must be a function name (string literal)", expr);
-        const std::string fnName = fnNameLit->stringValue;
+        const std::string fnName = extractFnName(expr->arguments[1].get());
+        if (fnName.empty())
+            codegenError("str_filter: second argument must be a function name (string literal or identifier)", expr);
         auto calleeIt = functions.find(fnName);
         if (calleeIt == functions.end() || !calleeIt->second)
             codegenError("str_filter: unknown function '" + fnName + "'", expr);
@@ -7528,10 +7539,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::MAP_FILTER) {
         validateArgCount(expr, "map_filter", 2);
-        auto* fnNameLit2 = dynamic_cast<LiteralExpr*>(expr->arguments[1].get());
-        if (!fnNameLit2 || fnNameLit2->literalType != LiteralExpr::LiteralType::STRING)
-            codegenError("map_filter: second argument must be a function name (string literal)", expr);
-        const std::string mfFnName = fnNameLit2->stringValue;
+        const std::string mfFnName = extractFnName(expr->arguments[1].get());
+        if (mfFnName.empty())
+            codegenError("map_filter: second argument must be a function name (string literal or identifier)", expr);
         auto mfCalleeIt = functions.find(mfFnName);
         if (mfCalleeIt == functions.end() || !mfCalleeIt->second)
             codegenError("map_filter: unknown function '" + mfFnName + "'", expr);

@@ -9,7 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Round-70: Paren-free control flow** (`src/parser.cpp`):
+- **Round-71: Arrow lambdas, switch expression, paren-free when/switch** (`src/parser.cpp`, `src/codegen_builtins.cpp`, `src/codegen_stmt.cpp`):
+  - **Arrow lambda syntax**: `(x: T, y: T) => expr` and `x => expr` and `() => expr` are now accepted as alternative lambda syntax alongside the existing `|x: T| expr` form. All forms desugar identically to a named `__lambda_N` function.
+  - **Lambda→funcptr fix**: `var f: fn(int)->int = |x: int| x * 2;` followed by `f(5)` no longer segfaults. Lambdas now desugar to an `IdentifierExpr` (function pointer) instead of a `LiteralExpr` (string), enabling direct call through `fn(T)->R` variables.
+  - **Arrow lambdas in higher-order functions**: `array_map(arr, (x: int) => x * 2)` and `apply(x => x + 1, n)` now work. All lambda-accepting builtins (`array_map`, `array_filter`, `array_reduce`, `array_any`, `array_every`, `array_count`, `str_filter`, `map_filter`) accept both string-literal function names and `IdentifierExpr` function names via the new `extractFnName()` helper.
+  - **Switch expression**: `var y = switch(x) { case 1: "one", case 2: "two", default: "other", }` — `switch` can now appear in expression context. Each arm has a `:` after the value(s) and ends with `,`. Desugars at parse time to an IIFE (`__switch_N`), so the condition is evaluated exactly once and side effects are safe. Both `switch(cond)` and paren-free `switch cond` forms work.
+  - **Paren-free `when`**: `when x { 1 => { ... } _ => { ... } }` — parentheses around the condition are now optional, consistent with `if`/`while`/`for` (Round-70).
+  - **Paren-free `switch` statement**: `switch x { case 1: ... }` — same optional-paren pattern for the statement form.
+  - `examples/round71_test.om` — 12 tests covering all new features.
+
+
   - `if COND { }` — parentheses around the condition are now optional. Both `if (x > 0) { }` and `if x > 0 { }` are accepted. Same for `elif`.
   - `while COND { }` — parentheses around the condition are now optional.
   - `for x in expr { }` — paren-free for-each over arrays and strings (sugar for `foreach x in expr`). `for idx, x in expr { }` (indexed form) also works paren-free.
