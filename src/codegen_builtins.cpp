@@ -2409,15 +2409,33 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Type* t = arg->getType();
         const char* name;
         if (t->isIntegerTy(1)) {
+            // Check whether the variable carries a bool annotation.
+            // i1 loaded from a bool-annotated alloca → "bool".
             name = "bool";
+        } else if (t->isIntegerTy(32)) {
+            // i32 could be a char (u32/char annotation) or a plain i32.
+            // Check var annotation; if it's "char" or "c_int"/"c_uint"/"u32"/"i32"
+            // we still call it "int" unless it's specifically annotated as char.
+            if (expr->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
+                const auto* id = static_cast<const IdentifierExpr*>(expr->arguments[0].get());
+                auto it = varTypeAnnotations_.find(id->name);
+                if (it != varTypeAnnotations_.end() && it->second == "char")
+                    name = "char";
+                else
+                    name = "int";
+            } else {
+                name = "int";
+            }
         } else if (t->isIntegerTy()) {
             name = "int";
         } else if (t->isDoubleTy()) {
             name = "float";
         } else if (t->isFloatTy()) {
             name = "f32";
+        } else if (t->isStructTy()) {
+            name = "tuple";
         } else if (t->isPointerTy()) {
-            // Distinguish string, array, dict, and plain pointers using the
+            // Distinguish string, array, dict, tuple, and plain pointers using the
             // higher-level expression classifiers the codegen already has.
             if (isStringExpr(expr->arguments[0].get())) {
                 name = "string";
@@ -2425,10 +2443,14 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 name = "dict";
             } else if (expr->arguments[0]->type == ASTNodeType::ARRAY_EXPR) {
                 name = "array";
+            } else if (expr->arguments[0]->type == ASTNodeType::TUPLE_EXPR) {
+                name = "tuple";
             } else if (expr->arguments[0]->type == ASTNodeType::IDENTIFIER_EXPR) {
-                // Check the arrayVars_ / stringVars_ tracking sets.
+                // Check the arrayVars_ / tupleVarTypes_ / stringVars_ tracking sets.
                 const auto* id = static_cast<const IdentifierExpr*>(expr->arguments[0].get());
-                if (arrayVars_.count(id->name)) {
+                if (tupleVarTypes_.count(id->name)) {
+                    name = "tuple";
+                } else if (arrayVars_.count(id->name)) {
                     name = "array";
                 } else {
                     name = "ptr";

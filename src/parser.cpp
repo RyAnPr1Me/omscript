@@ -1770,6 +1770,29 @@ std::string Parser::parseTypeAnnotation() {
     if (match(TokenType::AMPERSAND)) {
         prefix = "&";
     }
+    // ── Tuple type: (T1, T2, ...) ─────────────────────────────────────────────
+    // Parsed as "tuple<T1,T2,...>" internally; lowered to an anonymous LLVM struct.
+    if (check(TokenType::LPAREN)) {
+        advance(); // consume '('
+        std::vector<std::string> elemTypes;
+        if (!check(TokenType::RPAREN)) {
+            elemTypes.push_back(parseTypeAnnotation());
+            while (match(TokenType::COMMA)) {
+                if (check(TokenType::RPAREN)) break; // trailing comma
+                elemTypes.push_back(parseTypeAnnotation());
+            }
+        }
+        consume(TokenType::RPAREN, "Expected ')' to close tuple type");
+        if (elemTypes.empty())
+            return prefix + "void"; // () == void / unit
+        std::string tupleAnn = "tuple<";
+        for (size_t i = 0; i < elemTypes.size(); ++i) {
+            if (i) tupleAnn += ',';
+            tupleAnn += elemTypes[i];
+        }
+        tupleAnn += '>';
+        return prefix + tupleAnn;
+    }
     // Accept identifiers and the 'struct' keyword as type names
     std::string typeName;
     if (check(TokenType::STRUCT)) {
@@ -1933,8 +1956,15 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 
     // Optional return type annotation: -> type
     std::string returnType;
+    bool neverReturn = false; // set by `-> never` syntax
     if (match(TokenType::ARROW)) {
         returnType = parseTypeAnnotation();
+        // `-> never` is syntactic sugar for `@noreturn` with void return type.
+        // This mirrors Rust's `-> !` and C23's `[[noreturn]]` attribute.
+        if (returnType == "never") {
+            neverReturn = true;
+            returnType = "void";
+        }
     }
 
     std::unique_ptr<BlockStmt> body;
@@ -2112,6 +2142,8 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
                                                    std::move(body), isOptMax, returnType);
     funcDecl->line = name.line;
     funcDecl->column = name.column;
+    if (neverReturn)
+        funcDecl->hintNoReturn = true;
     return funcDecl;
 }
 
@@ -4884,6 +4916,16 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
         // Handle field access (dot notation) or method call (obj.method(args))
         else if (match(TokenType::DOT)) {
             const Token dotToken = tokens[current - 1];
+            // Tuple element access: t.0, t.1, t.2, ...
+            // An integer literal immediately after '.' is a tuple index.
+            if (check(TokenType::INTEGER)) {
+                const Token idxToken = advance();
+                const std::string idxStr = std::to_string(idxToken.intValue);
+                auto fieldExpr = std::make_unique<FieldAccessExpr>(std::move(expr), idxStr);
+                fieldExpr->line = dotToken.line;
+                fieldExpr->column = dotToken.column;
+                expr = std::move(fieldExpr);
+            } else {
             // Accept IDENTIFIER or SWAP (and any future keyword that doubles as a
             // field/method name) after '.'.  This mirrors C/C++ where keywords are
             // valid struct member names when disambiguated by the '.' context.
@@ -4921,6 +4963,7 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
                 fieldExpr->column = dotToken.column;
                 expr = std::move(fieldExpr);
             }
+            } // end else (non-integer field)
         }
         // Handle C-style arrow operator: ptr->field / ptr->method(args)
         // Identical semantics to ptr.field / ptr.method(args) — OmScript's
@@ -5093,6 +5136,16 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         return expr;
     }
 
+    // Character literal: 'A', '\n', '\u0041' — yields i32 code point.
+    if (match(TokenType::CHAR_LITERAL)) {
+        const Token token = tokens[current - 1];
+        long long codePoint = std::stoll(token.lexeme);
+        auto expr = std::make_unique<LiteralExpr>(codePoint);
+        expr->line = token.line;
+        expr->column = token.column;
+        return expr;
+    }
+
     if (match(TokenType::STRING)) {
         const Token token = tokens[current - 1];
         auto expr = std::make_unique<LiteralExpr>(token.lexeme);
@@ -5235,19 +5288,76 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         long long byteSize = 8; // default (pointer/int64)
         if (typeName == "bool" || typeName == "i8" || typeName == "u8" || typeName == "byte")
             byteSize = 1;
-        else if (typeName == "i16" || typeName == "u16")
+        else if (typeName == "i16" || typeName == "u16" || typeName == "c_short" || typeName == "c_ushort")
             byteSize = 2;
-        else if (typeName == "i32" || typeName == "u32" || typeName == "f32" || typeName == "float32")
+        else if (typeName == "i32" || typeName == "u32" || typeName == "f32" || typeName == "float32" ||
+                 typeName == "char" || typeName == "c_int" || typeName == "c_uint")
             byteSize = 4;
         else if (typeName == "i64" || typeName == "u64" || typeName == "int" || typeName == "uint" ||
                  typeName == "float" || typeName == "double" || typeName == "f64" || typeName == "float64" ||
-                 typeName == "ptr" || typeName.rfind("ptr<", 0) == 0 || typeName == "string" || typeName == "bigint")
+                 typeName == "ptr" || typeName.rfind("ptr<", 0) == 0 || typeName == "string" || typeName == "bigint" ||
+                 typeName == "usize" || typeName == "isize" ||
+                 typeName == "c_long" || typeName == "c_ulong" ||
+                 typeName == "c_longlong" || typeName == "c_ulonglong" ||
+                 typeName == "c_size_t" || typeName == "c_ssize_t")
             byteSize = 8;
         else if (typeName == "i128" || typeName == "u128")
             byteSize = 16;
         else if (typeName == "i256" || typeName == "u256")
             byteSize = 32;
-        else {
+        else if (typeName.rfind("tuple<", 0) == 0 && typeName.back() == '>') {
+            // Conservative tight-packed tuple size: sum of element sizes.
+            // Actual size may be larger due to LLVM struct alignment padding.
+            std::string inner = typeName.substr(6, typeName.size() - 7);
+            long long total = 0;
+            // Split elements on commas (depth-aware to handle nested types).
+            int depth = 0;
+            std::string cur;
+            for (char ch : inner) {
+                if (ch == '<') depth++;
+                else if (ch == '>') depth--;
+                if (ch == ',' && depth == 0) {
+                    // Recursively compute element size using same rules.
+                    // Re-use the sizeof parse-time table via a helper lambda.
+                    auto elemSize = [&](const std::string& t) -> long long {
+                        if (t == "bool" || t == "i8" || t == "u8" || t == "byte") return 1;
+                        if (t == "i16" || t == "u16") return 2;
+                        if (t == "i32" || t == "u32" || t == "f32" || t == "char" || t == "c_int" || t == "c_uint") return 4;
+                        if (t == "i128" || t == "u128") return 16;
+                        if (t == "i256" || t == "u256") return 32;
+                        const char* s = t.c_str();
+                        if ((s[0]=='i'||s[0]=='u') && s[1]!='\0') {
+                            int bits = std::atoi(s+1);
+                            if (bits>=1 && bits<=256) return (bits+7)/8;
+                        }
+                        return 8; // pointer/int64/float default
+                    };
+                    // Strip leading/trailing whitespace from cur
+                    while (!cur.empty() && cur.front()==' ') cur.erase(0,1);
+                    while (!cur.empty() && cur.back()==' ') cur.pop_back();
+                    total += elemSize(cur);
+                    cur.clear();
+                } else {
+                    cur += ch;
+                }
+            }
+            if (!cur.empty()) {
+                while (!cur.empty() && cur.front()==' ') cur.erase(0,1);
+                while (!cur.empty() && cur.back()==' ') cur.pop_back();
+                auto elemSize2 = [](const std::string& t) -> long long {
+                    if (t == "bool" || t == "i8" || t == "u8" || t == "byte") return 1;
+                    if (t == "i16" || t == "u16") return 2;
+                    if (t == "i32" || t == "u32" || t == "f32" || t == "char" || t == "c_int" || t == "c_uint") return 4;
+                    if (t == "i128" || t == "u128") return 16;
+                    if (t == "i256" || t == "u256") return 32;
+                    const char* s = t.c_str();
+                    if ((s[0]=='i'||s[0]=='u') && s[1]!='\0') { int bits=std::atoi(s+1); if (bits>=1&&bits<=256) return (bits+7)/8; }
+                    return 8;
+                };
+                total += elemSize2(cur);
+            }
+            byteSize = total;
+        } else {
             // iN / uN — compute from bit width
             const char* s = typeName.c_str();
             if ((s[0] == 'i' || s[0] == 'u') && s[1] != '\0') {
@@ -5297,7 +5407,12 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
 
                     // Canonical type groups
                     static const std::unordered_set<std::string> kIntTypes{"int", "i64", "i32", "i16", "i8",
-                                                                           "u64", "u32", "u16", "u8",  "uint"};
+                                                                           "u64", "u32", "u16", "u8",  "uint",
+                                                                           "usize", "isize",
+                                                                           "c_int", "c_uint", "c_short", "c_ushort",
+                                                                           "c_long", "c_ulong", "c_longlong", "c_ulonglong",
+                                                                           "c_size_t", "c_ssize_t", "c_char", "c_uchar",
+                                                                           "char"};
                     static const std::unordered_set<std::string> kFloatTypes{"float", "f64", "f32", "double"};
                     static const std::unordered_set<std::string> kStrTypes{"string", "str"};
                     static const std::unordered_set<std::string> kArrTypes{"array", "arr"};
@@ -5903,9 +6018,27 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     }
 
     if (match(TokenType::LPAREN)) {
-        auto expr = parseExpression();
+        const Token lpTok = tokens[current - 1];
+        // Tuple literal: (e1, e2, ...) — two or more comma-separated expressions.
+        // Single-element or empty parens are just grouping (parenthesized expression).
+        // Strategy: parse the first expression, then check for a comma.
+        auto firstExpr = parseExpression();
+        if (check(TokenType::COMMA)) {
+            // It's a tuple literal — gather all elements.
+            std::vector<std::unique_ptr<Expression>> elements;
+            elements.push_back(std::move(firstExpr));
+            while (match(TokenType::COMMA)) {
+                if (check(TokenType::RPAREN)) break; // trailing comma
+                elements.push_back(parseExpression());
+            }
+            consume(TokenType::RPAREN, "Expected ')' after tuple elements");
+            auto tupleExpr = std::make_unique<TupleExpr>(std::move(elements));
+            tupleExpr->line = lpTok.line;
+            tupleExpr->column = lpTok.column;
+            return tupleExpr;
+        }
         consume(TokenType::RPAREN, "Expected ')' after expression");
-        return expr;
+        return firstExpr;
     }
 
     if (match(TokenType::LBRACKET)) {

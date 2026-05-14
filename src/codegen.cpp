@@ -267,7 +267,9 @@ static constexpr SimdTypeRow kSimdTypeRegistry[] = {
 /// Returns true if a type-annotation string represents an unsigned integer
 /// (uint, byte, or any uN for N in [1..256]).
 static bool isUnsignedAnnotation(const std::string& tn) {
-    if (tn == "uint" || tn == "byte")
+    if (tn == "uint" || tn == "byte" || tn == "usize" || tn == "char" ||
+        tn == "c_uint" || tn == "c_ushort" || tn == "c_ulong" ||
+        tn == "c_ulonglong" || tn == "c_size_t" || tn == "c_uchar")
         return true;
     if (tn.size() >= 2 && tn[0] == 'u') {
         for (size_t j = 1; j < tn.size(); ++j)
@@ -531,12 +533,63 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
         return llvm::Type::getFloatTy(*context); // f32 (single)
     if (ann == "bool")
         return llvm::Type::getInt1Ty(*context); // i1
-    if (ann == "i8" || ann == "u8" || ann == "byte")
-        return llvm::Type::getInt8Ty(*context); // i8/u8/byte
-    if (ann == "i16" || ann == "u16")
+    if (ann == "i8" || ann == "u8" || ann == "byte" || ann == "c_char" || ann == "c_uchar")
+        return llvm::Type::getInt8Ty(*context); // i8/u8/byte/c_char
+    if (ann == "i16" || ann == "u16" || ann == "c_short" || ann == "c_ushort")
         return llvm::Type::getInt16Ty(*context); // i16/u16
-    if (ann == "i32" || ann == "u32")
-        return llvm::Type::getInt32Ty(*context); // i32/u32
+    if (ann == "i32" || ann == "u32" || ann == "c_int" || ann == "c_uint" || ann == "char")
+        return llvm::Type::getInt32Ty(*context); // i32/u32/c_int/c_uint/char (Unicode scalar)
+    // usize / isize — pointer-width integers (64-bit on all current targets)
+    if (ann == "usize" || ann == "isize")
+        return llvm::Type::getInt64Ty(*context);
+    // C interop long/longlong — 64-bit on LP64 (Linux/macOS/Windows 64-bit)
+    if (ann == "c_long" || ann == "c_ulong" || ann == "c_longlong" || ann == "c_ulonglong" ||
+        ann == "c_size_t" || ann == "c_ssize_t")
+        return llvm::Type::getInt64Ty(*context);
+    // c_void — void pointer (same as ptr)
+    if (ann == "c_void")
+        return llvm::PointerType::getUnqual(*context);
+    // never — bottom type; used as return type of functions that never return.
+    // Maps to void in LLVM IR (hintNoReturn is set separately by the parser).
+    if (ann == "never")
+        return llvm::Type::getVoidTy(*context);
+    // ── Tuple types: "tuple<T1,T2,...>" → pointer (like struct types) ─────────
+    // The actual LLVM struct type is cached in tupleAnnotStructTypes_ so that
+    // generateTuple and generateFieldAccess can use the correct layout.
+    if (ann.rfind("tuple<", 0) == 0 && ann.back() == '>') {
+        // Return cached struct type if already built.
+        auto cached = tupleAnnotStructTypes_.find(ann);
+        if (cached == tupleAnnotStructTypes_.end()) {
+            const std::string inner = ann.substr(6, ann.size() - 7);
+            // Split on commas at depth 0 (respects nested tuple<...> and ptr<...>).
+            std::vector<llvm::Type*> elemTypes;
+            int depth = 0;
+            std::string cur;
+            for (char ch : inner) {
+                if (ch == '<') depth++;
+                else if (ch == '>') depth--;
+                if (ch == ',' && depth == 0) {
+                    while (!cur.empty() && cur.front() == ' ') cur.erase(0, 1);
+                    while (!cur.empty() && cur.back()  == ' ') cur.pop_back();
+                    elemTypes.push_back(resolveAnnotatedType(cur));
+                    cur.clear();
+                } else {
+                    cur += ch;
+                }
+            }
+            if (!cur.empty()) {
+                while (!cur.empty() && cur.front() == ' ') cur.erase(0, 1);
+                while (!cur.empty() && cur.back()  == ' ') cur.pop_back();
+                elemTypes.push_back(resolveAnnotatedType(cur));
+            }
+            llvm::StructType* st = elemTypes.empty()
+                ? llvm::StructType::get(*context)
+                : llvm::StructType::get(*context, elemTypes);
+            tupleAnnotStructTypes_.emplace(ann, st);
+        }
+        // Tuples, like structs, are accessed through a pointer.
+        return llvm::PointerType::getUnqual(*context);
+    }
     // -----------------------------------------------------------------------
     for (const SimdTypeRow& r : kSimdTypeRegistry) {
         if (ann == r.name) {
@@ -934,7 +987,9 @@ void CodeGenerator::bindVariableAnnotated(const std::string& name, llvm::Value* 
 }
 
 bool CodeGenerator::isUnsignedAnnot(const std::string& annot) {
-    if (annot == "uint" || annot == "byte")
+    if (annot == "uint" || annot == "byte" || annot == "usize" || annot == "char" ||
+        annot == "c_uint" || annot == "c_ushort" || annot == "c_ulong" ||
+        annot == "c_ulonglong" || annot == "c_size_t" || annot == "c_uchar")
         return true;
     if (annot.size() >= 2 && annot[0] == 'u') {
         for (size_t j = 1; j < annot.size(); ++j)
@@ -5629,6 +5684,8 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateDerefAssign(static_cast<DerefAssignExpr*>(expr));
     case ASTNodeType::STRUCT_LITERAL_EXPR:
         return generateStructLiteral(static_cast<StructLiteralExpr*>(expr));
+    case ASTNodeType::TUPLE_EXPR:
+        return generateTuple(static_cast<TupleExpr*>(expr));
     case ASTNodeType::FIELD_ACCESS_EXPR:
         return generateFieldAccess(static_cast<FieldAccessExpr*>(expr));
     case ASTNodeType::FIELD_ASSIGN_EXPR:

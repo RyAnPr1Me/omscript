@@ -6691,6 +6691,34 @@ CodeGenerator::ResolvedField CodeGenerator::resolveField(const std::string& stru
     return rf;
 }
 
+llvm::Value* CodeGenerator::generateTuple(TupleExpr* expr) {
+    // Build the LLVM anonymous struct type from the element types.
+    std::vector<llvm::Value*> vals;
+    std::vector<llvm::Type*> types;
+    vals.reserve(expr->elements.size());
+    types.reserve(expr->elements.size());
+    for (auto& elem : expr->elements) {
+        llvm::Value* v = generateExpression(elem.get());
+        vals.push_back(v);
+        types.push_back(v->getType());
+    }
+    llvm::StructType* structTy = llvm::StructType::get(*context, types);
+
+    // Allocate the tuple on the entry block (like structs) and store each field.
+    llvm::Function* curFn = builder->GetInsertBlock()->getParent();
+    llvm::IRBuilder<> entryBuilder(&curFn->getEntryBlock(),
+                                   curFn->getEntryBlock().begin());
+    llvm::AllocaInst* alloca = entryBuilder.CreateAlloca(structTy, nullptr, "tuple.alloca");
+    alloca->setAlignment(module->getDataLayout().getPrefTypeAlign(structTy));
+
+    for (unsigned i = 0; i < vals.size(); ++i) {
+        llvm::Value* gep = builder->CreateStructGEP(structTy, alloca, i, "tuple.init.ptr");
+        llvm::Align al = module->getDataLayout().getABITypeAlign(types[i]);
+        builder->CreateAlignedStore(vals[i], gep, al);
+    }
+    return alloca;
+}
+
 llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
     auto it = structDefs_.find(expr->structName);
     if (it == structDefs_.end()) {
@@ -6764,6 +6792,60 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
+    // ── Tuple element access: t.0, t.1, ... ─────────────────────────────────
+    // If the field name is a non-negative integer, treat it as a tuple element index.
+    {
+        bool allDigits = !expr->fieldName.empty();
+        for (char ch : expr->fieldName)
+            if (!std::isdigit(static_cast<unsigned char>(ch))) { allDigits = false; break; }
+        if (allDigits) {
+            unsigned idx = static_cast<unsigned>(std::stoul(expr->fieldName));
+            // Determine the tuple struct type from the object's annotation.
+            std::string tupleAnn;
+            if (expr->object->type == ASTNodeType::IDENTIFIER_EXPR) {
+                const auto& name = static_cast<IdentifierExpr*>(expr->object.get())->name;
+                auto it = tupleVarTypes_.find(name);
+                if (it != tupleVarTypes_.end())
+                    tupleAnn = it->second;
+            }
+            llvm::Value* objPtr = generateExpression(expr->object.get());
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            if (!objPtr->getType()->isPointerTy())
+                objPtr = builder->CreateIntToPtr(objPtr, ptrTy, "tuple.baseptr");
+            if (!tupleAnn.empty()) {
+                // Look up the cached LLVM StructType (resolveAnnotatedType returns ptr for tuples).
+                auto stIt = tupleAnnotStructTypes_.find(tupleAnn);
+                if (stIt != tupleAnnotStructTypes_.end()) {
+                    llvm::StructType* st = stIt->second;
+                    if (idx < st->getNumElements()) {
+                        llvm::Value* elemPtr = builder->CreateStructGEP(st, objPtr, idx, "tuple.elem.ptr");
+                        llvm::Type* elemTy = st->getElementType(idx);
+                        llvm::Align al = module->getDataLayout().getABITypeAlign(elemTy);
+                        return builder->CreateAlignedLoad(elemTy, elemPtr, al, "tuple.elem.val");
+                    }
+                } else {
+                    // Annotation not yet cached — populate it by calling resolveAnnotatedType
+                    // which has a side-effect of building and caching the struct type.
+                    resolveAnnotatedType(tupleAnn);
+                    auto stIt2 = tupleAnnotStructTypes_.find(tupleAnn);
+                    if (stIt2 != tupleAnnotStructTypes_.end()) {
+                        llvm::StructType* st = stIt2->second;
+                        if (idx < st->getNumElements()) {
+                            llvm::Value* elemPtr = builder->CreateStructGEP(st, objPtr, idx, "tuple.elem.ptr");
+                            llvm::Type* elemTy = st->getElementType(idx);
+                            llvm::Align al = module->getDataLayout().getABITypeAlign(elemTy);
+                            return builder->CreateAlignedLoad(elemTy, elemPtr, al, "tuple.elem.val");
+                        }
+                    }
+                }
+            }
+            // Fallback: GEP with default type when annotation is unavailable.
+            llvm::Value* elemPtr = builder->CreateInBoundsGEP(
+                getDefaultType(), objPtr, llvm::ConstantInt::get(getDefaultType(), idx), "tuple.elem.ptr");
+            return builder->CreateLoad(getDefaultType(), elemPtr, "tuple.elem.val");
+        }
+    }
+    // ── Regular struct field access ───────────────────────────────────────────
     const std::string structHint = resolveStructType(expr->object.get());
     const ResolvedField rf = resolveField(structHint, expr->fieldName, expr);
 

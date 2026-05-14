@@ -581,6 +581,16 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
 
     bindVariableAnnotated(stmt->name, alloca, stmt->typeName, stmt->isConst);
 
+    // Track tuple-typed variables so field access (.0, .1, ...) can recover the struct type.
+    if (stmt->typeName.rfind("tuple<", 0) == 0 && stmt->typeName.back() == '>') {
+        tupleVarTypes_[stmt->name] = stmt->typeName;
+        // Eagerly populate the struct-type cache so generateFieldAccess never misses.
+        if (!tupleAnnotStructTypes_.count(stmt->typeName))
+            resolveAnnotatedType(stmt->typeName); // side-effect: caches the struct type
+    } else {
+        tupleVarTypes_.erase(stmt->name);
+    }
+
     // If the initializer was a borrow expression, register the alias mapping
     if (stmt->initializer && stmt->initializer->type == ASTNodeType::BORROW_EXPR) {
         auto* bw = static_cast<BorrowExpr*>(stmt->initializer.get());

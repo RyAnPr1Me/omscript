@@ -526,6 +526,12 @@ class CodeGenerator {
     llvm::StringSet<> stringArrayVars_;
     // arrayVars_: non-string pointer-typed array vars (disambiguates from string pointers in isStringExpr).
     llvm::StringSet<> arrayVars_;
+    // tupleVarTypes_: variable name → "tuple<T1,T2,...>" annotation string.
+    // Populated when a tuple-typed var is declared; used by field access to reconstruct LLVM struct type.
+    std::unordered_map<std::string, std::string> tupleVarTypes_;
+    // tupleAnnotStructTypes_: "tuple<T1,T2,...>" annotation → resolved LLVM StructType*.
+    // Caches the struct type so resolveAnnotatedType can return ptr but field access still knows the layout.
+    std::unordered_map<std::string, llvm::StructType*> tupleAnnotStructTypes_;
     // Whole-program array type info (mirrors string type system, see preAnalyzeArrayTypes).
     llvm::StringSet<> arrayReturningFunctions_;
     std::unordered_map<std::string, std::unordered_set<size_t>> funcParamArrayTypes_;
@@ -936,6 +942,7 @@ class CodeGenerator {
     llvm::Value* generateDerefAssign(DerefAssignExpr* expr); ///< *p = v (Ω spec §4.2)
     llvm::Value* generateStructLiteral(StructLiteralExpr* expr);
     llvm::Value* generateFieldAccess(FieldAccessExpr* expr);
+    llvm::Value* generateTuple(TupleExpr* expr);
     llvm::Value* generateFieldAssign(FieldAssignExpr* expr);
 
     std::string resolveStructType(Expression* objExpr) const;

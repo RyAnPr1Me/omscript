@@ -1,0 +1,147 @@
+// Round-58: Type system overhaul test
+// Covers: usize/isize, char + char literals, never return type,
+//         C FFI types, tuple types (literal, field access, type annotation).
+import std;
+
+// ─── usize / isize ────────────────────────────────────────────────────────────
+fn test_usize() {
+    var n: usize = 100;
+    var m: isize = -42;
+    n = n + 1;
+    m = m + 1;
+    // usize and isize are 8 bytes on 64-bit
+    if (sizeof(usize) == 8) {
+        if (sizeof(isize) == 8) {
+            exit_program(1);
+        }
+    }
+    exit_program(0);
+}
+
+// ─── char type and char literals ─────────────────────────────────────────────
+fn test_char_literal() {
+    var a: char = 'A';
+    var nl: char = '\n';
+    var zero: char = '\0';
+    var singleq: char = '\'';
+    var backsl: char = '\\';
+    if (a == 65) {
+        if (nl == 10) {
+            if (zero == 0) {
+                if (singleq == 39) {
+                    if (backsl == 92) {
+                        exit_program(1);
+                    }
+                }
+            }
+        }
+    }
+    exit_program(0);
+}
+
+fn test_char_unicode() {
+    var heart: char = '\u2665';   // ♥ U+2665
+    if (heart == 9829) {
+        exit_program(1);
+    }
+    exit_program(0);
+}
+
+fn test_sizeof_char() {
+    if (sizeof(char) == 4) {
+        exit_program(1);
+    }
+    exit_program(0);
+}
+
+// ─── never return type ────────────────────────────────────────────────────────
+fn abort_if_zero(code: int) -> never {
+    exit_program(code);
+}
+
+fn test_never() {
+    // Verify that -> never functions compile and can be called.
+    // We call abort_if_zero which calls exit_program; passing 1 means "pass".
+    abort_if_zero(1);
+}
+
+// ─── C FFI types ──────────────────────────────────────────────────────────────
+fn test_c_types() {
+    var ci: c_int    = 42;
+    var cui: c_uint  = 100;
+    var cl: c_long   = 1000000;
+    var sz: c_size_t = 256;
+    var cs: c_short  = -10;
+
+    if (sizeof(c_int) == 4) {
+        if (sizeof(c_uint) == 4) {
+            if (sizeof(c_long) == 8) {
+                if (sizeof(c_size_t) == 8) {
+                    if (sizeof(c_short) == 2) {
+                        exit_program(1);
+                    }
+                }
+            }
+        }
+    }
+    exit_program(0);
+}
+
+// ─── Tuple types ──────────────────────────────────────────────────────────────
+fn test_tuple_literal() {
+    var t: (int, int) = (10, 20);
+    var a: int = t.0;
+    var b: int = t.1;
+    if (a == 10) {
+        if (b == 20) {
+            exit_program(1);
+        }
+    }
+    exit_program(0);
+}
+
+fn test_tuple_mixed() {
+    var t: (int, float, int) = (1, 2.5, 3);
+    var x: int = t.0;
+    var z: int = t.2;
+    if (x == 1) {
+        if (z == 3) {
+            exit_program(1);
+        }
+    }
+    exit_program(0);
+}
+
+fn make_pair(a: int, b: int) -> (int, int) {
+    return (a, b);
+}
+
+fn test_tuple_return() {
+    var p: (int, int) = make_pair(7, 13);
+    var sum: int = p.0 + p.1;
+    if (sum == 20) {
+        exit_program(1);
+    }
+    exit_program(0);
+}
+
+fn test_type_name_tuple() {
+    var t: (int, int) = (1, 2);
+    if (str_eq(type_name(t), "tuple")) {
+        exit_program(1);
+    }
+    exit_program(0);
+}
+
+fn main() {
+    test_usize();
+    test_char_literal();
+    test_char_unicode();
+    test_sizeof_char();
+    test_never();
+    test_c_types();
+    test_tuple_literal();
+    test_tuple_mixed();
+    test_tuple_return();
+    test_type_name_tuple();
+}

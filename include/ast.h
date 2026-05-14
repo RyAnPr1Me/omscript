@@ -76,6 +76,7 @@ enum class ASTNodeType {
     NEW_CONSTRUCT_EXPR, // new T { field: val, ... } — alloc<T>(1) + field init
     JMP_STMT,          // jmp label; — unconditional jump to a named label (deprecated)
     LABEL_STMT,        // label name: — declares a named jump target in the current function
+    TUPLE_EXPR,        // (v1, v2, ...) — tuple literal; lowered to an anonymous LLVM struct
 };
 
 class ASTNode {
@@ -579,6 +580,17 @@ class StructLiteralExpr : public Expression {
 
     StructLiteralExpr(const std::string& name, std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fv)
         : Expression(ASTNodeType::STRUCT_LITERAL_EXPR), structName(name), fieldValues(std::move(fv)) {}
+};
+
+/// Tuple literal: `(v1, v2, ...)`.
+/// Each element is an arbitrary expression.  The tuple is lowered to an
+/// anonymous LLVM struct `{T1, T2, ...}` allocated on the entry-block stack.
+class TupleExpr : public Expression {
+  public:
+    std::vector<std::unique_ptr<Expression>> elements;
+
+    explicit TupleExpr(std::vector<std::unique_ptr<Expression>> elems)
+        : Expression(ASTNodeType::TUPLE_EXPR), elements(std::move(elems)) {}
 };
 
 class FieldAccessExpr : public Expression {

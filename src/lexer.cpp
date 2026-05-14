@@ -547,6 +547,65 @@ Token Lexer::scanMultiLineString() {
             continue;
         }
 
+        // Character literals: 'A', '\n', '\t', '\\', '\'', '\0', '\uXXXX', '\UXXXXXXXX'
+        // Yields a CHAR_LITERAL token whose intValue is the Unicode code point (i32).
+        if (c == '\'') {
+            const int charLine   = line;
+            const int charColumn = column;
+            advance(); // consume opening '
+            long long codePoint = 0;
+            if (!isAtEnd() && peek() != '\'') {
+                if (peek() == '\\') {
+                    advance(); // consume '\'
+                    char esc = isAtEnd() ? '\0' : advance();
+                    switch (esc) {
+                        case 'n':  codePoint = '\n'; break;
+                        case 't':  codePoint = '\t'; break;
+                        case 'r':  codePoint = '\r'; break;
+                        case '0':  codePoint = '\0'; break;
+                        case '\\': codePoint = '\\'; break;
+                        case '\'': codePoint = '\''; break;
+                        case '"':  codePoint = '"';  break;
+                        case 'u': {
+                            // \uXXXX — 4-digit hex Unicode escape
+                            long long val = 0;
+                            for (int i = 0; i < 4 && !isAtEnd(); ++i) {
+                                char h = advance();
+                                if (h >= '0' && h <= '9') val = val*16 + (h - '0');
+                                else if (h >= 'a' && h <= 'f') val = val*16 + (h - 'a' + 10);
+                                else if (h >= 'A' && h <= 'F') val = val*16 + (h - 'A' + 10);
+                            }
+                            codePoint = val;
+                            break;
+                        }
+                        case 'U': {
+                            // \UXXXXXXXX — 8-digit hex Unicode escape
+                            long long val = 0;
+                            for (int i = 0; i < 8 && !isAtEnd(); ++i) {
+                                char h = advance();
+                                if (h >= '0' && h <= '9') val = val*16 + (h - '0');
+                                else if (h >= 'a' && h <= 'f') val = val*16 + (h - 'a' + 10);
+                                else if (h >= 'A' && h <= 'F') val = val*16 + (h - 'A' + 10);
+                            }
+                            codePoint = val;
+                            break;
+                        }
+                        default:
+                            codePoint = static_cast<unsigned char>(esc);
+                            break;
+                    }
+                } else {
+                    // Plain ASCII/UTF-8 byte
+                    codePoint = static_cast<unsigned char>(advance());
+                }
+            }
+            if (!isAtEnd() && peek() == '\'')
+                advance(); // consume closing '
+            // Emit CHAR_LITERAL: store the code point as the token's lexeme (decimal)
+            tokens.push_back(Token(TokenType::CHAR_LITERAL, std::to_string(codePoint), charLine, charColumn));
+            continue;
+        }
+
         // Check for range operator ... or ..
         if (c == '.') {
             // peek() gives current position, peek(1) gives next

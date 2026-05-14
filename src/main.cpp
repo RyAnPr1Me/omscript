@@ -1527,6 +1527,8 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "STRING";
     case omscript::TokenType::BYTES_LITERAL:
         return "BYTES_LITERAL";
+    case omscript::TokenType::CHAR_LITERAL:
+        return "CHAR_LITERAL";
     case omscript::TokenType::IDENTIFIER:
         return "IDENTIFIER";
     case omscript::TokenType::FN:

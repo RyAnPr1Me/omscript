@@ -20,7 +20,8 @@ enum class TokenType {
     INTEGER,
     FLOAT,
     STRING,
-    BYTES_LITERAL, // 0x"AABBCC" — hex byte array literal
+    BYTES_LITERAL,  // 0x"AABBCC" — hex byte array literal
+    CHAR_LITERAL,   // 'A' / '\n' / '\u0041' — Unicode scalar value as i32
     IDENTIFIER,
 
     // Keywords
