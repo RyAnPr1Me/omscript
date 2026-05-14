@@ -165,6 +165,7 @@ class Parser {
     std::unique_ptr<Statement> parseWithStmt();
     std::unique_ptr<Statement> parsePipelineStmt();
     std::vector<std::unique_ptr<Statement>> parseDestructuringDecl(bool isConst);
+    std::vector<std::unique_ptr<Statement>> parseTupleDestructuringDecl(bool isConst);
     std::unique_ptr<EnumDecl> parseEnumDecl();
     std::unique_ptr<StructDecl> parseStructDecl(StructRepr repr = StructRepr::Auto, int reprAlignN = 0);
     std::unique_ptr<Expression> parseStructLiteral(const std::string& name, int line, int col);
@@ -203,6 +204,7 @@ class Parser {
     /// Pre-scan all tokens for `operator SYMBOL (` patterns and populate
     /// customOperatorSymbols_ before the main parse pass.
     void prescanCustomOperators();
+    void prescanFunctionParams();
 
     /// Try to match a registered custom operator at the current token position.
     /// Returns the longest matching operator symbol string, or "" if none match.
@@ -218,6 +220,11 @@ class Parser {
 
     /// Known enum names for scope resolution validation.
     std::unordered_set<std::string> enumNames_;
+
+    /// Parameter names for user-defined functions, populated during the
+    /// forward-declaration pre-scan pass.  Used to resolve named call
+    /// arguments: foo(height: 3, width: 4) → reorder to match decl order.
+    std::unordered_map<std::string, std::vector<std::string>> funcParamNames_;
 
     /// Namespace registry populated by 'import "file" as alias' statements.
     ///

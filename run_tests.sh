@@ -926,6 +926,7 @@ ptest_program "examples/struct_static_call_test.om" 11
 ptest_program "examples/top_const_test.om" 10
 ptest_program "examples/paren_free_test.om" 12
 ptest_program "examples/round71_test.om" 0
+ptest_program "examples/round72_test.om" 23
 flush_ptests
 
 echo ""

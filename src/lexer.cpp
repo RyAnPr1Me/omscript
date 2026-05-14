@@ -527,7 +527,12 @@ Token Lexer::scanMultiLineString() {
 
         // Identifiers and keywords
         if (__builtin_expect(isAlpha(c) || c == '_', 1)) {
-            tokens.push_back(scanIdentifier());
+            // f"..." — Python-style f-string: consume 'f' and '"', then parse like $"..."
+            if (c == 'f' && peek(1) == '"') {
+                scanFString(tokens);
+            } else {
+                tokens.push_back(scanIdentifier());
+            }
             continue;
         }
 
@@ -1058,6 +1063,121 @@ void Lexer::scanInterpolatedString(std::vector<Token>& tokens) {
             for (const auto& tok : exprTokens) {
                 if (tok.type == TokenType::END_OF_FILE)
                     break;
+                tokens.push_back(tok);
+            }
+            tokens.push_back(Token(TokenType::RPAREN, ")", startLine, startColumn));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// f"..." f-string — called after 'f' has been consumed by the main scan loop.
+// Behaves identically to scanInterpolatedString() except the opening character
+// is '"' (already in peek()) rather than '$"'.
+// ---------------------------------------------------------------------------
+void Lexer::scanFString(std::vector<Token>& tokens) {
+    const int startLine = line;
+    const int startColumn = column;
+    advance(); // skip 'f'
+    advance(); // skip opening '"'
+    // Temporarily adjust position to match what scanInterpolatedString expects:
+    // re-use by backing up 2 positions so scanInterpolatedString's first two
+    // advance() calls land on the already-consumed chars — but that would be
+    // brittle.  Instead, inline the body of scanInterpolatedString with the
+    // one difference that we have already consumed 'f' and '"'.
+
+    struct Segment { bool isLiteral; std::string text; };
+    std::vector<Segment> segments;
+    std::string currentLiteral;
+
+    while (!isAtEnd() && peek() != '"') {
+        if (peek() == '\\') {
+            advance();
+            if (isAtEnd())
+                lexError("Unterminated escape sequence in f-string", startLine, startColumn);
+            const char escaped = advance();
+            switch (escaped) {
+            case 'n':  currentLiteral += '\n'; break;
+            case 't':  currentLiteral += '\t'; break;
+            case 'r':  currentLiteral += '\r'; break;
+            case '0':  lexError("Null byte '\\0' is not allowed in string literals", line, column); break;
+            case 'b':  currentLiteral += '\b'; break;
+            case 'f':  currentLiteral += '\f'; break;
+            case 'v':  currentLiteral += '\v'; break;
+            case '\\': currentLiteral += '\\'; break;
+            case '"':  currentLiteral += '"';  break;
+            case '{':  currentLiteral += '{';  break;
+            case '}':  currentLiteral += '}';  break;
+            case 'x': {
+                if (isAtEnd() || !isHexDigit(peek()))
+                    lexError("Expected hex digit after '\\x' in f-string", line, column);
+                const char h1 = advance();
+                if (isAtEnd() || !isHexDigit(peek()))
+                    lexError("Expected two hex digits after '\\x' in f-string", line, column);
+                const char h2 = advance();
+                const int val = std::stoi(std::string{h1,h2}, nullptr, 16);
+                if (val == 0)
+                    lexError("Null byte '\\x00' is not allowed in string literals", line, column);
+                currentLiteral += static_cast<char>(val);
+                break;
+            }
+            default:
+                lexError("Unknown escape sequence '\\" + std::string(1, escaped) + "' in f-string", line, column);
+            }
+        } else if (peek() == '{') {
+            advance(); // skip '{'
+            segments.push_back({true, currentLiteral});
+            currentLiteral.clear();
+            std::string exprText;
+            int depth = 1;
+            while (!isAtEnd() && depth > 0) {
+                const char ch = peek();
+                if (ch == '{') { depth++; exprText += advance(); }
+                else if (ch == '}') {
+                    depth--;
+                    if (depth == 0) break;
+                    exprText += advance();
+                } else if (ch == '"') {
+                    exprText += advance();
+                    while (!isAtEnd() && peek() != '"') {
+                        if (peek() == '\\') exprText += advance();
+                        if (!isAtEnd()) exprText += advance();
+                    }
+                    if (!isAtEnd()) exprText += advance();
+                } else {
+                    exprText += advance();
+                }
+            }
+            if (isAtEnd())
+                lexError("Unterminated expression in f-string: missing closing '}'", startLine, startColumn);
+            advance(); // skip '}'
+            segments.push_back({false, exprText});
+        } else {
+            currentLiteral += advance();
+        }
+    }
+    if (isAtEnd())
+        lexError("Unterminated f-string literal", startLine, startColumn);
+    advance(); // skip closing '"'
+    if (!currentLiteral.empty())
+        segments.push_back({true, currentLiteral});
+    if (segments.empty()) {
+        tokens.push_back(Token(TokenType::STRING, "", startLine, startColumn));
+        return;
+    }
+    if (!segments[0].isLiteral)
+        segments.insert(segments.begin(), Segment{true, ""});
+    for (size_t i = 0; i < segments.size(); ++i) {
+        if (i > 0)
+            tokens.push_back(Token(TokenType::PLUS, "+", startLine, startColumn));
+        if (segments[i].isLiteral) {
+            tokens.push_back(Token(TokenType::STRING, segments[i].text, startLine, startColumn));
+        } else {
+            tokens.push_back(Token(TokenType::LPAREN, "(", startLine, startColumn));
+            Lexer exprLexer(segments[i].text);
+            const auto exprTokens = exprLexer.tokenize();
+            for (const auto& tok : exprTokens) {
+                if (tok.type == TokenType::END_OF_FILE) break;
                 tokens.push_back(tok);
             }
             tokens.push_back(Token(TokenType::RPAREN, ")", startLine, startColumn));

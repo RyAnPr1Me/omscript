@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-72: f-strings, `not in` operator, tuple destructuring, named call arguments** (`src/lexer.cpp`, `src/parser.cpp`, `include/lexer.h`, `include/parser.h`):
+  - **`f"..."` f-string syntax**: Python-style f-strings are now accepted as an alias for `$"..."` interpolated strings. `f"Hello {name}, age {age}"` desugars identically to `$"Hello {name}, age {age}"` — a chain of `+` concatenations. All escape sequences and nested expressions are supported.
+  - **`not in` operator**: `x not in arr` desugars to `!array_contains(arr, x)`. Works for integer and string arrays. Can be combined with `if`/`while`/`unless` and other control flow constructs.
+  - **Tuple destructuring `var (a, b) = expr`**: Variables can now be bound directly from tuple values using parenthesized destructuring. `var (x, y) = get_coords()` desugars to `var __tdestr_N = get_coords(); var x = __tdestr_N.0; var y = __tdestr_N.1;`. Supports any number of elements, `_` placeholder for skip, and works with `const` as well as `var`.
+  - **Named call arguments**: Function calls now accept `name: value` syntax for individual arguments. `foo(height: 5, width: 4)` reorders the arguments to match the function's declaration order. A two-phase approach is used: `prescanFunctionParams()` collects parameter names for all user-defined functions before the main parse, then named-arg resolution happens at each call site. Mixed positional + named is supported (positional must come first). Unknown functions fall through with args in given order.
+
 - **Round-71: Arrow lambdas, switch expression, paren-free when/switch** (`src/parser.cpp`, `src/codegen_builtins.cpp`, `src/codegen_stmt.cpp`):
   - **Arrow lambda syntax**: `(x: T, y: T) => expr` and `x => expr` and `() => expr` are now accepted as alternative lambda syntax alongside the existing `|x: T| expr` form. All forms desugar identically to a named `__lambda_N` function.
   - **Lambda→funcptr fix**: `var f: fn(int)->int = |x: int| x * 2;` followed by `f(5)` no longer segfaults. Lambdas now desugar to an `IdentifierExpr` (function pointer) instead of a `LiteralExpr` (string), enabling direct call through `fn(T)->R` variables.

@@ -363,10 +363,72 @@ void Parser::prescanCustomOperators() {
     current = saved;
 }
 
+// Pre-scan to collect parameter names for every user-defined function so
+// that named call arguments (e.g. foo(height: 3, width: 4)) can be reordered
+// to match the declaration order before building the CallExpr.
+void Parser::prescanFunctionParams() {
+    const size_t saved = current;
+    for (size_t i = 0; i + 2 < tokens.size(); ++i) {
+        // Match `fn` followed by an identifier (or ident :: ident for methods),
+        // then `(`.  Collect param names from `name :` pairs inside `(...)`.
+        if (tokens[i].type != TokenType::FN) continue;
+        // Advance past 'fn'
+        size_t j = i + 1;
+        // Skip optional attributes like @hot etc. — skip anything that's not an IDENTIFIER or SCOPE
+        while (j < tokens.size() && tokens[j].type == TokenType::AT) {
+            // skip @attr(...) block
+            j++; // skip '@'
+            if (j < tokens.size() && tokens[j].type == TokenType::IDENTIFIER) j++; // attr name
+            if (j < tokens.size() && tokens[j].type == TokenType::LPAREN) {
+                int depth = 1; j++;
+                while (j < tokens.size() && depth > 0) {
+                    if (tokens[j].type == TokenType::LPAREN) depth++;
+                    else if (tokens[j].type == TokenType::RPAREN) depth--;
+                    j++;
+                }
+            }
+        }
+        if (j >= tokens.size() || tokens[j].type != TokenType::IDENTIFIER) continue;
+        // Collect function name (may be  Name :: method)
+        std::string fnName = tokens[j].lexeme;
+        j++;
+        while (j + 1 < tokens.size() && tokens[j].type == TokenType::SCOPE &&
+               tokens[j+1].type == TokenType::IDENTIFIER) {
+            fnName += "::" + tokens[j+1].lexeme;
+            j += 2;
+        }
+        if (j >= tokens.size() || tokens[j].type != TokenType::LPAREN) continue;
+        j++; // skip '('
+        // Collect parameter names: `name :` patterns
+        std::vector<std::string> params;
+        int depth = 1;
+        while (j < tokens.size() && depth > 0) {
+            if (tokens[j].type == TokenType::RPAREN) {
+                depth--;
+                if (depth == 0) break;
+                j++; continue;
+            }
+            if (tokens[j].type == TokenType::LPAREN) { depth++; j++; continue; }
+            // A param name is an IDENTIFIER followed by COLON at depth == 1
+            if (depth == 1 && tokens[j].type == TokenType::IDENTIFIER &&
+                j + 1 < tokens.size() && tokens[j+1].type == TokenType::COLON) {
+                params.push_back(tokens[j].lexeme);
+            }
+            j++;
+        }
+        if (!params.empty()) {
+            funcParamNames_[fnName] = std::move(params);
+        }
+    }
+    current = saved;
+}
+
 std::unique_ptr<Program> Parser::parse() {
     // Pre-scan to collect custom operator symbols so that multi-token infix
     // operators (e.g. "<=>" or "^><") are recognisable during expression parsing.
     prescanCustomOperators();
+    // Pre-scan to collect function parameter names for named-argument support.
+    prescanFunctionParams();
 
     std::vector<std::unique_ptr<FunctionDecl>> functions;
     std::vector<std::unique_ptr<EnumDecl>> enums;
@@ -2430,11 +2492,48 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         return stmt;
     }
     if (match(TokenType::VAR)) {
+        // Tuple destructuring: var (a, b) = expr;
+        if (check(TokenType::LPAREN)) {
+            auto decls = parseTupleDestructuringDecl(false);
+            consume(TokenType::SEMICOLON, "Expected ';' after tuple destructuring declaration");
+            // Wrap multiple decls in a block statement
+            auto blk = std::make_unique<BlockStmt>(std::move(decls));
+            blk->line = tokens[current - 1].line;
+            blk->column = tokens[current - 1].column;
+            return blk;
+        }
+        // Array destructuring: var [a, b, c] = expr;
+        if (check(TokenType::LBRACKET)) {
+            auto decls = parseDestructuringDecl(false);
+            consume(TokenType::SEMICOLON, "Expected ';' after destructuring declaration");
+            auto blk = std::make_unique<BlockStmt>(std::move(decls));
+            blk->line = tokens[current - 1].line;
+            blk->column = tokens[current - 1].column;
+            return blk;
+        }
         auto decl = parseVarDecl(false);
         consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
         return decl;
     }
     if (match(TokenType::CONST)) {
+        // Tuple destructuring: const (a, b) = expr;
+        if (check(TokenType::LPAREN)) {
+            auto decls = parseTupleDestructuringDecl(true);
+            consume(TokenType::SEMICOLON, "Expected ';' after tuple destructuring declaration");
+            auto blk = std::make_unique<BlockStmt>(std::move(decls));
+            blk->line = tokens[current - 1].line;
+            blk->column = tokens[current - 1].column;
+            return blk;
+        }
+        // Array destructuring: const [a, b, c] = expr;
+        if (check(TokenType::LBRACKET)) {
+            auto decls = parseDestructuringDecl(true);
+            consume(TokenType::SEMICOLON, "Expected ';' after destructuring declaration");
+            auto blk = std::make_unique<BlockStmt>(std::move(decls));
+            blk->line = tokens[current - 1].line;
+            blk->column = tokens[current - 1].column;
+            return blk;
+        }
         auto decl = parseVarDecl(true);
         consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
         return decl;
@@ -2900,6 +2999,13 @@ std::unique_ptr<BlockStmt> Parser::parseBlock() {
                     statements.push_back(std::move(d));
                 }
                 consume(TokenType::SEMICOLON, "Expected ';' after destructuring declaration");
+            } else if (check(TokenType::LPAREN)) {
+                // Tuple destructuring: var (a, b) = expr;
+                auto decls = parseTupleDestructuringDecl(isConst);
+                for (auto& d : decls) {
+                    statements.push_back(std::move(d));
+                }
+                consume(TokenType::SEMICOLON, "Expected ';' after tuple destructuring declaration");
             } else {
                 // Multi-variable declarations: var a:T = 1, b = 2, c = 3;
                 // The type annotation on the first variable is propagated to
@@ -3943,6 +4049,75 @@ std::vector<std::unique_ptr<Statement>> Parser::parseDestructuringDecl(bool isCo
     return stmts;
 }
 
+// var (a, b, c) = expr;  or  const (a, b) = expr;
+// Desugars to:
+//   { var __tdestr_N = expr;
+//     var a = __tdestr_N.0;
+//     var b = __tdestr_N.1; }
+// Use '_' to skip an element.
+std::vector<std::unique_ptr<Statement>> Parser::parseTupleDestructuringDecl(bool isConst) {
+    const Token lparen = consume(TokenType::LPAREN, "Expected '(' for tuple destructuring");
+
+    std::vector<std::string> names;
+    if (!check(TokenType::RPAREN)) {
+        auto parseName = [&]() {
+            if (check(TokenType::IDENTIFIER) && peek().lexeme == "_") {
+                advance();
+                names.push_back("_");
+            } else {
+                const Token n = consume(TokenType::IDENTIFIER, "Expected variable name in tuple destructuring");
+                names.push_back(n.lexeme);
+            }
+        };
+        parseName();
+        while (match(TokenType::COMMA)) {
+            if (check(TokenType::RPAREN)) break; // trailing comma
+            parseName();
+        }
+    }
+    consume(TokenType::RPAREN, "Expected ')' after tuple destructuring names");
+
+    if (names.empty()) {
+        error("Tuple destructuring must have at least one variable name");
+    }
+
+    consume(TokenType::ASSIGN, "Expected '=' after tuple destructuring pattern");
+    auto initializer = parseExpression();
+
+    // Desugar to individual field-access assignments
+    static int tdestrCounter = 0;
+    const std::string tmpName = "__tdestr_" + std::to_string(tdestrCounter++);
+
+    std::vector<std::unique_ptr<Statement>> stmts;
+
+    // var __tdestr_N = expr;
+    auto tmpDecl = std::make_unique<VarDecl>(tmpName, std::move(initializer), false);
+    tmpDecl->isCompilerGenerated = true;
+    tmpDecl->line = lparen.line;
+    tmpDecl->column = lparen.column;
+    stmts.push_back(std::move(tmpDecl));
+
+    // var a = __tdestr_N.0; var b = __tdestr_N.1; ...
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (names[i] == "_") continue;
+
+        auto tmpRef = std::make_unique<IdentifierExpr>(tmpName);
+        // Use FieldAccessExpr with numeric field name (e.g. "0", "1")
+        // — generateFieldAccess handles integer field names as tuple indices.
+        auto fieldExpr = std::make_unique<FieldAccessExpr>(std::move(tmpRef), std::to_string(i));
+        fieldExpr->line = lparen.line;
+        fieldExpr->column = lparen.column;
+
+        auto varDecl = std::make_unique<VarDecl>(names[i], std::move(fieldExpr), isConst);
+        varDecl->isCompilerGenerated = true;
+        varDecl->line = lparen.line;
+        varDecl->column = lparen.column;
+        stmts.push_back(std::move(varDecl));
+    }
+
+    return stmts;
+}
+
 std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
     const Token nameToken = consume(TokenType::IDENTIFIER, "Expected enum name");
     consume(TokenType::LBRACE, "Expected '{' after enum name");
@@ -4782,6 +4957,28 @@ std::unique_ptr<Expression> Parser::parseComparison() {
     }
 
 check_in:
+    // 'not in' operator: x not in arr → !array_contains(arr, x)
+    // 'not' is parsed as an IDENTIFIER (no dedicated keyword), so check for
+    // IDENTIFIER with lexeme "not" followed by the IN keyword.
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "not" &&
+        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::IN) {
+        const Token notToken = tokens[current];
+        advance(); // consume 'not'
+        advance(); // consume 'in'
+        auto container = parseShift();
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(std::move(container));
+        args.push_back(std::move(left));
+        auto callExpr = std::make_unique<CallExpr>("array_contains", std::move(args));
+        callExpr->fromStdNamespace = true;
+        callExpr->line = notToken.line;
+        callExpr->column = notToken.column;
+        auto notExpr = std::make_unique<UnaryExpr>("!", std::move(callExpr));
+        notExpr->line = notToken.line;
+        notExpr->column = notToken.column;
+        return notExpr;
+    }
+
     // 'in' operator: x in arr → array_contains(arr, x)
     // Placed at comparison precedence so it binds like other relational ops.
     if (match(TokenType::IN)) {
@@ -5166,6 +5363,15 @@ std::unique_ptr<Expression> Parser::parseCall() {
             auto idExpr = dynamic_cast<IdentifierExpr*>(expr.get());
             std::vector<std::unique_ptr<Expression>> arguments;
 
+            // Named arguments: foo(width: 4, height: 5)
+            // Detect if any argument uses the `name: expr` form.
+            // Named and positional args may be mixed: positional args come first,
+            // named args can appear in any order after positional args.
+            struct NamedArg { std::string name; std::unique_ptr<Expression> value; };
+            std::vector<std::unique_ptr<Expression>> positionalArgs;
+            std::vector<NamedArg> namedArgs;
+            bool seenNamed = false;
+
             if (!check(TokenType::RPAREN)) {
                 do {
                     // Spread argument: ...expr
@@ -5175,9 +5381,27 @@ std::unique_ptr<Expression> Parser::parseCall() {
                         auto node = std::make_unique<SpreadExpr>(std::move(operand));
                         node->line = spreadToken.line;
                         node->column = spreadToken.column;
-                        arguments.push_back(std::move(node));
+                        if (seenNamed) {
+                            error("Positional/spread arguments cannot follow named arguments");
+                        }
+                        positionalArgs.push_back(std::move(node));
                     } else {
-                        arguments.push_back(parseExpression());
+                        // Peek: if next is IDENT COLON, it's a named arg
+                        bool isNamed = (check(TokenType::IDENTIFIER) &&
+                                        current + 1 < tokens.size() &&
+                                        tokens[current + 1].type == TokenType::COLON);
+                        if (isNamed) {
+                            seenNamed = true;
+                            const std::string argName = advance().lexeme; // consume name
+                            advance(); // consume ':'
+                            auto val = parseExpression();
+                            namedArgs.push_back({argName, std::move(val)});
+                        } else {
+                            if (seenNamed) {
+                                error("Positional arguments cannot follow named arguments");
+                            }
+                            positionalArgs.push_back(parseExpression());
+                        }
                     }
                 } while (match(TokenType::COMMA));
             }
@@ -5185,13 +5409,58 @@ std::unique_ptr<Expression> Parser::parseCall() {
             consume(TokenType::RPAREN, "Expected ')' after arguments");
 
             // Resolve bare function calls from globally-imported user namespaces.
-            // e.g. after `import Math;`, `add(x)` maps to `Math::add(x)`.
             std::string calleeName = idExpr->name;
             {
                 auto bif = bareImportedFunctions_.find(calleeName);
                 if (bif != bareImportedFunctions_.end())
                     calleeName = bif->second;
             }
+
+            if (!seenNamed) {
+                // Fast path: no named args — use positional args as-is
+                arguments = std::move(positionalArgs);
+            } else {
+                // Reorder named args to match the function's declaration order.
+                auto pit = funcParamNames_.find(calleeName);
+                if (pit == funcParamNames_.end()) {
+                    // Also try the unqualified name (may have been mangled)
+                    pit = funcParamNames_.find(idExpr->name);
+                }
+                if (pit != funcParamNames_.end()) {
+                    const auto& paramNames = pit->second;
+                    // Start with positional args already in order
+                    arguments = std::move(positionalArgs);
+                    // Build a map of named args
+                    std::unordered_map<std::string, size_t> namedArgIdx;
+                    for (size_t k = 0; k < namedArgs.size(); ++k)
+                        namedArgIdx[namedArgs[k].name] = k;
+                    // Fill remaining positions using param order
+                    const size_t posCount = arguments.size();
+                    for (size_t k = posCount; k < paramNames.size(); ++k) {
+                        auto it = namedArgIdx.find(paramNames[k]);
+                        if (it != namedArgIdx.end()) {
+                            arguments.push_back(std::move(namedArgs[it->second].value));
+                        } else {
+                            error("Named argument call missing argument for parameter '" + paramNames[k] + "'");
+                        }
+                    }
+                    // Check for extra named args (names not in the param list)
+                    for (const auto& na : namedArgs) {
+                        bool found = false;
+                        for (const auto& pn : paramNames)
+                            if (pn == na.name) { found = true; break; }
+                        if (!found && na.value != nullptr) {
+                            error("Unknown named argument '" + na.name + "' for function '" + calleeName + "'");
+                        }
+                    }
+                } else {
+                    // Unknown function — append named args in the order given
+                    arguments = std::move(positionalArgs);
+                    for (auto& na : namedArgs)
+                        arguments.push_back(std::move(na.value));
+                }
+            }
+
             auto callExpr = std::make_unique<CallExpr>(calleeName, std::move(arguments));
             callExpr->line = expr->line;
             callExpr->column = expr->column;

@@ -200,6 +200,9 @@ class Lexer {
     Token scanString();
     Token scanMultiLineString();
     void scanInterpolatedString(std::vector<Token>& tokens);
+    /// Scan an f"..." interpolated string.  Called when 'f' has already been
+    /// consumed; position is now pointing at the opening '"'.
+    void scanFString(std::vector<Token>& tokens);
 };
 
 } // namespace omscript
