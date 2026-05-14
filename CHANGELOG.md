@@ -9,7 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Round-67: Fix global array literal initializers and switch fallthrough return type** (`src/codegen.cpp`):
+- **Round-68: Global string-array and str_to_int fixes** (`src/codegen.cpp`, `src/codegen_builtins.cpp`):
+  - `generateGlobals` now handles string-element array literals in global initializers. Each string is interned and stored as `ptrtoint(strGV, i64)` in the `[N+1 x i64]` data global so that `len`, indexing, and for-in all work without a runtime call. Float-element arrays now store values as their IEEE-754 bit pattern (`memcpy`-based), not as truncated integers.
+  - `str_to_int`: the fat-pointer base was being passed to `strtoll` instead of the character-data pointer. Fixed to use `emitStringData()`, matching the existing `str_to_float` implementation.
+  - `examples/global_str_array_test.om` — 11 tests (len, indexing, iteration, pass-to-function).
+
+
   - `generateGlobals`: integer-array-literal initializers (`[1, 2, 3]`) now create a writable `[N+1 x i64]` data global (OmScript array layout: length header + elements) and set the `ptr`-typed global variable to point at it. Previously every global array was `null` at startup.
   - Default function return fallthrough (`switch.end` block, missing `return`): the synthesized terminal instruction now matches the function's actual return type — `ret ptr null` for string/pointer-returning functions, `ret void` for void functions, `ret double 0.0` for float functions. Previously a `ret i64 0` was always emitted, causing LLVM verifier failures for string/pointer return types.
   - `examples/global_array_test.om` — 9 tests (len, index, iteration, range, function call).

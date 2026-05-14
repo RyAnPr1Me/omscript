@@ -5488,7 +5488,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "strtoi.ptr");
         llvm::Value* nullPtr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context));
         llvm::Value* base10 = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 10);
-        return builder->CreateCall(getOrDeclareStrtoll(), {strPtr, nullPtr, base10}, "strtoi.val");
+        return builder->CreateCall(getOrDeclareStrtoll(), {emitStringData(strPtr, "strtoi.data"), nullPtr, base10},
+                                   "strtoi.val");
     }
 
     // -----------------------------------------------------------------------

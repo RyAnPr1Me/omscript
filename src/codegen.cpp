@@ -7,6 +7,7 @@
 #include "synthesize.h"
 #include <climits>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -7939,40 +7940,76 @@ void CodeGenerator::generateGlobals(Program* program) {
                 // a runtime call at startup.
                 auto* arrExpr = static_cast<ArrayExpr*>(gv->initializer.get());
                 bool allConst = true;
-                std::vector<int64_t> elems;
-                for (const auto& el : arrExpr->elements) {
-                    if (el->type == ASTNodeType::LITERAL_EXPR) {
-                        auto* lit2 = static_cast<LiteralExpr*>(el.get());
-                        if (lit2->literalType == LiteralExpr::LiteralType::INTEGER) {
-                            elems.push_back(lit2->intValue);
-                        } else if (lit2->literalType == LiteralExpr::LiteralType::FLOAT) {
-                            elems.push_back(static_cast<int64_t>(lit2->floatValue));
+                // Detect the element type by peeking at the first element.
+                bool isStringElems = false;
+                if (!arrExpr->elements.empty() && arrExpr->elements[0]->type == ASTNodeType::LITERAL_EXPR) {
+                    auto* firstLit = static_cast<LiteralExpr*>(arrExpr->elements[0].get());
+                    isStringElems = (firstLit->literalType == LiteralExpr::LiteralType::STRING);
+                }
+
+                if (isStringElems) {
+                    // String array: [N+1 x i64] where elements are ptrtoint(str_global).
+                    auto* i64Ty = llvm::Type::getInt64Ty(*context);
+                    std::vector<llvm::Constant*> vals;
+                    vals.reserve(arrExpr->elements.size() + 1);
+                    vals.push_back(llvm::ConstantInt::get(i64Ty, static_cast<int64_t>(arrExpr->elements.size())));
+                    for (const auto& el : arrExpr->elements) {
+                        if (el->type != ASTNodeType::LITERAL_EXPR ||
+                            static_cast<LiteralExpr*>(el.get())->literalType != LiteralExpr::LiteralType::STRING) {
+                            allConst = false;
+                            break;
+                        }
+                        auto* strGV = internString(static_cast<LiteralExpr*>(el.get())->stringValue);
+                        vals.push_back(llvm::ConstantExpr::getPtrToInt(strGV, i64Ty));
+                    }
+                    if (allConst) {
+                        auto* arrTy = llvm::ArrayType::get(i64Ty, arrExpr->elements.size() + 1);
+                        auto* arrConst = llvm::ConstantArray::get(arrTy, vals);
+                        auto* dataGV = new llvm::GlobalVariable(*module, arrTy, /*isConstant=*/false,
+                                                                llvm::GlobalValue::PrivateLinkage, arrConst,
+                                                                llvmName + ".data");
+                        dataGV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+                        dataGV->setAlignment(llvm::Align(8));
+                        initVal = dataGV;
+                    }
+                } else {
+                    std::vector<int64_t> elems;
+                    for (const auto& el : arrExpr->elements) {
+                        if (el->type == ASTNodeType::LITERAL_EXPR) {
+                            auto* lit2 = static_cast<LiteralExpr*>(el.get());
+                            if (lit2->literalType == LiteralExpr::LiteralType::INTEGER) {
+                                elems.push_back(lit2->intValue);
+                            } else if (lit2->literalType == LiteralExpr::LiteralType::FLOAT) {
+                                // Store as float bit pattern so a bitcast reads back correctly.
+                                double fv = lit2->floatValue;
+                                int64_t bits;
+                                std::memcpy(&bits, &fv, sizeof(bits));
+                                elems.push_back(bits);
+                            } else {
+                                allConst = false;
+                                break;
+                            }
                         } else {
                             allConst = false;
                             break;
                         }
-                    } else {
-                        allConst = false;
-                        break;
                     }
-                }
-                if (allConst) {
-                    // Build [N+1 x i64] array constant with header + elements.
-                    auto* i64Ty = llvm::Type::getInt64Ty(*context);
-                    std::vector<llvm::Constant*> vals;
-                    vals.reserve(elems.size() + 1);
-                    vals.push_back(llvm::ConstantInt::get(i64Ty, static_cast<int64_t>(elems.size())));
-                    for (int64_t v : elems)
-                        vals.push_back(llvm::ConstantInt::get(i64Ty, v));
-                    auto* arrTy = llvm::ArrayType::get(i64Ty, elems.size() + 1);
-                    auto* arrConst = llvm::ConstantArray::get(arrTy, vals);
-                    // A mutable (non-const) data global so in-place ops like pop work.
-                    auto* dataGV = new llvm::GlobalVariable(*module, arrTy, /*isConstant=*/false,
-                                                            llvm::GlobalValue::PrivateLinkage, arrConst,
-                                                            llvmName + ".data");
-                    dataGV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-                    dataGV->setAlignment(llvm::Align(8));
-                    initVal = dataGV; // ptr-typed global initialized to point to data
+                    if (allConst) {
+                        auto* i64Ty = llvm::Type::getInt64Ty(*context);
+                        std::vector<llvm::Constant*> vals;
+                        vals.reserve(elems.size() + 1);
+                        vals.push_back(llvm::ConstantInt::get(i64Ty, static_cast<int64_t>(elems.size())));
+                        for (int64_t v : elems)
+                            vals.push_back(llvm::ConstantInt::get(i64Ty, v));
+                        auto* arrTy = llvm::ArrayType::get(i64Ty, elems.size() + 1);
+                        auto* arrConst = llvm::ConstantArray::get(arrTy, vals);
+                        auto* dataGV = new llvm::GlobalVariable(*module, arrTy, /*isConstant=*/false,
+                                                                llvm::GlobalValue::PrivateLinkage, arrConst,
+                                                                llvmName + ".data");
+                        dataGV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+                        dataGV->setAlignment(llvm::Align(8));
+                        initVal = dataGV;
+                    }
                 }
             }
         }
