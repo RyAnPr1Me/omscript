@@ -1861,6 +1861,47 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // fall through to the integer path.
     }
 
+    // ── Pointer arithmetic (must precede the ptrtoint fallback below) ──────────
+    // ptr - ptr: signed byte distance (ptrdiff_t semantics).
+    if (expr->op == "-" && left->getType()->isPointerTy() && right->getType()->isPointerTy()) {
+        const llvm::DataLayout& DL = module->getDataLayout();
+        llvm::Type* intptrTy = DL.getIntPtrType(*context);
+        auto* lInt = builder->CreatePtrToInt(left, intptrTy, "ptrdiff.l");
+        auto* rInt = builder->CreatePtrToInt(right, intptrTy, "ptrdiff.r");
+        auto* diff = builder->CreateSub(lInt, rInt, "ptrdiff");
+        if (diff->getType() != getDefaultType())
+            diff = builder->CreateSExt(diff, getDefaultType(), "ptrdiff.ext");
+        return diff;
+    }
+    // ptr ± int: element-aware GEP advance/retreat.
+    auto emitPtrArith = [&](llvm::Value* ptrVal, llvm::Value* intVal, bool negate,
+                             const Expression* ptrExpr) -> llvm::Value* {
+        const llvm::DataLayout& DL = module->getDataLayout();
+        llvm::Type* idxTy = DL.getIndexType(ptrVal->getType());
+        llvm::Value* offset = intVal;
+        if (offset->getType()->isDoubleTy() || offset->getType()->isFloatTy())
+            offset = builder->CreateFPToSI(offset, idxTy, "ptrarith.ftoi");
+        if (negate)
+            offset = builder->CreateNeg(offset, "ptrarith.neg");
+        offset = builder->CreateIntCast(offset, idxTy, /*isSigned=*/true, "ptrarith.idx");
+        llvm::Type* gepElemTy = llvm::Type::getInt8Ty(*context);
+        if (ptrExpr && ptrExpr->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const auto* id = static_cast<const IdentifierExpr*>(ptrExpr);
+            auto it = ptrElemTypes_.find(id->name);
+            if (it != ptrElemTypes_.end())
+                gepElemTy = resolveAnnotatedType(it->second);
+        }
+        return builder->CreateGEP(gepElemTy, ptrVal, offset, "ptrarith");
+    };
+    if ((expr->op == "+" || expr->op == "-") && left->getType()->isPointerTy() &&
+        right->getType()->isIntegerTy()) {
+        return emitPtrArith(left, right, expr->op == "-", expr->left.get());
+    }
+    // int + ptr: commutative form (no subtraction allowed in C here).
+    if (expr->op == "+" && right->getType()->isPointerTy() && left->getType()->isIntegerTy()) {
+        return emitPtrArith(right, left, false, expr->right.get());
+    }
+
     // Convert pointer types to i64 for integer operations (fallback).
     // For comparison operators between two pointers, prefer direct pointer icmp
     // to preserve provenance and avoid unnecessary ptrtoint round-trips.
@@ -5024,6 +5065,14 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
             auto* idExpr = static_cast<IdentifierExpr*>(expr->operand.get());
             auto it = namedValues.find(idExpr->name);
             if (it != namedValues.end() && it->second) {
+                // For struct variables, the alloca holds a ptr to the struct
+                // data (double-indirection).  &struct_var must yield the address
+                // of the struct data, i.e. the VALUE stored in the alloca.
+                if (structVars_.count(idExpr->name)) {
+                    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+                    return builder->CreateAlignedLoad(ptrTy, it->second, llvm::MaybeAlign(8),
+                                                      (idExpr->name + ".addr").c_str());
+                }
                 // namedValues stores AllocaInst* or GlobalVariable* — both are
                 // already pointer-typed values.
                 return it->second;
@@ -6205,6 +6254,33 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     idxVal = toDefaultType(idxVal);
 
+    // ── Typed pointer indexed access: p[i] on *T / ptr<T> variables ──────────
+    // C semantics: p[i]  ≡  *(p + i) — raw GEP+load, no bounds check, no
+    // OmScript array-header offset.  Applies whenever the base expression is a
+    // variable tracked in ptrVarNames_ (i.e. declared as ptr<T> / *T).
+    if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const std::string& ptrName = static_cast<IdentifierExpr*>(expr->array.get())->name;
+        if (ptrVarNames_.count(ptrName) && !psliceVarNames_.count(ptrName)) {
+            // Determine the element type from ptrElemTypes_.
+            llvm::Type* elemTy = getDefaultType();
+            auto elemIt = ptrElemTypes_.find(ptrName);
+            if (elemIt != ptrElemTypes_.end() && elemIt->second != "ptr")
+                elemTy = resolveAnnotatedType(elemIt->second);
+            // Ensure the pointer is an LLVM pointer type.
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            llvm::Value* base =
+                arrVal->getType()->isPointerTy() ? arrVal
+                                                 : builder->CreateIntToPtr(arrVal, ptrTy, "ptridx.baseptr");
+            // GEP into the i-th element (identical to C pointer indexing).
+            llvm::Value* elemPtr = builder->CreateInBoundsGEP(elemTy, base, idxVal, "ptridx.elemptr");
+            auto* elemLoad = builder->CreateLoad(elemTy, elemPtr, "ptridx.load");
+            // Widen narrow integers to i64 for consistent downstream types.
+            if (elemTy->isIntegerTy() && elemTy != getDefaultType())
+                return builder->CreateSExt(elemLoad, getDefaultType(), "ptridx.widen");
+            return elemLoad;
+        }
+    }
+
     // ── pslice indexed access: bounds-checked element load ───────────────────
     // For a variable declared as `pslice<T>`, p[i] emits a compile-time check
     // when both i and the slice length are constants; otherwise emits a runtime
@@ -6464,6 +6540,36 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     inIndexAssignValueContext_ = savedInIndexAssignValue;
     newVal = toDefaultType(newVal);
     idxVal = toDefaultType(idxVal);
+
+    // ── Typed pointer indexed store: p[i] = val on *T / ptr<T> variables ──────
+    // C semantics: p[i] = val  ≡  *(p + i) = val — raw GEP+store, no bounds
+    // check, no OmScript array-header offset.
+    if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const std::string& ptrName = static_cast<IdentifierExpr*>(expr->array.get())->name;
+        if (ptrVarNames_.count(ptrName) && !psliceVarNames_.count(ptrName)) {
+            llvm::Type* elemTy = getDefaultType();
+            auto elemIt = ptrElemTypes_.find(ptrName);
+            if (elemIt != ptrElemTypes_.end() && elemIt->second != "ptr")
+                elemTy = resolveAnnotatedType(elemIt->second);
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            llvm::Value* base =
+                arrVal->getType()->isPointerTy() ? arrVal
+                                                 : builder->CreateIntToPtr(arrVal, ptrTy, "ptridxs.baseptr");
+            llvm::Value* elemPtr = builder->CreateInBoundsGEP(elemTy, base, idxVal, "ptridxs.elemptr");
+            // Truncate/extend value to match element storage type.
+            llvm::Value* storeVal = newVal;
+            if (storeVal->getType() != elemTy) {
+                if (elemTy->isIntegerTy() && storeVal->getType()->isIntegerTy())
+                    storeVal = builder->CreateIntCast(storeVal, elemTy, /*isSigned=*/true, "ptridxs.cast");
+                else if (elemTy->isFloatingPointTy() && storeVal->getType()->isIntegerTy())
+                    storeVal = builder->CreateSIToFP(storeVal, elemTy, "ptridxs.itofp");
+                else if (elemTy->isIntegerTy() && storeVal->getType()->isFloatingPointTy())
+                    storeVal = builder->CreateFPToSI(storeVal, elemTy, "ptridxs.ftoi");
+            }
+            builder->CreateStore(storeVal, elemPtr);
+            return newVal;
+        }
+    }
 
     // ── pslice indexed store: p[i] = val with bounds check ───────────────────
     if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {

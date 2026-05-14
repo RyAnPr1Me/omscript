@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-60: Full C-like pointer semantics** (`src/codegen_expr.cpp`):
+  - **`p[i]` on `*T` / `ptr<T>` typed pointers** — C semantics: `p[i]` compiles to a raw GEP+load (`*(p + i)`), with no OmScript array header offset or bounds check. Applies to any variable declared as `*T` or `ptr<T>` (not `pslice<T>`).
+  - **`p[i] = val` on `*T` / `ptr<T>` typed pointers** — C semantics: compiles to GEP+store, element type–aware truncation/extension.
+  - **`p + n` / `p - n` pointer arithmetic fixed** — moved to before the `ptrtoint` fallback so element-aware GEP is always emitted (was incorrectly falling through to byte-level integer add).
+  - **`int + ptr` commutative form** — `1 + p` now works as expected (same GEP semantics as `p + 1`).
+  - **`&struct_var` address-of fixed** — for struct variables (which use double-indirection internally), `&v` now correctly returns the pointer to struct data rather than the alloca of the pointer variable. Enables `var vp: *Vec2 = &v; vp->x`.
+  - All existing features continue to work: `*p` dereference, `*p = val` write-through, `p - q` pointer difference, `p -> field` / `p -> method()` struct member access via arrow, `NULL` / `nullptr` null pointer constant.
+
 - **Round-59: `*T` typed pointer syntax** (`src/parser.cpp`):
   - **`*T`** — new C/Rust-style typed pointer type annotation. `*int`, `*f64`, `*MyStruct`, `**int` (pointer-to-pointer), `*int[]` (pointer-to-array) are all valid. Desugars internally to the existing `ptr<T>` representation so all codegen, `sizeof`, `ptrElemTypes_`, and tooling work unchanged.
   - **`ptr`** (bare) and **`ptr<T>`** are still valid and unchanged — `ptr` is the untyped/fat/raw pointer; `ptr<T>` is now also writable as `*T`.
