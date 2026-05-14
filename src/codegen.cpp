@@ -5560,8 +5560,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
             }
         }
         llvm::Type* retTy = function->getReturnType();
-        if (retTy->isDoubleTy())
+        if (retTy->isVoidTy())
+            builder->CreateRetVoid();
+        else if (retTy->isDoubleTy())
             builder->CreateRet(llvm::ConstantFP::get(retTy, 0.0));
+        else if (retTy->isPointerTy())
+            builder->CreateRet(llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(retTy)));
         else
             builder->CreateRet(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)));
     }
@@ -7927,8 +7931,50 @@ void CodeGenerator::generateGlobals(Program* program) {
                     // which is a Constant* of the same opaque-pointer type.
                     initVal = internString(lit->stringValue);
                 }
+            } else if (gv->initializer->type == ASTNodeType::ARRAY_EXPR) {
+                // Array literal initializer: build a writable data global and point to it.
+                // Layout: [N+1 x i64] { N, elem0, elem1, ... }
+                // The array pointer global (ptr-typed) is initialized to point at
+                // this data global so that operations like len/index/pop work without
+                // a runtime call at startup.
+                auto* arrExpr = static_cast<ArrayExpr*>(gv->initializer.get());
+                bool allConst = true;
+                std::vector<int64_t> elems;
+                for (const auto& el : arrExpr->elements) {
+                    if (el->type == ASTNodeType::LITERAL_EXPR) {
+                        auto* lit2 = static_cast<LiteralExpr*>(el.get());
+                        if (lit2->literalType == LiteralExpr::LiteralType::INTEGER) {
+                            elems.push_back(lit2->intValue);
+                        } else if (lit2->literalType == LiteralExpr::LiteralType::FLOAT) {
+                            elems.push_back(static_cast<int64_t>(lit2->floatValue));
+                        } else {
+                            allConst = false;
+                            break;
+                        }
+                    } else {
+                        allConst = false;
+                        break;
+                    }
+                }
+                if (allConst) {
+                    // Build [N+1 x i64] array constant with header + elements.
+                    auto* i64Ty = llvm::Type::getInt64Ty(*context);
+                    std::vector<llvm::Constant*> vals;
+                    vals.reserve(elems.size() + 1);
+                    vals.push_back(llvm::ConstantInt::get(i64Ty, static_cast<int64_t>(elems.size())));
+                    for (int64_t v : elems)
+                        vals.push_back(llvm::ConstantInt::get(i64Ty, v));
+                    auto* arrTy = llvm::ArrayType::get(i64Ty, elems.size() + 1);
+                    auto* arrConst = llvm::ConstantArray::get(arrTy, vals);
+                    // A mutable (non-const) data global so in-place ops like pop work.
+                    auto* dataGV = new llvm::GlobalVariable(*module, arrTy, /*isConstant=*/false,
+                                                            llvm::GlobalValue::PrivateLinkage, arrConst,
+                                                            llvmName + ".data");
+                    dataGV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+                    dataGV->setAlignment(llvm::Align(8));
+                    initVal = dataGV; // ptr-typed global initialized to point to data
+                }
             }
-            // Non-literal initializers at top level: zero-init the global.
         }
 
         // If a global with this name already exists (e.g. from a previous import

@@ -919,6 +919,8 @@ ptest_program "examples/struct_param_test.om" 8
 ptest_program "examples/incdec_lvalue_test.om" 12
 ptest_program "examples/bare_fnptr_test.om" 9
 ptest_program "examples/global_string_test.om" 10
+ptest_program "examples/global_array_test.om" 9
+ptest_program "examples/switch_string_return_test.om" 7
 flush_ptests
 
 echo ""

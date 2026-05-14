@@ -1,0 +1,39 @@
+import std;
+
+// switch_string_return_test.om — Round-67: fix ret type mismatch in
+// string-returning functions with switch-only control flow.
+
+fn season(month: int) -> string {
+    switch (month) {
+        case 12, 1, 2: return "Winter";
+        case 3, 4, 5:  return "Spring";
+        case 6, 7, 8:  return "Summer";
+        case 9, 10, 11: return "Autumn";
+        default: return "Unknown";
+    }
+}
+
+fn parity(n: int) -> string {
+    switch (n % 2) {
+        case 0: return "even";
+        case 1: return "odd";
+        default: return "?";
+    }
+}
+
+fn main() -> int {
+    var score: int = 0;
+
+    // T1: switch string return — each branch
+    score += (season(1)  == "Winter");
+    score += (season(4)  == "Spring");
+    score += (season(7)  == "Summer");
+    score += (season(10) == "Autumn");
+    score += (season(99) == "Unknown");
+
+    // T2: switch with modular case
+    score += (parity(4) == "even");
+    score += (parity(7) == "odd");
+
+    return score;
+}

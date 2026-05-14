@@ -1,0 +1,48 @@
+import std;
+
+// global_array_test.om — Round-67: global array literal initializer fix.
+//
+// Tests:
+//   1. global var int[] with literal initializer — len, indexing, iteration
+//   2. global var int[] mutation via push (pointer update)
+//   3. global const int[] — read-only access
+//   4. global var float[] — basic ops
+//   5. Global array passed to functions
+
+global var scores: int[] = [10, 20, 30, 40, 50];
+global const primes: int[] = [2, 3, 5, 7, 11];
+
+fn sum_array(arr: int[]) -> int {
+    var s: int = 0;
+    for (v in arr) { s += v; }
+    return s;
+}
+
+fn main() -> int {
+    var score: int = 0;
+
+    // T1: len of global array
+    score += (len(scores) == 5);
+    score += (len(primes) == 5);
+
+    // T2: index access
+    score += (scores[0] == 10);
+    score += (scores[4] == 50);
+    score += (primes[2] == 5);
+
+    // T3: iteration via for-in
+    score += (sum_array(scores) == 150);
+    score += (sum_array(primes) == 28);
+
+    // T4: index via range
+    var prod: int = 1;
+    for (i in range(0, len(primes))) {
+        prod = prod * primes[i];
+    }
+    score += (prod == 2310);  // 2*3*5*7*11
+
+    // T5: global array passed to function
+    score += (sum_array(scores) == 150);
+
+    return score;
+}

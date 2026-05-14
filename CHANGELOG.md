@@ -9,7 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Round-66: Global variable string initializer and load-type fixes** (`src/codegen.cpp`, `src/codegen_expr.cpp`, `include/codegen.h`):
+- **Round-67: Fix global array literal initializers and switch fallthrough return type** (`src/codegen.cpp`):
+  - `generateGlobals`: integer-array-literal initializers (`[1, 2, 3]`) now create a writable `[N+1 x i64]` data global (OmScript array layout: length header + elements) and set the `ptr`-typed global variable to point at it. Previously every global array was `null` at startup.
+  - Default function return fallthrough (`switch.end` block, missing `return`): the synthesized terminal instruction now matches the function's actual return type — `ret ptr null` for string/pointer-returning functions, `ret void` for void functions, `ret double 0.0` for float functions. Previously a `ret i64 0` was always emitted, causing LLVM verifier failures for string/pointer return types.
+  - `examples/global_array_test.om` — 9 tests (len, index, iteration, range, function call).
+  - `examples/switch_string_return_test.om` — 7 tests (switch with only `return` in every branch, multiple case values per arm).
+
+
   - `generateGlobals`: string literal initializers now call `internString()` so a global `string` variable starts with the correct fat-pointer address instead of `null`.
   - `generateIdentifier`: global variables in `namedValues` are now loaded with their declared value type (`GlobalVariable::getValueType()`) instead of always defaulting to `i64`. This ensures `load ptr` is emitted for string/array/dict globals.
   - `isStringExpr`: global variables declared as `string` are now classified as string expressions via a new `globalStringVarNames_` set, fixing `println`, `+` concat, string comparison, and all other string operations on global variables.
