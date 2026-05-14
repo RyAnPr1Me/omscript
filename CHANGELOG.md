@@ -9,7 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Round-63: Compound assignment on pointer dereference + struct type ordering fix** (`src/parser.cpp`, `src/codegen.cpp`):
+- **Round-64: `++`/`--` on pointer dereferences and struct fields** (`src/parser.cpp`, `src/codegen_expr.cpp`):
+  - **`(*p)++`, `++(*p)`, `(*p)--`, `--(*p)`** — prefix and postfix increment/decrement now work on a dereferenced pointer variable. Parser lvalue check expanded to accept `UNARY_EXPR("deref", ...)`. Codegen `generateIncDec` handles this case: loads the value at the pointer address, adds/subtracts 1, stores back; returns old value for postfix, new value for prefix.
+  - **`s.field++`, `++s.field`, `s.field--`, `--s.field`** — prefix and postfix increment/decrement now work on struct field access expressions. Parser lvalue check expanded to accept `FIELD_ACCESS_EXPR`. Codegen resolves the field GEP via `resolveField()`, loads value, increments/decrements, stores back. Values narrower than `i64` are sign-extended before arithmetic and truncated back before storing.
+  - `examples/incdec_lvalue_test.om` — 12 tests covering all combinations: postfix/prefix `++`/`--` on `*ptr` and `struct.field`, old/new value semantics, and loop usage.
+
+
   - **`*p op= rhs` compound assignment on pointer dereference** — `*p += n`, `*p *= n`, `*p -= n`, `*p /= n`, and all other compound-assignment operators now work when the left-hand side is a dereferenced pointer variable (e.g. `*ptr`). Desugars to `*ptr = *ptr op rhs` in the parser, emitting a `DerefAssignExpr` on the write side and a `UnaryExpr("deref", ...)` on the read side. Previously the parser rejected these with "Compound assignment is only supported on variables, array elements, and struct fields" even though `*ptr = val` (plain assignment) already worked.
   - **Struct type annotations in function parameters no longer warn** — the struct declaration pre-pass is now executed _before_ the function forward-declaration loop. Previously, `resolveAnnotatedType("MyStruct")` in the function declaration loop consulted `structDefs_` before it was populated, producing a spurious `[warning] unknown type annotation 'MyStruct' — falling back to i64` on every function that took a struct parameter by value. The LLVM type resolution already returned the correct `ptr` type (fall-through path) so behaviour was always correct, but the noise confused users into thinking struct parameters were unsupported. Now produces no warnings.
   - `examples/compound_deref_test.om` — 8 tests: `*p += n`, chained compound ops (`/=`, `-=`), struct method `self->field += step`, and out-param pattern.

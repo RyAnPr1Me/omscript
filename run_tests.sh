@@ -916,6 +916,7 @@ ptest_program "examples/fnptr_test.om" 10
 ptest_program "examples/ptr_mutation_test.om" 8
 ptest_program "examples/compound_deref_test.om" 8
 ptest_program "examples/struct_param_test.om" 8
+ptest_program "examples/incdec_lvalue_test.om" 12
 flush_ptests
 
 echo ""

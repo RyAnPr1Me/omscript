@@ -5474,8 +5474,82 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
     }
 
     // Handle array element increment/decrement: arr[i]++ / ++arr[i]
-    if (operandExpr->type != ASTNodeType::INDEX_EXPR && operandExpr->type != ASTNodeType::IDENTIFIER_EXPR) {
+    if (operandExpr->type != ASTNodeType::INDEX_EXPR &&
+        operandExpr->type != ASTNodeType::IDENTIFIER_EXPR &&
+        operandExpr->type != ASTNodeType::FIELD_ACCESS_EXPR &&
+        !(operandExpr->type == ASTNodeType::UNARY_EXPR &&
+          static_cast<const UnaryExpr*>(operandExpr)->op == "deref")) {
         codegenError("Increment/decrement operators require an lvalue operand", errorNode);
+    }
+
+    // ── Deref inc/dec: (*p)++ / ++(*p) ──────────────────────────────────────
+    if (operandExpr->type == ASTNodeType::UNARY_EXPR &&
+        static_cast<const UnaryExpr*>(operandExpr)->op == "deref") {
+        auto* ue = static_cast<const UnaryExpr*>(operandExpr);
+        llvm::Value* ptrVal = generateExpression(ue->operand.get());
+        auto* opaquePtrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* addr =
+            ptrVal->getType()->isPointerTy()
+                ? ptrVal
+                : builder->CreateIntToPtr(ptrVal, opaquePtrTy, "incdec.deref.addr");
+        llvm::Value* current =
+            builder->CreateAlignedLoad(getDefaultType(), addr, llvm::MaybeAlign(8), "incdec.deref.val");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(current)->setMetadata(llvm::LLVMContext::MD_noundef,
+                                                                llvm::MDNode::get(*context, {}));
+        llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
+        llvm::Value* updated = (op == "++")
+                                   ? builder->CreateAdd(current, delta, "incdec.deref.inc",
+                                                        /*HasNUW=*/false, /*HasNSW=*/true)
+                                   : builder->CreateSub(current, delta, "incdec.deref.dec",
+                                                        /*HasNUW=*/false, /*HasNSW=*/true);
+        builder->CreateAlignedStore(updated, addr, llvm::MaybeAlign(8));
+        return isPostfix ? current : updated;
+    }
+
+    // ── Field access inc/dec: s.field++ / ++s.field ─────────────────────────
+    if (operandExpr->type == ASTNodeType::FIELD_ACCESS_EXPR) {
+        auto* fa = static_cast<const FieldAccessExpr*>(operandExpr);
+        const std::string structHint = resolveStructType(fa->object.get());
+        const ResolvedField rf = resolveField(structHint, fa->fieldName, errorNode);
+
+        llvm::Value* objVal = generateExpression(fa->object.get());
+        auto* opaquePtrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* basePtr = objVal->getType()->isPointerTy()
+                                   ? objVal
+                                   : builder->CreateIntToPtr(objVal, opaquePtrTy, "incdec.field.base");
+
+        llvm::Type* elemTy = rf.fieldType ? rf.fieldType : getDefaultType();
+        llvm::Value* elemPtr;
+        if (rf.structType) {
+            elemPtr = builder->CreateStructGEP(rf.structType, basePtr, static_cast<unsigned>(rf.index),
+                                               "incdec.field.ptr");
+        } else {
+            elemPtr = builder->CreateInBoundsGEP(
+                getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), rf.index), "incdec.field.ptr");
+        }
+        const llvm::Align fieldAlign = module->getDataLayout().getABITypeAlign(elemTy);
+        llvm::Value* current =
+            builder->CreateAlignedLoad(elemTy, elemPtr, fieldAlign, "incdec.field.val");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(current)->setMetadata(llvm::LLVMContext::MD_noundef,
+                                                                llvm::MDNode::get(*context, {}));
+        // Lift to i64 for arithmetic (field may be i8/i32 etc.)
+        llvm::Value* widened = (elemTy == getDefaultType())
+                                   ? current
+                                   : builder->CreateSExt(current, getDefaultType(), "incdec.field.widen");
+        llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
+        llvm::Value* updatedWide = (op == "++")
+                                       ? builder->CreateAdd(widened, delta, "incdec.field.inc",
+                                                            /*HasNUW=*/false, /*HasNSW=*/true)
+                                       : builder->CreateSub(widened, delta, "incdec.field.dec",
+                                                            /*HasNUW=*/false, /*HasNSW=*/true);
+        llvm::Value* updated = (elemTy == getDefaultType())
+                                   ? updatedWide
+                                   : builder->CreateTrunc(updatedWide, elemTy, "incdec.field.trunc");
+        builder->CreateAlignedStore(updated, elemPtr, fieldAlign);
+        // Return wide (i64) value to match the convention of generateFieldAccess.
+        return isPostfix ? widened : updatedWide;
     }
     IndexExpr* indexExpr =
         (operandExpr->type == ASTNodeType::INDEX_EXPR) ? static_cast<IndexExpr*>(operandExpr) : nullptr;
