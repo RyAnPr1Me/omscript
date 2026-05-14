@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-59: `*T` typed pointer syntax** (`src/parser.cpp`):
+  - **`*T`** — new C/Rust-style typed pointer type annotation. `*int`, `*f64`, `*MyStruct`, `**int` (pointer-to-pointer), `*int[]` (pointer-to-array) are all valid. Desugars internally to the existing `ptr<T>` representation so all codegen, `sizeof`, `ptrElemTypes_`, and tooling work unchanged.
+  - **`ptr`** (bare) and **`ptr<T>`** are still valid and unchanged — `ptr` is the untyped/fat/raw pointer; `ptr<T>` is now also writable as `*T`.
+  - `**T` chains recursively: each leading `*` adds one level of `ptr<...>` wrapping, exactly like C/Rust.
+  - Works in all type-annotation positions: variable declarations (`var p: *int`), function parameters (`fn foo(p: *int)`), return types (`fn bar() -> *int`), struct fields, and type aliases (`type IntPtr = *int`).
+
 - **Round-58: C-like type system additions** (`src/codegen.cpp`, `src/codegen_expr.cpp`, `src/parser.cpp`):
   - **`c_FILE`** — opaque pointer type representing C `FILE*`. Lowers to `ptr` (LLVM opaque pointer). `sizeof(c_FILE) == 8`. Use with `fopen`/`fclose`/`fread`/`fwrite`/`fgets`/`fputs` builtins.
   - **`c_dir` / `c_DIR`** — opaque pointer type for POSIX `DIR*` (returned by `opendir`). Lowers to `ptr`.

@@ -929,37 +929,14 @@ std::unique_ptr<Program> Parser::parse() {
                 advance(); // consume 'type'
                 const Token aliasName = consume(TokenType::IDENTIFIER, "Expected alias name after 'type'");
                 consume(TokenType::ASSIGN, "Expected '=' after type alias name");
-                // Parse the right-hand side type (possibly u64x{N} or other SIMD type)
-                std::string typeName;
-                if (check(TokenType::IDENTIFIER)) {
-                    typeName = advance().lexeme;
-                    // Handle parameterised SIMD types: u64x{IDENT} or u64x{INTEGER}
-                    if (check(TokenType::LBRACE)) {
-                        advance(); // consume '{'
-                        std::string sizeStr;
-                        if (check(TokenType::IDENTIFIER)) {
-                            const std::string ident = advance().lexeme;
-                            auto it = comptimeConstants_.find(ident);
-                            if (it != comptimeConstants_.end())
-                                sizeStr = std::to_string(it->second);
-                            else
-                                sizeStr = ident; // keep as-is; may resolve later
-                        } else if (check(TokenType::INTEGER)) {
-                            sizeStr = std::to_string(advance().intValue);
-                        }
-                        consume(TokenType::RBRACE, "Expected '}' after SIMD lane count");
-                        typeName = typeName + sizeStr;
-                    }
-                    // Handle array suffix: type[]
-                    while (check(TokenType::LBRACKET) && current + 1 < tokens.size() &&
-                           tokens[current + 1].type == TokenType::RBRACKET) {
-                        advance();
-                        advance();
-                        typeName += "[]";
-                    }
-                } else {
+                // Parse the right-hand side type using the full type annotation
+                // parser so that *T, **T, (T1,T2), ptr<T>, etc. all work.
+                if (!check(TokenType::IDENTIFIER) && !check(TokenType::STAR) &&
+                    !check(TokenType::STAR_STAR) && !check(TokenType::LPAREN) &&
+                    !check(TokenType::AMPERSAND)) {
                     error("Expected type name after '=' in type alias");
                 }
+                const std::string typeName = parseTypeAnnotation();
                 consume(TokenType::SEMICOLON, "Expected ';' after type alias");
                 typeAliases_[aliasName.lexeme] = typeName;
             } catch (const std::exception& e) {
@@ -1769,6 +1746,20 @@ std::string Parser::parseTypeAnnotation() {
     std::string prefix;
     if (match(TokenType::AMPERSAND)) {
         prefix = "&";
+    }
+    // ── *T typed pointer syntax (C/Rust style) ────────────────────────────────
+    // `*T`  →  desugared to `ptr<T>` internally.  Chains: `**T` → `ptr<ptr<T>>`.
+    // `ptr` (bare) and `ptr<T>` remain valid for raw/fat pointers.
+    if (check(TokenType::STAR)) {
+        advance(); // consume '*'
+        std::string inner = parseTypeAnnotation(); // recursively parse pointed-to type
+        return prefix + "ptr<" + inner + ">";
+    }
+    // `**T` — the lexer produces a STAR_STAR token; desugar as two pointer levels.
+    if (check(TokenType::STAR_STAR)) {
+        advance(); // consume '**'
+        std::string inner = parseTypeAnnotation();
+        return prefix + "ptr<ptr<" + inner + ">>";
     }
     // ── Tuple type: (T1, T2, ...) ─────────────────────────────────────────────
     // Parsed as "tuple<T1,T2,...>" internally; lowered to an anonymous LLVM struct.
