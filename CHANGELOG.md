@@ -9,7 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Round-68: Global string-array and str_to_int fixes** (`src/codegen.cpp`, `src/codegen_builtins.cpp`):
+- **Round-69: `Struct::method(args)` static-call syntax, top-level `const`, and bool comparison fix** (`src/parser.cpp`, `src/codegen_expr.cpp`):
+  - **Static struct method calls**: `Counter::new(start, step)` — calling a function declared as `fn Counter::method(...)` via the `Struct::method(args)` call site — was rejected with "Unknown namespace 'Counter'" because the parser treated the left side of `::` as an imported-file namespace. Fix: before the "Unknown namespace" hard error, the parser checks if `segments[0]` is in `structNames_`. If so, it constructs the fully-qualified callee name (e.g. `"Counter::new"`) and emits a `CallExpr` directly. Spread args (`...arr`) are forwarded correctly.
+  - **Top-level `const`**: Bare `const NAME [: TYPE] = VALUE;` at program scope was rejected with "Expected 'fn'". It is now accepted as a shorthand for `global const NAME [: TYPE] = VALUE;`.
+  - **Bool `i1` zero-extension in comparisons**: When a `bool` variable (LLVM `i1` type) was compared with a non-i1 integer (e.g. `flag == true`), the `i1 1` was *sign-extended* to `i64 -1` causing `-1 == 1 = false`. Fix: the "Normalize integer widths" section in `generateBinaryExpr` now treats `i1` operands as unsigned (zero-extends them), consistent with `toDefaultType()`.
+  - `examples/struct_static_call_test.om` — 11 tests (factories, binary-op methods, chained calls).
+  - `examples/top_const_test.om` — 10 tests (int/float/string/bool consts, arithmetic, function calls).
+
+
   - `generateGlobals` now handles string-element array literals in global initializers. Each string is interned and stored as `ptrtoint(strGV, i64)` in the `[N+1 x i64]` data global so that `len`, indexing, and for-in all work without a runtime call. Float-element arrays now store values as their IEEE-754 bit pattern (`memcpy`-based), not as truncated integers.
   - `str_to_int`: the fat-pointer base was being passed to `strtoll` instead of the character-data pointer. Fixed to use `emitStringData()`, matching the existing `str_to_float` implementation.
   - `examples/global_str_array_test.om` — 11 tests (len, indexing, iteration, pass-to-function).

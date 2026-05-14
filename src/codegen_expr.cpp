@@ -2047,8 +2047,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     if (left->getType()->isIntegerTy() && right->getType()->isIntegerTy() && left->getType() != right->getType()) {
         const unsigned leftBits = left->getType()->getIntegerBitWidth();
         const unsigned rightBits = right->getType()->getIntegerBitWidth();
-        const bool leftUnsigned = unsignedExprs_.count(left) || isUnsignedValue(left);
-        const bool rightUnsigned = unsignedExprs_.count(right) || isUnsignedValue(right);
+        // i1 (bool) is always logically 0 or 1; zero-extend it like an unsigned type.
+        const bool leftUnsigned = (leftBits == 1) || unsignedExprs_.count(left) || isUnsignedValue(left);
+        const bool rightUnsigned = (rightBits == 1) || unsignedExprs_.count(right) || isUnsignedValue(right);
         if (leftBits < rightBits) {
             if (leftUnsigned) {
                 left = builder->CreateZExt(left, right->getType(), "zext",

@@ -404,6 +404,32 @@ std::unique_ptr<Program> Parser::parse() {
             }
             continue;
         }
+        // Top-level `const NAME [: TYPE] = VALUE;` — shorthand for `global const`.
+        // This is a common pattern; accept it to avoid confusing "Expected 'fn'" errors.
+        if (check(TokenType::CONST)) {
+            try {
+                advance(); // consume 'const'
+                const Token name = consume(TokenType::IDENTIFIER, "Expected variable name after 'const'");
+                std::string typeName;
+                if (match(TokenType::COLON)) {
+                    typeName = parseTypeAnnotation();
+                }
+                std::unique_ptr<Expression> init = nullptr;
+                if (match(TokenType::ASSIGN)) {
+                    init = parseExpression();
+                }
+                consume(TokenType::SEMICOLON, "Expected ';' after const declaration");
+                auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init), /*isConst=*/true, typeName);
+                decl->isGlobal = true;
+                decl->line = name.line;
+                decl->column = name.column;
+                globals.push_back(std::move(decl));
+            } catch (const std::exception& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
         if (match(TokenType::OPTMAX_START)) {
             if (optMaxTagActive) {
                 error("Nested OPTMAX blocks are not allowed");
@@ -5945,7 +5971,40 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                     e->column = token.column;
                     return e;
                 }
-                // ── Priority 3: unknown namespace — hard error ─────────────────
+                // ── Priority 3: struct static-method call ──────────────────────
+                // If the first segment is a known struct name (e.g. Counter),
+                // treat  Counter::new(args)  as a static/class-method call by
+                // emitting a CallExpr with the fully-qualified mangled name.
+                // Codegen will find it in the function map directly (function was
+                // declared as  fn Counter::new(...)  which stores name "Counter::new").
+                if (structNames_.count(segments[0])) {
+                    // Build mangled callee name: "Counter::new" or deeper.
+                    std::string callee = segments[0];
+                    for (int si = 1; si < (int)segments.size(); ++si)
+                        callee += "::" + segments[si];
+                    advance(); // consume '('
+                    std::vector<std::unique_ptr<Expression>> args;
+                    if (!check(TokenType::RPAREN)) {
+                        do {
+                            if (check(TokenType::RANGE)) {
+                                advance();
+                                auto spreadArg = parseExpression();
+                                auto se = std::make_unique<SpreadExpr>(std::move(spreadArg));
+                                se->line = token.line;
+                                se->column = token.column;
+                                args.push_back(std::move(se));
+                            } else {
+                                args.push_back(parseExpression());
+                            }
+                        } while (match(TokenType::COMMA));
+                    }
+                    consume(TokenType::RPAREN, "Expected ')' after arguments");
+                    auto e = std::make_unique<CallExpr>(callee, std::move(args));
+                    e->line = token.line;
+                    e->column = token.column;
+                    return e;
+                }
+                // ── Priority 4: unknown namespace — hard error ─────────────────
                 // resolveNamespacedPath() returned empty, meaning no namespace
                 // prefix in the registry matched.  This is always a compile
                 // error: either the namespace was never imported, it was
