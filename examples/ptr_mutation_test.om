@@ -1,0 +1,93 @@
+import std;
+
+fn increment(p: *int) {
+    *p = *p + 1;
+}
+
+fn do_swap(a: *int, b: *int) {
+    var tmp: int = *a;
+    *a = *b;
+    *b = tmp;
+}
+
+fn sum_arr(p: *int, n: int) -> int {
+    var total: int = 0;
+    var i: int = 0;
+    while (i < n) {
+        total = total + p[i];
+        i = i + 1;
+    }
+    return total;
+}
+
+fn set_val(p: *int, v: int) {
+    *p = v;
+}
+
+fn add_to(p: *int, delta: int) {
+    *p = *p + delta;
+}
+
+fn fill(p: *int, n: int, v: int) {
+    var i: int = 0;
+    while (i < n) {
+        p[i] = v;
+        i = i + 1;
+    }
+}
+
+fn dot(a: *int, b: *int, n: int) -> int {
+    var total: int = 0;
+    var i: int = 0;
+    while (i < n) {
+        total = total + a[i] * b[i];
+        i = i + 1;
+    }
+    return total;
+}
+
+fn main() -> int {
+    var score: int = 0;
+
+    // T1: write through ptr and read back
+    var x: int = 10;
+    set_val(&x, 42);
+    score += (x == 42);
+
+    // T2: to_string after ptr mutation (const-fold clobber fix)
+    var y: int = 5;
+    increment(&y);
+    score += (y == 6);
+
+    // T3: multiple writes
+    increment(&y);
+    increment(&y);
+    score += (y == 8);
+
+    // T4: swap
+    var a: int = 3;
+    var b: int = 7;
+    do_swap(&a, &b);
+    score += (a == 7 && b == 3);
+
+    // T5: add_to
+    var c: int = 100;
+    add_to(&c, 23);
+    score += (c == 123);
+
+    // T6: sum via array decay
+    var arr: int[] = [1, 2, 3, 4, 5];
+    score += (sum_arr(arr, 5) == 15);
+
+    // T7: fill then sum
+    var buf: int[] = [0, 0, 0, 0];
+    fill(buf, 4, 7);
+    score += (sum_arr(buf, 4) == 28);
+
+    // T8: dot product
+    var u: int[] = [1, 2, 3];
+    var v: int[] = [4, 5, 6];
+    score += (dot(u, v, 3) == 32);
+
+    return score;
+}

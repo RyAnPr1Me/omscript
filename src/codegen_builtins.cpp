@@ -10122,6 +10122,36 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                      expr);
     }
 
+    // ── Clobber variables passed by address ──────────────────────────────────
+    // When a variable's address is passed to a function (e.g. `f(&x)`), the
+    // callee may write to it through the pointer.  Remove `x` from the
+    // compile-time constant fold maps so that subsequent uses of `x` in the
+    // same scope are not incorrectly constant-folded to the pre-call value.
+    // This handles both BorrowExpr (`&x` explicit address-of) and
+    // UnaryExpr with op "&" (alternate representation).
+    for (auto& entry : flatArgEntries) {
+        if (!entry.expr)
+            continue;
+        const Expression* arg = entry.expr;
+        // Unwrap a single level of borrow/unary-& to get the variable name.
+        std::string clobbered;
+        if (arg->type == ASTNodeType::BORROW_EXPR) {
+            const auto* borrow = static_cast<const BorrowExpr*>(arg);
+            if (borrow->source && borrow->source->type == ASTNodeType::IDENTIFIER_EXPR)
+                clobbered = static_cast<const IdentifierExpr*>(borrow->source.get())->name;
+        } else if (arg->type == ASTNodeType::UNARY_EXPR) {
+            const auto* u = static_cast<const UnaryExpr*>(arg);
+            if (u->op == "&" && u->operand && u->operand->type == ASTNodeType::IDENTIFIER_EXPR)
+                clobbered = static_cast<const IdentifierExpr*>(u->operand.get())->name;
+        }
+        if (!clobbered.empty()) {
+            constIntFolds_.erase(llvm::StringRef(clobbered));
+            constFloatFolds_.erase(llvm::StringRef(clobbered));
+            constStringFolds_.erase(llvm::StringRef(clobbered));
+            scopeComptimeInts_.erase(llvm::StringRef(clobbered));
+        }
+    }
+
     std::vector<llvm::Value*> args;
     args.reserve(callee->arg_size());
     for (size_t i = 0; i < callee->arg_size(); ++i) {

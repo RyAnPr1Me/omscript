@@ -6979,6 +6979,39 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
                 fx.mergeFrom(exprEffects(fv.second.get(), self));
             break;
         }
+        case ASTNodeType::DEREF_ASSIGN_EXPR: {
+            // *p = v — write-through dereference.  Marks the pointer variable
+            // that is being dereferenced as mutated so the optimizer does NOT
+            // add 'readonly' to that parameter.
+            auto* da = static_cast<const DerefAssignExpr*>(expr);
+            fx.writesMemory = true;
+            fx.hasMutation = true;
+            // Walk through any unary * chains to get the base pointer name.
+            const Expression* base = da->ptr.get();
+            while (base && base->type == ASTNodeType::UNARY_EXPR) {
+                auto* u = static_cast<const UnaryExpr*>(base);
+                if (u->op == "*")
+                    base = u->operand.get();
+                else
+                    break;
+            }
+            if (base && self) {
+                std::string n = identName(base);
+                if (!n.empty()) {
+                    for (std::size_t i = 0; i < self->parameters.size(); ++i) {
+                        if (self->parameters[i].name == n) {
+                            fx.paramMutated[i] = true;
+                            break;
+                        }
+                    }
+                    if (globalNames.count(n))
+                        fx.writesGlobal = true;
+                }
+            }
+            fx.mergeFrom(exprEffects(da->ptr.get(), self));
+            fx.mergeFrom(exprEffects(da->value.get(), self));
+            break;
+        }
         default:
             // Literals, move/borrow/freeze — no effects.
             break;
