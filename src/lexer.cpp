@@ -488,6 +488,41 @@ Token Lexer::scanMultiLineString() {
     lexError("Unterminated multi-line string literal", startLine, startColumn);
 }
 
+// r"..." — raw string literal: no escape processing whatsoever.
+// The caller has already consumed the 'r' prefix; we are positioned at the opening '"'.
+Token Lexer::scanRawString() {
+    const int startLine = line;
+    const int startColumn = column;
+    advance(); // consume opening '"'
+    std::string str;
+    while (!isAtEnd() && peek() != '"') {
+        str += advance();
+    }
+    if (isAtEnd())
+        lexError("Unterminated raw string literal", startLine, startColumn);
+    advance(); // consume closing '"'
+    return Token(TokenType::STRING, str, startLine, startColumn);
+}
+
+// r"""...""" — raw triple-quoted string: no escape processing, spans multiple lines.
+// The caller has already consumed the 'r' prefix; we are positioned at the first '"'.
+Token Lexer::scanRawMultiLineString() {
+    const int startLine = line;
+    const int startColumn = column;
+    advance(); // first '"'
+    advance(); // second '"'
+    advance(); // third '"'
+    std::string str;
+    while (!isAtEnd()) {
+        if (peek() == '"' && peek(1) == '"' && peek(2) == '"') {
+            advance(); advance(); advance(); // consume closing """
+            return Token(TokenType::STRING, str, startLine, startColumn);
+        }
+        str += advance();
+    }
+    lexError("Unterminated raw multi-line string literal", startLine, startColumn);
+}
+
 [[gnu::hot]] std::vector<Token> Lexer::tokenize() {
     std::vector<Token> tokens;
     // Heuristic pre-allocation: most source characters produce roughly
@@ -530,6 +565,14 @@ Token Lexer::scanMultiLineString() {
             // f"..." — Python-style f-string: consume 'f' and '"', then parse like $"..."
             if (c == 'f' && peek(1) == '"') {
                 scanFString(tokens);
+            // r"..." and r"""...""" — raw string literals: no escape processing.
+            } else if (c == 'r' && peek(1) == '"') {
+                advance(); // consume 'r'
+                if (peek() == '"' && peek(1) == '"' && peek(2) == '"') {
+                    tokens.push_back(scanRawMultiLineString());
+                } else {
+                    tokens.push_back(scanRawString());
+                }
             } else {
                 tokens.push_back(scanIdentifier());
             }

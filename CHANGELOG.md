@@ -9,7 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Round-72: f-strings, `not in` operator, tuple destructuring, named call arguments** (`src/lexer.cpp`, `src/parser.cpp`, `include/lexer.h`, `include/parser.h`):
+- **Round-73: Raw strings, `str_is_empty`, `str_capitalize`, `array_first`, `map_copy`, `map_clear`** (`src/lexer.cpp`, `include/lexer.h`, `src/codegen_builtins.cpp`):
+  - **Raw string literals `r"..."` and `r"""..."""`**: Prefixing a string literal with `r` disables all escape-sequence processing — backslashes are taken verbatim. `r"\n"` is a two-character string containing `\` and `n`, not a newline. Useful for regular-expression patterns, Windows file paths, and embedded text that contains many backslashes. The triple-quoted form `r"""..."""` spans multiple lines without any escape interpretation. Both forms produce a normal `STRING` token; no runtime overhead. Mixed with other lexer forms: `f"..."` still interpolates, `$"..."` still interpolates, `r"..."` never does.
+  - **`str_is_empty(s)` builtin**: Returns `1` if the string `s` has zero characters, `0` otherwise. Compile-time folded for literal arguments. Equivalent to `str_len(s) == 0` but more readable and generates slightly tighter IR (a single length-load + icmp, no explicit constant).
+  - **`str_capitalize(s)` builtin**: Returns a copy of `s` with the first character converted to uppercase (via `toupper`) and all remaining characters converted to lowercase (via `tolower`). Compile-time folded for literal arguments. Empty string returns empty string.
+  - **`array_first(arr)` builtin**: Returns the first element of `arr`. Aborts with a runtime error message if the array is empty, matching the behaviour of `array_last`. Provides the natural counterpart to the existing `array_last` builtin.
+  - **`map_copy(d)` builtin**: Returns a fully independent shallow copy of the hashmap `d`. Implemented by iterating over all live buckets in the source (entries with `hash >= 2`, i.e. skipping empty slots and tombstones) and re-inserting each key–value pair into a freshly allocated map. Modifications to the original after copying do not affect the copy and vice versa.
+  - **`map_clear(d)` builtin**: Returns a fresh empty hashmap, effectively clearing the map. The argument is evaluated for side effects but its allocation is no longer referenced. Equivalent in semantics to `map_new()` but more expressive at a call site where the intent is "reset this map".
+  - `examples/round73_test.om` — 38 tests covering all new features.
+
+
   - **`f"..."` f-string syntax**: Python-style f-strings are now accepted as an alias for `$"..."` interpolated strings. `f"Hello {name}, age {age}"` desugars identically to `$"Hello {name}, age {age}"` — a chain of `+` concatenations. All escape sequences and nested expressions are supported.
   - **`not in` operator**: `x not in arr` desugars to `!array_contains(arr, x)`. Works for integer and string arrays. Can be combined with `if`/`while`/`unless` and other control flow constructs.
   - **Tuple destructuring `var (a, b) = expr`**: Variables can now be bound directly from tuple values using parenthesized destructuring. `var (x, y) = get_coords()` desugars to `var __tdestr_N = get_coords(); var x = __tdestr_N.0; var y = __tdestr_N.1;`. Supports any number of elements, `_` placeholder for skip, and works with `const` as well as `var`.

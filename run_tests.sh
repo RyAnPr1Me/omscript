@@ -927,6 +927,7 @@ ptest_program "examples/top_const_test.om" 10
 ptest_program "examples/paren_free_test.om" 12
 ptest_program "examples/round71_test.om" 0
 ptest_program "examples/round72_test.om" 23
+ptest_program "examples/round73_test.om" 38
 flush_ptests
 
 echo ""

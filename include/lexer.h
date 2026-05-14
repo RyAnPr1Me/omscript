@@ -199,6 +199,8 @@ class Lexer {
     Token scanIdentifier();
     Token scanString();
     Token scanMultiLineString();
+    Token scanRawString();
+    Token scanRawMultiLineString();
     void scanInterpolatedString(std::vector<Token>& tokens);
     /// Scan an f"..." interpolated string.  Called when 'f' has already been
     /// consumed; position is now pointing at the opening '"'.
