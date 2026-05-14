@@ -4162,6 +4162,59 @@ void CodeGenerator::generate(Program* program) {
         builder->setFastMathFlags(FMF);
     }
 
+    // Process struct declarations early — before function forward-declarations —
+    // so that resolveAnnotatedType(param.typeName) can recognise struct type
+    // names in function parameter lists and return ptr (without emitting a
+    // spurious "unknown type annotation" warning).
+    for (auto& structDecl : program->structs) {
+        if (!structDecl->fieldDecls.empty()) {
+            bool hasLayoutHints = false;
+            for (const auto& fd : structDecl->fieldDecls) {
+                if (fd.attrs.hot || fd.attrs.cold) {
+                    hasLayoutHints = true;
+                    break;
+                }
+            }
+            if (hasLayoutHints && optimizationLevel >= OptimizationLevel::O2) {
+                std::vector<size_t> hotIdx, normalIdx, coldIdx;
+                for (size_t i = 0; i < structDecl->fieldDecls.size(); ++i) {
+                    if (structDecl->fieldDecls[i].attrs.hot)
+                        hotIdx.push_back(i);
+                    else if (structDecl->fieldDecls[i].attrs.cold)
+                        coldIdx.push_back(i);
+                    else
+                        normalIdx.push_back(i);
+                }
+                std::vector<std::string> reorderedFields;
+                std::vector<StructField> reorderedDecls;
+                reorderedFields.reserve(structDecl->fields.size());
+                reorderedDecls.reserve(structDecl->fieldDecls.size());
+                for (size_t i : hotIdx) {
+                    reorderedFields.push_back(structDecl->fields[i]);
+                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
+                }
+                for (size_t i : normalIdx) {
+                    reorderedFields.push_back(structDecl->fields[i]);
+                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
+                }
+                for (size_t i : coldIdx) {
+                    reorderedFields.push_back(structDecl->fields[i]);
+                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
+                }
+                structDefs_[structDecl->name] = reorderedFields;
+                structFieldDecls_[structDecl->name] = reorderedDecls;
+            } else {
+                structDefs_[structDecl->name] = structDecl->fields;
+                structFieldDecls_[structDecl->name] = structDecl->fieldDecls;
+            }
+        } else {
+            structDefs_[structDecl->name] = structDecl->fields;
+        }
+        structReprs_[structDecl->name] = structDecl->repr;
+        structReprAlignN_[structDecl->name] = structDecl->reprAlignN;
+        getOrCreateStructLLVMType(structDecl->name);
+    }
+
     // Forward-declare all functions so that any function can reference any
     for (auto& structDecl : program->structs) {
         for (auto& overload : structDecl->operators) {
@@ -4240,66 +4293,6 @@ void CodeGenerator::generate(Program* program) {
             memberNames.push_back(memberName);
         }
         enumMembers_[enumDecl->name] = std::move(memberNames);
-    }
-
-    // Process struct declarations: store field layouts for struct operations.
-    for (auto& structDecl : program->structs) {
-        if (!structDecl->fieldDecls.empty()) {
-            // Check if any field has hot or cold annotations.
-            bool hasLayoutHints = false;
-            for (const auto& fd : structDecl->fieldDecls) {
-                if (fd.attrs.hot || fd.attrs.cold) {
-                    hasLayoutHints = true;
-                    break;
-                }
-            }
-
-            if (hasLayoutHints && optimizationLevel >= OptimizationLevel::O2) {
-                // Reorder: hot fields first, normal fields next, cold fields last.
-                // Build a permutation that maps original index → new index.
-                std::vector<size_t> hotIdx, normalIdx, coldIdx;
-                for (size_t i = 0; i < structDecl->fieldDecls.size(); ++i) {
-                    if (structDecl->fieldDecls[i].attrs.hot)
-                        hotIdx.push_back(i);
-                    else if (structDecl->fieldDecls[i].attrs.cold)
-                        coldIdx.push_back(i);
-                    else
-                        normalIdx.push_back(i);
-                }
-
-                // Build reordered field lists.
-                std::vector<std::string> reorderedFields;
-                std::vector<StructField> reorderedDecls;
-                reorderedFields.reserve(structDecl->fields.size());
-                reorderedDecls.reserve(structDecl->fieldDecls.size());
-
-                for (size_t i : hotIdx) {
-                    reorderedFields.push_back(structDecl->fields[i]);
-                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
-                }
-                for (size_t i : normalIdx) {
-                    reorderedFields.push_back(structDecl->fields[i]);
-                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
-                }
-                for (size_t i : coldIdx) {
-                    reorderedFields.push_back(structDecl->fields[i]);
-                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
-                }
-
-                structDefs_[structDecl->name] = reorderedFields;
-                structFieldDecls_[structDecl->name] = reorderedDecls;
-            } else {
-                structDefs_[structDecl->name] = structDecl->fields;
-                structFieldDecls_[structDecl->name] = structDecl->fieldDecls;
-            }
-        } else {
-            structDefs_[structDecl->name] = structDecl->fields;
-        }
-        // Store @repr metadata.
-        structReprs_[structDecl->name] = structDecl->repr;
-        structReprAlignN_[structDecl->name] = structDecl->reprAlignN;
-        // Eagerly build the LLVM StructType so that the field offsets/sizes
-        getOrCreateStructLLVMType(structDecl->name);
     }
 
     // ── Optimization pre-pass sequence ────────────────────────────────────

@@ -4329,9 +4329,39 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             node->line = expr->line;
             node->column = expr->column;
             return node;
+        } else if (expr->type == ASTNodeType::UNARY_EXPR) {
+            // Desugar: *ptr op= rhs  =>  *ptr = *ptr op rhs
+            auto* ue = static_cast<UnaryExpr*>(expr.get());
+            if (ue->op != "deref")
+                error("Compound assignment target must be a variable, *ptr, arr[i], or struct.field");
+            auto rhs = parseAssignment();
+            // We need two copies of the pointer expression.  The common case is
+            // that the pointer operand is a simple identifier; duplicate it.
+            auto ptrOp = std::move(ue->operand);
+            std::unique_ptr<Expression> ptrRef2;
+            if (ptrOp->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* pid = static_cast<IdentifierExpr*>(ptrOp.get());
+                ptrRef2 = std::make_unique<IdentifierExpr>(pid->name);
+                ptrRef2->line = ptrOp->line;
+                ptrRef2->column = ptrOp->column;
+            } else {
+                error("Compound assignment '*p op= rhs' requires a simple pointer variable (e.g. '*p += 1')");
+            }
+            // Build: *ptr op rhs  (read side)
+            auto readDeref = std::make_unique<UnaryExpr>("deref", std::move(ptrRef2));
+            readDeref->line = expr->line;
+            readDeref->column = expr->column;
+            auto binExpr = std::make_unique<BinaryExpr>(binOp, std::move(readDeref), std::move(rhs));
+            binExpr->line = expr->line;
+            binExpr->column = expr->column;
+            // Build: *ptr = (*ptr op rhs)  (write side)
+            auto node = std::make_unique<DerefAssignExpr>(std::move(ptrOp), std::move(binExpr));
+            node->line = expr->line;
+            node->column = expr->column;
+            return node;
         } else {
-            error("Compound assignment (e.g., '+=') is only supported on variables, array elements (arr[i]), and "
-                  "struct fields (s.x)");
+            error("Compound assignment (e.g., '+=') is only supported on variables, array elements (arr[i]), "
+                  "struct fields (s.x), and pointer dereferences (*p)");
         }
     }
 

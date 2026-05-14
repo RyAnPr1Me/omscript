@@ -914,6 +914,8 @@ ptest_program "examples/jmp_test.om" 7
 ptest_program "examples/type_system_test.om" 11
 ptest_program "examples/fnptr_test.om" 10
 ptest_program "examples/ptr_mutation_test.om" 8
+ptest_program "examples/compound_deref_test.om" 8
+ptest_program "examples/struct_param_test.om" 8
 flush_ptests
 
 echo ""

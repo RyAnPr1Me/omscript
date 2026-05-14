@@ -1,0 +1,84 @@
+import std;
+
+fn accum(p: *int, n: int) {
+    *p += n;
+}
+
+fn scale(p: *int, n: int) {
+    *p *= n;
+}
+
+fn halve(p: *int) {
+    *p /= 2;
+}
+
+fn negate_ptr(p: *int) {
+    *p -= *p * 2;
+}
+
+struct Counter { count: int, step: int }
+fn Counter::tick(self: *Counter) {
+    self->count += self->step;
+}
+fn Counter::value(self: *Counter) -> int {
+    return self->count;
+}
+
+fn out_params(a: int, b: int, out_sum: *int, out_diff: *int) {
+    *out_sum = a + b;
+    *out_diff = a - b;
+}
+
+fn main() -> int {
+    var score: int = 0;
+
+    // T1: *p += n via pointer variable
+    var x: int = 10;
+    var px: *int = &x;
+    *px += 5;
+    score += (x == 15);
+
+    // T2: accum via function
+    var y: int = 1;
+    accum(&y, 4);
+    score += (y == 5);
+
+    // T3: *p *= n via function
+    scale(&y, 3);
+    score += (y == 15);
+
+    // T4: chained ops via pointer variable
+    var z: int = 100;
+    var pz: *int = &z;
+    *pz /= 2;
+    *pz -= 5;
+    score += (z == 45);
+
+    // T5: halve function
+    var h: int = 80;
+    halve(&h);
+    score += (h == 40);
+
+    // T6: multiple increments via accum(&counter, i)
+    var counter: int = 0;
+    var i: int = 0;
+    while (i < 5) {
+        accum(&counter, i);
+        i++;
+    }
+    score += (counter == 10);  // 0+1+2+3+4
+
+    // T7: struct method via *self using self->field +=
+    var c: Counter = Counter { count: 0, step: 5 };
+    c.tick();
+    c.tick();
+    score += (c.value() == 10);
+
+    // T8: out-params with *out_sum, *out_diff writes
+    var s: int = 0;
+    var d: int = 0;
+    out_params(10, 3, &s, &d);
+    score += (s == 13 && d == 7);
+
+    return score;
+}
