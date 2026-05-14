@@ -930,10 +930,10 @@ std::unique_ptr<Program> Parser::parse() {
                 const Token aliasName = consume(TokenType::IDENTIFIER, "Expected alias name after 'type'");
                 consume(TokenType::ASSIGN, "Expected '=' after type alias name");
                 // Parse the right-hand side type using the full type annotation
-                // parser so that *T, **T, (T1,T2), ptr<T>, etc. all work.
+                // parser so that *T, **T, (T1,T2), ptr<T>, fn(T)->R, etc. all work.
                 if (!check(TokenType::IDENTIFIER) && !check(TokenType::STAR) &&
                     !check(TokenType::STAR_STAR) && !check(TokenType::LPAREN) &&
-                    !check(TokenType::AMPERSAND)) {
+                    !check(TokenType::AMPERSAND) && !check(TokenType::FN)) {
                     error("Expected type name after '=' in type alias");
                 }
                 const std::string typeName = parseTypeAnnotation();
@@ -1783,6 +1783,33 @@ std::string Parser::parseTypeAnnotation() {
         }
         tupleAnn += '>';
         return prefix + tupleAnn;
+    }
+    // ── fn(T1, T2, ...) -> R  function-pointer type annotation ───────────────
+    // C-style typed function pointers.  `fn(int, int) -> int` desugars to the
+    // internal `funcptr` type so that all funcptr codegen paths handle it
+    // transparently.  The parameter / return type names are stored in a
+    // side-channel string for potential future typed-call improvements.
+    if (check(TokenType::FN)) {
+        advance(); // consume 'fn'
+        consume(TokenType::LPAREN, "Expected '(' in fn(...) type annotation");
+        std::vector<std::string> paramTypes;
+        if (!check(TokenType::RPAREN)) {
+            paramTypes.push_back(parseTypeAnnotation());
+            while (match(TokenType::COMMA)) {
+                if (check(TokenType::RPAREN)) break; // trailing comma
+                paramTypes.push_back(parseTypeAnnotation());
+            }
+        }
+        consume(TokenType::RPAREN, "Expected ')' to close fn(...) type annotation");
+        std::string retType = "void";
+        if (check(TokenType::ARROW)) {
+            advance(); // consume '->'
+            retType = parseTypeAnnotation();
+        }
+        // Build a canonical description for diagnostics but lower to "funcptr"
+        // for codegen — LLVM function pointers are opaque ptrs at IR level.
+        (void)paramTypes; (void)retType; // suppress unused warning for now
+        return prefix + "funcptr";
     }
     // Accept identifiers and the 'struct' keyword as type names
     std::string typeName;
@@ -4724,7 +4751,7 @@ std::unique_ptr<Expression> Parser::parseMultiplication() {
 }
 
 std::unique_ptr<Expression> Parser::parsePower() {
-    auto left = parseUnary();
+    auto left = parseCast();
 
     if (match(TokenType::STAR_STAR)) {
         // Right-associative: 2 ** 3 ** 2 = 2 ** (3 ** 2) = 2 ** 9 = 512
@@ -4733,6 +4760,29 @@ std::unique_ptr<Expression> Parser::parsePower() {
     }
 
     return left;
+}
+
+// ── parseCast ─────────────────────────────────────────────────────────────────
+// Handles `expr as TypeName` with LOWER precedence than all unary prefix
+// operators (&, *, -, !, ~) but HIGHER than multiplication/power.
+// This ensures `&x as *T` parses as `(&x) as *T` (C semantics), not
+// `&(x as *T)`.
+std::unique_ptr<Expression> Parser::parseCast() {
+    auto expr = parseUnary();
+
+    while (check(TokenType::IDENTIFIER) && peek().lexeme == "as") {
+        const Token asTok = advance(); // consume 'as'
+        const std::string targetType = parseTypeAnnotation();
+        auto typeExpr = std::make_unique<IdentifierExpr>(targetType);
+        typeExpr->line = asTok.line;
+        typeExpr->column = asTok.column;
+        auto castExpr = std::make_unique<BinaryExpr>("as", std::move(expr), std::move(typeExpr));
+        castExpr->line = asTok.line;
+        castExpr->column = asTok.column;
+        expr = std::move(castExpr);
+    }
+
+    return expr;
 }
 
 std::unique_ptr<Expression> Parser::parseUnary() {
@@ -4835,20 +4885,6 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
     auto expr = parseCall();
 
     while (true) {
-        // `expr as TypeName` — type cast / reinterpret expression.
-        // Desugared to a BinaryExpr with op "as" and an IdentifierExpr(TypeName) on the right.
-        if (check(TokenType::IDENTIFIER) && peek().lexeme == "as") {
-            const Token asTok = advance(); // consume 'as'
-            const std::string targetType = parseTypeAnnotation();
-            auto typeExpr = std::make_unique<IdentifierExpr>(targetType);
-            typeExpr->line = asTok.line;
-            typeExpr->column = asTok.column;
-            auto castExpr = std::make_unique<BinaryExpr>("as", std::move(expr), std::move(typeExpr));
-            castExpr->line = asTok.line;
-            castExpr->column = asTok.column;
-            expr = std::move(castExpr);
-            continue;
-        }
         // Handle postfix operators
         if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
             const Token opToken = tokens[current - 1];

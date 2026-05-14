@@ -1,0 +1,106 @@
+import std;
+// fnptr_test.om — Round-61 C-like type system tests
+//
+// Tests:
+//   1. `&x as *T`  —  address-of then cast parses as (&x) as *T  (not &(x as *T))
+//   2. `fn(T,T)->R`  —  function-pointer type annotation works as variable type
+//   3. `fp(args)`  —  calling a funcptr variable directly
+//   4. `funcptr_from(ident)`  —  bare function identifier (no string literal)
+//   5. Array-to-pointer decay: int[] → *int parameter
+//   6. type BinOp = fn(int,int)->int  —  fn type annotation in type alias
+//   7. `*T` parameter body: p[i] uses C ptr semantics (no fat-pointer header)
+//   8. Multiple funcptr variables, each holding a different function
+//   9. Round-trip: &x as *c_void  →  store, load back as *int, correct value
+//  10. Pointer parameter write-through: p[0] = v stores to original array
+//
+// Expected exit code = 10 (one point per passing test)
+
+fn add(a: int, b: int) -> int { return a + b; }
+fn mul(a: int, b: int) -> int { return a * b; }
+fn sub(a: int, b: int) -> int { return a - b; }
+
+// Helper: sum elements of *int array (C-pointer semantics inside)
+fn array_sum(p: *int, n: int) -> int {
+    var total: int = 0;
+    var i: int = 0;
+    while (i < n) {
+        total = total + p[i];
+        i = i + 1;
+    }
+    return total;
+}
+
+// Helper: write to *int array via pointer
+fn fill_ptr_arr(p: *int, n: int, val: int) {
+    var i: int = 0;
+    while (i < n) {
+        p[i] = val;
+        i = i + 1;
+    }
+}
+
+type BinOp = fn(int, int) -> int;
+
+fn main() -> int {
+    var score: int = 0;
+
+    // ── 1: &x as *T  parses as  (&x) as *T  ─────────────────────────────
+    var x: int = 42;
+    var vp: *c_void = &x as *c_void;
+    var ip: *int = vp as *int;
+    var v1: int = *ip;
+    score = score + (v1 == 42);  // 1
+
+    // ── 2: fn(T,T)->R type annotation ────────────────────────────────────
+    var fp2: fn(int, int) -> int = funcptr_from("add");
+    var r2: int = fp2(7, 3);
+    score = score + (r2 == 10);  // 2
+
+    // ── 3: fp(args) direct call ───────────────────────────────────────────
+    var fp3: funcptr = funcptr_from("mul");
+    var r3: int = fp3(4, 5);
+    score = score + (r3 == 20);  // 3
+
+    // ── 4: funcptr_from(ident) bare identifier ────────────────────────────
+    var fp4: funcptr = funcptr_from(sub);
+    var r4: int = fp4(10, 3);
+    score = score + (r4 == 7);   // 4
+
+    // ── 5: Array-to-pointer decay ─────────────────────────────────────────
+    var arr5: int[] = [10, 20, 30, 40, 50];
+    var sum5: int = array_sum(arr5, 5);
+    score = score + (sum5 == 150);  // 5
+
+    // ── 6: BinOp type alias = fn(int,int)->int ────────────────────────────
+    var fp6: BinOp = funcptr_from(add);
+    var r6: int = fp6(11, 4);
+    score = score + (r6 == 15);  // 6
+
+    // ── 7: *T parameter, p[i] uses C pointer indexing ─────────────────────
+    var arr7: int[] = [1, 2, 3, 4, 5];
+    var s7: int = array_sum(arr7, 5);
+    score = score + (s7 == 15);  // 7
+
+    // ── 8: Multiple funcptr variables with different functions ─────────────
+    var fp8a: fn(int, int) -> int = funcptr_from(add);
+    var fp8b: fn(int, int) -> int = funcptr_from(mul);
+    var fp8c: fn(int, int) -> int = funcptr_from(sub);
+    var r8a: int = fp8a(6, 2);   // add → 8
+    var r8b: int = fp8b(6, 2);   // mul → 12
+    var r8c: int = fp8c(6, 2);   // sub → 4
+    score = score + (r8a == 8 && r8b == 12 && r8c == 4);  // 8
+
+    // ── 9: &x as *c_void round-trip ──────────────────────────────────────
+    var y: int = 99;
+    var vp9: *c_void = &y as *c_void;
+    var ip9: *int = vp9 as *int;
+    score = score + (*ip9 == 99);  // 9
+
+    // ── 10: Write-through via *int pointer ────────────────────────────────
+    var arr10: int[] = [0, 0, 0];
+    fill_ptr_arr(arr10, 3, 7);
+    var s10: int = arr10[0] + arr10[1] + arr10[2];
+    score = score + (s10 == 21);  // 10
+
+    return score;  // expected: 10
+}

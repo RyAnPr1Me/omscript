@@ -5184,7 +5184,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->addFnAttr(llvm::Attribute::NoSync);
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
-                function->addParamAttr(i, llvm::Attribute::NoAlias);
+                // Skip noalias for typed-pointer (*T) params — may alias caller data.
+                bool isTypedPtr = i < func->parameters.size() &&
+                                  func->parameters[i].typeName.size() > 4 &&
+                                  func->parameters[i].typeName.rfind("ptr<", 0) == 0;
+                if (!isTypedPtr)
+                    function->addParamAttr(i, llvm::Attribute::NoAlias);
                 function->addParamAttr(i, llvm::Attribute::NonNull);
                 // OmScript arrays always have a valid header (at least 8 bytes
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(*context, 8));
@@ -5200,7 +5205,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
                 function->addParamAttr(i, llvm::Attribute::NonNull);
-                function->addParamAttr(i, llvm::Attribute::NoAlias);
+                // Skip noalias for typed-pointer (*T) params — may alias caller data.
+                bool isTypedPtr = i < func->parameters.size() &&
+                                  func->parameters[i].typeName.size() > 4 &&
+                                  func->parameters[i].typeName.rfind("ptr<", 0) == 0;
+                if (!isTypedPtr)
+                    function->addParamAttr(i, llvm::Attribute::NoAlias);
                 // OmScript arrays always have a valid header (at least 8 bytes).
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(*context, 8));
                 function->addParamAttr(i, llvm::Attribute::getWithAlignment(*context, llvm::Align(16)));
@@ -5213,7 +5223,16 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     if (!inOptMaxFunction && !currentFuncHintHot_ && !func->hintRestrict && !fileNoAlias_) {
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
-                function->addParamAttr(i, llvm::Attribute::NoAlias);
+                // ── Skip noalias for typed-pointer (*T / ptr<T>) parameters ──
+                // Raw C-style pointer params may alias caller-visible data
+                // (e.g. array-to-pointer decay passes a pointer into an array
+                // that the caller still holds a reference to).  Adding noalias
+                // in that case is UB and breaks write-through stores.
+                bool isTypedPtr = i < func->parameters.size() &&
+                                  func->parameters[i].typeName.size() > 4 &&
+                                  func->parameters[i].typeName.rfind("ptr<", 0) == 0;
+                if (!isTypedPtr)
+                    function->addParamAttr(i, llvm::Attribute::NoAlias);
                 function->addParamAttr(i, llvm::Attribute::NonNull);
                 // OmScript arrays always have a valid header: at least 8 bytes
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(*context, 8));
@@ -5358,6 +5377,21 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         // Annotate parameter with its declared type for signed/unsigned tracking.
         if (!param.typeName.empty())
             varTypeAnnotations_[param.name] = param.typeName;
+
+        // Register typed-pointer parameters (*T / ptr<T>) so that p[i], *p, p->field
+        // and pointer arithmetic inside the function body use C-pointer semantics
+        // (raw GEP, no fat-pointer header offset).
+        if (param.typeName.size() > 4 && param.typeName.rfind("ptr<", 0) == 0 &&
+            param.typeName.back() == '>') {
+            const std::string elemType = param.typeName.substr(4, param.typeName.size() - 5);
+            ptrVarNames_.insert(param.name);
+            ptrElemTypes_[param.name] = elemType;
+        }
+        // funcptr parameters: fn(T...) -> R desugars to "funcptr".
+        if (param.typeName == "funcptr") {
+            funcptrVarNames_.insert(param.name);
+            ptrVarNames_.insert(param.name);
+        }
 
         if (paramStrIt != funcParamStringTypes_.end() && paramStrIt->second.count(paramIdx))
             stringVars_.insert(param.name);

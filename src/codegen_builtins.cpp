@@ -9569,16 +9569,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // because funcptr allocas are now ptr-typed (resolveAnnotatedType returns ptr).
     if (bid == BuiltinId::FUNCPTR_FROM) {
         validateArgCount(expr, "funcptr_from", 1);
-        // Argument must be a string literal holding the function name.
+        // Argument may be a string literal OR a bare identifier naming a function.
         Expression* nameExpr = expr->arguments[0].get();
         std::string fnName;
         if (nameExpr->type == ASTNodeType::LITERAL_EXPR) {
             auto* lit = static_cast<LiteralExpr*>(nameExpr);
             if (lit->literalType == LiteralExpr::LiteralType::STRING)
                 fnName = lit->stringValue;
+        } else if (nameExpr->type == ASTNodeType::IDENTIFIER_EXPR) {
+            // Allow funcptr_from(add) — bare identifier refers to a function name.
+            fnName = static_cast<IdentifierExpr*>(nameExpr)->name;
         }
         if (fnName.empty())
-            codegenError("funcptr_from: argument must be a string literal function name", expr);
+            codegenError("funcptr_from: argument must be a function name (identifier or string literal)", expr);
         // Look up or declare the target function with signature () -> i64.
         llvm::Function* targetFn = module->getFunction(fnName);
         if (!targetFn) {
@@ -9940,6 +9943,41 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
     }
 
+    // ── funcptr variable call: `fp(args)` ──────────────────────────────────
+    // If the callee name is a known funcptr variable (declared as `funcptr` or
+    // `fn(T...) -> R`), emit an indirect typed call through the stored pointer.
+    if (funcptrVarNames_.count(expr->callee)) {
+        auto nvIt = namedValues.find(expr->callee);
+        if (nvIt != namedValues.end() && nvIt->second) {
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            auto* i64Ty = getDefaultType();
+            // Load the function pointer from the variable's alloca.
+            llvm::Value* fnPtr = builder->CreateAlignedLoad(ptrTy, nvIt->second,
+                                                            llvm::MaybeAlign(8),
+                                                            (expr->callee + ".fnptr").c_str());
+            // Build a FunctionType using i64 for every argument + return value.
+            // This is the conservative ABI-compatible approach.
+            std::vector<llvm::Type*> paramTys(expr->arguments.size(), i64Ty);
+            llvm::FunctionType* fnTy = llvm::FunctionType::get(i64Ty, paramTys, /*isVarArg=*/false);
+            std::vector<llvm::Value*> callArgs;
+            callArgs.reserve(expr->arguments.size());
+            for (auto& argExpr : expr->arguments) {
+                llvm::Value* av = generateExpression(argExpr.get());
+                // Coerce to i64 for the indirect call.
+                if (av->getType()->isPointerTy())
+                    av = builder->CreatePtrToInt(av, i64Ty, "fpcall.ptoi");
+                else if (av->getType()->isDoubleTy())
+                    av = builder->CreateBitCast(av, i64Ty, "fpcall.ftoi");
+                else if (av->getType() != i64Ty)
+                    av = builder->CreateSExtOrBitCast(av, i64Ty, "fpcall.ext");
+                callArgs.push_back(av);
+            }
+            auto* ci = builder->CreateCall(fnTy, fnPtr, callArgs, "fpcall.ret");
+            ci->addFnAttr(llvm::Attribute::NoUnwind);
+            return ci;
+        }
+    }
+
     auto calleeIt = functions.find(expr->callee);
     // Method-call desugaring: `obj.method(args)` emits CallExpr("method", {obj, args}).
     // If the bare name isn't found, try `StructName::method` for each known struct
@@ -10091,6 +10129,42 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (i < flatArgEntries.size()) {
             llvm::Value* argVal =
                 flatArgEntries[i].val ? flatArgEntries[i].val : generateExpression(flatArgEntries[i].expr);
+            // ── Array-to-pointer decay ────────────────────────────────────────
+            // When the declared parameter type is a typed pointer (`ptr<T>` / `*T`)
+            // and the supplied argument is an OmScript fat-pointer array, skip the
+            // 16-byte {len, cap} header and pass the data pointer directly, matching
+            // C array-decay semantics: `int arr[] → int *p`.
+            if (argVal->getType()->isPointerTy() && declIt != functionDecls_.end() &&
+                i < declIt->second->parameters.size()) {
+                const std::string& paramAnn = declIt->second->parameters[i].typeName;
+                // Detect a typed-pointer parameter (ptr<T> / *T → normalised to ptr<...>).
+                bool isTypedPtrParam = paramAnn.size() > 4 && paramAnn.rfind("ptr<", 0) == 0 && paramAnn.back() == '>';
+                if (isTypedPtrParam) {
+                    // Detect an array argument: identifier in arrayVars_ or funcParamArrayTypes_.
+                    bool isArrayArg = false;
+                    if (flatArgEntries[i].expr &&
+                        flatArgEntries[i].expr->type == ASTNodeType::IDENTIFIER_EXPR) {
+                        const auto& argName = static_cast<IdentifierExpr*>(flatArgEntries[i].expr)->name;
+                        if (arrayVars_.count(argName) ||
+                            (funcParamArrayTypes_.count(expr->callee) &&
+                             funcParamArrayTypes_.at(expr->callee).count(i)))
+                            isArrayArg = true;
+                    }
+                    if (isArrayArg) {
+                        // Skip the 8-byte length header to get the raw element data.
+                        // OmScript array layout: [i64 len | i64 elem0 | i64 elem1 | ...]
+                        // — only one header field, so element data starts at byte +8.
+                        // (Strings have two fields {len, cap} = +16; arrays have one.)
+                        auto* i8Ty = llvm::Type::getInt8Ty(*context);
+                        auto* i64Ty = getDefaultType();
+                        if (!argVal->getType()->isPointerTy())
+                            argVal = builder->CreateIntToPtr(argVal,
+                                         llvm::PointerType::getUnqual(*context), "arr.decay.itp");
+                        argVal = builder->CreateInBoundsGEP(i8Ty, argVal,
+                                     llvm::ConstantInt::get(i64Ty, 8), "arr.decay");
+                    }
+                }
+            }
             // Convert argument to the callee's declared parameter type.
             argVal = convertTo(argVal, expectedTy);
             args.push_back(argVal);

@@ -269,6 +269,7 @@ class Parser {
     std::unique_ptr<Expression> parseAddition();
     std::unique_ptr<Expression> parseMultiplication();
     std::unique_ptr<Expression> parsePower();
+    std::unique_ptr<Expression> parseCast();
     std::unique_ptr<Expression> parseUnary();
     std::unique_ptr<Expression> parsePostfix();
     std::unique_ptr<Expression> parseCall();

@@ -4200,6 +4200,12 @@ void CTEngine::runPass(const Program* program) {
                         return false;
                 return true;
             }
+            // Write-through operations are never pure: they modify heap/shared
+            // memory that may be visible to callers or other parts of the program.
+            if (ex->type == ASTNodeType::INDEX_ASSIGN_EXPR ||
+                ex->type == ASTNodeType::DEREF_ASSIGN_EXPR ||
+                ex->type == ASTNodeType::FIELD_ASSIGN_EXPR)
+                return false;
             return true;
         };
         pureS = [&](const Statement* st) -> bool {
@@ -4500,6 +4506,15 @@ void CTEngine::runPass(const Program* program) {
             return; // zero-arg: already in globalConsts_
         if (fn->parameters.empty())
             return;
+
+        // Skip functions with raw-pointer parameters (*T / ptr<T>) — the
+        // symbolic evaluator can't model pointer dereferences accurately, so
+        // treating the loop body as "never executed" (loop bound = symbolic)
+        // would falsely conclude a uniform return value of 0.
+        for (const auto& param : fn->parameters) {
+            if (param.typeName.size() > 4 && param.typeName.rfind("ptr<", 0) == 0)
+                return;
+        }
 
         // Build all-symbolic argument vector.
         std::vector<CTValue> symbolicArgs;
