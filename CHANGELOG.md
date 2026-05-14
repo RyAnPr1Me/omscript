@@ -9,7 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Round-64: `++`/`--` on pointer dereferences and struct fields** (`src/parser.cpp`, `src/codegen_expr.cpp`):
+- **Round-65: Bare function names as first-class values** (`src/codegen_expr.cpp`):
+  - Function names can now be used as values directly without `funcptr_from()`. Writing `var fp: fn(int)->int = square;` or `apply(add, 3, 4)` now works. The `generateIdentifier` fallback checks `functionDecls_` and `module->getFunction()` before emitting "Unknown variable"; when a function is found it is returned directly as an `llvm::Function*` (the same value `funcptr_from()` would produce).
+  - `funcptr_from()` continues to work and is semantically equivalent — both produce the same native function pointer. Code using the old explicit form does not need to change.
+  - `examples/bare_fnptr_test.om` — 9 tests covering: variable assignment, argument passing, reassignment, `compose`, and equality with explicit `funcptr_from()`.
+
+
   - **`(*p)++`, `++(*p)`, `(*p)--`, `--(*p)`** — prefix and postfix increment/decrement now work on a dereferenced pointer variable. Parser lvalue check expanded to accept `UNARY_EXPR("deref", ...)`. Codegen `generateIncDec` handles this case: loads the value at the pointer address, adds/subtracts 1, stores back; returns old value for postfix, new value for prefix.
   - **`s.field++`, `++s.field`, `s.field--`, `--s.field`** — prefix and postfix increment/decrement now work on struct field access expressions. Parser lvalue check expanded to accept `FIELD_ACCESS_EXPR`. Codegen resolves the field GEP via `resolveField()`, loads value, increments/decrements, stores back. Values narrower than `i64` are sign-extended before arithmetic and truncated back before storing.
   - `examples/incdec_lvalue_test.om` — 12 tests covering all combinations: postfix/prefix `++`/`--` on `*ptr` and `struct.field`, old/new value semantics, and loop usage.

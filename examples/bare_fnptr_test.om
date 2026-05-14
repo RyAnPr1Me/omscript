@@ -1,0 +1,55 @@
+import std;
+
+// Test bare function names as first-class values (implicit funcptr_from).
+// Every function name used as a value should produce the same result
+// as funcptr_from(name).
+
+fn add(a: int, b: int) -> int { return a + b; }
+fn mul(a: int, b: int) -> int { return a * b; }
+fn sub(a: int, b: int) -> int { return a - b; }
+fn square(x: int) -> int { return x * x; }
+fn negate(x: int) -> int { return 0 - x; }
+
+// Higher-order helpers
+fn apply1(f: fn(int)->int, x: int) -> int { return f(x); }
+fn apply2(f: fn(int,int)->int, a: int, b: int) -> int { return f(a, b); }
+fn compose(f: fn(int)->int, g: fn(int)->int, x: int) -> int { return f(g(x)); }
+
+fn main() -> int {
+    var score: int = 0;
+
+    // T1: assign bare fn name to fn-typed variable
+    var fp1: fn(int,int)->int = add;
+    score += (fp1(3, 4) == 7);
+
+    // T2: assign different function to same type
+    var fp2: fn(int,int)->int = mul;
+    score += (fp2(3, 4) == 12);
+
+    // T3: pass bare fn name as argument
+    score += (apply1(square, 5) == 25);
+
+    // T4: pass unary fn by name
+    score += (apply1(negate, 10) == -10);
+
+    // T5: pass binary fn by name
+    score += (apply2(add, 7, 3) == 10);
+
+    // T6: pass binary fn, different function
+    score += (apply2(sub, 10, 4) == 6);
+
+    // T7: reassign fn-typed variable to a different function
+    var fp7: fn(int,int)->int = add;
+    fp7 = mul;
+    score += (fp7(6, 7) == 42);
+
+    // T8: compose two functions using bare names
+    score += (compose(square, negate, 3) == 9);
+
+    // T9: funcptr_from still works alongside bare name syntax
+    var fp9a: fn(int,int)->int = funcptr_from(add);
+    var fp9b: fn(int,int)->int = add;
+    score += (fp9a(2, 3) == fp9b(2, 3));
+
+    return score;
+}

@@ -649,6 +649,27 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
             if (rangeConst)
                 return rangeConst;
         }
+        // Bare function name used as a first-class value — implicit funcptr_from.
+        // When the identifier names a known function (in functionDecls_ or already
+        // emitted into the module), return the LLVM Function* directly so that it
+        // can be stored in a fn(…)->… variable or passed as a call argument.
+        //
+        // Example:  var fp: fn(int)->int = double_it;
+        //           apply(triple, 5);           // pass fn by name
+        {
+            const bool isFnDecl = functionDecls_.count(expr->name) != 0;
+            if (isFnDecl || module->getFunction(expr->name)) {
+                llvm::Function* targetFn = module->getFunction(expr->name);
+                if (!targetFn) {
+                    // Forward-declare with a generic signature; the linker resolves it.
+                    llvm::FunctionType* fty =
+                        llvm::FunctionType::get(getDefaultType(), /*Params=*/{}, /*isVarArg=*/false);
+                    targetFn = llvm::Function::Create(fty, llvm::Function::ExternalLinkage,
+                                                      expr->name, module.get());
+                }
+                return targetFn;
+            }
+        }
         // Build "did you mean?" suggestion from known variables.
         std::string msg = "Unknown variable: " + expr->name;
         std::vector<std::string> candidates;
