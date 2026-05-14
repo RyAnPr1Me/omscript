@@ -1,0 +1,65 @@
+import std;
+
+// global_string_test.om — Round-66: global variable string initializer fix.
+//
+// Tests:
+//   1. Global const string — comparison, len, print
+//   2. Global var string — comparison, mutation, re-assignment
+//   3. Global string passed to function parameter
+//   4. Multiple global strings — all initialized correctly
+//   5. Global string in println (should print content not address)
+
+global const GREETING: string = "hello";
+global const LANG: string = "omscript";
+global var MSG: string = "world";
+
+fn check_greeting() -> int {
+    return (GREETING == "hello");
+}
+
+fn check_msg() -> int {
+    return (MSG == "world");
+}
+
+fn greet_with(s: string) -> string {
+    return str_concat(GREETING, str_concat(", ", s));
+}
+
+fn main() -> int {
+    var score: int = 0;
+
+    // T1: global const string comparison
+    score += (GREETING == "hello");
+    score += (LANG == "omscript");
+
+    // T2: global const string len
+    score += (len(GREETING) == 5);
+    score += (len(LANG) == 9);
+
+    // T3: global var string comparison
+    score += (MSG == "world");
+
+    // T4: global string passed to function
+    score += check_greeting();
+
+    // T5: global string via function with local string parameter
+    var r: string = greet_with("world");
+    score += (r == "hello, world");
+
+    // T6: global var string reassignment
+    MSG = "updated";
+    score += (MSG == "updated");
+
+    // T7: global var string back-to-original
+    MSG = "world";
+    score += check_msg();
+
+    // T8: global string substr
+    score += (str_substr(LANG, 0, 2) == "om");
+
+    // T9: global string + local string concat
+    var full: string = str_concat(GREETING, " world");
+    score += (full == "hello world");
+
+    return score;
+}

@@ -736,8 +736,15 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
 
     // Register-promotion strategy: prefetched variables go straight to
     auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+    auto* globalVar = llvm::dyn_cast<llvm::GlobalVariable>(it->second);
 
-    llvm::Type* loadType = alloca ? alloca->getAllocatedType() : getDefaultType();
+    // For global variables, use their declared value type so that e.g.
+    // string globals (ptr-typed) are loaded as ptr rather than defaulting
+    // to i64.  For ordinary allocas use the alloca's element type.
+    // Everything else (e.g. prefetched function args) falls back to i64.
+    llvm::Type* loadType = alloca      ? alloca->getAllocatedType()
+                           : globalVar ? globalVar->getValueType()
+                                       : getDefaultType();
 
     const bool isVol = volatileVars_.count(expr->name) != 0;
     const bool isAtom = atomicVars_.count(expr->name) != 0;

@@ -440,6 +440,10 @@ class CodeGenerator {
     /// LLVM global variable registry: name → GlobalVariable*.
     llvm::StringMap<llvm::GlobalVariable*> globalVars_;
 
+    /// Names of global variables whose declared type is "string".
+    /// Used by isStringExpr() to correctly classify global string identifiers.
+    llvm::StringSet<> globalStringVarNames_;
+
     /// Maps array name → size alloca from array_fill(n,v) for bounds check elision.
     llvm::StringMap<llvm::AllocaInst*> knownArraySizeAllocas_;
 

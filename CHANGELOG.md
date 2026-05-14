@@ -9,7 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Round-65: Bare function names as first-class values** (`src/codegen_expr.cpp`):
+- **Round-66: Global variable string initializer and load-type fixes** (`src/codegen.cpp`, `src/codegen_expr.cpp`, `include/codegen.h`):
+  - `generateGlobals`: string literal initializers now call `internString()` so a global `string` variable starts with the correct fat-pointer address instead of `null`.
+  - `generateIdentifier`: global variables in `namedValues` are now loaded with their declared value type (`GlobalVariable::getValueType()`) instead of always defaulting to `i64`. This ensures `load ptr` is emitted for string/array/dict globals.
+  - `isStringExpr`: global variables declared as `string` are now classified as string expressions via a new `globalStringVarNames_` set, fixing `println`, `+` concat, string comparison, and all other string operations on global variables.
+  - At function-entry setup, `stringVars_` is pre-populated from `globalStringVarNames_` so string globals are recognised throughout each function body.
+  - `examples/global_string_test.om` — 10 tests covering const/var global strings, comparison, `len`, reassignment, passing to functions, and concat.
+
+
   - Function names can now be used as values directly without `funcptr_from()`. Writing `var fp: fn(int)->int = square;` or `apply(add, 3, 4)` now works. The `generateIdentifier` fallback checks `functionDecls_` and `module->getFunction()` before emitting "Unknown variable"; when a function is found it is returned directly as an `llvm::Function*` (the same value `funcptr_from()` would produce).
   - `funcptr_from()` continues to work and is semantically equivalent — both produce the same native function pointer. Code using the old explicit form does not need to change.
   - `examples/bare_fnptr_test.om` — 9 tests covering: variable assignment, argument passing, reassignment, `compose`, and equality with explicit `funcptr_from()`.

@@ -3977,6 +3977,9 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         // vars assigned from string function returns).
         if (stringVars_.count(id->name) > 0)
             return true;
+        // Global variables declared with type "string" are always strings.
+        if (globalStringVarNames_.count(id->name) > 0)
+            return true;
         // Check the LLVM alloca type: a pointer-typed alloca is a string ONLY
         if (arrayVars_.count(id->name) || dictVarNames_.count(id->name) || structVars_.count(id->name) ||
             stringArrayVars_.count(id->name) || ptrVarNames_.count(id->name) || refVarElemTypes_.count(id->name))
@@ -5346,6 +5349,10 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     for (auto& entry : globalVars_) {
         namedValues[entry.getKey().str()] = entry.getValue();
     }
+    // Pre-populate stringVars_ for global variables declared as type "string"
+    // so that isStringExpr() treats them correctly inside this function body.
+    for (auto& gsn : globalStringVarNames_)
+        stringVars_.insert(gsn.getKey().str());
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
@@ -7913,8 +7920,13 @@ void CodeGenerator::generateGlobals(Program* program) {
                         initVal = llvm::ConstantFP::get(ty, lit->floatValue);
                     else
                         initVal = llvm::ConstantInt::get(ty, static_cast<uint64_t>(lit->floatValue), true);
+                } else if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+                    // String global: point to an interned fat-pointer constant so the
+                    // global starts with a valid pointer (not null) at module load time.
+                    // The global is ptr-typed; internString() returns a GlobalVariable*
+                    // which is a Constant* of the same opaque-pointer type.
+                    initVal = internString(lit->stringValue);
                 }
-                // String or other: fall back to null (runtime init unsupported for top-level globals)
             }
             // Non-literal initializers at top level: zero-init the global.
         }
@@ -7931,6 +7943,8 @@ void CodeGenerator::generateGlobals(Program* program) {
                                                 llvm::GlobalValue::ExternalLinkage, initVal, llvmName);
         llvmGV->setAlignment(llvm::MaybeAlign(8));
         globalVars_[llvmName] = llvmGV;
+        if (gv->typeName == "string")
+            globalStringVarNames_.insert(llvmName);
     }
 }
 
