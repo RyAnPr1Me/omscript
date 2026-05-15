@@ -320,11 +320,13 @@ struct Diagnostic {
         // Gutter helper: "  5 | " or "    | "
         auto gutterLine = [&](int ln) -> std::string {
             std::string num = (ln > 0) ? std::to_string(ln) : "";
-            std::string padded(static_cast<size_t>(lineNoWidth) - num.size(), ' ');
+            const size_t numLen = num.size();
+            const size_t width  = static_cast<size_t>(lineNoWidth);
+            std::string padded(numLen < width ? width - numLen : 0, ' ');
             return c(AnsiColor::dim) + " " + padded + num + " | " + c(AnsiColor::reset);
         };
         auto gutterBlank = [&]() -> std::string {
-            std::string spaces(static_cast<size_t>(lineNoWidth), ' ');
+            std::string spaces(static_cast<size_t>(std::max(0, lineNoWidth)), ' ');
             return c(AnsiColor::dim) + " " + spaces + " | " + c(AnsiColor::reset);
         };
 

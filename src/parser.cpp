@@ -337,7 +337,7 @@ void Parser::synchronize() {
 // compatibility) and the structured diagnostics_ vector (rich diagnostics).
 // Preserves source location when the exception is a DiagnosticError.
 // ---------------------------------------------------------------------------
-static void pushError(std::vector<std::string>& errors, std::vector<omscript::Diagnostic>& diagnostics,
+static void recordException(std::vector<std::string>& errors, std::vector<omscript::Diagnostic>& diagnostics,
                       const std::exception& e) {
     errors.push_back(e.what());
     if (const auto* de = dynamic_cast<const omscript::DiagnosticError*>(&e)) {
@@ -460,7 +460,7 @@ std::unique_ptr<Program> Parser::parse() {
             try {
                 parseImport(functions, enums, structs, globals);
             } catch (const std::exception& e) {
-                pushError(errors_, diagnostics_, e);
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -469,7 +469,7 @@ std::unique_ptr<Program> Parser::parse() {
             try {
                 parseNamespace(functions, enums, structs);
             } catch (const std::exception& e) {
-                pushError(errors_, diagnostics_, e);
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -479,7 +479,7 @@ std::unique_ptr<Program> Parser::parse() {
                 auto gv = parseGlobalDecl();
                 globals.push_back(std::move(gv));
             } catch (const std::exception& e) {
-                pushError(errors_, diagnostics_, e);
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -505,7 +505,7 @@ std::unique_ptr<Program> Parser::parse() {
                 decl->column = name.column;
                 globals.push_back(std::move(decl));
             } catch (const std::exception& e) {
-                pushError(errors_, diagnostics_, e);
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -528,7 +528,7 @@ std::unique_ptr<Program> Parser::parse() {
             try {
                 enums.push_back(parseEnumDecl());
             } catch (const std::exception& e) {
-                pushError(errors_, diagnostics_, e);
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1024,7 +1024,7 @@ std::unique_ptr<Program> Parser::parse() {
                     consume(TokenType::RBRACE, "Expected '}' to close comptime block");
                 }
             } catch (const std::exception& e) {
-                pushError(errors_, diagnostics_, e);
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1046,7 +1046,7 @@ std::unique_ptr<Program> Parser::parse() {
                 consume(TokenType::SEMICOLON, "Expected ';' after type alias");
                 typeAliases_[aliasName.lexeme] = typeName;
             } catch (const std::exception& e) {
-                pushError(errors_, diagnostics_, e);
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1055,7 +1055,7 @@ std::unique_ptr<Program> Parser::parse() {
             try {
                 structs.push_back(parseStructDecl());
             } catch (const std::exception& e) {
-                pushError(errors_, diagnostics_, e);
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1094,7 +1094,7 @@ std::unique_ptr<Program> Parser::parse() {
                 consume(TokenType::STRUCT, "Expected 'struct' after @repr(...)");
                 structs.push_back(parseStructDecl(repr, reprAlignN));
             } catch (const std::exception& e) {
-                pushError(errors_, diagnostics_, e);
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1108,7 +1108,7 @@ std::unique_ptr<Program> Parser::parse() {
                 consume(TokenType::STRUCT, "Expected 'struct' after @packed");
                 structs.push_back(parseStructDecl(StructRepr::Packed, 0));
             } catch (const std::exception& e) {
-                pushError(errors_, diagnostics_, e);
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1554,7 +1554,7 @@ std::unique_ptr<Program> Parser::parse() {
             }
             functions.push_back(std::move(func));
         } catch (const std::exception& e) {
-            pushError(errors_, diagnostics_, e);
+            recordException(errors_, diagnostics_, e);
             synchronize();
         }
     }

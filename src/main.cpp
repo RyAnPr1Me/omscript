@@ -2626,9 +2626,8 @@ int main(int argc, char* argv[]) {
     std::vector<std::string> runArgs;
     // Source lines: populated when a .om file is read, used for rich error display.
     std::vector<std::string> sourceLines;
-    // Resolve whether colors should be emitted based on --color/--no-color and TTY detection.
-    const bool useColor = (colorMode == ColorMode::On) ||
-                          (colorMode == ColorMode::Auto && omscript::stderrIsTerminal());
+    // useColor is resolved after all arguments are parsed (see below).
+    bool useColor = false;
     // -D NAME[=VALUE] defines injected as comptime constants (Phase 2 comptime flags).
     std::vector<std::pair<std::string, std::string>> userDefines; // name → raw string value ("" = integer 1)
 
@@ -2835,6 +2834,10 @@ int main(int argc, char* argv[]) {
             return 1;
         }
     }
+
+    // Resolve color preference after all arguments have been parsed.
+    useColor = (colorMode == ColorMode::On) ||
+               (colorMode == ColorMode::Auto && omscript::stderrIsTerminal());
 
     if (command == Command::Clean) {
         // Project-mode clean: when no explicit -o was given and an oms.toml
