@@ -665,9 +665,9 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
         // parameters such as single upper-case letters like T, R, K, V).
         const bool looksGeneric = ann.size() == 1 && std::isupper(static_cast<unsigned char>(ann[0]));
         if (!looksGeneric) {
-            std::cerr << "[warning] unknown type annotation '" << ann
-                      << "' — falling back to i64 (int). "
-                         "Did you mean 'int', 'i64', or a declared struct/alias?\n";
+            codegenWarning("unknown type annotation '" + ann +
+                           "' — falling back to i64 (int). "
+                           "Did you mean 'int', 'i64', or a declared struct/alias?");
         }
     }
     return getDefaultType();
@@ -1125,6 +1125,15 @@ void CodeGenerator::codegenError(const std::string& message, const ASTNode* node
         loc.column = node->column;
     }
     throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, loc, message});
+}
+
+void CodeGenerator::codegenWarning(const std::string& message, const ASTNode* node) {
+    SourceLocation loc;
+    if (node && node->line > 0) {
+        loc.line = node->line;
+        loc.column = node->column;
+    }
+    codegenWarnings_.push_back(Diagnostic{DiagnosticSeverity::Warning, loc, message});
 }
 
 // ---------------------------------------------------------------------------
@@ -7225,12 +7234,12 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
 
         if (f->hintPure) {
             if (fx.hasIO) {
-                std::cerr << "[warning] @pure function '" << f->name
-                          << "' performs I/O — @pure annotation may be incorrect\n";
+                codegenWarning("@pure function '" + f->name +
+                               "' performs I/O — @pure annotation may be incorrect");
                 ++optStats_.almostPureFns;
             } else if (fx.writesMemory || fx.hasMutation || fx.writesGlobal) {
-                std::cerr << "[warning] @pure function '" << f->name
-                          << "' mutates memory — @pure annotation may be incorrect\n";
+                codegenWarning("@pure function '" + f->name +
+                               "' mutates memory — @pure annotation may be incorrect");
                 ++optStats_.almostPureFns;
             }
         } else if (actuallyPure && !f->parameters.empty()) {

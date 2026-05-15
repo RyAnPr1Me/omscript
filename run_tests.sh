@@ -548,6 +548,19 @@ test_cli_output "e020-write-to-shared-msg" "E020" 1 ./build/omsc examples/write_
 test_cli_output "e021-own-on-frozen-msg" "E021" 1 ./build/omsc examples/own_on_frozen_error_test.om -o /tmp/test_e021
 test_cli_output "e022-invalidate-while-borrowed-msg" "E022" 1 ./build/omsc examples/invalidate_while_borrowed_error_test.om -o /tmp/test_e022
 
+# Ω Diagnostic flag tests
+# --Werror: a deprecated @inline annotation should be a warning normally, error with --Werror
+test_cli_output "werror-promotes-warning" "error" 1 ./build/omsc check examples/deprecated_inline_test.om --Werror --no-color
+test_cli_output "warning-no-werror" "warning" 0 ./build/omsc check examples/deprecated_inline_test.om --no-color
+# --max-errors: multi-error file should stop after limit
+test_cli_output "max-errors-limit" "error limit reached" 1 ./build/omsc check examples/multi_error_test.om --max-errors=1 --no-color
+# --error-format=json: emits structured JSON
+test_cli_output "error-format-json" "severity" 1 ./build/omsc check examples/undefined_var.om --error-format=json
+# --error-format=plain: no snippet
+test_cli_output "error-format-plain-has-colno" ":5:" 1 ./build/omsc check examples/missing_semicolon.om --error-format=plain --no-color
+# Multiple errors shown individually (each has -->)
+test_cli_output "multi-error-individual-snippets" "-->" 1 ./build/omsc check examples/multi_error_test.om --no-color
+
 echo ""
 echo "============================================"
 echo "Optimization Tests (parallel)"

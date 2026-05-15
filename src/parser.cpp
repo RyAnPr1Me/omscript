@@ -1567,26 +1567,24 @@ std::unique_ptr<Program> Parser::parse() {
         // When there is exactly one structured diagnostic, re-throw it directly so
         // that its raw message and source location are preserved without the
         // "error at line X: ..." prefix that format() bakes into the combined string.
-        if (diagnostics_.size() == 1 && diagnostics_.front().location.line > 0) {
+        if (diagnostics_.size() == 1) {
             throw DiagnosticError(diagnostics_.front());
         }
 
+        // Multiple errors: throw a MultiDiagnosticError so the driver can emit
+        // each one individually with full source-location and snippet support.
+        if (diagnostics_.size() > 1) {
+            throw MultiDiagnosticError(diagnostics_);
+        }
+
+        // Fallback (plain-string errors without structured diagnostics).
         std::string combined;
         for (size_t i = 0; i < errors_.size(); ++i) {
             if (i > 0)
                 combined += "\n";
             combined += errors_[i];
         }
-        // Use the first structured diagnostic's location so that the compiler
-        // driver can display a source snippet pointing at the actual error site.
-        SourceLocation firstLoc;
-        if (!diagnostics_.empty() && diagnostics_.front().location.line > 0) {
-            firstLoc = diagnostics_.front().location;
-        }
-        // Errors already contain formatted location information from individual
-        // DiagnosticError exceptions; wrap in a DiagnosticError so callers can
-        // catch a single exception type for all compilation failures.
-        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, firstLoc, combined});
+        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {}, combined});
     }
 
     // Append generated lambda functions to the program

@@ -1490,6 +1490,8 @@ void printUsage(const char* progName) {
                  "  --color              Force ANSI colors in diagnostics (default: auto-detect TTY)\n"
                  "  --no-color           Disable ANSI colors in diagnostics\n"
                  "  --error-format=<fmt> Diagnostic output format: human (default), plain, json\n"
+                 "  -Werror              Treat all warnings as errors\n"
+                 "  --max-errors=N       Stop after N errors (0 = unlimited, default: 0)\n"
                  "\n"
                  "Linker:\n"
                  "  -static          Static linking\n"
@@ -2218,6 +2220,10 @@ int main(int argc, char* argv[]) {
     enum class ColorMode { Auto, On, Off } colorMode = ColorMode::Auto;
     // Error format: human (rich), plain (no snippets), or json.
     enum class ErrorFormat { Human, Plain, Json } errorFormat = ErrorFormat::Human;
+    // --Werror: promote all warnings to errors.
+    bool werror = false;
+    // --max-errors=N: stop after N errors (0 = unlimited).
+    unsigned maxErrors = 0;
     omscript::OptimizationLevel optLevel = omscript::OptimizationLevel::O2;
     std::string marchCpu;
     std::string mtuneCpu;
@@ -2654,10 +2660,15 @@ int main(int argc, char* argv[]) {
     };
 
     // Helper: emit a single Diagnostic to stderr, respecting --error-format and --color.
-    auto emitDiagnostic = [&](omscript::Diagnostic diag) {
+    // Returns true if the diagnostic was fatal (error-level, or warning promoted by --Werror).
+    auto emitDiagnostic = [&](omscript::Diagnostic diag) -> bool {
         // Backfill filename if not set.
         if (diag.location.filename.empty() && !sourceFile.empty()) {
             diag.location.filename = sourceFile;
+        }
+        // --Werror: promote warnings to errors.
+        if (werror && diag.severity == omscript::DiagnosticSeverity::Warning) {
+            diag.severity = omscript::DiagnosticSeverity::Error;
         }
         if (errorFormat == ErrorFormat::Json) {
             std::cerr << diag.formatJson() << "\n";
@@ -2666,9 +2677,57 @@ int main(int argc, char* argv[]) {
         } else {
             std::cerr << diag.format() << "\n";
         }
+        return diag.severity == omscript::DiagnosticSeverity::Error;
     };
 
-    // Parse command line arguments
+    // Helper: emit a list of diagnostics, respecting --max-errors.
+    // Returns true if any fatal diagnostic was emitted.
+    auto emitDiagnostics = [&](const std::vector<omscript::Diagnostic>& diags) -> bool {
+        bool hadError = false;
+        unsigned errCount = 0;
+        for (const auto& d : diags) {
+            const bool fatal = emitDiagnostic(d);
+            if (fatal) {
+                ++errCount;
+                hadError = true;
+                if (maxErrors > 0 && errCount >= maxErrors) {
+                    if (errorFormat == ErrorFormat::Json) {
+                        std::cerr << "{\"severity\":\"note\",\"message\":\"error limit reached ("
+                                  << maxErrors << "), further errors suppressed\"}\n";
+                    } else {
+                        std::cerr << "note: error limit reached (" << maxErrors
+                                  << "), further errors suppressed\n";
+                    }
+                    break;
+                }
+            }
+        }
+        return hadError;
+    };
+
+    // Helper: emit parser warnings from the plain-string vector.
+    // The strings look like "warning: <message>"; we strip the "warning: " prefix.
+    // Returns true if --Werror is set and any warning was emitted.
+    auto emitParserWarnings = [&](const std::vector<std::string>& warnings) -> bool {
+        bool hadError = false;
+        for (const auto& w : warnings) {
+            std::string msg = w;
+            if (msg.rfind("warning: ", 0) == 0)
+                msg = msg.substr(9);
+            omscript::Diagnostic diag{omscript::DiagnosticSeverity::Warning, {}, msg};
+            if (emitDiagnostic(diag))
+                hadError = true;
+        }
+        return hadError;
+    };
+
+    // Helper: emit codegen warnings, respecting --Werror.
+    // Returns true if --Werror and any warning was emitted.
+    auto emitCodegenWarnings = [&](const omscript::CodeGenerator& cg) -> bool {
+        return emitDiagnostics(cg.getWarnings());
+    };
+
+
     for (int i = argIndex; i < argc; i++) {
         std::string arg = argv[i];
         if (command == Command::Run && arg == "--") {
@@ -2743,6 +2802,22 @@ int main(int argc, char* argv[]) {
             std::cerr << "Error: unknown --error-format value '" << arg.substr(15)
                       << "' (valid: human, plain, json)\n";
             return 1;
+        }
+        if (!parsingRunArgs && (arg == "-Werror" || arg == "--Werror")) {
+            werror = true;
+            continue;
+        }
+        if (!parsingRunArgs && arg.rfind("--max-errors=", 0) == 0) {
+            const std::string val = arg.substr(13);
+            try {
+                const long n = std::stol(val);
+                if (n < 0) throw std::out_of_range("negative");
+                maxErrors = static_cast<unsigned>(n);
+            } catch (...) {
+                std::cerr << "Error: --max-errors requires a non-negative integer, got '" << val << "'\n";
+                return 1;
+            }
+            continue;
         }
         if (!parsingRunArgs && arg == "--emit-obj") {
             emitObjOnly = true;
@@ -3019,12 +3094,13 @@ int main(int argc, char* argv[]) {
             parser.setSourceFile(sourceFile);
             applyUserDefines(parser);
             auto program = parser.parse();
-            for (const auto& w : parser.warnings()) {
-                std::cerr << w << "\n";
-            }
+            const bool parserWarnErr = emitParserWarnings(parser.warnings());
             auto parseEnd = std::chrono::steady_clock::now();
 
             if (command == Command::Check) {
+                if (parserWarnErr) {
+                    return 1; // --Werror: warnings promoted to errors
+                }
                 if (!quiet) {
                     std::cout << sourceFile << ": OK (" << program->functions.size() << " function(s))\n";
                 }
@@ -3069,6 +3145,9 @@ int main(int argc, char* argv[]) {
             codegen.setSourceFilename(sourceFile);
             codegen.generate(program.get());
             auto codegenEnd = std::chrono::steady_clock::now();
+            if (emitCodegenWarnings(codegen)) {
+                return 1; // --Werror promoted warnings to errors
+            }
 
             if (!dryRun) {
                 if (outputFile.empty()) {
@@ -3111,9 +3190,7 @@ int main(int argc, char* argv[]) {
             parser.setSourceFile(sourceFile);
             applyUserDefines(parser);
             auto program = parser.parse();
-            for (const auto& w : parser.warnings()) {
-                std::cerr << w << "\n";
-            }
+            const bool warnErr1 = emitParserWarnings(parser.warnings());
             auto parseEnd = std::chrono::steady_clock::now();
 
             auto codegenStart = std::chrono::steady_clock::now();
@@ -3125,7 +3202,11 @@ int main(int argc, char* argv[]) {
             codegen.setSourceFilename(sourceFile);
             codegen.generate(program.get());
             auto codegenEnd = std::chrono::steady_clock::now();
+            const bool warnErr2 = emitCodegenWarnings(codegen);
 
+            if (warnErr1 || warnErr2) {
+                return 1;
+            }
             if (!quiet) {
                 std::cout << "Dry run: compilation successful for " << sourceFile << "\n";
             }
@@ -3155,9 +3236,7 @@ int main(int argc, char* argv[]) {
             parser.setSourceFile(sourceFile);
             applyUserDefines(parser);
             auto program = parser.parse();
-            for (const auto& w : parser.warnings()) {
-                std::cerr << w << "\n";
-            }
+            const bool pWarnErr = emitParserWarnings(parser.warnings());
 
             omscript::CodeGenerator codegen(optLevel);
             codegen.setVerbose(verbose);
@@ -3166,7 +3245,11 @@ int main(int argc, char* argv[]) {
             applyCodegenFlags(codegen);
             codegen.setSourceFilename(sourceFile);
             codegen.generate(program.get());
+            const bool cgWarnErr = emitCodegenWarnings(codegen);
 
+            if (pWarnErr || cgWarnErr) {
+                return 1;
+            }
             const std::string objFile =
                 outputSpecified ? outputFile : (std::filesystem::path(sourceFile).stem().string() + ".o");
             codegen.writeObjectFile(objFile);
@@ -3299,6 +3382,10 @@ int main(int argc, char* argv[]) {
             return result;
         }
         return 0;
+    } catch (const omscript::MultiDiagnosticError& e) {
+        // Parser collected multiple structured errors — emit each individually.
+        emitDiagnostics(e.diagnostics());
+        return 1;
     } catch (const omscript::DiagnosticError& e) {
         emitDiagnostic(e.diagnostic());
         return 1;

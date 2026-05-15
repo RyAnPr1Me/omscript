@@ -1,0 +1,17 @@
+// multi_error_test.om
+// Contains multiple parse errors so that the multi-error diagnostic path
+// (MultiDiagnosticError) is exercised by run_tests.sh.
+import std;
+
+fn broken_a() -> int {
+    var x =
+    return x;
+}
+
+fn broken_b() -> int {
+    return 10 + ;
+}
+
+fn main() -> int {
+    return 0;
+}

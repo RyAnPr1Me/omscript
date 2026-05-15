@@ -116,6 +116,8 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     std::unique_ptr<Program> program;
     try {
         program = parser.parse();
+    } catch (const MultiDiagnosticError&) {
+        throw; // Carry all structured diagnostics to the driver.
     } catch (const DiagnosticError&) {
         throw;
     } catch (const std::exception& e) {

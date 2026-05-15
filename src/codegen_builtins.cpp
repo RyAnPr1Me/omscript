@@ -2437,8 +2437,9 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // not at runtime. Use explicit type annotations instead.
     if (bid == BuiltinId::TYPEOF) {
         validateArgCount(expr, "typeof", 1);
-        std::cerr << "[warning] 'typeof' is deprecated and will be removed in a future version."
-                     " It resolves statically at compile time; use explicit type annotations instead.\n";
+        codegenWarning("'typeof' is deprecated and will be removed in a future version."
+                       " It resolves statically at compile time; use explicit type annotations instead.",
+                       expr);
         // Evaluate the argument for its side effects, then derive type tag.
         llvm::Value* arg = generateExpression(expr->arguments[0].get());
         long long tag;

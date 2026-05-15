@@ -405,6 +405,26 @@ class DiagnosticError : public std::runtime_error {
     Diagnostic diagnostic_;
 };
 
+/// Exception that carries multiple structured Diagnostic objects.
+///
+/// The parser throws this when it recovers from multiple errors in a single
+/// pass.  The compiler driver catches it and emits each diagnostic individually,
+/// enabling source snippets and location info for every error.
+class MultiDiagnosticError : public std::runtime_error {
+  public:
+    explicit MultiDiagnosticError(std::vector<Diagnostic> diags)
+        : std::runtime_error(diags.empty() ? "compilation error"
+                                           : diags.front().format()),
+          diagnostics_(std::move(diags)) {}
+
+    const std::vector<Diagnostic>& diagnostics() const noexcept {
+        return diagnostics_;
+    }
+
+  private:
+    std::vector<Diagnostic> diagnostics_;
+};
+
 // ---------------------------------------------------------------------------
 // Source-text utilities
 // ---------------------------------------------------------------------------
