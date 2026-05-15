@@ -12,15 +12,46 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#include <io.h>
+#define OMSC_ISATTY(fd) _isatty(fd)
+#define OMSC_STDERR_FILENO 2
+#else
+#include <unistd.h>
+#define OMSC_ISATTY(fd) isatty(fd)
+#define OMSC_STDERR_FILENO STDERR_FILENO
+#endif
+
 namespace omscript {
 
 // ---------------------------------------------------------------------------
-// Error codes — machine-readable identifiers for every diagnostic.
+// ANSI terminal color helpers
 // ---------------------------------------------------------------------------
+
+/// Returns true if stderr is a TTY and colors should be emitted by default.
+inline bool stderrIsTerminal() noexcept {
+    return OMSC_ISATTY(OMSC_STDERR_FILENO) != 0;
+}
+
+/// ANSI escape-code constants.  Use AnsiColor::reset etc.
+struct AnsiColor {
+    static constexpr const char* reset   = "\033[0m";
+    static constexpr const char* bold    = "\033[1m";
+    static constexpr const char* red     = "\033[1;31m"; ///< bold red    — errors
+    static constexpr const char* yellow  = "\033[1;33m"; ///< bold yellow — warnings
+    static constexpr const char* cyan    = "\033[1;36m"; ///< bold cyan   — notes / hints
+    static constexpr const char* blue    = "\033[1;34m"; ///< bold blue   — location prefix
+    static constexpr const char* green   = "\033[1;32m"; ///< bold green  — hints
+    static constexpr const char* white   = "\033[1;37m"; ///< bold white  — source text
+    static constexpr const char* dim     = "\033[2m";    ///< dim         — line-number gutter
+};
+
+
 enum class ErrorCode {
     E001_UNDEFINED_VARIABLE,
     E002_TYPE_MISMATCH,
@@ -205,6 +236,154 @@ struct Diagnostic {
         }
         return codePrefix + prefix + ": " + message;
     }
+
+    /// Format a rich, human-readable diagnostic with optional ANSI colors and a
+    /// source-code snippet showing the error location (clang / rustc style).
+    ///
+    /// @param color        When true, emit ANSI escape codes.
+    /// @param sourceLines  The source file split into lines (1-indexed via [line-1]).
+    ///
+    /// Example output (colors stripped):
+    /// @code
+    ///   error[E006]: Parse error: expected ';'
+    ///    --> src/main.om:15:8
+    ///     |
+    ///  15 |   var x = foo bar
+    ///     |               ^
+    ///     |
+    /// @endcode
+    std::string formatRich(bool color, const std::vector<std::string>& sourceLines) const {
+        // ── ANSI helpers ────────────────────────────────────────────────────
+        auto c = [&](const char* code) -> std::string { return color ? code : ""; };
+
+        // Severity label + color.
+        std::string severityLabel;
+        const char* severityColor = "";
+        switch (severity) {
+        case DiagnosticSeverity::Error:
+            severityLabel = "error";
+            severityColor = AnsiColor::red;
+            break;
+        case DiagnosticSeverity::Warning:
+            severityLabel = "warning";
+            severityColor = AnsiColor::yellow;
+            break;
+        case DiagnosticSeverity::Note:
+            severityLabel = "note";
+            severityColor = AnsiColor::cyan;
+            break;
+        case DiagnosticSeverity::Hint:
+            severityLabel = "hint";
+            severityColor = AnsiColor::green;
+            break;
+        }
+
+        std::string codeStr;
+        if (code != ErrorCode::NONE) {
+            codeStr = std::string("[") + errorCodeString(code) + "]";
+        }
+
+        std::ostringstream out;
+
+        // ── Header: "error[E006]: message" ──────────────────────────────────
+        out << c(severityColor) << severityLabel;
+        if (!codeStr.empty()) {
+            out << codeStr;
+        }
+        out << c(AnsiColor::reset) << c(AnsiColor::bold) << ": " << message << c(AnsiColor::reset) << "\n";
+
+        const bool hasLocation = location.line > 0;
+        if (!hasLocation) {
+            return out.str();
+        }
+
+        // ── Location arrow: " --> file:line:col" ───────────────────────────
+        std::string locStr;
+        if (!location.filename.empty()) {
+            locStr = location.filename + ":" + std::to_string(location.line) + ":" + std::to_string(location.column);
+        } else {
+            locStr = "line " + std::to_string(location.line) + ", column " + std::to_string(location.column);
+        }
+        out << c(AnsiColor::blue) << " --> " << c(AnsiColor::reset) << locStr << "\n";
+
+        // ── Source snippet ───────────────────────────────────────────────────
+        const int lineIdx = location.line - 1; // 0-based
+        if (lineIdx < 0 || static_cast<size_t>(lineIdx) >= sourceLines.size()) {
+            return out.str();
+        }
+        const std::string& srcLine = sourceLines[static_cast<size_t>(lineIdx)];
+
+        // Compute the width of the line-number column.
+        const int lineNo      = location.line;
+        const int lineNoWidth = static_cast<int>(std::to_string(lineNo).size());
+
+        // Gutter helper: "  5 | " or "    | "
+        auto gutterLine = [&](int ln) -> std::string {
+            std::string num = (ln > 0) ? std::to_string(ln) : "";
+            std::string padded(static_cast<size_t>(lineNoWidth) - num.size(), ' ');
+            return c(AnsiColor::dim) + " " + padded + num + " | " + c(AnsiColor::reset);
+        };
+        auto gutterBlank = [&]() -> std::string {
+            std::string spaces(static_cast<size_t>(lineNoWidth), ' ');
+            return c(AnsiColor::dim) + " " + spaces + " | " + c(AnsiColor::reset);
+        };
+
+        out << gutterBlank() << "\n";
+        out << gutterLine(lineNo) << c(AnsiColor::white) << srcLine << c(AnsiColor::reset) << "\n";
+
+        // Build the caret line under the column.
+        const int col = (location.column > 0) ? location.column : 1;
+        const int caretOffset = std::max(0, col - 1);
+        std::string caretLine(static_cast<size_t>(caretOffset), ' ');
+        caretLine += c(severityColor) + "^" + c(AnsiColor::reset);
+
+        out << gutterBlank() << caretLine << "\n";
+
+        return out.str();
+    }
+
+    /// Serialize the diagnostic to a single-line JSON object (without trailing newline).
+    /// Suitable for --error-format=json output: one object per line.
+    std::string formatJson() const {
+        auto jsonEscape = [](const std::string& s) -> std::string {
+            std::string out;
+            out.reserve(s.size() + 2);
+            for (char ch : s) {
+                switch (ch) {
+                case '"':  out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                case '\n': out += "\\n";  break;
+                case '\r': out += "\\r";  break;
+                case '\t': out += "\\t";  break;
+                default:   out += ch;     break;
+                }
+            }
+            return out;
+        };
+
+        std::string sev;
+        switch (severity) {
+        case DiagnosticSeverity::Error:   sev = "error";   break;
+        case DiagnosticSeverity::Warning: sev = "warning"; break;
+        case DiagnosticSeverity::Note:    sev = "note";    break;
+        case DiagnosticSeverity::Hint:    sev = "hint";    break;
+        }
+
+        std::ostringstream j;
+        j << "{\"severity\":\"" << sev << "\"";
+        if (code != ErrorCode::NONE) {
+            j << ",\"code\":\"" << errorCodeString(code) << "\"";
+        }
+        j << ",\"message\":\"" << jsonEscape(message) << "\"";
+        if (!location.filename.empty()) {
+            j << ",\"file\":\"" << jsonEscape(location.filename) << "\"";
+        }
+        if (location.line > 0) {
+            j << ",\"line\":" << location.line << ",\"column\":" << location.column;
+        }
+        j << "}";
+        return j.str();
+    }
 };
 
 /// Exception type that carries a full Diagnostic payload.
@@ -223,6 +402,35 @@ class DiagnosticError : public std::runtime_error {
   private:
     Diagnostic diagnostic_;
 };
+
+// ---------------------------------------------------------------------------
+// Source-text utilities
+// ---------------------------------------------------------------------------
+
+/// Split a source string into a vector of lines (without trailing newline chars).
+/// Used to provide source snippets to Diagnostic::formatRich().
+inline std::vector<std::string> splitSourceLines(const std::string& source) {
+    std::vector<std::string> lines;
+    std::string line;
+    for (size_t i = 0; i < source.size(); ++i) {
+        if (source[i] == '\n') {
+            lines.push_back(line);
+            line.clear();
+        } else if (source[i] == '\r') {
+            // Handle \r\n — skip the '\n' if it follows.
+            lines.push_back(line);
+            line.clear();
+            if (i + 1 < source.size() && source[i + 1] == '\n') {
+                ++i;
+            }
+        } else {
+            line += source[i];
+        }
+    }
+    // Push the last line even if there's no trailing newline.
+    lines.push_back(line);
+    return lines;
+}
 
 // ---------------------------------------------------------------------------
 // Production-grade exception hierarchy

@@ -529,7 +529,7 @@ ptest_compile_fail "examples/write_to_shared_error_test.om"
 ptest_compile_fail "examples/invalidate_while_borrowed_error_test.om"
 ptest_compile_fail "examples/own_on_frozen_error_test.om"
 flush_ptests
-test_cli_output "error-line-info" "line" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
+test_cli_output "error-line-info" "-->" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "error-includes-filename" "undefined_var.om" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "missing-semicolon-msg" "Expected ';'" 1 ./build/omsc examples/missing_semicolon.om -o /tmp/test_semicolon
 test_cli_output "int-overflow-msg" "Integer literal out of range" 1 ./build/omsc examples/int_overflow.om -o /tmp/test_overflow

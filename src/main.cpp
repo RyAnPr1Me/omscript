@@ -1486,6 +1486,11 @@ void printUsage(const char* progName) {
                  "  --no-ownership-checks  Disable borrow/ownership checks (unsafe mode)\n"
                  "  --mem-sanitize         Compile-time path-sensitive memory-safety diagnostics\n"
                  "\n"
+                 "Diagnostics:\n"
+                 "  --color              Force ANSI colors in diagnostics (default: auto-detect TTY)\n"
+                 "  --no-color           Disable ANSI colors in diagnostics\n"
+                 "  --error-format=<fmt> Diagnostic output format: human (default), plain, json\n"
+                 "\n"
                  "Linker:\n"
                  "  -static          Static linking\n"
                  "  -s, --strip      Strip symbols\n"
@@ -2209,6 +2214,10 @@ int main(int argc, char* argv[]) {
     bool dumpAstFull = false;
     bool emitObjOnly = false;
     bool dryRun = false;
+    // Color/format control: auto = detect TTY, on = always, off = never.
+    enum class ColorMode { Auto, On, Off } colorMode = ColorMode::Auto;
+    // Error format: human (rich), plain (no snippets), or json.
+    enum class ErrorFormat { Human, Plain, Json } errorFormat = ErrorFormat::Human;
     omscript::OptimizationLevel optLevel = omscript::OptimizationLevel::O2;
     std::string marchCpu;
     std::string mtuneCpu;
@@ -2409,6 +2418,41 @@ int main(int argc, char* argv[]) {
             argIndex++;
             continue;
         }
+        if (arg == "--color" || arg == "--color=always") {
+            colorMode = ColorMode::On;
+            argIndex++;
+            continue;
+        }
+        if (arg == "--no-color" || arg == "--color=never") {
+            colorMode = ColorMode::Off;
+            argIndex++;
+            continue;
+        }
+        if (arg == "--color=auto") {
+            colorMode = ColorMode::Auto;
+            argIndex++;
+            continue;
+        }
+        if (arg == "--error-format=json") {
+            errorFormat = ErrorFormat::Json;
+            argIndex++;
+            continue;
+        }
+        if (arg == "--error-format=plain") {
+            errorFormat = ErrorFormat::Plain;
+            argIndex++;
+            continue;
+        }
+        if (arg == "--error-format=human" || arg == "--error-format=rich") {
+            errorFormat = ErrorFormat::Human;
+            argIndex++;
+            continue;
+        }
+        if (arg.rfind("--error-format=", 0) == 0) {
+            std::cerr << "Error: unknown --error-format value '" << arg.substr(15)
+                      << "' (valid: human, plain, json)\n";
+            return 1;
+        }
         if (arg == "--release") {
             releaseProfile = true;
             argIndex++;
@@ -2580,6 +2624,11 @@ int main(int argc, char* argv[]) {
     bool parsingRunArgs = false;
     bool keepTemps = false;
     std::vector<std::string> runArgs;
+    // Source lines: populated when a .om file is read, used for rich error display.
+    std::vector<std::string> sourceLines;
+    // Resolve whether colors should be emitted based on --color/--no-color and TTY detection.
+    const bool useColor = (colorMode == ColorMode::On) ||
+                          (colorMode == ColorMode::Auto && omscript::stderrIsTerminal());
     // -D NAME[=VALUE] defines injected as comptime constants (Phase 2 comptime flags).
     std::vector<std::pair<std::string, std::string>> userDefines; // name → raw string value ("" = integer 1)
 
@@ -2602,6 +2651,21 @@ int main(int argc, char* argv[]) {
                     p.setComptimeString(name, value);
                 }
             }
+        }
+    };
+
+    // Helper: emit a single Diagnostic to stderr, respecting --error-format and --color.
+    auto emitDiagnostic = [&](omscript::Diagnostic diag) {
+        // Backfill filename if not set.
+        if (diag.location.filename.empty() && !sourceFile.empty()) {
+            diag.location.filename = sourceFile;
+        }
+        if (errorFormat == ErrorFormat::Json) {
+            std::cerr << diag.formatJson() << "\n";
+        } else if (errorFormat == ErrorFormat::Human) {
+            std::cerr << diag.formatRich(useColor, sourceLines);
+        } else {
+            std::cerr << diag.format() << "\n";
         }
     };
 
@@ -2643,6 +2707,43 @@ int main(int argc, char* argv[]) {
         if (!parsingRunArgs && arg == "--dump-ast") {
             dumpAstFull = true;
             continue;
+        }
+        if (!parsingRunArgs && arg == "--no-ownership-checks") {
+            flagNoOwnershipChecks = true;
+            continue;
+        }
+        if (!parsingRunArgs && arg == "--mem-sanitize") {
+            flagMemSanitize = true;
+            continue;
+        }
+        if (!parsingRunArgs && (arg == "--color" || arg == "--color=always")) {
+            colorMode = ColorMode::On;
+            continue;
+        }
+        if (!parsingRunArgs && (arg == "--no-color" || arg == "--color=never")) {
+            colorMode = ColorMode::Off;
+            continue;
+        }
+        if (!parsingRunArgs && arg == "--color=auto") {
+            colorMode = ColorMode::Auto;
+            continue;
+        }
+        if (!parsingRunArgs && arg == "--error-format=json") {
+            errorFormat = ErrorFormat::Json;
+            continue;
+        }
+        if (!parsingRunArgs && arg == "--error-format=plain") {
+            errorFormat = ErrorFormat::Plain;
+            continue;
+        }
+        if (!parsingRunArgs && (arg == "--error-format=human" || arg == "--error-format=rich")) {
+            errorFormat = ErrorFormat::Human;
+            continue;
+        }
+        if (!parsingRunArgs && arg.rfind("--error-format=", 0) == 0) {
+            std::cerr << "Error: unknown --error-format value '" << arg.substr(15)
+                      << "' (valid: human, plain, json)\n";
+            return 1;
         }
         if (!parsingRunArgs && arg == "--emit-obj") {
             emitObjOnly = true;
@@ -2895,6 +2996,7 @@ int main(int argc, char* argv[]) {
             command == Command::Check) {
             auto lexStart = std::chrono::steady_clock::now();
             std::string source = readSourceFile(sourceFile);
+            sourceLines = omscript::splitSourceLines(source);
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
             auto lexEnd = std::chrono::steady_clock::now();
@@ -2996,6 +3098,7 @@ int main(int argc, char* argv[]) {
             // For compile/run with --dry-run: lex, parse, codegen but don't write files.
             auto lexStart = std::chrono::steady_clock::now();
             std::string source = readSourceFile(sourceFile);
+            sourceLines = omscript::splitSourceLines(source);
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
             auto lexEnd = std::chrono::steady_clock::now();
@@ -3042,6 +3145,7 @@ int main(int argc, char* argv[]) {
         if (emitObjOnly) {
             // Compile to object file only (no linking).
             std::string source = readSourceFile(sourceFile);
+            sourceLines = omscript::splitSourceLines(source);
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
             omscript::Parser parser(tokens);
@@ -3124,6 +3228,14 @@ int main(int argc, char* argv[]) {
             compiler.setVerbose(false);
             compiler.setQuiet(true);
         }
+        // Pre-read source for rich diagnostic display.
+        {
+            std::ifstream f(sourceFile);
+            if (f) {
+                std::string src((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+                sourceLines = omscript::splitSourceLines(src);
+            }
+        }
         compiler.compile(sourceFile, outputFile);
 
         if (showTiming) {
@@ -3185,12 +3297,7 @@ int main(int argc, char* argv[]) {
         }
         return 0;
     } catch (const omscript::DiagnosticError& e) {
-        // Structured diagnostic: include source file path for context.
-        if (!sourceFile.empty()) {
-            std::cerr << sourceFile << ": " << e.what() << "\n";
-        } else {
-            std::cerr << e.what() << "\n";
-        }
+        emitDiagnostic(e.diagnostic());
         return 1;
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";

@@ -331,6 +331,24 @@ void Parser::synchronize() {
 }
 
 // ---------------------------------------------------------------------------
+// Error accumulation helper.
+// ---------------------------------------------------------------------------
+// Records an exception into both the plain-string errors_ vector (backward
+// compatibility) and the structured diagnostics_ vector (rich diagnostics).
+// Preserves source location when the exception is a DiagnosticError.
+// ---------------------------------------------------------------------------
+static void pushError(std::vector<std::string>& errors, std::vector<omscript::Diagnostic>& diagnostics,
+                      const std::exception& e) {
+    errors.push_back(e.what());
+    if (const auto* de = dynamic_cast<const omscript::DiagnosticError*>(&e)) {
+        diagnostics.push_back(de->diagnostic());
+    } else {
+        diagnostics.push_back(
+            omscript::Diagnostic{omscript::DiagnosticSeverity::Error, {}, std::string(e.what())});
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Pre-scan: collect all custom operator symbols before the main parse.
 // ---------------------------------------------------------------------------
 // Walks the token stream looking for the pattern:
@@ -442,7 +460,7 @@ std::unique_ptr<Program> Parser::parse() {
             try {
                 parseImport(functions, enums, structs, globals);
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                pushError(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -451,7 +469,7 @@ std::unique_ptr<Program> Parser::parse() {
             try {
                 parseNamespace(functions, enums, structs);
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                pushError(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -461,7 +479,7 @@ std::unique_ptr<Program> Parser::parse() {
                 auto gv = parseGlobalDecl();
                 globals.push_back(std::move(gv));
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                pushError(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -487,7 +505,7 @@ std::unique_ptr<Program> Parser::parse() {
                 decl->column = name.column;
                 globals.push_back(std::move(decl));
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                pushError(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -510,7 +528,7 @@ std::unique_ptr<Program> Parser::parse() {
             try {
                 enums.push_back(parseEnumDecl());
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                pushError(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1006,7 +1024,7 @@ std::unique_ptr<Program> Parser::parse() {
                     consume(TokenType::RBRACE, "Expected '}' to close comptime block");
                 }
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                pushError(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1028,7 +1046,7 @@ std::unique_ptr<Program> Parser::parse() {
                 consume(TokenType::SEMICOLON, "Expected ';' after type alias");
                 typeAliases_[aliasName.lexeme] = typeName;
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                pushError(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1037,7 +1055,7 @@ std::unique_ptr<Program> Parser::parse() {
             try {
                 structs.push_back(parseStructDecl());
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                pushError(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1076,7 +1094,7 @@ std::unique_ptr<Program> Parser::parse() {
                 consume(TokenType::STRUCT, "Expected 'struct' after @repr(...)");
                 structs.push_back(parseStructDecl(repr, reprAlignN));
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                pushError(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1090,7 +1108,7 @@ std::unique_ptr<Program> Parser::parse() {
                 consume(TokenType::STRUCT, "Expected 'struct' after @packed");
                 structs.push_back(parseStructDecl(StructRepr::Packed, 0));
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                pushError(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1536,7 +1554,7 @@ std::unique_ptr<Program> Parser::parse() {
             }
             functions.push_back(std::move(func));
         } catch (const std::exception& e) {
-            errors_.push_back(e.what());
+            pushError(errors_, diagnostics_, e);
             synchronize();
         }
     }
@@ -1546,16 +1564,29 @@ std::unique_ptr<Program> Parser::parse() {
     }
 
     if (!errors_.empty()) {
+        // When there is exactly one structured diagnostic, re-throw it directly so
+        // that its raw message and source location are preserved without the
+        // "error at line X: ..." prefix that format() bakes into the combined string.
+        if (diagnostics_.size() == 1 && diagnostics_.front().location.line > 0) {
+            throw DiagnosticError(diagnostics_.front());
+        }
+
         std::string combined;
         for (size_t i = 0; i < errors_.size(); ++i) {
             if (i > 0)
                 combined += "\n";
             combined += errors_[i];
         }
+        // Use the first structured diagnostic's location so that the compiler
+        // driver can display a source snippet pointing at the actual error site.
+        SourceLocation firstLoc;
+        if (!diagnostics_.empty() && diagnostics_.front().location.line > 0) {
+            firstLoc = diagnostics_.front().location;
+        }
         // Errors already contain formatted location information from individual
         // DiagnosticError exceptions; wrap in a DiagnosticError so callers can
         // catch a single exception type for all compilation failures.
-        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, combined});
+        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, firstLoc, combined});
     }
 
     // Append generated lambda functions to the program
