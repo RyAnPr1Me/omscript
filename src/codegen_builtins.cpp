@@ -3372,8 +3372,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Extract the key function name.
         llvm::Function* keyFn = nullptr;
         {
-            const std::string kname = extractFnName(expr->arguments[1].get());
-            if (!kname.empty()) keyFn = module->getFunction(kname);
+            const std::string keyFnName = extractFnName(expr->arguments[1].get());
+            if (!keyFnName.empty()) keyFn = module->getFunction(keyFnName);
         }
         if (!keyFn) {
             llvm::errs() << "warning: " << builtinName
