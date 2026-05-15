@@ -3660,6 +3660,15 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (expr->arguments.size() < 1 || expr->arguments.size() > 2) {
             codegenError("assert() requires 1 or 2 arguments (condition[, message])", expr);
         }
+        // Compile-time type check: catch the most obvious misuse where the caller
+        // accidentally passes an integer literal as the message argument.
+        if (expr->arguments.size() == 2) {
+            auto* msgExpr = expr->arguments[1].get();
+            if (msgExpr->type == ASTNodeType::LITERAL_EXPR &&
+                static_cast<LiteralExpr*>(msgExpr)->literalType == LiteralExpr::LiteralType::INTEGER) {
+                codegenError("assert(): second argument must be a string message, not an integer literal", expr);
+            }
+        }
         llvm::Value* condVal = generateExpression(expr->arguments[0].get());
         condVal = toBool(condVal);
 
