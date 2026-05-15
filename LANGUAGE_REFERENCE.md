@@ -3161,6 +3161,46 @@ for (i: int in 0...10) {
 
 **`break` in `switch`**: Required at the end of each case to prevent fallthrough (unless explicit fallthrough is intended).
 
+#### Labeled `break` / `continue`
+
+Any loop can be given a **label** by prefixing it with `label_name:`. Labeled `break label;` and `continue label;` then target the labeled loop rather than the nearest enclosing one. This avoids flag variables for breaking out of deeply nested loops.
+
+**Syntax**:
+```
+label_name: while COND { ... break label_name; ... }
+label_name: for x in arr { ... continue label_name; ... }
+label_name: for i in 0..n { ... }
+```
+
+**Example — labeled break**:
+```omscript
+outer: for i in 0..10 {
+    for j in 0..10 {
+        if i * 10 + j == 23 {
+            break outer;   // exit both loops when found
+        }
+    }
+}
+```
+
+**Example — labeled continue**:
+```omscript
+outer: for i in 0..4 {
+    for j in 0..4 {
+        if j == 2 {
+            continue outer;  // skip rest of outer iteration
+        }
+        process(i, j);       // only reached for j == 0 and j == 1
+    }
+}
+```
+
+**Rules**:
+- Labels are identifiers (any valid identifier that is not a keyword).
+- A label must immediately precede a loop keyword (`while`, `for`, `foreach`, `forever`, `loop`, `repeat`, `do`, `until`).
+- `break label;` and `continue label;` are parse errors if no enclosing loop has that label.
+- Unlabeled `break;` and `continue;` still target the nearest enclosing loop.
+
 ### 8.16 Loop Annotations
 
 **Syntax**: `for (...) @loop(annotation) { body }`
@@ -4656,7 +4696,46 @@ println(flat[5]);  // 6
 
 ---
 
-### 11.8 Array-of-string special handling
+#### `array_flat_map(array, fn) → array`
+
+**Signature:** `array_flat_map(array, function) → array`  
+**Semantics:** Apply `fn` to every element of `array`, treat each result as a pointer to an inner array, then concatenate all inner arrays into a single output array. Equivalent to `array_flatten(array_map(array, fn))` but avoids the intermediate outer array allocation. Two-pass: pass 1 measures total output length, pass 2 copies elements.  
+**Time:** O(n × cost(fn) + total output length)
+
+```omscript
+fn make_range(n: int) -> int {
+    var arr = [n, n + 1];
+    return arr as int;
+}
+
+var inp: int[] = [1, 2, 3];
+var flat = array_flat_map(inp, make_range);
+// flat == [1, 2, 2, 3, 3, 4], len(flat) == 6
+```
+
+---
+
+#### `array_scan(array, init, fn) → array`
+
+**Signature:** `array_scan(array, init, function) → array`  
+**Semantics:** Prefix scan (running aggregate). Returns a new array of the same length as `array` where `result[0] = fn(init, array[0])`, `result[i] = fn(result[i-1], array[i])`. Useful for running totals, cumulative products, and any fold that retains intermediate values. Returns an empty array for empty input.  
+**Time:** O(n × cost(fn))
+
+```omscript
+fn add(a: int, b: int) -> int { return a + b; }
+
+var ns: int[] = [1, 2, 3, 4, 5];
+var running = array_scan(ns, 0, add);
+// running == [1, 3, 6, 10, 15]  (prefix sums)
+
+fn mul(a: int, b: int) -> int { return a * b; }
+var factorials = array_scan([1, 2, 3, 4], 1, mul);
+// factorials == [1, 2, 6, 24]
+```
+
+---
+
+
 
 **String-array tracking:** When an array is known to contain string pointers (i.e., every element is an i64 holding a `char*`), the compiler tracks it in `stringArrays_` set. This enables:
 - Type-aware code generation for `join`, `split`, etc.
@@ -5100,6 +5179,34 @@ var t3 = "one\r\ntwo\r\nthree";
 var l3: string[] = str_to_lines(t3);
 println(len(l3));          // 3
 println(l3[0]);            // one  (no trailing \r)
+```
+
+---
+
+#### `str_remove_prefix(string, prefix) → string`
+
+**Signature:** `str_remove_prefix(string, prefix) → string`  
+**Semantics:** If `string` starts with `prefix`, return a copy of `string` with the first `len(prefix)` characters removed. Otherwise return `string` unchanged. Compile-time folded when both arguments are string literals.  
+**Time:** O(len(prefix) + len(result)) — one `memcmp` + one `memcpy`
+
+```omscript
+println(str_remove_prefix("hello world", "hello "));  // "world"
+println(str_remove_prefix("hello world", "bye "));    // "hello world" (no match)
+println(str_remove_prefix("abc", "abcdef"));          // "abc" (prefix too long)
+```
+
+---
+
+#### `str_remove_suffix(string, suffix) → string`
+
+**Signature:** `str_remove_suffix(string, suffix) → string`  
+**Semantics:** If `string` ends with `suffix`, return a copy of `string` with the last `len(suffix)` characters removed. Otherwise return `string` unchanged. Compile-time folded when both arguments are string literals.  
+**Time:** O(len(suffix) + len(result)) — one `memcmp` + one `memcpy`
+
+```omscript
+println(str_remove_suffix("hello world", " world"));  // "hello"
+println(str_remove_suffix("hello world", "xyz"));     // "hello world" (no match)
+println(str_remove_suffix("abc", "abcdef"));          // "abc" (suffix too long)
 ```
 
 ---
@@ -5833,19 +5940,21 @@ fn parse_and_use(s: string) {
 
 ---
 
-### 16.3 `assert(cond)`
+### 16.3 `assert(cond)` / `assert(cond, msg)`
 
-**Syntax:** Built-in function, **single argument only**:
+**Syntax:** Built-in function, **1 or 2 arguments**:
 ```ebnf
 assert_call ::= 'assert' '(' expression ')'
+              | 'assert' '(' expression ',' expression ')'
 ```
-
-> **Note:** OmScript's `assert` does **not** accept a custom message argument. `assert(cond, "msg")` is a compile error. The runtime always prints `Runtime error: assertion failed at line N`.
 
 **Semantics:**
 1. Evaluates `cond` and coerces to a 1-bit boolean.
 2. If true: returns `1` (the call evaluates as an expression to `1`).
-3. If false: prints `Runtime error: assertion failed at line N` to stdout and calls `abort()`.
+3. If false:
+   - **1-arg form**: prints `Runtime error: assertion failed at line N\n` to stdout.
+   - **2-arg form**: prints `Runtime error: assertion failed at line N: <msg>\n` to stdout (where `<msg>` is the second argument evaluated as a string).
+   - Calls `abort()` in both cases.
 
 **Optimizer hint:** The compiler tags the success branch with a 1000:1 branch-weight, telling LLVM to lay out the failure path cold.
 
@@ -5861,8 +5970,13 @@ Use `assert` for safety-critical invariants you want enforced. Use `assume` only
 **Example:**
 ```omscript
 fn divide(a: int, b: int) {
-    assert(b != 0);   // aborts on b == 0 with line number
+    assert(b != 0, "divisor must be non-zero");  // custom message on failure
     return a / b;
+}
+
+fn sqrt_safe(x: int) -> int {
+    assert(x >= 0);   // line-number-only message
+    return isqrt(x);
 }
 ```
 
@@ -5877,7 +5991,7 @@ Runtime errors in OmScript fall into three categories, all of which **terminate 
 | Bounds check | Out-of-range array / string index | `Runtime error: index out of bounds` |
 | Division by zero | Integer `/` or `%` with zero divisor | `Runtime error: division by zero` |
 | Zero-step loop | `for (i in 0...10...0)` | `Runtime error: for loop step is zero` |
-| Assertion failure | `assert(false)` | `Runtime error: assertion failed at line N` |
+| Assertion failure | `assert(false)` / `assert(false, "msg")` | `Runtime error: assertion failed at line N[: msg]` |
 | Unmatched throw | `throw N;` with no `catch(N)` in the function | `Runtime error: unmatched throw` |
 | Unhandled throw | `throw N;` in a function with **no** catch blocks at all | `Runtime error: unhandled throw at line N` |
 

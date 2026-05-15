@@ -2297,6 +2297,34 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->column = hintKw.column;
         return stmt;
     }
+    // Labeled loop: label_name: while/for/foreach/forever/loop/repeat/do/until { ... }
+    // Enables `break label_name;` and `continue label_name;` to target specific outer loops.
+    if (check(TokenType::IDENTIFIER) && current + 1 < tokens.size() &&
+        tokens[current + 1].type == TokenType::COLON && current + 2 < tokens.size()) {
+        const TokenType nextNext = tokens[current + 2].type;
+        const bool isLoopKeyword =
+            nextNext == TokenType::WHILE || nextNext == TokenType::FOR || nextNext == TokenType::FOREACH ||
+            nextNext == TokenType::FOREVER || nextNext == TokenType::LOOP || nextNext == TokenType::REPEAT ||
+            nextNext == TokenType::DO || nextNext == TokenType::UNTIL;
+        if (isLoopKeyword) {
+            const std::string loopLabel = tokens[current].lexeme;
+            const Token labelTok = tokens[current];
+            advance(); // consume identifier
+            advance(); // consume ':'
+            // Now parse the loop statement normally and attach the label.
+            auto loopStmt = parseStatement();
+            if (auto* ws = dynamic_cast<WhileStmt*>(loopStmt.get())) {
+                ws->label = loopLabel;
+            } else if (auto* fs = dynamic_cast<ForStmt*>(loopStmt.get())) {
+                fs->label = loopLabel;
+            } else if (auto* fe = dynamic_cast<ForEachStmt*>(loopStmt.get())) {
+                fe->label = loopLabel;
+            }
+            loopStmt->line = labelTok.line;
+            loopStmt->column = labelTok.column;
+            return loopStmt;
+        }
+    }
     if (match(TokenType::IF)) {
         const Token kw = tokens[current - 1];
         auto stmt = parseIfStmt();
@@ -3431,13 +3459,25 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
 }
 
 std::unique_ptr<Statement> Parser::parseBreakStmt() {
+    auto stmt = std::make_unique<BreakStmt>();
+    // Labeled break: break label_name;
+    if (check(TokenType::IDENTIFIER)) {
+        stmt->label = tokens[current].lexeme;
+        advance();
+    }
     consume(TokenType::SEMICOLON, "Expected ';' after 'break'");
-    return std::make_unique<BreakStmt>();
+    return stmt;
 }
 
 std::unique_ptr<Statement> Parser::parseContinueStmt() {
+    auto stmt = std::make_unique<ContinueStmt>();
+    // Labeled continue: continue label_name;
+    if (check(TokenType::IDENTIFIER)) {
+        stmt->label = tokens[current].lexeme;
+        advance();
+    }
     consume(TokenType::SEMICOLON, "Expected ';' after 'continue'");
-    return std::make_unique<ContinueStmt>();
+    return stmt;
 }
 
 std::unique_ptr<Statement> Parser::parseJmpStmt() {

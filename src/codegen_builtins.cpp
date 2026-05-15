@@ -314,6 +314,11 @@ enum class BuiltinId : uint8_t {
     ARRAY_MIN_BY,   ///< array_min_by(arr,fn)  → element with minimum key fn(elem)
     ARRAY_MAX_BY,   ///< array_max_by(arr,fn)  → element with maximum key fn(elem)
     STR_TO_LINES,   ///< str_to_lines(s)       → split on \n / \r\n → string[]
+    // ── Round-76 additions ───────────────────────────────────────────────────
+    ARRAY_FLAT_MAP,    ///< array_flat_map(arr, fn)     → map fn over arr, flatten one level
+    ARRAY_SCAN,        ///< array_scan(arr, init, fn)   → prefix scan: result[i] = fn(result[i-1], arr[i])
+    STR_REMOVE_PREFIX, ///< str_remove_prefix(s, prefix)→ s without leading prefix (if present)
+    STR_REMOVE_SUFFIX, ///< str_remove_suffix(s, suffix)→ s without trailing suffix (if present)
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -573,10 +578,15 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"str_title",      BuiltinId::STR_TITLE},
     {"str_swapcase",   BuiltinId::STR_SWAPCASE},
     // Round-75
-    {"array_flatten",  BuiltinId::ARRAY_FLATTEN},
-    {"array_min_by",   BuiltinId::ARRAY_MIN_BY},
-    {"array_max_by",   BuiltinId::ARRAY_MAX_BY},
-    {"str_to_lines",   BuiltinId::STR_TO_LINES},
+    {"array_flatten",    BuiltinId::ARRAY_FLATTEN},
+    {"array_min_by",     BuiltinId::ARRAY_MIN_BY},
+    {"array_max_by",     BuiltinId::ARRAY_MAX_BY},
+    {"str_to_lines",     BuiltinId::STR_TO_LINES},
+    // ── Round-76 ──────────────────────────────────────────────────────────────
+    {"array_flat_map",   BuiltinId::ARRAY_FLAT_MAP},
+    {"array_scan",       BuiltinId::ARRAY_SCAN},
+    {"str_remove_prefix",BuiltinId::STR_REMOVE_PREFIX},
+    {"str_remove_suffix",BuiltinId::STR_REMOVE_SUFFIX},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -3646,7 +3656,10 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     // ── End Round-75 builtins ────────────────────────────────────────────────
     if (bid == BuiltinId::ASSERT) {
-        validateArgCount(expr, "assert", 1);
+        // assert(cond) or assert(cond, "message") — 1- or 2-arg form
+        if (expr->arguments.size() < 1 || expr->arguments.size() > 2) {
+            codegenError("assert() requires 1 or 2 arguments (condition[, message])", expr);
+        }
         llvm::Value* condVal = generateExpression(expr->arguments[0].get());
         condVal = toBool(condVal);
 
@@ -3660,10 +3673,27 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(failBB);
         {
-            std::string msg = expr->line > 0 ? std::string("Runtime error: assertion failed at line ") +
-                                                   std::to_string(expr->line) + "\n"
-                                             : "Runtime error: assertion failed\n";
-            builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(msg, "assert_fail_msg")});
+            if (expr->arguments.size() == 2) {
+                // 2-arg form: print user-supplied message then location
+                llvm::Value* msgVal = generateExpression(expr->arguments[1].get());
+                // Ensure we have a pointer to the string data
+                llvm::Value* msgPtr =
+                    msgVal->getType()->isPointerTy()
+                        ? msgVal
+                        : builder->CreateIntToPtr(msgVal, llvm::PointerType::getUnqual(*context), "assert.msg.ptr");
+                llvm::Value* msgData = emitStringData(msgPtr, "assert.msg.data");
+                std::string prefix = expr->line > 0
+                                         ? std::string("Runtime error: assertion failed at line ") +
+                                               std::to_string(expr->line) + ": %s\n"
+                                         : "Runtime error: assertion failed: %s\n";
+                builder->CreateCall(getPrintfFunction(),
+                                    {builder->CreateGlobalString(prefix, "assert_fail_fmt"), msgData});
+            } else {
+                std::string msg = expr->line > 0 ? std::string("Runtime error: assertion failed at line ") +
+                                                       std::to_string(expr->line) + "\n"
+                                                 : "Runtime error: assertion failed\n";
+                builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(msg, "assert_fail_msg")});
+            }
         }
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
@@ -3672,6 +3702,361 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return llvm::ConstantInt::get(getDefaultType(), 1);
     }
 
+    // ── Round-76 builtins ────────────────────────────────────────────────────
+
+    // array_flat_map(arr, fn) → apply fn to each element, treat each result as an inner array,
+    // then flatten all inner arrays into one output array.  Equivalent to
+    // array_flatten(array_map(arr, fn)) but in one pass over the data.
+    if (bid == BuiltinId::ARRAY_FLAT_MAP) {
+        validateArgCount(expr, "array_flat_map", 2);
+        const std::string fnName = extractFnName(expr->arguments[1].get());
+        if (fnName.empty()) {
+            codegenError("array_flat_map: second argument must be a function name", expr);
+        }
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second) {
+            codegenError("array_flat_map: unknown function '" + fnName + "'", expr);
+        }
+        llvm::Function* flatMapFn = calleeIt->second;
+        if (flatMapFn->arg_size() < 1) {
+            codegenError("array_flat_map: function '" + fnName + "' must accept at least 1 argument", expr);
+        }
+
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* outerPtr = getArrayPtr(arrArg);
+        llvm::Value* outerLen = emitLoadArrayLen(outerPtr, "afm.outerlen");
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        // ── Pass 1: apply fn to each element and sum resulting array lengths ─
+        llvm::BasicBlock* p1Pre  = builder->GetInsertBlock();
+        llvm::BasicBlock* p1Loop = llvm::BasicBlock::Create(*context, "afm.p1loop", parentFn);
+        llvm::BasicBlock* p1Body = llvm::BasicBlock::Create(*context, "afm.p1body", parentFn);
+        llvm::BasicBlock* p1Done = llvm::BasicBlock::Create(*context, "afm.p1done", parentFn);
+        builder->CreateCondBr(builder->CreateICmpSGT(outerLen, zero, "afm.p1gt0"), p1Loop, p1Done,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(p1Loop);
+        llvm::PHINode* p1i     = builder->CreatePHI(getDefaultType(), 2, "afm.p1i");
+        llvm::PHINode* p1total = builder->CreatePHI(getDefaultType(), 2, "afm.p1total");
+        p1i->addIncoming(zero, p1Pre);
+        p1total->addIncoming(zero, p1Pre);
+        builder->CreateCondBr(builder->CreateICmpSLT(p1i, outerLen, "afm.p1cond"), p1Body, p1Done,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(p1Body);
+        llvm::Value* p1slot  = builder->CreateAdd(p1i, one, "afm.p1slot", true, true);
+        llvm::Value* p1eptr  = builder->CreateInBoundsGEP(getDefaultType(), outerPtr, p1slot, "afm.p1eptr");
+        llvm::Value* p1elem  = emitLoadArrayElem(p1eptr, "afm.p1elem");
+        llvm::Value* p1inner = builder->CreateCall(flatMapFn, {p1elem}, "afm.p1inner");
+        p1inner = toDefaultType(p1inner);
+        llvm::Value* p1iptr  = builder->CreateIntToPtr(p1inner, ptrTy, "afm.p1iptr");
+        llvm::Value* p1ilen  = emitLoadArrayLen(p1iptr, "afm.p1ilen");
+        llvm::Value* p1ntot  = builder->CreateAdd(p1total, p1ilen, "afm.p1ntot", false, true);
+        llvm::Value* p1next  = builder->CreateAdd(p1i, one, "afm.p1next", true, true);
+        p1i->addIncoming(p1next, builder->GetInsertBlock());
+        p1total->addIncoming(p1ntot, builder->GetInsertBlock());
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(p1Loop)));
+
+        builder->SetInsertPoint(p1Done);
+        llvm::PHINode* totalLen = builder->CreatePHI(getDefaultType(), 2, "afm.total");
+        totalLen->addIncoming(zero, p1Pre);
+        totalLen->addIncoming(p1total, p1Loop);
+        nonNegValues_.insert(totalLen);
+
+        // ── Allocate output array ────────────────────────────────────────────
+        llvm::Value* eight   = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* slots   = builder->CreateAdd(totalLen, one, "afm.slots", true, true);
+        llvm::Value* bytes   = builder->CreateMul(slots, eight, "afm.bytes", true, true);
+        llvm::Value* outBuf  = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "afm.outbuf");
+        llvm::cast<llvm::CallInst>(outBuf)->addRetAttr(llvm::Attribute::NonNull);
+        emitStoreArrayLen(totalLen, outBuf);
+
+        // ── Pass 2: apply fn again, copy each inner array's elements ─────────
+        llvm::BasicBlock* p2Pre  = builder->GetInsertBlock();
+        llvm::BasicBlock* p2Loop = llvm::BasicBlock::Create(*context, "afm.p2loop", parentFn);
+        llvm::BasicBlock* p2Body = llvm::BasicBlock::Create(*context, "afm.p2body", parentFn);
+        llvm::BasicBlock* p2Done = llvm::BasicBlock::Create(*context, "afm.p2done", parentFn);
+        builder->CreateCondBr(builder->CreateICmpSGT(outerLen, zero, "afm.p2gt0"), p2Loop, p2Done,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(p2Loop);
+        llvm::PHINode* p2i   = builder->CreatePHI(getDefaultType(), 2, "afm.p2i");
+        llvm::PHINode* p2dst = builder->CreatePHI(getDefaultType(), 2, "afm.p2dst");
+        p2i->addIncoming(zero, p2Pre);
+        p2dst->addIncoming(one, p2Pre); // slot 0 is header
+        builder->CreateCondBr(builder->CreateICmpSLT(p2i, outerLen, "afm.p2cond"), p2Body, p2Done,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(p2Body);
+        llvm::Value* p2slot  = builder->CreateAdd(p2i, one, "afm.p2slot", true, true);
+        llvm::Value* p2eptr  = builder->CreateInBoundsGEP(getDefaultType(), outerPtr, p2slot, "afm.p2eptr");
+        llvm::Value* p2elem  = emitLoadArrayElem(p2eptr, "afm.p2elem");
+        llvm::Value* p2inner = builder->CreateCall(flatMapFn, {p2elem}, "afm.p2inner");
+        p2inner = toDefaultType(p2inner);
+        llvm::Value* p2iptr  = builder->CreateIntToPtr(p2inner, ptrTy, "afm.p2iptr");
+        llvm::Value* p2ilen  = emitLoadArrayLen(p2iptr, "afm.p2ilen");
+
+        // Inner loop: copy p2ilen elements from p2iptr into outBuf at p2dst
+        llvm::BasicBlock* inPre  = builder->GetInsertBlock();
+        llvm::BasicBlock* inLoop = llvm::BasicBlock::Create(*context, "afm.inloop", parentFn);
+        llvm::BasicBlock* inBody = llvm::BasicBlock::Create(*context, "afm.inbody", parentFn);
+        llvm::BasicBlock* inDone = llvm::BasicBlock::Create(*context, "afm.indone", parentFn);
+        builder->CreateCondBr(builder->CreateICmpSGT(p2ilen, zero, "afm.ingt0"), inLoop, inDone,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(inLoop);
+        llvm::PHINode* ini    = builder->CreatePHI(getDefaultType(), 2, "afm.ini");
+        llvm::PHINode* inDst2 = builder->CreatePHI(getDefaultType(), 2, "afm.indst");
+        ini->addIncoming(zero, inPre);
+        inDst2->addIncoming(p2dst, inPre);
+        builder->CreateCondBr(builder->CreateICmpSLT(ini, p2ilen, "afm.incond"), inBody, inDone,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(inBody);
+        llvm::Value* inSrcSlot = builder->CreateAdd(ini, one, "afm.insrcslot", true, true);
+        llvm::Value* inSrcPtr  = builder->CreateInBoundsGEP(getDefaultType(), p2iptr, inSrcSlot, "afm.insrcptr");
+        llvm::Value* inElem    = emitLoadArrayElem(inSrcPtr, "afm.inelem");
+        llvm::Value* inDstPtr  = builder->CreateInBoundsGEP(getDefaultType(), outBuf, inDst2, "afm.indstptr");
+        emitStoreArrayElem(inElem, inDstPtr);
+        llvm::Value* inNextI   = builder->CreateAdd(ini, one, "afm.innexti", true, true);
+        llvm::Value* inNextDst = builder->CreateAdd(inDst2, one, "afm.innextdst", true, true);
+        ini->addIncoming(inNextI, builder->GetInsertBlock());
+        inDst2->addIncoming(inNextDst, builder->GetInsertBlock());
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(inLoop)));
+
+        builder->SetInsertPoint(inDone);
+        // p2dst for next outer iteration = inDst2 at inDone (current dst position)
+        llvm::PHINode* newDst = builder->CreatePHI(getDefaultType(), 2, "afm.newdst");
+        newDst->addIncoming(p2dst, inPre);      // inner array was empty
+        newDst->addIncoming(inDst2, inLoop);    // advanced by inner array length
+
+        llvm::Value* p2next = builder->CreateAdd(p2i, one, "afm.p2next", true, true);
+        p2i->addIncoming(p2next, builder->GetInsertBlock());
+        p2dst->addIncoming(newDst, builder->GetInsertBlock());
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(p2Loop)));
+
+        builder->SetInsertPoint(p2Done);
+        arrayReturningFunctions_.insert("array_flat_map");
+        return outBuf;
+    }
+
+    // array_scan(arr, init, fn) → prefix scan.
+    // Returns a new array of the same length where result[0] = fn(init, arr[0]),
+    // result[1] = fn(result[0], arr[1]), ..., and so on.
+    // If arr is empty, returns an empty array.  Useful for running totals,
+    // cumulative products, and any "fold that keeps intermediate results".
+    if (bid == BuiltinId::ARRAY_SCAN) {
+        validateArgCount(expr, "array_scan", 3);
+        const std::string fnName = extractFnName(expr->arguments[2].get());
+        if (fnName.empty()) {
+            codegenError("array_scan: third argument must be a function name", expr);
+        }
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second) {
+            codegenError("array_scan: unknown function '" + fnName + "'", expr);
+        }
+        llvm::Function* scanFn = calleeIt->second;
+        if (scanFn->arg_size() < 2) {
+            codegenError("array_scan: function '" + fnName + "' must accept at least 2 arguments", expr);
+        }
+
+        llvm::Value* arrArg  = generateExpression(expr->arguments[0].get());
+        llvm::Value* initVal = generateExpression(expr->arguments[1].get());
+        arrArg  = toDefaultType(arrArg);
+        initVal = toDefaultType(initVal);
+        llvm::Value* arrPtr = getArrayPtr(arrArg);
+        llvm::Value* arrLen = emitLoadArrayLen(arrPtr, "ascan.len");
+
+        llvm::Value* one   = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* zero  = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+
+        // Allocate output array with same length
+        llvm::Value* slots  = builder->CreateAdd(arrLen, one, "ascan.slots", true, true);
+        llvm::Value* bytes  = builder->CreateMul(slots, eight, "ascan.bytes", true, true);
+        llvm::Value* outBuf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "ascan.outbuf");
+        llvm::cast<llvm::CallInst>(outBuf)->addRetAttr(llvm::Attribute::NonNull);
+        emitStoreArrayLen(arrLen, outBuf);
+
+        // Loop: acc = init; for each element, acc = fn(acc, elem); store acc
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "ascan.loop", parentFn);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "ascan.body", parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "ascan.done", parentFn);
+        builder->CreateCondBr(builder->CreateICmpSGT(arrLen, zero, "ascan.gt0"), loopBB, doneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "ascan.idx");
+        llvm::PHINode* acc = builder->CreatePHI(getDefaultType(), 2, "ascan.acc");
+        idx->addIncoming(zero, preBB);
+        acc->addIncoming(initVal, preBB);
+        builder->CreateCondBr(builder->CreateICmpSLT(idx, arrLen, "ascan.cond"), bodyBB, doneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* srcSlot  = builder->CreateAdd(idx, one, "ascan.srcslot", true, true);
+        llvm::Value* srcPtr   = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, srcSlot, "ascan.srcptr");
+        llvm::Value* elem     = emitLoadArrayElem(srcPtr, "ascan.elem");
+        llvm::Value* newAcc   = builder->CreateCall(scanFn, {acc, elem}, "ascan.acc2");
+        newAcc = toDefaultType(newAcc);
+        llvm::Value* dstPtr   = builder->CreateInBoundsGEP(getDefaultType(), outBuf, srcSlot, "ascan.dstptr");
+        emitStoreArrayElem(newAcc, dstPtr);
+        llvm::Value* nextIdx  = builder->CreateAdd(idx, one, "ascan.next", true, true);
+        idx->addIncoming(nextIdx, builder->GetInsertBlock());
+        acc->addIncoming(newAcc, builder->GetInsertBlock());
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+        builder->SetInsertPoint(doneBB);
+        arrayReturningFunctions_.insert("array_scan");
+        return outBuf;
+    }
+
+    // str_remove_prefix(s, prefix) → if s starts with prefix, return s[len(prefix):], else return s.
+    if (bid == BuiltinId::STR_REMOVE_PREFIX) {
+        validateArgCount(expr, "str_remove_prefix", 2);
+        // Compile-time fold when both args are string constants.
+        if (auto sc = tryFoldStr(expr->arguments[0].get())) {
+            if (auto pfx = tryFoldStr(expr->arguments[1].get())) {
+                const std::string result =
+                    (pfx->size() <= sc->size() && sc->compare(0, pfx->size(), *pfx) == 0)
+                        ? sc->substr(pfx->size())
+                        : *sc;
+                llvm::GlobalVariable* gv = internString(result.c_str());
+                stringReturningFunctions_.insert("str_remove_prefix");
+                return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                    gv->getValueType(), gv,
+                    llvm::ArrayRef<llvm::Constant*>{llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+            }
+        }
+        llvm::Value* sArg   = generateExpression(expr->arguments[0].get());
+        llvm::Value* pfxArg = generateExpression(expr->arguments[1].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* sPtr   = sArg->getType()->isPointerTy()
+                                  ? sArg
+                                  : builder->CreateIntToPtr(sArg,   ptrTy, "srpfx.sptr");
+        llvm::Value* pfxPtr = pfxArg->getType()->isPointerTy()
+                                  ? pfxArg
+                                  : builder->CreateIntToPtr(pfxArg, ptrTy, "srpfx.pfxptr");
+        llvm::Value* sLen   = emitStringLen(sPtr,   "srpfx.slen");
+        llvm::Value* pfxLen = emitStringLen(pfxPtr, "srpfx.pfxlen");
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* cmpBB  = llvm::BasicBlock::Create(*context, "srpfx.cmp",  parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "srpfx.done", parentFn);
+
+        // Guard: only try memcmp if pfxLen <= sLen
+        llvm::Value* canFit = builder->CreateICmpSLE(pfxLen, sLen, "srpfx.canfit");
+        builder->CreateCondBr(canFit, cmpBB, doneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(700, 300));
+
+        builder->SetInsertPoint(cmpBB);
+        llvm::Value* sData   = emitStringData(sPtr,   "srpfx.sdata");
+        llvm::Value* pfxData = emitStringData(pfxPtr, "srpfx.pfxdata");
+        llvm::Value* cmpRes  = builder->CreateCall(getOrDeclareMemcmp(), {sData, pfxData, pfxLen}, "srpfx.cmpres");
+        llvm::Value* matched = builder->CreateICmpEQ(cmpRes, llvm::ConstantInt::get(cmpRes->getType(), 0), "srpfx.match");
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* didMatch = builder->CreatePHI(llvm::Type::getInt1Ty(*context), 2, "srpfx.did");
+        didMatch->addIncoming(llvm::ConstantInt::getFalse(*context), preBB);
+        didMatch->addIncoming(matched, cmpBB);
+
+        // Compute new length and source offset via select (safe: canFit guards underflow)
+        llvm::Value* stripped = builder->CreateSub(sLen, pfxLen, "srpfx.stripped");
+        llvm::Value* newLen   = builder->CreateSelect(didMatch, stripped, sLen, "srpfx.newlen");
+        llvm::Value* srcOff   = builder->CreateSelect(didMatch, pfxLen,
+                                    llvm::ConstantInt::get(getDefaultType(), 0), "srpfx.srcoff");
+
+        // Allocate output string and copy
+        llvm::Value* hdr     = emitAllocString(newLen, newLen, "srpfx.out");
+        llvm::Value* srcBase = emitStringData(sPtr, "srpfx.srcbase");
+        llvm::Value* srcStart = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context),
+                                                            srcBase, srcOff, "srpfx.src");
+        llvm::Value* dstData = emitStringData(hdr, "srpfx.dst");
+        builder->CreateCall(getOrDeclareMemcpy(), {dstData, srcStart, newLen});
+        // Null-terminate
+        llvm::Value* nulPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dstData, newLen, "srpfx.nul");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nulPtr);
+        stringReturningFunctions_.insert("str_remove_prefix");
+        return hdr;
+    }
+
+    // str_remove_suffix(s, suffix) → if s ends with suffix, return s[:len(s)-len(suffix)], else return s.
+    if (bid == BuiltinId::STR_REMOVE_SUFFIX) {
+        validateArgCount(expr, "str_remove_suffix", 2);
+        // Compile-time fold
+        if (auto sc = tryFoldStr(expr->arguments[0].get())) {
+            if (auto sfx = tryFoldStr(expr->arguments[1].get())) {
+                const std::string result =
+                    (sfx->size() <= sc->size() && sc->compare(sc->size() - sfx->size(), sfx->size(), *sfx) == 0)
+                        ? sc->substr(0, sc->size() - sfx->size())
+                        : *sc;
+                llvm::GlobalVariable* gv = internString(result.c_str());
+                stringReturningFunctions_.insert("str_remove_suffix");
+                return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                    gv->getValueType(), gv,
+                    llvm::ArrayRef<llvm::Constant*>{llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+            }
+        }
+        llvm::Value* sArg   = generateExpression(expr->arguments[0].get());
+        llvm::Value* sfxArg = generateExpression(expr->arguments[1].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* sPtr   = sArg->getType()->isPointerTy()
+                                  ? sArg
+                                  : builder->CreateIntToPtr(sArg,   ptrTy, "srsfx.sptr");
+        llvm::Value* sfxPtr = sfxArg->getType()->isPointerTy()
+                                  ? sfxArg
+                                  : builder->CreateIntToPtr(sfxArg, ptrTy, "srsfx.sfxptr");
+        llvm::Value* sLen   = emitStringLen(sPtr,   "srsfx.slen");
+        llvm::Value* sfxLen = emitStringLen(sfxPtr, "srsfx.sfxlen");
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* cmpBB  = llvm::BasicBlock::Create(*context, "srsfx.cmp",  parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "srsfx.done", parentFn);
+
+        llvm::Value* canFit = builder->CreateICmpSLE(sfxLen, sLen, "srsfx.canfit");
+        builder->CreateCondBr(canFit, cmpBB, doneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(700, 300));
+
+        builder->SetInsertPoint(cmpBB);
+        llvm::Value* sData   = emitStringData(sPtr,   "srsfx.sdata");
+        llvm::Value* sfxData = emitStringData(sfxPtr, "srsfx.sfxdata");
+        // Compare last sfxLen bytes of s with sfx
+        llvm::Value* sfxOff  = builder->CreateSub(sLen, sfxLen, "srsfx.sfxoff");
+        llvm::Value* sEnd    = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), sData, sfxOff, "srsfx.send");
+        llvm::Value* cmpRes  = builder->CreateCall(getOrDeclareMemcmp(), {sEnd, sfxData, sfxLen}, "srsfx.cmpres");
+        llvm::Value* matched = builder->CreateICmpEQ(cmpRes, llvm::ConstantInt::get(cmpRes->getType(), 0), "srsfx.match");
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* didMatch = builder->CreatePHI(llvm::Type::getInt1Ty(*context), 2, "srsfx.did");
+        didMatch->addIncoming(llvm::ConstantInt::getFalse(*context), preBB);
+        didMatch->addIncoming(matched, cmpBB);
+
+        llvm::Value* stripped = builder->CreateSub(sLen, sfxLen, "srsfx.stripped");
+        llvm::Value* newLen   = builder->CreateSelect(didMatch, stripped, sLen, "srsfx.newlen");
+
+        llvm::Value* hdr     = emitAllocString(newLen, newLen, "srsfx.out");
+        llvm::Value* srcBase = emitStringData(sPtr, "srsfx.srcbase");
+        llvm::Value* dstData = emitStringData(hdr, "srsfx.dst");
+        builder->CreateCall(getOrDeclareMemcpy(), {dstData, srcBase, newLen});
+        // Null-terminate
+        llvm::Value* nulPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dstData, newLen, "srsfx.nul");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nulPtr);
+        stringReturningFunctions_.insert("str_remove_suffix");
+        return hdr;
+    }
+
+    // ── End Round-76 builtins ────────────────────────────────────────────────
     if (bid == BuiltinId::STR_LEN) {
         validateArgCount(expr, "str_len", 1);
         // ── Compile-time str_len folding ────────────────────────────

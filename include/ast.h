@@ -368,6 +368,7 @@ class WhileStmt : public Statement {
     std::unique_ptr<Expression> condition;
     std::unique_ptr<Statement> body;
     LoopConfig loopHints;
+    std::string label; ///< Optional loop label for labeled break/continue
 
     WhileStmt(std::unique_ptr<Expression> cond, std::unique_ptr<Statement> b)
         : Statement(ASTNodeType::WHILE_STMT), condition(std::move(cond)), body(std::move(b)) {}
@@ -378,6 +379,7 @@ class DoWhileStmt : public Statement {
     std::unique_ptr<Statement> body;
     std::unique_ptr<Expression> condition;
     LoopConfig loopHints;
+    std::string label; ///< Optional loop label for labeled break/continue
 
     DoWhileStmt(std::unique_ptr<Statement> b, std::unique_ptr<Expression> cond)
         : Statement(ASTNodeType::DO_WHILE_STMT), body(std::move(b)), condition(std::move(cond)) {}
@@ -392,6 +394,7 @@ class ForStmt : public Statement {
     std::unique_ptr<Expression> step; // Optional, can be nullptr
     std::unique_ptr<Statement> body;
     LoopConfig loopHints;
+    std::string label; ///< Optional loop label for labeled break/continue
 
     ForStmt(const std::string& iter, std::unique_ptr<Expression> s, std::unique_ptr<Expression> e,
             std::unique_ptr<Expression> st, std::unique_ptr<Statement> b, const std::string& iterType = "")
@@ -401,11 +404,13 @@ class ForStmt : public Statement {
 
 class BreakStmt : public Statement {
   public:
+    std::string label; ///< Optional target loop label (empty = nearest enclosing loop)
     BreakStmt() : Statement(ASTNodeType::BREAK_STMT) {}
 };
 
 class ContinueStmt : public Statement {
   public:
+    std::string label; ///< Optional target loop label (empty = nearest enclosing loop)
     ContinueStmt() : Statement(ASTNodeType::CONTINUE_STMT) {}
 };
 
@@ -415,6 +420,7 @@ class ForEachStmt : public Statement {
     std::unique_ptr<Expression> collection;
     std::unique_ptr<Statement> body;
     LoopConfig loopHints;
+    std::string label; ///< Optional loop label for labeled break/continue
 
     ForEachStmt(const std::string& iter, std::unique_ptr<Expression> coll, std::unique_ptr<Statement> b)
         : Statement(ASTNodeType::FOR_EACH_STMT), iteratorVar(iter), collection(std::move(coll)), body(std::move(b)) {}

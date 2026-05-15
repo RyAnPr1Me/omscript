@@ -1225,6 +1225,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         builder->CreateBr(bodyBB);
         builder->SetInsertPoint(bodyBB);
         loopStack.push_back({endBB, bodyBB});
+        loopStack.back().label = stmt->label;
         auto savedLenCacheWI = std::move(loopArrayLenCache_);
         loopArrayLenCache_.clear();
         generateStatement(stmt->body.get());
@@ -1302,6 +1303,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     // Body block
     builder->SetInsertPoint(bodyBB);
     loopStack.push_back({endBB, condBB});
+    loopStack.back().label = stmt->label;
 
     auto savedLenCacheW = std::move(loopArrayLenCache_);
     loopArrayLenCache_.clear();
@@ -1436,6 +1438,7 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
     // Body block
     builder->SetInsertPoint(bodyBB);
     loopStack.push_back({endBB, condBB});
+    loopStack.back().label = stmt->label;
     auto savedLenCacheDW = std::move(loopArrayLenCache_);
     loopArrayLenCache_.clear();
     generateStatement(stmt->body.get());
@@ -1923,6 +1926,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     }
 
     loopStack.push_back({endBB, incBB});
+    loopStack.back().label = stmt->label;
     // Clear per-iteration array length cache so inner-body bounds checks
     // get fresh values.  Save outer cache for nested loop restore.
     auto savedLenCache = std::move(loopArrayLenCache_);
@@ -2381,6 +2385,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
             builder->CreateAlignedStore(iterVal, iterAllocaR, iterAllocaR->getAlign());
 
             loopStack.push_back({endBBR, incBBR});
+            loopStack.back().label = stmt->label;
             auto savedLenCacheR = std::move(loopArrayLenCache_);
             loopArrayLenCache_.clear();
             generateStatement(stmt->body.get());
@@ -2559,6 +2564,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     }
 
     loopStack.push_back({endBB, incBB});
+    loopStack.back().label = stmt->label;
     auto savedLenCacheFE = std::move(loopArrayLenCache_);
     loopArrayLenCache_.clear();
     generateStatement(stmt->body.get());

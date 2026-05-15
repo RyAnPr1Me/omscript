@@ -421,6 +421,7 @@ class CodeGenerator {
     struct LoopContext {
         llvm::BasicBlock* breakTarget;
         llvm::BasicBlock* continueTarget;
+        std::string label; ///< Optional label for labeled break/continue (empty = unlabeled)
     };
     std::vector<LoopContext> loopStack;
 

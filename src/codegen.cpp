@@ -5631,25 +5631,59 @@ void CodeGenerator::generateStatement(Statement* stmt) {
     case ASTNodeType::FOR_EACH_STMT:
         generateForEach(static_cast<ForEachStmt*>(stmt));
         break;
-    case ASTNodeType::BREAK_STMT:
+    case ASTNodeType::BREAK_STMT: {
+        auto* breakNode = static_cast<BreakStmt*>(stmt);
         if (loopStack.empty()) {
             codegenError("break used outside of a loop", stmt);
         }
-        builder->CreateBr(loopStack.back().breakTarget);
-        break;
-    case ASTNodeType::CONTINUE_STMT: {
-        // Search backwards through the loop stack for the nearest enclosing loop
-        llvm::BasicBlock* continueTarget = nullptr;
-        for (auto it = loopStack.rbegin(); it != loopStack.rend(); ++it) {
-            if (it->continueTarget != nullptr) {
-                continueTarget = it->continueTarget;
-                break;
+        if (breakNode->label.empty()) {
+            // Unlabeled break: target nearest enclosing loop
+            builder->CreateBr(loopStack.back().breakTarget);
+        } else {
+            // Labeled break: search for the loop with the matching label
+            llvm::BasicBlock* target = nullptr;
+            for (auto it = loopStack.rbegin(); it != loopStack.rend(); ++it) {
+                if (it->label == breakNode->label) {
+                    target = it->breakTarget;
+                    break;
+                }
             }
+            if (!target) {
+                codegenError("break: no enclosing loop with label '" + breakNode->label + "'", stmt);
+            }
+            builder->CreateBr(target);
         }
-        if (!continueTarget) {
-            codegenError("continue used outside of a loop", stmt);
+        break;
+    }
+    case ASTNodeType::CONTINUE_STMT: {
+        auto* contNode = static_cast<ContinueStmt*>(stmt);
+        if (contNode->label.empty()) {
+            // Unlabeled continue: search backwards for nearest enclosing loop with a continue target
+            llvm::BasicBlock* continueTarget = nullptr;
+            for (auto it = loopStack.rbegin(); it != loopStack.rend(); ++it) {
+                if (it->continueTarget != nullptr) {
+                    continueTarget = it->continueTarget;
+                    break;
+                }
+            }
+            if (!continueTarget) {
+                codegenError("continue used outside of a loop", stmt);
+            }
+            builder->CreateBr(continueTarget);
+        } else {
+            // Labeled continue: search for matching label
+            llvm::BasicBlock* target = nullptr;
+            for (auto it = loopStack.rbegin(); it != loopStack.rend(); ++it) {
+                if (it->label == contNode->label && it->continueTarget != nullptr) {
+                    target = it->continueTarget;
+                    break;
+                }
+            }
+            if (!target) {
+                codegenError("continue: no enclosing loop with label '" + contNode->label + "'", stmt);
+            }
+            builder->CreateBr(target);
         }
-        builder->CreateBr(continueTarget);
         break;
     }
     case ASTNodeType::BLOCK:
