@@ -421,6 +421,7 @@ class CodeGenerator {
     struct LoopContext {
         llvm::BasicBlock* breakTarget;
         llvm::BasicBlock* continueTarget;
+        std::string label; ///< Optional label for labeled break/continue (empty = unlabeled)
     };
     std::vector<LoopContext> loopStack;
 
@@ -440,6 +441,10 @@ class CodeGenerator {
     /// LLVM global variable registry: name → GlobalVariable*.
     llvm::StringMap<llvm::GlobalVariable*> globalVars_;
 
+    /// Names of global variables whose declared type is "string".
+    /// Used by isStringExpr() to correctly classify global string identifiers.
+    llvm::StringSet<> globalStringVarNames_;
+
     /// Maps array name → size alloca from array_fill(n,v) for bounds check elision.
     llvm::StringMap<llvm::AllocaInst*> knownArraySizeAllocas_;
 
@@ -448,6 +453,11 @@ class CodeGenerator {
     // Maps string error codes to their assigned integer IDs for this module.
     std::unordered_map<std::string, int64_t> catchStringIds_;
     int64_t nextCatchStringId_ = 1; // start at 1; 0 reserved for "no error"
+
+    /// Per-function `label` BasicBlock map: label name → pre-created BB.
+    /// Populated by prescanLabels() before the function body is generated.
+    /// Cleared at the start of each function.
+    llvm::StringMap<llvm::BasicBlock*> labelBlocks_;
     // Default (unmatched-throw) block used by the jump table's default arm.
     llvm::BasicBlock* catchDefaultBB_ = nullptr;
     bool inOptMaxFunction;
@@ -477,6 +487,12 @@ class CodeGenerator {
 
     /// Maps variable name → declared type annotation (empty = untyped/i64).
     llvm::StringMap<std::string> varTypeAnnotations_;
+
+    /// Module-wide type alias map: user alias name → resolved underlying type name.
+    /// Populated from Program::typeAliases at the start of code generation so that
+    /// resolveAnnotatedType() can expand aliases that survive as raw strings in the AST
+    /// (e.g. struct field types, function return types, parameter types).
+    std::unordered_map<std::string, std::string> typeAliasMap_;
 
     // Store AST function declarations for default parameter lookup at call sites.
     llvm::StringMap<const FunctionDecl*> functionDecls_;
@@ -515,6 +531,12 @@ class CodeGenerator {
     llvm::StringSet<> stringArrayVars_;
     // arrayVars_: non-string pointer-typed array vars (disambiguates from string pointers in isStringExpr).
     llvm::StringSet<> arrayVars_;
+    // tupleVarTypes_: variable name → "tuple<T1,T2,...>" annotation string.
+    // Populated when a tuple-typed var is declared; used by field access to reconstruct LLVM struct type.
+    std::unordered_map<std::string, std::string> tupleVarTypes_;
+    // tupleAnnotStructTypes_: "tuple<T1,T2,...>" annotation → resolved LLVM StructType*.
+    // Caches the struct type so resolveAnnotatedType can return ptr but field access still knows the layout.
+    std::unordered_map<std::string, llvm::StructType*> tupleAnnotStructTypes_;
     // Whole-program array type info (mirrors string type system, see preAnalyzeArrayTypes).
     llvm::StringSet<> arrayReturningFunctions_;
     std::unordered_map<std::string, std::unordered_set<size_t>> funcParamArrayTypes_;
@@ -925,6 +947,7 @@ class CodeGenerator {
     llvm::Value* generateDerefAssign(DerefAssignExpr* expr); ///< *p = v (Ω spec §4.2)
     llvm::Value* generateStructLiteral(StructLiteralExpr* expr);
     llvm::Value* generateFieldAccess(FieldAccessExpr* expr);
+    llvm::Value* generateTuple(TupleExpr* expr);
     llvm::Value* generateFieldAssign(FieldAssignExpr* expr);
 
     std::string resolveStructType(Expression* objExpr) const;
@@ -967,6 +990,14 @@ class CodeGenerator {
     void generateOwn(OwnStmt* stmt);                           ///< own x;    — Ω spec §3.1
     void generateConstruct(ConstructStmt* stmt);               ///< construct ptr { field: val, ... };
     llvm::Value* generateNewConstruct(NewConstructExpr* expr); ///< new T { field: val, ... }
+
+    // ── jmp / label ──────────────────────────────────────────────────────────
+    /// Pre-scan @p body (recursively) for LabelStmt nodes and create one LLVM
+    /// BasicBlock per label in the current function.  Must be called before
+    /// generating any statement in the function so that forward jumps resolve.
+    void prescanLabels(Statement* body, llvm::Function* fn);
+    void generateJmp(JmpStmt* stmt);     ///< jmp label; → br label %BB
+    void generateLabel(LabelStmt* stmt); ///< label name: → set insert point to pre-created BB
     /// Shared back-end: emit one GEP+store per field into @p basePtr.
     /// Reused by both generateConstruct (statement) and generateNewConstruct (expression).
     void emitConstructFieldsInto(llvm::Value* basePtr, const std::string& structHint,

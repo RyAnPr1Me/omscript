@@ -1,0 +1,215 @@
+import std;
+// round76_test.om — Round-76 production-grade features
+// Tests: labeled break/continue, assert(cond,msg), array_flat_map,
+//        array_scan, str_remove_prefix, str_remove_suffix.
+// Expected return value: 0
+
+fn double_range(n: int) -> int {
+    return n * 2;
+}
+
+fn make_range(n: int) -> int {
+    // Returns a new array [n, n+1] encoded as int (pointer)
+    // We use this to test array_flat_map
+    var arr = [n, n + 1];
+    return arr as int;
+}
+
+fn add(a: int, b: int) -> int {
+    return a + b;
+}
+
+fn mul(a: int, b: int) -> int {
+    return a * b;
+}
+
+fn main() {
+    var total = 0;
+
+    // ── Test 1-4: Labeled break ──────────────────────────────────────────────
+    // Break out of outer loop from inner loop
+    var found = 0;
+    outer: for i in 0..5 {
+        for j in 0..5 {
+            if i * 10 + j == 23 {
+                found = i * 10 + j;
+                break outer;
+            }
+        }
+    }
+    assert(found == 23, "labeled break: expected 23");
+    total = total + (found == 23);  // +1
+    // total = 1
+
+    // Labeled break with while loop
+    var cnt = 0;
+    outer2: while cnt < 100 {
+        var inner = 0;
+        while inner < 100 {
+            inner = inner + 1;
+            if inner == 7 {
+                break outer2;
+            }
+        }
+        cnt = cnt + 1;
+    }
+    assert(cnt == 0, "labeled break while: cnt should be 0");
+    total = total + (cnt == 0);  // +1
+    // total = 2
+
+    // ── Test 3-4: Labeled continue ───────────────────────────────────────────
+    var skip_sum = 0;
+    outer3: for i in 0..4 {
+        for j in 0..4 {
+            if j == 2 {
+                continue outer3;  // skip rest of outer iteration when j==2
+            }
+            skip_sum = skip_sum + 1;
+        }
+    }
+    // For each i: j=0 (+1), j=1 (+1), j=2 -> continue outer, so 2 per outer iter, 4 outer iters = 8
+    assert(skip_sum == 8, "labeled continue: expected 8");
+    total = total + (skip_sum == 8);  // +1
+    // total = 3
+
+    // Labeled continue with foreach
+    var sum2 = 0;
+    var arr2 = [10, 20, 30, 40, 50];
+    outer4: for x in arr2 {
+        var sub = 0;
+        while sub < 3 {
+            sub = sub + 1;
+            if sub == 2 {
+                continue outer4;
+            }
+            sum2 = sum2 + x;
+        }
+    }
+    // For each x: sub=1 → sum2 += x; sub=2 → continue outer4; total = 10+20+30+40+50 = 150
+    assert(sum2 == 150, "labeled continue foreach: expected 150");
+    total = total + (sum2 == 150);  // +1
+    // total = 4
+
+    // ── Test 5-6: assert(cond, msg) 2-arg form ──────────────────────────────
+    // Test that passing assert doesn't abort
+    assert(1 == 1, "basic identity");
+    total = total + 1;  // +1 (we got here, so assert passed)
+    // total = 5
+
+    assert(100 > 99, "100 > 99 must hold");
+    total = total + 1;  // +1
+    // total = 6
+
+    // ── Test 7-10: array_scan ────────────────────────────────────────────────
+    // Running sum: [1,2,3,4,5] with init=0 and add → [1,3,6,10,15]
+    var ns = [1, 2, 3, 4, 5];
+    var running = array_scan(ns, 0, add);
+    assert(running[0] == 1,  "scan[0]==1");
+    assert(running[1] == 3,  "scan[1]==3");
+    assert(running[2] == 6,  "scan[2]==6");
+    assert(running[3] == 10, "scan[3]==10");
+    assert(running[4] == 15, "scan[4]==15");
+    total = total + (running[0] == 1);   // +1
+    total = total + (running[4] == 15);  // +1
+    // total = 8
+
+    // Running product: [1,2,3,4] with init=1 and mul → [1,2,6,24]
+    var ps = [1, 2, 3, 4];
+    var prods = array_scan(ps, 1, mul);
+    assert(prods[0] == 1,  "prodscan[0]==1");
+    assert(prods[1] == 2,  "prodscan[1]==2");
+    assert(prods[2] == 6,  "prodscan[2]==6");
+    assert(prods[3] == 24, "prodscan[3]==24");
+    total = total + (prods[3] == 24);  // +1
+    // total = 9
+
+    // Empty array scan
+    var empty: int[] = [];
+    var emptyResult = array_scan(empty, 42, add);
+    assert(len(emptyResult) == 0, "empty scan len==0");
+    total = total + (len(emptyResult) == 0);  // +1
+    // total = 10
+
+    // ── Test 11-14: array_flat_map ───────────────────────────────────────────
+    // array_flat_map([1,2,3], make_range) → [1,2, 2,3, 3,4] = [1,2,2,3,3,4]
+    var inp = [1, 2, 3];
+    var flat = array_flat_map(inp, make_range);
+    assert(len(flat) == 6, "flat_map len==6");
+    total = total + (len(flat) == 6);  // +1
+    // total = 11
+
+    assert(flat[0] == 1 && flat[1] == 2, "flat_map[0,1]");
+    assert(flat[2] == 2 && flat[3] == 3, "flat_map[2,3]");
+    assert(flat[4] == 3 && flat[5] == 4, "flat_map[4,5]");
+    total = total + (flat[0] == 1);  // +1
+    total = total + (flat[5] == 4);  // +1
+    // total = 13
+
+    // Empty outer array
+    var empInp: int[] = [];
+    var empFlat = array_flat_map(empInp, make_range);
+    assert(len(empFlat) == 0, "flat_map empty");
+    total = total + (len(empFlat) == 0);  // +1
+    // total = 14
+
+    // ── Test 15-18: str_remove_prefix ────────────────────────────────────────
+    var s1 = str_remove_prefix("hello world", "hello ");
+    assert(s1 == "world", "remove_prefix basic");
+    total = total + (s1 == "world");  // +1
+    // total = 15
+
+    var s2 = str_remove_prefix("hello world", "bye ");
+    assert(s2 == "hello world", "remove_prefix no match");
+    total = total + (s2 == "hello world");  // +1
+    // total = 16
+
+    var s3 = str_remove_prefix("abc", "abcdef");
+    assert(s3 == "abc", "remove_prefix too long");
+    total = total + (s3 == "abc");  // +1
+    // total = 17
+
+    // Compile-time fold
+    var s4 = str_remove_prefix("foobar", "foo");
+    assert(s4 == "bar", "remove_prefix ct fold");
+    total = total + (s4 == "bar");  // +1
+    // total = 18
+
+    // ── Test 19-22: str_remove_suffix ────────────────────────────────────────
+    var t1 = str_remove_suffix("hello world", " world");
+    assert(t1 == "hello", "remove_suffix basic");
+    total = total + (t1 == "hello");  // +1
+    // total = 19
+
+    var t2 = str_remove_suffix("hello world", "xyz");
+    assert(t2 == "hello world", "remove_suffix no match");
+    total = total + (t2 == "hello world");  // +1
+    // total = 20
+
+    var t3 = str_remove_suffix("abc", "abcdef");
+    assert(t3 == "abc", "remove_suffix too long");
+    total = total + (t3 == "abc");  // +1
+    // total = 21
+
+    var t4 = str_remove_suffix("foobar", "bar");
+    assert(t4 == "foo", "remove_suffix ct fold");
+    total = total + (t4 == "foo");  // +1
+    // total = 22
+
+    // ── Test 23: nested labeled break (3 levels) ─────────────────────────────
+    var found3 = 0;
+    level1: for a in 0..10 {
+        level2: for b in 0..10 {
+            for c in 0..10 {
+                if a + b + c == 15 && a == 5 && b == 5 {
+                    found3 = a * 100 + b * 10 + c;
+                    break level1;
+                }
+            }
+        }
+    }
+    assert(found3 == 555, "3-level labeled break");
+    total = total + (found3 == 555);  // +1
+    // total = 23
+
+    return total;
+}

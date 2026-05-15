@@ -63,19 +63,18 @@ This reference is derived exclusively from the OmScript compiler implementation 
 
 OmScript source code undergoes the following compilation stages:
 
-1. **Preprocessor** — Expands macros (`#define`), processes conditional compilation directives (`#if`, `#ifdef`), and handles file inclusion (`import`)
-2. **Lexer** — Tokenizes source text into a stream of lexical tokens (keywords, identifiers, literals, operators, punctuation)
-3. **Parser** — Constructs an Abstract Syntax Tree (AST) from the token stream, enforcing syntactic rules
-4. **Semantic Analysis** — Validates type consistency, resolves identifiers, enforces mandatory type annotations, and checks control-flow constraints
-5. **Code Generation** — Traverses the AST to emit LLVM IR, applying function annotations and optimization hints
-6. **Optimization Passes** — LLVM's optimization pipeline transforms the IR (inlining, vectorization, constant folding, dead-code elimination, loop transformations)
-7. **Object Code Emission** — LLVM backend generates native machine code for the target architecture
-8. **Linking** — Links object files with the OmScript runtime library to produce the final executable
+1. **Lexer** — Tokenizes source text into a stream of lexical tokens (keywords, identifiers, literals, operators, punctuation)
+2. **Parser** — Constructs an Abstract Syntax Tree (AST) from the token stream, enforcing syntactic rules; evaluates `comptime {}` blocks for conditional compilation and constant injection
+3. **Semantic Analysis** — Validates type consistency, resolves identifiers, enforces mandatory type annotations, and checks control-flow constraints
+4. **Code Generation** — Traverses the AST to emit LLVM IR, applying function annotations and optimization hints
+5. **Optimization Passes** — LLVM's optimization pipeline transforms the IR (inlining, vectorization, constant folding, dead-code elimination, loop transformations)
+6. **Object Code Emission** — LLVM backend generates native machine code for the target architecture
+7. **Linking** — Links object files with the OmScript runtime library to produce the final executable
 
 ### High-Level Feature Map
 
 - **Lexical structure**: Keywords, identifiers, literals (integer, float, string, bytes, interpolated), operators, comments (§2)
-- **Preprocessor**: Macros, conditional compilation, predefined macros (§3)
+- **Conditional compilation**: `comptime {}` blocks, `comptime if COND {}` shorthand, built-in constants `OS`/`ARCH`/`VERSION`/`FILE`, `-D NAME[=VALUE]` CLI flags, `defined(NAME)` predicate (§3, §5.9)
 - **Type system**: Scalar types (signed/unsigned integers, floats, bool, string), composite types (arrays, dicts, structs, enums, pointers, SIMD vectors, bigint), mandatory type annotations (§4)
 - **Variables and constants**: `var`, `const`, `register var`, `atomic var`, `volatile var`, `global`, `comptime`, compound assignment, destructuring (§5)
 - **Functions**: Declaration syntax, parameters, return types, default parameters, expression-body functions, generics, annotations (`@opt(hot)`, `@semantics(pure)`, `@memory(allocator)`, etc.), tail calls, lambdas (§6)
@@ -198,6 +197,8 @@ The following identifiers are reserved as keywords. They are grouped by category
 | `shared` | Transition variable to shared (read-only aliasable) ownership (Ω spec §3.1) |
 | `own` | Restore unique ownership from shared state (Ω spec §3.1) |
 | `construct` | In-place field initialisation of a `ptr<T>` (see §17.9.2a) |
+| `jmp` | ⚠ **Deprecated** — unconditional jump to a named label (see §7.11) |
+| `label` | Named jump target declaration for `jmp` (see §7.11) |
 
 **Literals:**
 | Keyword | Purpose |
@@ -563,402 +564,31 @@ These do not appear in the keyword table in §2.4 and you may shadow them, but d
 
 ---
 
-## 3. Preprocessor
+## 3. Preprocessor (Removed — Migrate to `comptime {}`)
 
-The **preprocessor** runs before lexical analysis, transforming source text by expanding macros, resolving conditional compilation directives, and handling file inclusion. Preprocessor directives begin with `#` at the start of a line (leading whitespace is allowed).
+The OmScript preprocessor has been **removed**. Preprocessor directives (`#define`, `#ifdef`, `#if`, `#include`, etc.) are no longer supported and will produce a compile-time error if present in source code.
 
-> **Recommendation for new code**: Prefer `comptime {}` blocks over preprocessor macros for constant definitions and conditional compilation. `comptime {}` is fully type-checked, IDE-friendly, scope-aware, and integrates with the language's constant folding and CF-CTRE engine. See §5.9 for the `comptime {}` reference and a preprocessor migration guide.
->
-> Use the preprocessor for:
-> - Cross-language compatibility (bridging with C headers or build systems that emit `#define`)
-> - Textual macro expansion not expressible in the type system
-> - Legacy codebases
+**Migration:** Replace all preprocessor usage with `comptime {}` blocks (§5.9). A complete migration table is provided in §5.9.1.
 
-### 3.1 Directive List
-
-#### 3.1.1 `#define` — Define Macro
-
-**Object-like macro** (constant substitution):
-```omscript
-#define PI 3.14159
-#define MAX_SIZE 1024
-```
-
-**Function-like macro** (parameterized):
-```omscript
-#define SQUARE(x) x * x
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
-```
-
-**Typed function-like macro** (optional `: <type>` per parameter, optional
-`-> <returnType>` after the parameter list):
-```omscript
-#define SQUARE(x: int) -> int          ((x) * (x))
-#define SCALE(x: float, k: int) -> float ((x) * (k))
-#define GREET(s: string) -> string     (s)
-```
-
-Recognised parameter types: `int`, `uint`, `float`, `double`, `string`,
-`bool`, `any`. Untyped parameters (and the catch-all `any`) accept any
-argument shape. The return-type annotation is informational only.
-
-When the preprocessor expands a typed macro it classifies the *syntactic
-shape* of each argument (a string literal, a numeric literal, a bare
-identifier, a parenthesised expression, …) and rejects an obvious
-mismatch — for example calling `SQUARE("hi")` is reported at preprocess
-time instead of producing a downstream parse error. Identifiers and
-general expressions are accepted for any declared type, since they may
-expand or evaluate to the right shape.
-
-**Syntax**:
-- Object-like: `#define NAME body`
-- Function-like: `#define NAME(param1, param2, ...) body`
-- Typed function-like: `#define NAME(p1: T1, p2: T2, ...) -> R body`
-- No space allowed between `NAME` and `(` in function-like macros
-- Macro body extends to end of line (or use `\` for continuation)
-- Macros are substituted in subsequent source text
-- Recursive expansion is supported up to a hard limit of 256 nested
-  expansions; true *cyclic* macro definitions (e.g. `#define A B` and
-  `#define B A`) are detected and reported as a deterministic error
-  instead of silently truncating
-
-**Stringification (`#param`)** and **token pasting (`a ## b`)** are
-supported in function-like macro bodies — see §3.2.
-
-**Diagnostics emitted by `#define` and friends**:
-| Condition | Severity |
+| C/C++ preprocessor | OmScript `comptime {}` equivalent |
 |---|---|
-| `#define` / `#undef` of a reserved predefined macro (`__FILE__`, `__LINE__`, `__VERSION__`, `__DATE__`, `__TIME__`, `__BASE_FILE__`, `__OS__`, `__ARCH__`, `__COUNTER__`, `__VECTOR_WIDTH__`, the `__SIMD_*__` family) | **error** |
-| Function-like macro called with the wrong number of arguments | **error** |
-| Typed function-like macro argument shape clearly incompatible with declared type | **error** |
-| Cyclic macro expansion or > 256 levels of nesting | **error** |
-| Macro redefined with a body that differs from the previous definition | warning |
-| `#undef` of a macro that was never defined | warning |
-| Function-like macro uses a parameter more than once and the matching argument looks like a function call (multi-evaluation footgun) | warning |
-
-#### 3.1.2 `#undef` — Undefine Macro
-
-Removes a macro definition:
-```omscript
-#define TEMP 42
-#undef TEMP
-// TEMP is no longer defined
-```
-
-`#undef` of a name that was never defined emits a warning, and `#undef`
-of a reserved predefined macro is a hard error.
-
-#### 3.1.3 `#if` / `#elif` / `#else` / `#endif` — Conditional Compilation
-
-Conditionally include source text based on compile-time expressions:
-```omscript
-#define DEBUG 1
-#if DEBUG
-    println("Debug mode enabled");
-#elif RELEASE
-    println("Release mode");
-#else
-    println("Unknown mode");
-#endif
-```
-
-**Evaluation**:
-- `#if` and `#elif` conditions are integer expressions evaluated at preprocessing time
-- Macros in conditions are expanded before evaluation
-- Supported operators (in C-style precedence): unary `! - + ~`, `* / %`, `+ -`, `<< >>`, `< <= > >=`, `== !=`, `&`, `^`, `|`, `&&`, `||`, ternary `? :`, parentheses
-- Hex integer literals (`0xFF`, `0X1A`) are supported alongside decimal
-- `defined(NAME)` (or `defined NAME`) checks if macro `NAME` is defined (returns 1 or 0)
-- Undefined identifiers evaluate to 0
-
-**Example with `defined`**:
-```omscript
-#if defined(WINDOWS) && !defined(DEBUG)
-    #define LOG_FILE "release.log"
-#endif
-```
-
-**Example using bitwise / shift / ternary**:
-```omscript
-#define FLAGS 0x0F
-#if (FLAGS & 0x08) != 0
-    #define HAS_BIT3 1
-#endif
-#if (1 << 4) == 16 ? 1 : 0
-    #define POW2_OK 1
-#endif
-```
-
-#### 3.1.4 `#ifdef` / `#ifndef` / `#elifdef` / `#elifndef` — Test Macro Definition
-
-Shorthand for testing macro presence:
-```omscript
-#ifdef DEBUG
-    println("Debugging");
-#endif
-
-#ifndef NDEBUG
-    println("Assertions enabled");
-#endif
-```
-
-Equivalent to:
-- `#ifdef X` → `#if defined(X)`
-- `#ifndef X` → `#if !defined(X)`
-
-The C23-style shorthands `#elifdef X` and `#elifndef X` chain the same test in an `#if` ladder:
-
-```omscript
-#ifdef USE_NEON
-    // ...
-#elifdef USE_AVX2
-    // ...
-#elifndef USE_SCALAR
-    // ...
-#else
-    // ...
-#endif
-```
-
-#### 3.1.5 `#error` — Emit Compilation Error
-
-Causes compilation to fail with a message:
-```omscript
-#ifndef VERSION
-    #error "VERSION macro must be defined"
-#endif
-```
-
-#### 3.1.6 `#warning` — Emit Compilation Warning
-
-Emits a warning message (compilation continues):
-```omscript
-#warning "This feature is experimental"
-```
-
-#### 3.1.7 `#line` — Set Line Number (RESERVED — NOT IMPLEMENTED)
-
-**Status:** Reserved syntactically. The current preprocessor (`src/preprocessor.cpp`) does **not** recognize `#line` as a known directive — it falls through to the generic "unknown preprocessor directive" warning. Generated-code line attribution must be done via host-side rewriting until this directive is wired up.
-
-#### 3.1.8 `#info` — Emit Informational Message
-
-Like `#warning` but tagged as `info:` instead of `warning:`. Compilation continues. Use for benign build-time annotations (which optimization tier was selected, which feature flags are on, etc.):
-```omscript
-#info "fast-path build enabled"
-```
-Implementation: appended to the preprocessor's accumulated warnings list and surfaced through the same diagnostic channel as `#warning`.
-
-#### 3.1.9 `#assert` — Compile-Time Assertion
-
-**Syntax:**
-```ebnf
-assert_directive ::= '#assert' const_expression [ '"' message '"' ]
-```
-
-Evaluates `const_expression` using the same `#if` expression evaluator (§3.5). If the result is `0`, the build fails with a diagnostic of the form `#assert failed: <message>` (or `#assert failed: compile-time assertion failed: <expression>` if no message is given).
-
-```omscript
-#assert __VERSION__ >= 2 "OmScript ≥ 2 required"
-#assert defined(TARGET_X86_64) "this module is x86-64-only"
-```
-
-Use for build-time invariants (feature-flag combinations, ABI assumptions) that should fail loudly rather than silently mis-compile.
-
-#### 3.1.10 `#require` — Minimum Compiler Version
-
-**Syntax:**
-```ebnf
-require_directive ::= '#require' '"' version_string '"'
-```
-
-Fails the build if the running compiler's `__VERSION__` is older than `version_string` (string-comparison via the compiler's internal `cmpVersion`). Emits an error of the form `#require: compiler version <current> is older than required <X.Y.Z>`.
-
-```omscript
-#require "1.2.0"
-```
-
-#### 3.1.11 `#counter` — Define an Auto-Incrementing Macro
-
-**Syntax:**
-```ebnf
-counter_directive ::= '#counter' identifier
-```
-
-Creates a macro that yields a fresh, monotonically increasing integer on every textual expansion (starts at `0`). Useful for generating unique IDs in macro-heavy code:
-```omscript
-#counter UNIQ
-const int id1 = UNIQ;   // 0
-const int id2 = UNIQ;   // 1
-const int id3 = UNIQ;   // 2
-```
-Distinct from the predefined `__COUNTER__` macro (§3.3) — `__COUNTER__` is a single global counter shared across the whole translation unit, while `#counter` lets you declare *named* counters with independent state.
-
-#### 3.1.12 `#pragma` — Vendor-Specific Hints (Currently a No-Op)
-
-`#pragma` lines are accepted by the preprocessor and silently consumed. No pragma names are currently recognized — the directive is reserved for forward-compatible insertion of compiler-specific hints without breaking older builds.
-
-```omscript
-#pragma optimize_for_size   // accepted but ignored today
-```
-
-#### 3.1.13 `import` — File Inclusion
-
-Includes another OmScript source file (processed by the parser, not the preprocessor directly, but conceptually similar to `#include`):
-```omscript
-import "utilities.om"
-import "math_helpers.om" as math
-```
-
-**Syntax**:
-- `import "path"` — Include file at `path` (relative to current file)
-- `import "path" as alias` — Include file and namespace it under `alias`
-- Circular imports are detected and rejected
-- Imported files are preprocessed and parsed recursively
-
-**Note**: `import` is technically a parser-level keyword, not a preprocessor directive, but it is conceptually similar to `#include` in C.
-
-### 3.2 Macro Expansion Rules
-
-**Textual substitution**: Macro bodies are substituted verbatim at the point of invocation.
-
-**Function-like macros**: Arguments are collected by matching parentheses, separated by commas. Nested parentheses and string literals are handled correctly.
-
-**Recursion**: Macros may expand recursively up to a depth of 64. Circular macros cause infinite recursion and trigger an error at the depth limit.
-
-**Example**:
-```omscript
-#define ADD(a, b) a + b
-#define DOUBLE(x) ADD(x, x)
-
-var result = DOUBLE(5);  // Expands to: 5 + 5
-```
-
-**Stringification (`#`) and token pasting (`##`)**: Implemented for
-function-like macros.
-
-* `#param` in the macro body is replaced by a string literal whose contents
-  are the textual argument with leading/trailing whitespace trimmed and
-  embedded `"` / `\` escaped:
-
-  ```omscript
-  #define STR(x) #x
-  var s:string = STR(world);   // expands to: var s:string = "world";
-  ```
-
-* `a ## b` collapses two tokens into one by removing the `##` and any
-  surrounding whitespace.  Multiple consecutive pastes are supported:
-
-  ```omscript
-  #define CONCAT(a, b) a ## b
-  var CONCAT(my, Var):i64 = 42;   // expands to: var myVar:i64 = 42;
-  ```
-
-### 3.3 Predefined Macros
-
-The preprocessor defines the following macros automatically:
-
-| Macro | Value | Description |
-|-------|-------|-------------|
-| `__FILE__` | `"filename"` | Current source file name (string) |
-| `__LINE__` | `123` | Current line number (integer) |
-| `__BASE_FILE__` | `"main.om"` | Top-level source as passed on the command line — preserved across `#line` (string) |
-| `__DATE__` | `"Jan 23 2026"` | Compilation date in C-style `Mmm dd yyyy` form (string) |
-| `__TIME__` | `"14:05:09"` | Compilation time in `HH:MM:SS` form (string) |
-| `__VERSION__` | `"4.4.0"` | OmScript compiler version (string) |
-| `__OS__` | `"linux"` / `"windows"` / `"macos"` | Target operating system (string) |
-| `__ARCH__` | `"x86_64"` / `"aarch64"` / `"arm"` | Target architecture (string) |
-| `__COUNTER__` | `0`, `1`, ... | Global counter, increments on each use (integer) |
-| `__VECTOR_WIDTH__` | `4` / `8` / `16` | Natural i32-lane SIMD width on the **host CPU at compile time** (detected via `llvm::sys::getHostCPUFeatures()` — reflects the machine running the compiler, not the C build ISA) |
-| `__SIMD_SSE2__` … `__SIMD_AVX512F__` | `1` (defined only if available) | Defined when the corresponding x86 SIMD feature is present on the **host CPU at compile time** (runtime LLVM query, not C compile-time `#ifdef`) |
-| `__SIMD_NEON__` | `1` (defined only on ARM) | Defined when ARM NEON is available on the host CPU at compile time |
-
-The SIMD-feature macros let portable user code conditionally pick a vector width:
-
-```omscript
-#if defined(__SIMD_AVX512F__)
-    var v: i32x16 = ...;
-#elifdef __SIMD_AVX2__
-    var v: i32x8  = ...;
-#else
-    var v: i32x4  = ...;
-#endif
-```
-
-**Example**:
-```omscript
-#define LOG(msg) println(__FILE__, ":", __LINE__, " - ", msg)
-
-fn main() {
-    LOG("Starting program");  // Outputs: "example.om:5 - Starting program"
-}
-```
-
-**`__COUNTER__` macro**: Special predefined macro that increments globally each time it is referenced:
-```omscript
-var id1 = __COUNTER__;  // 0
-var id2 = __COUNTER__;  // 1
-var id3 = __COUNTER__;  // 2
-```
-
-**Custom counter macros**: Use `#counter NAME` to define a named counter:
-```omscript
-#counter MY_ID
-var a = MY_ID;  // 0
-var b = MY_ID;  // 1
-var c = MY_ID;  // 2
-```
-
-### 3.4 Line Continuation
-
-A backslash `\` immediately followed by a newline (LF or CRLF) performs a **zero-character splice**: both characters are removed and the two physical lines are joined into a single logical line with no separator inserted. The lexer sees the joined line as a single logical line.
-
-```omscript
-#define LONG_MACRO \
-    some_function(arg1, \
-                  arg2, \
-                  arg3)
-```
-
-**Important**: The splice inserts **nothing** — not even a space. This means macro names and identifiers can be split across lines:
-```omscript
-#define MY_\
-MACRO 42       // defines MY_MACRO (not "MY_ MACRO")
-```
-
-**Splice precedence**: Line continuation is processed before tokenisation, so a `\<newline>` inside a string literal is also spliced (removing both the backslash and the newline from the literal). To include a literal backslash at the end of a line, use `\\`.
-
-### 3.5 Conditional Expressions Allowed in `#if`
-
-The preprocessor supports a subset of C-like expression syntax in `#if` and `#elif` conditions:
-
-**Operators** (in precedence order, high to low):
-1. Grouping: `(` `)`
-2. Unary: `!`, `-`, `+`
-3. Multiplicative: `*`, `/`, `%`
-4. Additive: `+`, `-`
-5. Relational: `<`, `<=`, `>`, `>=`
-6. Equality: `==`, `!=`
-7. Logical AND: `&&`
-8. Logical OR: `||`
-
-**`defined(NAME)` operator**: Returns 1 if macro `NAME` is defined, 0 otherwise. Can be used with or without parentheses:
-```omscript
-#if defined(DEBUG)
-#if defined DEBUG
-```
-
-**Integer literals**: Decimal, hex (`0x...`), octal (`0o...`), binary (`0b...`) literals are supported.
-
-**Undefined identifiers**: Expand to `0`.
-
-**Example**:
-```omscript
-#define VERSION 2
-#if VERSION >= 2 && defined(FEATURE_X)
-    // Code for version 2+ with FEATURE_X
-#endif
-```
-
----
+| `#define MAX 1024` | `comptime { const MAX: int = 1024; }` |
+| `#define PI 3.14` | `comptime { const PI: float = 3.14; }` |
+| `#define NAME "hi"` | n/a — use a local `var` or string literal directly |
+| `#define DEBUG` | `comptime { const DEBUG: bool = true; }` |
+| `#ifdef DEBUG` / `#endif` | `comptime { if (defined(DEBUG)) { ... } }` |
+| `#ifndef NDEBUG` | `comptime { if (!defined(NDEBUG)) { ... } }` |
+| `#if OS == "linux"` | `comptime { if (OS == "linux") { ... } }` |
+| `#if X == 0 && Y != 0` | `comptime { if (X == 0 && Y != 0) { ... } }` |
+| `#error "message"` | `comptime { error("message"); }` |
+| `#warning "message"` | `comptime { warning("message"); }` |
+| `__OS__` | built-in `OS` comptime string: `"linux"` / `"windows"` / `"macos"` |
+| `__ARCH__` | built-in `ARCH` comptime string: `"x86_64"` / `"aarch64"` |
+| `__VERSION__` | built-in `VERSION` comptime string |
+| `__FILE__` | built-in `FILE` comptime string (source file path) |
+| `#define MAX(a,b) ...` | `fn max(a: int, b: int) -> int { ... }` — typed function |
+
+For a full migration guide and examples, see **§5.9.1** (`comptime {}` blocks).
 
 ## 4. Type System Overview
 
@@ -1592,7 +1222,60 @@ OmScript supports **limited type inference**:
 
 ---
 
-## 5. Variables, Constants, and Comptime
+### 4.6 Type Aliases
+
+Declare a name as an alias for an existing type with the `type` keyword. Aliases are resolved transitively and fully at compile time — they have zero overhead and may be used anywhere a type annotation is accepted (variable declarations, struct fields, function parameters, return types, `sizeof()`).
+
+**Syntax:**
+```omscript
+type AliasName = ExistingType;
+```
+
+**Rules:**
+- Aliases are module-scoped (top-level only).
+- Aliases are resolved transitively: if `type A = B` and `type B = int`, then using `A` is exactly the same as using `int`.
+- Up to 32 hops are followed; self-referential or cyclic aliases are silently capped at the current value.
+- Aliases for SIMD vector types may use comptime-sized lane counts: `type V8 = u64x{8};`.
+
+**Example:**
+```omscript
+import std;
+
+type Score  = int;
+type Weight = f64;
+type Name   = string;
+
+// Transitive alias — Alias → Middle → int
+type Middle = int;
+type Alias  = Middle;
+
+struct Player {
+    name:  Name,
+    score: Score,
+}
+
+fn rank(a: Score, b: Score) -> Score {
+    return a - b;
+}
+
+fn main() {
+    var sc: Score  = 100;
+    var wt: Weight = 2.5;
+
+    // Aliases resolve identically to the underlying type.
+    var p: Player = Player { name: "alice", score: sc };
+    var al: Alias = 42;     // same as int
+
+    println(sc + 1);        // 101
+    println(al * 2);        // 84
+    println(sizeof(Score)); // 8  (same as sizeof(int))
+    println(sizeof(Weight));// 8  (same as sizeof(f64))
+}
+```
+
+---
+
+
 
 ### 5.1 `var` Declaration
 
@@ -1843,21 +1526,54 @@ Placed at the top level of a source file (not inside a function), a `comptime {}
 | Boolean literal | `const DEBUG: bool = true;` | `bool` (stored as `int` 0/1) |
 | Reference to comptime const | `const ALIAS = MAX;` | same type as source |
 
-**Built-in comptime identifiers** (read-only, string-valued):
+**Built-in comptime identifiers** (read-only):
 
-| Name | Example value | Equivalent preprocessor macro |
-|---|---|---|
-| `OS` | `"linux"` / `"windows"` / `"macos"` | `__OS__` |
-| `ARCH` | `"x86_64"` / `"aarch64"` / `"arm"` | `__ARCH__` |
-| `VERSION` | `"4.4.0"` | `__VERSION__` |
+| Name | Type | Example value | Equivalent preprocessor macro |
+|---|---|---|---|
+| `OS` | string | `"linux"` / `"windows"` / `"macos"` | `__OS__` |
+| `ARCH` | string | `"x86_64"` / `"aarch64"` / `"arm"` | `__ARCH__` |
+| `VERSION` | string | `"5.0.0"` | `__VERSION__` |
+| `FILE` | string | `"src/main.om"` | `__FILE__` |
+
+> **Note:** Built-in string comptime constants (`OS`, `ARCH`, `VERSION`, `FILE`) are only available inside `comptime {}` condition expressions. They are not emitted as runtime string globals.
 
 **Condition expression syntax** for `if (COND)`:
 - Comparison: `NAME == "value"`, `COUNT >= 100`, `FLAG != 0`
 - Logical: `COND1 && COND2`, `COND1 || COND2`, `!COND`
-- Existence test: `defined(NAME)` — true if `NAME` is a defined comptime constant
+- Existence test: `defined(NAME)` — true if `NAME` is a defined comptime constant (including CLI `-D` flags and built-in identifiers)
 - Parenthesised: `(COND1 && COND2) || COND3`
 
-Every `const` that survives an active branch is also injected as a **global `const` variable** accessible inside function bodies — no extra annotation required.
+Every integer or bool `const` that survives an active branch is also injected as a **global `const` variable** accessible inside function bodies — no extra annotation required.
+
+**`comptime if COND { ... }` shorthand** (Phase 2):
+
+For simple single-condition cases, the outer `comptime { }` braces may be omitted. The condition does not need parentheses, allowing bare boolean constants:
+
+```omscript
+comptime if BUILD_DEBUG {
+    const LOG_LEVEL: int = 2;
+}
+
+comptime if OS == "linux" {
+    const USE_EPOLL: int = 1;
+} else {
+    const USE_EPOLL: int = 0;
+}
+```
+
+This is exactly equivalent to `comptime { if (COND) { ... } }` — a syntactic convenience.
+
+**`-D NAME[=VALUE]` CLI flags** (Phase 2):
+
+Comptime constants can be injected from the command line without modifying source code:
+
+```sh
+omsc compile main.om -DBUILD_DEBUG         # injects  comptime const BUILD_DEBUG: int = 1
+omsc compile main.om -DLOG_LEVEL=3         # injects  comptime const LOG_LEVEL: int = 3
+omsc compile main.om -DPLATFORM=embedded   # injects  comptime const PLATFORM: string = "embedded"
+```
+
+CLI-injected constants behave identically to constants defined with `comptime { const ... }` and are visible to `defined()`, `if (COND)`, and function bodies throughout the file.
 
 **Example — platform constants and conditional selection:**
 ```omscript
@@ -3002,6 +2718,82 @@ fn handle_case(x: int) {
 
 ---
 
+### 7.11 `jmp` / `label` — Deprecated Unconditional Jump
+
+> **⚠ Deprecated.** `jmp` emits a compile-time deprecation warning every time it is used. It will be removed in a future version. Always prefer structured control flow (`if`, `while`, `for`, `break`, `continue`).
+
+`jmp` performs an unconditional branch to a named **label** in the **same function**. Labels are declared with the `label` keyword.
+
+**Syntax:**
+```
+jmp label_name;
+...
+label label_name:
+```
+
+**Semantics:**
+- Execution transfers immediately to the statement following `label name:`.
+- Code between a `jmp` and its target label is unreachable (skipped entirely).
+- A `label` declaration does not end the current block; control falls through from the preceding statement unless there is a `jmp` or other terminator above it.
+- Labels are function-scoped. You cannot jump to a label in a different function.
+- Both forward jumps (label appears later in source) and backward jumps (label appears earlier — manual loop) are supported.
+
+**Example — forward jump (skip a block):**
+```omscript
+fn main() -> int {
+    jmp done;          // ⚠ deprecated warning emitted here
+    var x: int = 42;   // error — 'jmp done' jumps forward over 'x'
+    label done:
+    return 0;
+}
+```
+
+> The compiler **errors** if a forward `jmp` skips over a `var` declaration at the same block level, because the initializer would be bypassed. Move all declarations before the `jmp`, or declare them after the label.
+
+**Correct pattern — declarations before the jump:**
+```omscript
+fn main() -> int {
+    var x: int = 0;
+    jmp done;       // ⚠ deprecated
+    x = 42;         // skipped; x remains 0
+    label done:
+    return x;       // returns 0
+}
+```
+
+**Example — backward jump (manual counted loop):**
+```omscript
+fn sum_to_four() -> int {
+    var i: int = 1;
+    var total: int = 0;
+    label loop_top:        // ← loop entry
+    total = total + i;
+    i = i + 1;
+    if (i <= 4) {
+        jmp loop_top;      // ⚠ deprecated — prefer `for i in 1..=4 { total += i; }`
+    }
+    return total;  // 10
+}
+```
+
+**Compile-time safety checks:**
+
+| Violation | Severity | Message |
+|-----------|----------|---------|
+| Label not defined in current function | **Error** | `'jmp foo': label 'foo' is not defined in this function` |
+| Forward jump over `var` declaration | **Error** | `'jmp after' at line N jumps forward over declaration of variable 'x'...` |
+| Any use of `jmp` | **Warning** | `'jmp' is deprecated; prefer structured control flow (if / while / for / break / continue)` |
+
+**Migration guide:**
+| `jmp` pattern | Preferred replacement |
+|---------------|-----------------------|
+| Skip optional block | `if (!condition) { ... }` |
+| Retry / retry loop | `while (condition) { ... }` |
+| Counted loop | `for i in start..end { ... }` |
+| Early exit from nested loops | `break` with labelled loops (planned) |
+
+---
+
 ## 8. Loops
 
 ### 8.1 `while`
@@ -3368,6 +3160,46 @@ for (i: int in 0...10) {
 ```
 
 **`break` in `switch`**: Required at the end of each case to prevent fallthrough (unless explicit fallthrough is intended).
+
+#### Labeled `break` / `continue`
+
+Any loop can be given a **label** by prefixing it with `label_name:`. Labeled `break label;` and `continue label;` then target the labeled loop rather than the nearest enclosing one. This avoids flag variables for breaking out of deeply nested loops.
+
+**Syntax**:
+```
+label_name: while COND { ... break label_name; ... }
+label_name: for x in arr { ... continue label_name; ... }
+label_name: for i in 0..n { ... }
+```
+
+**Example — labeled break**:
+```omscript
+outer: for i in 0..10 {
+    for j in 0..10 {
+        if i * 10 + j == 23 {
+            break outer;   // exit both loops when found
+        }
+    }
+}
+```
+
+**Example — labeled continue**:
+```omscript
+outer: for i in 0..4 {
+    for j in 0..4 {
+        if j == 2 {
+            continue outer;  // skip rest of outer iteration
+        }
+        process(i, j);       // only reached for j == 0 and j == 1
+    }
+}
+```
+
+**Rules**:
+- Labels are identifiers (any valid identifier that is not a keyword).
+- A label must immediately precede a loop keyword (`while`, `for`, `foreach`, `forever`, `loop`, `repeat`, `do`, `until`).
+- `break label;` and `continue label;` are parse errors if no enclosing loop has that label.
+- Unlabeled `break;` and `continue;` still target the nearest enclosing loop.
 
 ### 8.16 Loop Annotations
 
@@ -4533,6 +4365,52 @@ println(array_product(a));  // 24
 
 ---
 
+#### `array_sum(array) → i64`
+
+**Signature:** `array_sum(array) → i64`  
+**Semantics:** Return the sum of all integer elements in `array`. Returns `0` for an empty array. Compile-time folded when all elements are constant literals.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+var a = [3, 1, 4, 1, 5];
+println(array_sum(a));  // 14
+```
+
+---
+
+#### `array_sorted(array) → array`
+
+**Signature:** `array_sorted(array) → array`  
+**Semantics:** Return a new array containing the same elements as `array`, sorted in ascending order. The original array is **not** modified. Works for both integer and string arrays. Uses `qsort` internally.  
+**Time:** O(n log n)
+
+**Example:**
+```omscript
+var a = [5, 3, 1, 4, 2];
+var s = array_sorted(a);
+println(s[0]);   // 1
+println(a[0]);   // 5  (original unchanged)
+```
+
+---
+
+#### `array_reverse(array) → array`
+
+**Signature:** `array_reverse(array) → array`  
+**Semantics:** Return a new array with elements in reverse order. The original array is **not** modified.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+var a = [1, 2, 3, 4, 5];
+var r = array_reverse(a);
+println(r[0]);   // 5
+println(a[0]);   // 1  (original unchanged)
+```
+
+---
+
 #### `array_mean(array) → i64` / `array_avg(array) → i64` (alias)
 
 **Signature:** `array_mean(array) → i64`  
@@ -4758,7 +4636,106 @@ println(array_every(a, is_pos));  // 1
 
 ---
 
-### 11.8 Array-of-string special handling
+#### `array_min_by(array, fn) → i64`
+
+**Signature:** `array_min_by(array, function) → i64`  
+**Semantics:** Return the element `e` in `array` for which `fn(e)` produces the smallest value. If multiple elements produce the same minimum key, the first one encountered is returned. Returns `0` if the array is empty.  
+**Time:** O(n * cost(fn))
+
+```omscript
+fn last_digit(x: int) -> int { return x % 10; }
+
+var a = [15, 3, 27, 9, 42];
+// last digits: 5, 3, 7, 9, 2  →  minimum key is 2  →  element is 42
+var m = array_min_by(a, last_digit);   // 42
+
+// Block-body lambda form:
+var m2 = array_min_by(a, |x: int| {
+    var d = x % 10;
+    return d;
+});  // 42
+```
+
+---
+
+#### `array_max_by(array, fn) → i64`
+
+**Signature:** `array_max_by(array, function) → i64`  
+**Semantics:** Return the element `e` in `array` for which `fn(e)` produces the largest value. If multiple elements produce the same maximum key, the first one encountered is returned. Returns `0` if the array is empty.  
+**Time:** O(n * cost(fn))
+
+```omscript
+fn last_digit(x: int) -> int { return x % 10; }
+
+var a = [15, 3, 27, 9, 42];
+// last digits: 5, 3, 7, 9, 2  →  maximum key is 9  →  element is 9
+var m = array_max_by(a, last_digit);   // 9
+```
+
+---
+
+#### `array_flatten(array) → array`
+
+**Signature:** `array_flatten(array) → array`  
+**Semantics:** Flatten one level of array nesting. The outer array's elements must be integer values holding pointers to inner arrays (obtained by casting with `as int`). Returns a new array containing all elements from all inner arrays concatenated in outer-array order. Returns an empty array if the outer array is empty; empty inner arrays contribute zero elements.  
+**Time:** O(total elements across all inner arrays)
+
+```omscript
+var a: int[] = [1, 2, 3];
+var b: int[] = [4, 5];
+var c: int[] = [6];
+
+// Build outer array of pointers
+var nested: int[] = [a as int, b as int, c as int];
+
+var flat: int[] = array_flatten(nested);
+// flat == [1, 2, 3, 4, 5, 6], len(flat) == 6
+println(flat[0]);  // 1
+println(flat[5]);  // 6
+```
+
+---
+
+#### `array_flat_map(array, fn) → array`
+
+**Signature:** `array_flat_map(array, function) → array`  
+**Semantics:** Apply `fn` to every element of `array`, treat each result as a pointer to an inner array, then concatenate all inner arrays into a single output array. Equivalent to `array_flatten(array_map(array, fn))` but avoids the intermediate outer array allocation. Two-pass: pass 1 measures total output length, pass 2 copies elements.  
+**Time:** O(n × cost(fn) + total output length)
+
+```omscript
+fn make_range(n: int) -> int {
+    var arr = [n, n + 1];
+    return arr as int;
+}
+
+var inp: int[] = [1, 2, 3];
+var flat = array_flat_map(inp, make_range);
+// flat == [1, 2, 2, 3, 3, 4], len(flat) == 6
+```
+
+---
+
+#### `array_scan(array, init, fn) → array`
+
+**Signature:** `array_scan(array, init, function) → array`  
+**Semantics:** Prefix scan (running aggregate). Returns a new array of the same length as `array` where `result[0] = fn(init, array[0])`, `result[i] = fn(result[i-1], array[i])`. Useful for running totals, cumulative products, and any fold that retains intermediate values. Returns an empty array for empty input.  
+**Time:** O(n × cost(fn))
+
+```omscript
+fn add(a: int, b: int) -> int { return a + b; }
+
+var ns: int[] = [1, 2, 3, 4, 5];
+var running = array_scan(ns, 0, add);
+// running == [1, 3, 6, 10, 15]  (prefix sums)
+
+fn mul(a: int, b: int) -> int { return a * b; }
+var factorials = array_scan([1, 2, 3, 4], 1, mul);
+// factorials == [1, 2, 6, 24]
+```
+
+---
+
+
 
 **String-array tracking:** When an array is known to contain string pointers (i.e., every element is an i64 holding a `char*`), the compiler tracks it in `stringArrays_` set. This enables:
 - Type-aware code generation for `join`, `split`, etc.
@@ -5086,6 +5063,59 @@ println(str_lower("HELLO"));  // "hello"
 
 ---
 
+#### `str_lower(string) → string`
+
+**Semantics:** Return a NEW string with all uppercase letters converted to lowercase.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+println(str_lower("HELLO"));  // "hello"
+```
+
+---
+
+#### `str_title(string) → string`
+
+**Semantics:** Return a NEW string in "title case": the first character of each whitespace-separated word is uppercased, and all other characters are lowercased. Compile-time folded for literal arguments.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+println(str_title("hello world"));  // "Hello World"
+println(str_title("HELLO WORLD"));  // "Hello World"
+```
+
+---
+
+#### `str_swapcase(string) → string`
+
+**Semantics:** Return a NEW string with uppercase ASCII letters converted to lowercase and lowercase ASCII letters converted to uppercase. Non-alphabetic characters are unchanged. Compile-time folded for literal arguments.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+println(str_swapcase("Hello World"));  // "hELLO wORLD"
+println(str_swapcase("abc123"));       // "ABC123"
+```
+
+---
+
+#### `str_words(string) → array`
+
+**Semantics:** Split `string` on any whitespace (spaces, tabs, newlines), skipping empty tokens, and return the words as a `string[]`. Equivalent to Python's `str.split()` with no argument. Returns an empty array for an all-whitespace or empty string.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+var words = str_words("  hello   world  ");
+println(len(words));   // 2
+println(words[0]);     // "hello"
+println(words[1]);     // "world"
+```
+
+---
+
 #### `str_repeat(string, i64) → string`
 
 **Semantics:** Return a NEW string that is the input repeated `n` times.  
@@ -5121,6 +5151,62 @@ println(str_reverse("hello"));  // "olleh"
 var words = str_split("a,b,c", ",");
 println(len(words));  // 3
 println(words[0]);    // "a"
+```
+
+---
+
+#### `str_to_lines(string) → string[]`
+
+**Signature:** `str_to_lines(string) → string[]`  
+**Semantics:** Split `string` at newline characters and return the resulting lines as an array of strings. Both Unix (`\n`) and Windows (`\r\n`) line endings are handled — any trailing `\r` is stripped from each line before it is stored. A trailing newline at the end of the input does **not** produce an empty final element (matches Python's `str.splitlines()` behaviour). Compile-time folded for string literals.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+var text = "hello\nworld\nfoo";
+var lines: string[] = str_to_lines(text);
+println(len(lines));       // 3
+println(lines[0]);         // hello
+println(lines[2]);         // foo
+
+// Trailing newline excluded:
+var t2 = "alpha\nbeta\n";
+var l2: string[] = str_to_lines(t2);
+println(len(l2));          // 2  (no empty final element)
+
+// CRLF line endings:
+var t3 = "one\r\ntwo\r\nthree";
+var l3: string[] = str_to_lines(t3);
+println(len(l3));          // 3
+println(l3[0]);            // one  (no trailing \r)
+```
+
+---
+
+#### `str_remove_prefix(string, prefix) → string`
+
+**Signature:** `str_remove_prefix(string, prefix) → string`  
+**Semantics:** If `string` starts with `prefix`, return a copy of `string` with the first `len(prefix)` characters removed. Otherwise return `string` unchanged. Compile-time folded when both arguments are string literals.  
+**Time:** O(len(prefix) + len(result)) — one `memcmp` + one `memcpy`
+
+```omscript
+println(str_remove_prefix("hello world", "hello "));  // "world"
+println(str_remove_prefix("hello world", "bye "));    // "hello world" (no match)
+println(str_remove_prefix("abc", "abcdef"));          // "abc" (prefix too long)
+```
+
+---
+
+#### `str_remove_suffix(string, suffix) → string`
+
+**Signature:** `str_remove_suffix(string, suffix) → string`  
+**Semantics:** If `string` ends with `suffix`, return a copy of `string` with the last `len(suffix)` characters removed. Otherwise return `string` unchanged. Compile-time folded when both arguments are string literals.  
+**Time:** O(len(suffix) + len(result)) — one `memcmp` + one `memcpy`
+
+```omscript
+println(str_remove_suffix("hello world", " world"));  // "hello"
+println(str_remove_suffix("hello world", "xyz"));     // "hello world" (no match)
+println(str_remove_suffix("abc", "abcdef"));          // "abc" (suffix too long)
 ```
 
 ---
@@ -5854,19 +5940,21 @@ fn parse_and_use(s: string) {
 
 ---
 
-### 16.3 `assert(cond)`
+### 16.3 `assert(cond)` / `assert(cond, msg)`
 
-**Syntax:** Built-in function, **single argument only**:
+**Syntax:** Built-in function, **1 or 2 arguments**:
 ```ebnf
 assert_call ::= 'assert' '(' expression ')'
+              | 'assert' '(' expression ',' expression ')'
 ```
-
-> **Note:** OmScript's `assert` does **not** accept a custom message argument. `assert(cond, "msg")` is a compile error. The runtime always prints `Runtime error: assertion failed at line N`.
 
 **Semantics:**
 1. Evaluates `cond` and coerces to a 1-bit boolean.
 2. If true: returns `1` (the call evaluates as an expression to `1`).
-3. If false: prints `Runtime error: assertion failed at line N` to stdout and calls `abort()`.
+3. If false:
+   - **1-arg form**: prints `Runtime error: assertion failed at line N\n` to stdout.
+   - **2-arg form**: prints `Runtime error: assertion failed at line N: <msg>\n` to stdout (where `<msg>` is the second argument evaluated as a string).
+   - Calls `abort()` in both cases.
 
 **Optimizer hint:** The compiler tags the success branch with a 1000:1 branch-weight, telling LLVM to lay out the failure path cold.
 
@@ -5882,8 +5970,13 @@ Use `assert` for safety-critical invariants you want enforced. Use `assume` only
 **Example:**
 ```omscript
 fn divide(a: int, b: int) {
-    assert(b != 0);   // aborts on b == 0 with line number
+    assert(b != 0, "divisor must be non-zero");  // custom message on failure
     return a / b;
+}
+
+fn sqrt_safe(x: int) -> int {
+    assert(x >= 0);   // line-number-only message
+    return isqrt(x);
 }
 ```
 
@@ -5898,7 +5991,7 @@ Runtime errors in OmScript fall into three categories, all of which **terminate 
 | Bounds check | Out-of-range array / string index | `Runtime error: index out of bounds` |
 | Division by zero | Integer `/` or `%` with zero divisor | `Runtime error: division by zero` |
 | Zero-step loop | `for (i in 0...10...0)` | `Runtime error: for loop step is zero` |
-| Assertion failure | `assert(false)` | `Runtime error: assertion failed at line N` |
+| Assertion failure | `assert(false)` / `assert(false, "msg")` | `Runtime error: assertion failed at line N[: msg]` |
 | Unmatched throw | `throw N;` with no `catch(N)` in the function | `Runtime error: unmatched throw` |
 | Unhandled throw | `throw N;` in a function with **no** catch blocks at all | `Runtime error: unhandled throw at line N` |
 
@@ -7049,13 +7142,55 @@ Subtract with INT64_MAX/MIN clamping.
 
 **Deprecated** — emit a compile-time integer tag based on the static type of the argument: `1` = integer, `2` = float, `3` = string. This function is resolved entirely at compile time from static type information; it does not perform any runtime type query. Use explicit type annotations instead.
 
-> **Migration**: Replace `if (typeof(x) == 2)` guards with properly typed function overloads or separate typed variables. `typeof` will be removed in a future version.
+> **Migration**: Replace `if (typeof(x) == 2)` guards with `type_name(x)` comparisons or properly typed function overloads. `typeof` will be removed in a future version.
 
 **Example (legacy):**
 ```omscript
 println(typeof(42));      // 1  (compile-time constant; argument evaluated for side effects only)
 println(typeof(3.14));    // 2
 println(typeof("hello")); // 3
+```
+
+---
+
+#### `type_name(any) → string`
+
+Return a human-readable **compile-time string** describing the OmScript type of the argument expression. Resolved purely from static LLVM IR type information — zero runtime overhead. The argument is evaluated for side-effects but the produced value is not used at runtime.
+
+| Return value | Meaning |
+|---|---|
+| `"int"` | Any integer type: `i64`, `i32`, `i16`, `i8`, `u64`, `u32`, `u8`, `byte`, … |
+| `"float"` | Double-precision float (`f64`) |
+| `"f32"` | Single-precision float |
+| `"bool"` | Boolean (`bool`-annotated variable or `i1` value) |
+| `"string"` | OmScript fat-pointer string |
+| `"array"` | Array / slice pointer |
+| `"dict"` | Hash-map pointer |
+| `"ptr"` | Raw or struct pointer |
+| `"simd"` | LLVM fixed-width vector (SIMD type) |
+| `"void"` | Void / no-value |
+| `"unknown"` | Anything not in the above categories |
+
+**Example:**
+```omscript
+import std;
+
+var iv: int    = 7;
+var fv: float  = 1.5;
+var sv: string = "hello";
+var bv: bool   = true;
+
+println(type_name(42));   // "int"
+println(type_name(3.14)); // "float"
+println(type_name("hi")); // "string"
+println(type_name(iv));   // "int"
+println(type_name(fv));   // "float"
+println(type_name(sv));   // "string"
+println(type_name(bv));   // "bool"
+
+if str_eq(type_name(iv), "int") {
+    println("iv is an integer");
+}
 ```
 
 ---
@@ -8133,28 +8268,43 @@ if (file_exists("config.txt")) {
 
 ## 22. Lambda Expressions
 
-OmScript lambdas are anonymous functions with a lightweight `|params| body` syntax, designed primarily for use with the higher-order array built-ins (`array_map`, `array_filter`, `array_reduce`, `array_any`, `array_every`, `array_count`, `array_find`).
+OmScript lambdas are anonymous functions with a lightweight `|params| body` or `(params) => body` syntax, designed primarily for use with the higher-order array built-ins (`array_map`, `array_filter`, `array_reduce`, `array_any`, `array_every`, `array_count`, `array_find`, `array_min_by`, `array_max_by`).
 
-**Implementation model — important:** Lambdas are *not* runtime closures. The parser desugars every lambda into a top-level named function (`__lambda_N`) and replaces the lambda expression with a string literal containing that name. The higher-order built-ins receive that string and resolve it to the generated function at code-gen time. The consequences are:
+**Implementation model — important:** Lambdas are *not* runtime closures. The parser desugars every lambda into a top-level named function (`__lambda_N`) and replaces the lambda expression with an identifier referring to that function. The higher-order built-ins receive that function reference at code-gen time. The consequences are:
 
 - Lambdas **cannot capture** variables from the enclosing scope. Reference any non-parameter identifier and you reference a top-level / `global` symbol of the same name, not a local.
-- A lambda's runtime *value* is a `string` (the generated function's name), not a callable. You can store it in a variable, but you cannot directly invoke it as `f(x)` from OmScript code — it can only flow into a built-in that knows how to call it by name.
+- A lambda's runtime *value* is a function pointer. You can store it in a `fn(T)->R` typed variable and call it directly.
 - All lambdas with the same body produce distinct generated functions; there is no deduplication.
 
 ### 22.1 Syntax
 
+Two lambda forms are supported. Both accept either an **expression body** (implicit return) or a **block body** (explicit `return`):
+
 ```ebnf
-lambda      ::= '|' [params] '|' expression
-params      ::= param { ',' param }
-param       ::= identifier [ ':' type ]
+pipe_lambda       ::= '|' [params] '|' ( expression | block )
+arrow_lambda      ::= param_list '=>' ( expression | block )
+params            ::= param { ',' param }
+param             ::= identifier [ ':' type ]
+param_list        ::= identifier
+                    | '(' [ params ] ')'
+block             ::= '{' { statement } '}'
 ```
 
-- The body is **a single expression** (no statement block, no `return` keyword). Whatever the expression evaluates to becomes the function's return value.
-- Parameters with no type annotation default to `i64` (this is the only inferred type — there is no full inference at parse time).
-- Annotate explicitly when the element type is anything else: `|x:float| x * 2.0`, `|s:string| str_len(s)`.
-- Empty parameter list is written as `||`: `var make_zero = || 0;`.
+**Expression-body (single expression, implicit `return`):**
+- The expression after `|` (pipe form) or `=>` (arrow form) is implicitly returned.
+- No `return` keyword is written.
 
-**Examples:**
+**Block-body (multi-statement, explicit `return`):**
+- When `{` immediately follows the closing `|` (pipe form) or `=>` (arrow form), the parser reads a full block statement.
+- The block may contain variable declarations, conditionals, loops, and any other statements.
+- Results must be returned explicitly with `return`.
+- An implicit `return` is NOT added — a block lambda that falls off the end returns `0`.
+
+- Parameters with no type annotation default to `i64`.
+- Annotate explicitly when the element type is anything else: `|x:float| x * 2.0`, `|s:string| str_len(s)`.
+- Empty parameter list is written as `||` (pipe form) or `()` (arrow form): `var make_zero: fn()->int = || 0;`.
+
+**Examples — expression body:**
 
 ```omscript
 |x| x * 2                    // i64 → i64
@@ -8163,6 +8313,36 @@ param       ::= identifier [ ':' type ]
 |acc, x| acc + x             // for array_reduce
 |s:string| str_len(s)        // string → i64
 || 42                        // () → i64
+
+x => x * 2                   // single-param shorthand
+(x: int) => x * 2
+(x: int, y: int) => x + y
+() => 42
+```
+
+**Examples — block body:**
+
+```omscript
+// Pipe lambda with block body
+var doubled = array_map(arr, |x: int| {
+    var y = x * 2;
+    return y;
+});
+
+// Arrow lambda with block body
+var transformed: int[] = array_map(arr, (x: int) => {
+    if x < 0 {
+        return -x;
+    }
+    return x * 2;
+});
+
+// Stored in a funcptr variable
+var adder: fn(int)->int = (x: int) => {
+    var bump = 100;
+    return x + bump;
+};
+println(adder(7));   // 107
 ```
 
 ---
@@ -8186,32 +8366,33 @@ Inside the generated `__lambda_N` function, `factor` is an unbound name — it r
        return array_map(arr, |x| x * 2);    // ✅ literal 2
    }
    ```
-3. **Write a named helper function** and reference it by name (which is what the higher-order built-ins want anyway):
+3. **Write a named helper function** and reference it by name:
    ```omscript
    fn double(x) { return x * 2; }
-   var doubled = array_map(arr, "double");  // pass the name as a string
+   var doubled = array_map(arr, double);    // ✅ pass the identifier
    ```
 
 ---
 
 ### 22.3 First-class function values
 
-The built-ins that accept a lambda also accept a **string literal containing a function name**, because that's what a lambda compiles to. Both forms are interchangeable:
+Lambdas evaluate to a `fn(T)->R` function reference that can be stored in a typed variable and invoked directly:
 
 ```omscript
-fn square(n) { return n * n; }
+fn square(n: int) -> int { return n * n; }
 
-var a = array_map([1, 2, 3], |x| x * x);  // lambda form
-var b = array_map([1, 2, 3], "square");   // named-function form (identical effect)
+var f: fn(int)->int = |x: int| x * x;    // store lambda
+println(f(5));                             // 25 ✅
+
+var g: fn(int)->int = square;             // store named function
+println(g(5));                             // 25 ✅
 ```
-
-Functions cannot be passed as bare identifiers in this position — only string literals or lambdas. This is what allows the parser to resolve the target at compile time and emit a direct call.
 
 ---
 
 ### 22.4 Higher-order built-in interaction
 
-The following built-ins accept a lambda or a function-name string. See §11.7 for full signatures.
+The following built-ins accept a lambda or a named function reference. See §11.7 for full signatures.
 
 | Built-in | Lambda shape |
 | --- | --- |
@@ -8222,31 +8403,25 @@ The following built-ins accept a lambda or a function-name string. See §11.7 fo
 | `array_every(arr, fn)` | `|x| → bool` |
 | `array_count(arr, fn)` | `|x| → bool` |
 | `array_find(arr, fn)` | `|x| → bool`, returns first matching index or `-1` |
+| `array_min_by(arr, fn)` | `|x| → key`, returns element with minimum key |
+| `array_max_by(arr, fn)` | `|x| → key`, returns element with maximum key |
 
 ---
 
 ### 22.5 Pipe-forward and spread interaction
 
-Because a lambda evaluates to a function-name string and **cannot be invoked as a normal call**, it cannot appear directly on the right side of `|>`. This is illegal:
+Lambdas stored in `fn(T)->R` variables can be used as pipe targets:
 
 ```omscript
-5 |> |x| x * 2     // ❌ pipe target must be a callable named function
+var double: fn(int)->int = x => x * 2;
+var y = 5 |> double;                           // ✅ 10
 ```
 
-Use a named function, or pipe into a higher-order built-in:
-
-```omscript
-fn double(x) { return x * 2; }
-var y = 5 |> double;                          // ✅ 10
-
-var doubled = [1, 2, 3] |> array_map(|x| x * 2);  // ✅ — array_map is the pipe target
-```
-
-The spread operator `...arr` expands an array as positional arguments to a *function call*, independently of any lambdas:
+The spread operator `...arr` expands an array as positional arguments to a function call, independently of any lambdas:
 
 ```omscript
 var a = [1, 2, 3];
-var s = sum(...a);   // sum(1, 2, 3) — `sum` is a built-in, not a lambda
+var s = sum(...a);   // sum(1, 2, 3)
 ```
 
 ---

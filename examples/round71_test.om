@@ -1,0 +1,82 @@
+import std;
+
+// Round-71 feature tests:
+// 1. Lambda→funcptr fix: |params| expr stored in fn() var no longer segfaults
+// 2. Arrow lambda syntax: (x: T) => expr, x => expr, () => expr
+// 3. Paren-free when: when x { ... }
+// 4. Paren-free switch statement: switch x { ... }
+// 5. Switch expression: var y = switch(x) { case v: expr, default: expr }
+
+fn apply(f: fn(int)->int, val: int) -> int {
+    return f(val);
+}
+
+fn main() -> int {
+    // --- 1. Lambda stored in funcptr var (was segfaulting before Round-71) ---
+    var double: fn(int)->int = |x: int| x * 2;
+    println(double(7));           // 14
+
+    // --- 2a. Arrow lambda: (params) => expr ---
+    var triple: fn(int)->int = (x: int) => x * 3;
+    println(triple(4));           // 12
+
+    // --- 2b. Single-param bare arrow lambda: x => expr ---
+    var square: fn(int)->int = x => x * x;
+    println(square(5));           // 25
+
+    // --- 2c. Zero-param arrow lambda: () => expr ---
+    var const42: fn()->int = () => 42;
+    println(const42());           // 42
+
+    // --- 2d. Multi-param arrow lambda ---
+    var add2: fn(int,int)->int = (a: int, b: int) => a + b;
+    println(add2(10, 20));        // 30
+
+    // --- 2e. Arrow lambda passed to higher-order function ---
+    var r: int = apply((x: int) => x + 100, 5);
+    println(r);                   // 105
+
+    // --- 3. Paren-free when ---
+    var n: int = 3;
+    when n {
+        1 => { println(11); }
+        3 => { println(33); }
+        _ => { println(99); }
+    }   // 33
+
+    // --- 4. Paren-free switch statement ---
+    switch n {
+        case 3:
+            println(333);
+    }   // 333
+
+    // --- 5a. Switch expression with parens ---
+    var sw_label: int = switch(n) {
+        case 1: 10,
+        case 2: 20,
+        case 3: 30,
+        default: 0,
+    };
+    println(sw_label);               // 30
+
+    // --- 5b. Switch expression paren-free ---
+    var sw_label2: int = switch n {
+        case 3: 777,
+        default: 0,
+    };
+    println(sw_label2);              // 777
+
+    // --- 5c. Switch expression with multi-value case ---
+    var m: int = 2;
+    var tag: int = switch(m) {
+        case 1, 2, 3: 123,
+        case 4, 5: 45,
+        default: 0,
+    };
+    println(tag);                 // 123
+
+    // --- 5d. Switch expression used directly in expression context ---
+    println(switch(m) { case 2: 9999, default: 0, });  // 9999
+
+    return 0;
+}

@@ -26,8 +26,8 @@ fn main() {
     assert(str_starts_with(piStr, "3.14"));
 
     // ── Two-arg mixed: int and string ───────────────────────────
-    var label = "score";
-    var msg = str_format("%s: %lld", label, 100);
+    var lbl = "score";
+    var msg = str_format("%s: %lld", lbl, 100);
     assert(str_eq(msg, "score: 100"));
 
     return 0;

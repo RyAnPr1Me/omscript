@@ -5,6 +5,7 @@
 
 #include "codegen.h"
 #include <string>
+#include <unordered_map>
 
 namespace omscript {
 
@@ -160,6 +161,24 @@ class Compiler {
         return memSanitize_;
     }
 
+    /// Inject an integer comptime define (equivalent to `comptime { const NAME: int = VALUE; }`).
+    /// Used to implement the -D NAME[=VALUE] command-line flag.
+    void addDefine(const std::string& name, long long value = 1) {
+        defines_[name] = value;
+    }
+
+    /// Inject a string comptime define (equivalent to `comptime { const NAME: string = VALUE; }`).
+    void addDefineString(const std::string& name, const std::string& value) {
+        stringDefines_[name] = value;
+    }
+
+    [[nodiscard]] const std::unordered_map<std::string, long long>& defines() const noexcept {
+        return defines_;
+    }
+    [[nodiscard]] const std::unordered_map<std::string, std::string>& stringDefines() const noexcept {
+        return stringDefines_;
+    }
+
   private:
     std::string readFile(const std::string& filename);
     bool verbose_ = false;
@@ -189,6 +208,8 @@ class Compiler {
     bool memSanitize_ = false;       ///< --mem-sanitize        (Ω spec §7)
     std::string pgoGenPath_;
     std::string pgoUsePath_;
+    std::unordered_map<std::string, long long> defines_;      ///< -D NAME[=int] comptime flags
+    std::unordered_map<std::string, std::string> stringDefines_; ///< -D NAME=str comptime flags
 };
 
 } // namespace omscript

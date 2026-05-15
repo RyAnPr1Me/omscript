@@ -1,0 +1,79 @@
+import std;
+// struct_static_call_test.om — Round-69
+//
+// Verifies that Struct::method(args) works as a static (class-method) call
+// where the function was declared as  fn Struct::method(...).
+//
+// Expected exit code = 11 (one point per passing test)
+
+struct Vec2 { x, y }
+
+fn Vec2::zero() -> Vec2 {
+    return Vec2 { x: 0, y: 0 };
+}
+
+fn Vec2::from(x: int, y: int) -> Vec2 {
+    return Vec2 { x: x, y: y };
+}
+
+fn Vec2::add(a: Vec2, b: Vec2) -> Vec2 {
+    return Vec2 { x: a.x + b.x, y: a.y + b.y };
+}
+
+fn Vec2::dot(a: Vec2, b: Vec2) -> int {
+    return a.x * b.x + a.y * b.y;
+}
+
+fn Vec2::scale(v: Vec2, factor: int) -> Vec2 {
+    return Vec2 { x: v.x * factor, y: v.y * factor };
+}
+
+struct Counter { val, step }
+
+fn Counter::new(start: int, step: int) -> Counter {
+    return Counter { val: start, step: step };
+}
+
+fn Counter::tick(c: Counter) -> Counter {
+    return Counter { val: c.val + c.step, step: c.step };
+}
+
+fn Counter::get(c: Counter) -> int {
+    return c.val;
+}
+
+fn main() -> int {
+    var score: int = 0;
+
+    // T1: Vec2::zero() — static factory returning struct
+    var z: Vec2 = Vec2::zero();
+    score += (z.x == 0);
+    score += (z.y == 0);
+
+    // T2: Vec2::from() — static factory with args
+    var p: Vec2 = Vec2::from(3, 4);
+    score += (p.x == 3);
+    score += (p.y == 4);
+
+    // T3: Vec2::add() — static method, two struct args
+    var q: Vec2 = Vec2::from(1, 2);
+    var r: Vec2 = Vec2::add(p, q);
+    score += (r.x == 4);
+    score += (r.y == 6);
+
+    // T4: Vec2::dot() — static method returning int
+    score += (Vec2::dot(p, q) == 11); // 3*1 + 4*2 = 11
+
+    // T5: Vec2::scale() — inline static call
+    var s: Vec2 = Vec2::scale(Vec2::from(2, 3), 5);
+    score += (s.x == 10);
+    score += (s.y == 15);
+
+    // T6: Counter static factory + tick
+    var c: Counter = Counter::new(10, 3);
+    score += (Counter::get(c) == 10);
+    c = Counter::tick(c);
+    score += (Counter::get(c) == 13);
+
+    return score;
+}

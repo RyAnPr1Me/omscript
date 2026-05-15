@@ -1,0 +1,214 @@
+import std;
+// round75_test.om — Round-75 production-grade syntax enhancements
+//
+// Features tested:
+//   1. Block-body pipe lambda:  |params| { stmts; return val; }
+//   2. Block-body arrow lambda: (params) => { stmts; return val; }
+//   3. array_flatten(arr)    — flatten one level of array nesting
+//   4. array_min_by(arr, fn) — element with minimum key
+//   5. array_max_by(arr, fn) — element with maximum key
+//   6. str_to_lines(s)       — split string on newlines into string[]
+//
+// Expected exit code: 0 (all assertions pass; return 0)
+
+fn last_digit(x: int) -> int { return x % 10; }
+fn negate(x: int) -> int { return -x; }
+
+fn main() -> int {
+    var ok = 0;
+
+    // ── 1. Block-body pipe lambda with multi-statement body ─────────────────
+    var nums: int[] = [1, 2, 3, 4, 5];
+
+    var doubled: int[] = array_map(nums, |x: int| {
+        var y = x * 2;
+        return y;
+    });
+    assert(doubled[0] == 2);
+    assert(doubled[2] == 6);
+    assert(doubled[4] == 10);
+    ok = ok + 1;
+
+    // ── 2. Block-body pipe lambda with conditional logic ────────────────────
+    var abs_vals: int[] = array_map(nums, |x: int| {
+        if x < 0 {
+            return -x;
+        }
+        return x;
+    });
+    assert(abs_vals[0] == 1);
+    assert(abs_vals[4] == 5);
+    ok = ok + 1;
+
+    // ── 3. Block-body pipe lambda in array_filter ───────────────────────────
+    var mixed: int[] = [1, -2, 3, -4, 5, -6];
+    var positives: int[] = array_filter(mixed, |x: int| {
+        var isPos = x > 0;
+        return isPos;
+    });
+    assert(len(positives) == 3);
+    assert(positives[0] == 1);
+    assert(positives[1] == 3);
+    assert(positives[2] == 5);
+    ok = ok + 1;
+
+    // ── 4. Block-body arrow lambda (single expression in a block) ───────────
+    var tripled: int[] = array_map(nums, (x: int) => {
+        return x * 3;
+    });
+    assert(tripled[0] == 3);
+    assert(tripled[4] == 15);
+    ok = ok + 1;
+
+    // ── 5. Block-body arrow lambda with multi-statement body ────────────────
+    var processed: int[] = array_map(nums, (x: int) => {
+        var a = x * x;
+        var b = a + x;
+        return b;
+    });
+    // x^2 + x: 1+1=2, 4+2=6, 9+3=12, 16+4=20, 25+5=30
+    assert(processed[0] == 2);
+    assert(processed[1] == 6);
+    assert(processed[2] == 12);
+    assert(processed[3] == 20);
+    assert(processed[4] == 30);
+    ok = ok + 1;
+
+    // ── 6. Block-body arrow lambda in array_filter ──────────────────────────
+    var evens: int[] = array_filter(nums, (x: int) => {
+        var rem = x % 2;
+        return rem == 0;
+    });
+    assert(len(evens) == 2);
+    assert(evens[0] == 2);
+    assert(evens[1] == 4);
+    ok = ok + 1;
+
+    // ── 7. Block-body arrow lambda stored in funcptr var ────────────────────
+    var adder: fn(int)->int = (x: int) => {
+        var bump = 100;
+        return x + bump;
+    };
+    assert(adder(7) == 107);
+    assert(adder(0) == 100);
+    ok = ok + 1;
+
+    // ── 8. array_flatten — basic case ───────────────────────────────────────
+    var a1: int[] = [1, 2, 3];
+    var a2: int[] = [4, 5];
+    var a3: int[] = [6];
+    var nested: int[] = [a1 as int, a2 as int, a3 as int];
+    var flat: int[] = array_flatten(nested);
+    assert(len(flat) == 6);
+    assert(flat[0] == 1);
+    assert(flat[1] == 2);
+    assert(flat[2] == 3);
+    assert(flat[3] == 4);
+    assert(flat[4] == 5);
+    assert(flat[5] == 6);
+    ok = ok + 1;
+
+    // ── 9. array_flatten — empty inner array ────────────────────────────────
+    var e1: int[] = [];
+    var e2: int[] = [99, 100];
+    var nestedE: int[] = [e1 as int, e2 as int];
+    var flatE: int[] = array_flatten(nestedE);
+    assert(len(flatE) == 2);
+    assert(flatE[0] == 99);
+    assert(flatE[1] == 100);
+    ok = ok + 1;
+
+    // ── 10. array_flatten — empty outer array ───────────────────────────────
+    var outerEmpty: int[] = [];
+    var flatOE: int[] = array_flatten(outerEmpty);
+    assert(len(flatOE) == 0);
+    ok = ok + 1;
+
+    // ── 11. array_min_by ────────────────────────────────────────────────────
+    var vals: int[] = [15, 3, 27, 9, 42];
+    // last_digit: 5, 3, 7, 9, 2 → min is 2 → element 42
+    var minE: int = array_min_by(vals, last_digit);
+    assert(minE == 42);
+    ok = ok + 1;
+
+    // ── 12. array_max_by ────────────────────────────────────────────────────
+    // last_digit: 5, 3, 7, 9, 2 → max is 9 → element 9
+    var maxE: int = array_max_by(vals, last_digit);
+    assert(maxE == 9);
+    ok = ok + 1;
+
+    // ── 13. array_min_by with negate (finds element whose negation is smallest) ─
+    var nums2: int[] = [4, -10, 2, -7, 1];
+    // negate(x)=-x: -4, 10, -2, 7, -1 → minimum key is -4 → element is 4
+    var minNeg: int = array_min_by(nums2, negate);
+    assert(minNeg == 4);
+    ok = ok + 1;
+
+    // ── 14. array_max_by with negate (finds element whose negation is largest) ─
+    // negate(x)=-x: -4, 10, -2, 7, -1 → maximum key is 10 → element is -10
+    var maxNeg: int = array_max_by(nums2, negate);
+    assert(maxNeg == -10);
+    ok = ok + 1;
+
+    // ── 15. str_to_lines — basic LF-separated ───────────────────────────────
+    var text = "hello\nworld\nfoo";
+    var lines: string[] = str_to_lines(text);
+    assert(len(lines) == 3);
+    assert(str_eq(lines[0], "hello"));
+    assert(str_eq(lines[1], "world"));
+    assert(str_eq(lines[2], "foo"));
+    ok = ok + 1;
+
+    // ── 16. str_to_lines — trailing newline excluded ─────────────────────────
+    var text2 = "alpha\nbeta\n";
+    var lines2: string[] = str_to_lines(text2);
+    assert(len(lines2) == 2);
+    assert(str_eq(lines2[0], "alpha"));
+    assert(str_eq(lines2[1], "beta"));
+    ok = ok + 1;
+
+    // ── 17. str_to_lines — CRLF handling ────────────────────────────────────
+    var text3 = "one\r\ntwo\r\nthree";
+    var lines3: string[] = str_to_lines(text3);
+    assert(len(lines3) == 3);
+    assert(str_eq(lines3[0], "one"));
+    assert(str_eq(lines3[1], "two"));
+    assert(str_eq(lines3[2], "three"));
+    ok = ok + 1;
+
+    // ── 18. str_to_lines — single line (no newline) ──────────────────────────
+    var text4 = "single";
+    var lines4: string[] = str_to_lines(text4);
+    assert(len(lines4) == 1);
+    assert(str_eq(lines4[0], "single"));
+    ok = ok + 1;
+
+    // ── 19. str_to_lines — compile-time fold (literal argument) ─────────────
+    var ctLines: string[] = str_to_lines("a\nb\nc");
+    assert(len(ctLines) == 3);
+    assert(str_eq(ctLines[0], "a"));
+    assert(str_eq(ctLines[2], "c"));
+    ok = ok + 1;
+
+    // ── 20. block lambda in array_reduce ────────────────────────────────────
+    var src: int[] = [1, 2, 3, 4, 5];
+    var total: int = array_reduce(src, |acc: int, x: int| {
+        return acc + x;
+    }, 0);
+    assert(total == 15);
+    ok = ok + 1;
+
+    // ── 21. block arrow lambda in array_any / array_every ───────────────────
+    var has_even: int = array_any(src, (x: int) => {
+        var rem = x % 2;
+        return rem == 0;
+    });
+    assert(has_even == 1);
+    var all_pos: int = array_every(src, (x: int) => {
+        return x > 0;
+    });
+    assert(all_pos == 1);
+    ok = ok + 1;
+
+    return 0;
+}

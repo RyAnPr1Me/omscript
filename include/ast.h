@@ -73,7 +73,10 @@ enum class ASTNodeType {
     OWN_STMT,          // own x;   — explicitly assert unique ownership (Ω spec §3.1)
     DEREF_ASSIGN_EXPR, // *p = v — write through pointer (Ω spec §4.2)
     CONSTRUCT_STMT,    // construct ptr { field: val, ... }; — in-place field init
-    NEW_CONSTRUCT_EXPR // new T { field: val, ... } — alloc<T>(1) + field init
+    NEW_CONSTRUCT_EXPR, // new T { field: val, ... } — alloc<T>(1) + field init
+    JMP_STMT,          // jmp label; — unconditional jump to a named label (deprecated)
+    LABEL_STMT,        // label name: — declares a named jump target in the current function
+    TUPLE_EXPR,        // (v1, v2, ...) — tuple literal; lowered to an anonymous LLVM struct
 };
 
 class ASTNode {
@@ -365,6 +368,7 @@ class WhileStmt : public Statement {
     std::unique_ptr<Expression> condition;
     std::unique_ptr<Statement> body;
     LoopConfig loopHints;
+    std::string label; ///< Optional loop label for labeled break/continue
 
     WhileStmt(std::unique_ptr<Expression> cond, std::unique_ptr<Statement> b)
         : Statement(ASTNodeType::WHILE_STMT), condition(std::move(cond)), body(std::move(b)) {}
@@ -375,6 +379,7 @@ class DoWhileStmt : public Statement {
     std::unique_ptr<Statement> body;
     std::unique_ptr<Expression> condition;
     LoopConfig loopHints;
+    std::string label; ///< Optional loop label for labeled break/continue
 
     DoWhileStmt(std::unique_ptr<Statement> b, std::unique_ptr<Expression> cond)
         : Statement(ASTNodeType::DO_WHILE_STMT), body(std::move(b)), condition(std::move(cond)) {}
@@ -389,6 +394,7 @@ class ForStmt : public Statement {
     std::unique_ptr<Expression> step; // Optional, can be nullptr
     std::unique_ptr<Statement> body;
     LoopConfig loopHints;
+    std::string label; ///< Optional loop label for labeled break/continue
 
     ForStmt(const std::string& iter, std::unique_ptr<Expression> s, std::unique_ptr<Expression> e,
             std::unique_ptr<Expression> st, std::unique_ptr<Statement> b, const std::string& iterType = "")
@@ -398,11 +404,13 @@ class ForStmt : public Statement {
 
 class BreakStmt : public Statement {
   public:
+    std::string label; ///< Optional target loop label (empty = nearest enclosing loop)
     BreakStmt() : Statement(ASTNodeType::BREAK_STMT) {}
 };
 
 class ContinueStmt : public Statement {
   public:
+    std::string label; ///< Optional target loop label (empty = nearest enclosing loop)
     ContinueStmt() : Statement(ASTNodeType::CONTINUE_STMT) {}
 };
 
@@ -412,6 +420,7 @@ class ForEachStmt : public Statement {
     std::unique_ptr<Expression> collection;
     std::unique_ptr<Statement> body;
     LoopConfig loopHints;
+    std::string label; ///< Optional loop label for labeled break/continue
 
     ForEachStmt(const std::string& iter, std::unique_ptr<Expression> coll, std::unique_ptr<Statement> b)
         : Statement(ASTNodeType::FOR_EACH_STMT), iteratorVar(iter), collection(std::move(coll)), body(std::move(b)) {}
@@ -579,6 +588,17 @@ class StructLiteralExpr : public Expression {
         : Expression(ASTNodeType::STRUCT_LITERAL_EXPR), structName(name), fieldValues(std::move(fv)) {}
 };
 
+/// Tuple literal: `(v1, v2, ...)`.
+/// Each element is an arbitrary expression.  The tuple is lowered to an
+/// anonymous LLVM struct `{T1, T2, ...}` allocated on the entry-block stack.
+class TupleExpr : public Expression {
+  public:
+    std::vector<std::unique_ptr<Expression>> elements;
+
+    explicit TupleExpr(std::vector<std::unique_ptr<Expression>> elems)
+        : Expression(ASTNodeType::TUPLE_EXPR), elements(std::move(elems)) {}
+};
+
 class FieldAccessExpr : public Expression {
   public:
     std::unique_ptr<Expression> object;
@@ -713,13 +733,19 @@ class Program : public ASTNode {
     /// form).  The codegen uses this to enforce that stdlib functions are called
     /// via `std::` qualification unless the `std` namespace is in this set.
     std::unordered_set<std::string> importedNamespaces;
+    /// All `type Alias = Underlying;` declarations from this translation unit.
+    /// Propagated to the codegen so that `resolveAnnotatedType` can resolve
+    /// user-defined type aliases even when they reach the backend as raw strings
+    /// (e.g., struct field types, function return types).
+    std::unordered_map<std::string, std::string> typeAliases;
 
     Program(std::vector<std::unique_ptr<FunctionDecl>> funcs, std::vector<std::unique_ptr<EnumDecl>> enms = {},
             std::vector<std::unique_ptr<StructDecl>> strcts = {}, bool noAlias = false,
-            std::vector<std::unique_ptr<VarDecl>> globs = {}, std::unordered_set<std::string> importedNs = {})
+            std::vector<std::unique_ptr<VarDecl>> globs = {}, std::unordered_set<std::string> importedNs = {},
+            std::unordered_map<std::string, std::string> typeAliasMap = {})
         : ASTNode(ASTNodeType::PROGRAM), functions(std::move(funcs)), enums(std::move(enms)),
           structs(std::move(strcts)), fileNoAlias(noAlias), globals(std::move(globs)),
-          importedNamespaces(std::move(importedNs)) {}
+          importedNamespaces(std::move(importedNs)), typeAliases(std::move(typeAliasMap)) {}
 };
 
 // ---------------------------------------------------------------------------
@@ -900,6 +926,31 @@ class OwnStmt : public Statement {
     std::string varName;
 
     explicit OwnStmt(const std::string& name) : Statement(ASTNodeType::OWN_STMT), varName(name) {}
+};
+
+/// `jmp label_name;` — unconditional branch to a named `label` in the same
+/// function.
+///
+/// **Deprecated:** `jmp` always emits a compile-time deprecation warning.
+/// Prefer structured control flow (`if`, `while`, `for`, `break`, `continue`).
+/// The compiler rejects obviously unsafe jumps:
+///   - jumping to an undefined label
+///   - jumping forward over a `var` declaration (skipped initialization)
+class JmpStmt : public Statement {
+  public:
+    std::string targetLabel; ///< Name of the `label` to jump to.
+
+    explicit JmpStmt(const std::string& target) : Statement(ASTNodeType::JMP_STMT), targetLabel(target) {}
+};
+
+/// `label name:` — declares a named jump target reachable by `jmp`.
+/// Labels are scoped to the enclosing function; they cannot be jumped to from
+/// a different function.
+class LabelStmt : public Statement {
+  public:
+    std::string labelName; ///< The unique label identifier within this function.
+
+    explicit LabelStmt(const std::string& name) : Statement(ASTNodeType::LABEL_STMT), labelName(name) {}
 };
 
 /// `comptime { statements... }` — compile-time evaluated block expression.

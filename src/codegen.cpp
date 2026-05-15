@@ -7,6 +7,7 @@
 #include "synthesize.h"
 #include <climits>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -216,6 +217,11 @@ static bool usesConcurrencyPrimitive(const omscript::FunctionDecl* func) {
 
 namespace omscript {
 
+/// Maximum number of hops followed when resolving a transitive type alias chain.
+/// Caps cycle detection: if the same alias keeps pointing to another alias, we
+/// stop after this many iterations rather than looping forever.
+static constexpr int kMaxTypeAliasHops = 32;
+
 // File-scope SIMD type registry — single source of truth for the
 struct SimdTypeRow {
     const char* name; // OmScript annotation, e.g. "i32x8"
@@ -262,7 +268,10 @@ static constexpr SimdTypeRow kSimdTypeRegistry[] = {
 /// Returns true if a type-annotation string represents an unsigned integer
 /// (uint, byte, or any uN for N in [1..256]).
 static bool isUnsignedAnnotation(const std::string& tn) {
-    if (tn == "uint" || tn == "byte")
+    if (tn == "uint" || tn == "byte" || tn == "usize" || tn == "char" ||
+        tn == "c_uint" || tn == "c_ushort" || tn == "c_ulong" ||
+        tn == "c_ulonglong" || tn == "c_size_t" || tn == "c_uchar" ||
+        tn == "uintptr_t" || tn == "c_uintptr")
         return true;
     if (tn.size() >= 2 && tn[0] == 'u') {
         for (size_t j = 1; j < tn.size(); ++j)
@@ -301,7 +310,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {
     // OPTMAX functions can call them without error.
     "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64", "to_i8", "to_u8", "to_i16", "to_u16", "to_i32",
     "to_u32", "to_i64", "to_u64", "to_f32", "to_f64", "store_ptr", "pslice_len", "pslice_ptr", "funcptr_from",
-    "funcptr_new", "malloc", "free"};
+    "funcptr_new", "malloc", "free", "type_name"};
 
 bool isStdlibFunction(const std::string& name) {
     return stdlibFunctions.find(name) != stdlibFunctions.end();
@@ -506,6 +515,17 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     if (!ann.empty() && ann[0] == '&') {
         ann = ann.substr(1);
     }
+    // ── Type alias resolution ─────────────────────────────────────────────────
+    // Chase the typeAliasMap_ chain up to 32 hops (handles transitive aliases
+    // that were not yet fully resolved when the AST was built, or that come from
+    // imported files).  Stops if the annotation is not a registered alias.
+    for (int hop = 0; hop < kMaxTypeAliasHops; ++hop) {
+        auto it = typeAliasMap_.find(ann);
+        if (it == typeAliasMap_.end()) break;
+        if (it->second == ann) break; // trivial self-alias guard
+        ann = it->second;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
     if (ann == "ptr" || ann == "funcptr" || (ann.rfind("ptr<", 0) == 0 && ann.back() == '>') ||
         (ann.rfind("pslice<", 0) == 0 && ann.back() == '>'))
         return llvm::PointerType::getUnqual(*context);
@@ -515,12 +535,79 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
         return llvm::Type::getFloatTy(*context); // f32 (single)
     if (ann == "bool")
         return llvm::Type::getInt1Ty(*context); // i1
-    if (ann == "i8" || ann == "u8" || ann == "byte")
-        return llvm::Type::getInt8Ty(*context); // i8/u8/byte
-    if (ann == "i16" || ann == "u16")
+    if (ann == "i8" || ann == "u8" || ann == "byte" || ann == "c_char" || ann == "c_uchar")
+        return llvm::Type::getInt8Ty(*context); // i8/u8/byte/c_char
+    if (ann == "i16" || ann == "u16" || ann == "c_short" || ann == "c_ushort")
         return llvm::Type::getInt16Ty(*context); // i16/u16
-    if (ann == "i32" || ann == "u32")
-        return llvm::Type::getInt32Ty(*context); // i32/u32
+    if (ann == "i32" || ann == "u32" || ann == "c_int" || ann == "c_uint" || ann == "char")
+        return llvm::Type::getInt32Ty(*context); // i32/u32/c_int/c_uint/char (Unicode scalar)
+    // usize / isize — pointer-width integers (64-bit on all current targets)
+    if (ann == "usize" || ann == "isize")
+        return llvm::Type::getInt64Ty(*context);
+    // C interop long/longlong — 64-bit on LP64 (Linux/macOS/Windows 64-bit)
+    if (ann == "c_long" || ann == "c_ulong" || ann == "c_longlong" || ann == "c_ulonglong" ||
+        ann == "c_size_t" || ann == "c_ssize_t")
+        return llvm::Type::getInt64Ty(*context);
+    // c_void — void pointer (same as ptr)
+    if (ann == "c_void")
+        return llvm::PointerType::getUnqual(*context);
+    // c_double / c_long_double — f64 (C double / long double on x86-64)
+    if (ann == "c_double" || ann == "c_long_double")
+        return llvm::Type::getDoubleTy(*context);
+    // c_float — f32 (C float)
+    if (ann == "c_float")
+        return llvm::Type::getFloatTy(*context);
+    // intptr_t / uintptr_t / ptrdiff_t — pointer-sized integers (64-bit)
+    if (ann == "intptr_t" || ann == "ptrdiff_t" || ann == "c_ptrdiff" || ann == "c_intptr")
+        return llvm::Type::getInt64Ty(*context);
+    if (ann == "uintptr_t" || ann == "c_uintptr")
+        return llvm::Type::getInt64Ty(*context);
+    // c_FILE — opaque pointer representing C FILE* (like ptr)
+    // c_dir  — opaque pointer for POSIX DIR* (like ptr)
+    // c_jmp_buf — opaque pointer for setjmp/longjmp state (like ptr)
+    if (ann == "c_FILE" || ann == "c_dir" || ann == "c_DIR" || ann == "c_jmp_buf")
+        return llvm::PointerType::getUnqual(*context);
+    // never — bottom type; used as return type of functions that never return.
+    // Maps to void in LLVM IR (hintNoReturn is set separately by the parser).
+    if (ann == "never")
+        return llvm::Type::getVoidTy(*context);
+    // ── Tuple types: "tuple<T1,T2,...>" → pointer (like struct types) ─────────
+    // The actual LLVM struct type is cached in tupleAnnotStructTypes_ so that
+    // generateTuple and generateFieldAccess can use the correct layout.
+    if (ann.rfind("tuple<", 0) == 0 && ann.back() == '>') {
+        // Return cached struct type if already built.
+        auto cached = tupleAnnotStructTypes_.find(ann);
+        if (cached == tupleAnnotStructTypes_.end()) {
+            const std::string inner = ann.substr(6, ann.size() - 7);
+            // Split on commas at depth 0 (respects nested tuple<...> and ptr<...>).
+            std::vector<llvm::Type*> elemTypes;
+            int depth = 0;
+            std::string cur;
+            for (char ch : inner) {
+                if (ch == '<') depth++;
+                else if (ch == '>') depth--;
+                if (ch == ',' && depth == 0) {
+                    while (!cur.empty() && cur.front() == ' ') cur.erase(0, 1);
+                    while (!cur.empty() && cur.back()  == ' ') cur.pop_back();
+                    elemTypes.push_back(resolveAnnotatedType(cur));
+                    cur.clear();
+                } else {
+                    cur += ch;
+                }
+            }
+            if (!cur.empty()) {
+                while (!cur.empty() && cur.front() == ' ') cur.erase(0, 1);
+                while (!cur.empty() && cur.back()  == ' ') cur.pop_back();
+                elemTypes.push_back(resolveAnnotatedType(cur));
+            }
+            llvm::StructType* st = elemTypes.empty()
+                ? llvm::StructType::get(*context)
+                : llvm::StructType::get(*context, elemTypes);
+            tupleAnnotStructTypes_.emplace(ann, st);
+        }
+        // Tuples, like structs, are accessed through a pointer.
+        return llvm::PointerType::getUnqual(*context);
+    }
     // -----------------------------------------------------------------------
     for (const SimdTypeRow& r : kSimdTypeRegistry) {
         if (ann == r.name) {
@@ -570,6 +657,19 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     }
 
     // "int", "uint", generics, and empty annotations map to i64.
+    // Emit a warning for non-empty, non-generic, unrecognized annotation strings
+    // so developers get feedback about typos or missing type definitions instead of
+    // silently getting i64 (which can cause subtle correctness bugs).
+    if (!ann.empty() && ann != "int" && ann != "uint" && ann != "void") {
+        // Only warn for annotations that look like concrete type names (not template
+        // parameters such as single upper-case letters like T, R, K, V).
+        const bool looksGeneric = ann.size() == 1 && std::isupper(static_cast<unsigned char>(ann[0]));
+        if (!looksGeneric) {
+            std::cerr << "[warning] unknown type annotation '" << ann
+                      << "' — falling back to i64 (int). "
+                         "Did you mean 'int', 'i64', or a declared struct/alias?\n";
+        }
+    }
     return getDefaultType();
 }
 
@@ -905,7 +1005,10 @@ void CodeGenerator::bindVariableAnnotated(const std::string& name, llvm::Value* 
 }
 
 bool CodeGenerator::isUnsignedAnnot(const std::string& annot) {
-    if (annot == "uint" || annot == "byte")
+    if (annot == "uint" || annot == "byte" || annot == "usize" || annot == "char" ||
+        annot == "c_uint" || annot == "c_ushort" || annot == "c_ulong" ||
+        annot == "c_ulonglong" || annot == "c_size_t" || annot == "c_uchar" ||
+        annot == "uintptr_t" || annot == "c_uintptr")
         return true;
     if (annot.size() >= 2 && annot[0] == 'u') {
         for (size_t j = 1; j < annot.size(); ++j)
@@ -3732,7 +3835,8 @@ isPreAnalysisArrayExpr(Expression* expr, const llvm::StringSet<>& arrayReturning
         // Known array-returning builtins
         static const std::unordered_set<std::string> arrayBuiltins = {
             "array_fill", "array_concat", "array_copy", "array_map", "array_filter", "array_slice", "sort",
-            "reverse",    "str_split",    "str_chars",  "push",      "pop",          "unshift",     "array_remove"};
+            "reverse",    "str_split",    "str_chars",  "push",      "pop",          "unshift",     "array_remove",
+            "array_sorted", "array_reverse"};
         if (arrayBuiltins.count(call->callee))
             return true;
         if (arrayReturningFunctions.count(call->callee))
@@ -3875,6 +3979,9 @@ bool CodeGenerator::isStringExpr(Expression* expr) const {
         // vars assigned from string function returns).
         if (stringVars_.count(id->name) > 0)
             return true;
+        // Global variables declared with type "string" are always strings.
+        if (globalStringVarNames_.count(id->name) > 0)
+            return true;
         // Check the LLVM alloca type: a pointer-typed alloca is a string ONLY
         if (arrayVars_.count(id->name) || dictVarNames_.count(id->name) || structVars_.count(id->name) ||
             stringArrayVars_.count(id->name) || ptrVarNames_.count(id->name) || refVarElemTypes_.count(id->name))
@@ -3934,12 +4041,15 @@ bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
     // str_split() always returns an array of strings.
     if (expr->type == ASTNodeType::CALL_EXPR) {
         auto* call = static_cast<CallExpr*>(expr);
-        if (call->callee == "str_split")
+        if (call->callee == "str_split" || call->callee == "str_words" || call->callee == "str_to_lines")
             return true;
         if ((call->callee == "push" || call->callee == "unshift" || call->callee == "array_copy") &&
             !call->arguments.empty())
             return isStringArrayExpr(call->arguments[0].get());
         if (call->callee == "array_concat" && !call->arguments.empty())
+            return isStringArrayExpr(call->arguments[0].get());
+        if ((call->callee == "array_sorted" || call->callee == "array_reverse") &&
+            !call->arguments.empty())
             return isStringArrayExpr(call->arguments[0].get());
         return false;
     }
@@ -3954,6 +4064,9 @@ void CodeGenerator::generate(Program* program) {
     irInstructionCount_ = 0;
     fileNoAlias_ = program->fileNoAlias;
     stdImported_ = program->importedNamespaces.count("std") > 0;
+    // Propagate type aliases so resolveAnnotatedType() can expand user-defined
+    // aliases that survive as raw strings in the AST (struct fields, fn returns…).
+    typeAliasMap_ = program->typeAliases;
 
     // Initialize the module's target triple and data layout before any IR is
     // generated so that all DataLayout queries (alignment, type sizes) during
@@ -4057,6 +4170,59 @@ void CodeGenerator::generate(Program* program) {
         builder->setFastMathFlags(FMF);
     }
 
+    // Process struct declarations early — before function forward-declarations —
+    // so that resolveAnnotatedType(param.typeName) can recognise struct type
+    // names in function parameter lists and return ptr (without emitting a
+    // spurious "unknown type annotation" warning).
+    for (auto& structDecl : program->structs) {
+        if (!structDecl->fieldDecls.empty()) {
+            bool hasLayoutHints = false;
+            for (const auto& fd : structDecl->fieldDecls) {
+                if (fd.attrs.hot || fd.attrs.cold) {
+                    hasLayoutHints = true;
+                    break;
+                }
+            }
+            if (hasLayoutHints && optimizationLevel >= OptimizationLevel::O2) {
+                std::vector<size_t> hotIdx, normalIdx, coldIdx;
+                for (size_t i = 0; i < structDecl->fieldDecls.size(); ++i) {
+                    if (structDecl->fieldDecls[i].attrs.hot)
+                        hotIdx.push_back(i);
+                    else if (structDecl->fieldDecls[i].attrs.cold)
+                        coldIdx.push_back(i);
+                    else
+                        normalIdx.push_back(i);
+                }
+                std::vector<std::string> reorderedFields;
+                std::vector<StructField> reorderedDecls;
+                reorderedFields.reserve(structDecl->fields.size());
+                reorderedDecls.reserve(structDecl->fieldDecls.size());
+                for (size_t i : hotIdx) {
+                    reorderedFields.push_back(structDecl->fields[i]);
+                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
+                }
+                for (size_t i : normalIdx) {
+                    reorderedFields.push_back(structDecl->fields[i]);
+                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
+                }
+                for (size_t i : coldIdx) {
+                    reorderedFields.push_back(structDecl->fields[i]);
+                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
+                }
+                structDefs_[structDecl->name] = reorderedFields;
+                structFieldDecls_[structDecl->name] = reorderedDecls;
+            } else {
+                structDefs_[structDecl->name] = structDecl->fields;
+                structFieldDecls_[structDecl->name] = structDecl->fieldDecls;
+            }
+        } else {
+            structDefs_[structDecl->name] = structDecl->fields;
+        }
+        structReprs_[structDecl->name] = structDecl->repr;
+        structReprAlignN_[structDecl->name] = structDecl->reprAlignN;
+        getOrCreateStructLLVMType(structDecl->name);
+    }
+
     // Forward-declare all functions so that any function can reference any
     for (auto& structDecl : program->structs) {
         for (auto& overload : structDecl->operators) {
@@ -4135,66 +4301,6 @@ void CodeGenerator::generate(Program* program) {
             memberNames.push_back(memberName);
         }
         enumMembers_[enumDecl->name] = std::move(memberNames);
-    }
-
-    // Process struct declarations: store field layouts for struct operations.
-    for (auto& structDecl : program->structs) {
-        if (!structDecl->fieldDecls.empty()) {
-            // Check if any field has hot or cold annotations.
-            bool hasLayoutHints = false;
-            for (const auto& fd : structDecl->fieldDecls) {
-                if (fd.attrs.hot || fd.attrs.cold) {
-                    hasLayoutHints = true;
-                    break;
-                }
-            }
-
-            if (hasLayoutHints && optimizationLevel >= OptimizationLevel::O2) {
-                // Reorder: hot fields first, normal fields next, cold fields last.
-                // Build a permutation that maps original index → new index.
-                std::vector<size_t> hotIdx, normalIdx, coldIdx;
-                for (size_t i = 0; i < structDecl->fieldDecls.size(); ++i) {
-                    if (structDecl->fieldDecls[i].attrs.hot)
-                        hotIdx.push_back(i);
-                    else if (structDecl->fieldDecls[i].attrs.cold)
-                        coldIdx.push_back(i);
-                    else
-                        normalIdx.push_back(i);
-                }
-
-                // Build reordered field lists.
-                std::vector<std::string> reorderedFields;
-                std::vector<StructField> reorderedDecls;
-                reorderedFields.reserve(structDecl->fields.size());
-                reorderedDecls.reserve(structDecl->fieldDecls.size());
-
-                for (size_t i : hotIdx) {
-                    reorderedFields.push_back(structDecl->fields[i]);
-                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
-                }
-                for (size_t i : normalIdx) {
-                    reorderedFields.push_back(structDecl->fields[i]);
-                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
-                }
-                for (size_t i : coldIdx) {
-                    reorderedFields.push_back(structDecl->fields[i]);
-                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
-                }
-
-                structDefs_[structDecl->name] = reorderedFields;
-                structFieldDecls_[structDecl->name] = reorderedDecls;
-            } else {
-                structDefs_[structDecl->name] = structDecl->fields;
-                structFieldDecls_[structDecl->name] = structDecl->fieldDecls;
-            }
-        } else {
-            structDefs_[structDecl->name] = structDecl->fields;
-        }
-        // Store @repr metadata.
-        structReprs_[structDecl->name] = structDecl->repr;
-        structReprAlignN_[structDecl->name] = structDecl->reprAlignN;
-        // Eagerly build the LLVM StructType so that the field offsets/sizes
-        getOrCreateStructLLVMType(structDecl->name);
     }
 
     // ── Optimization pre-pass sequence ────────────────────────────────────
@@ -5079,7 +5185,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         function->addFnAttr(llvm::Attribute::NoSync);
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
-                function->addParamAttr(i, llvm::Attribute::NoAlias);
+                // Skip noalias for typed-pointer (*T) params — may alias caller data.
+                bool isTypedPtr = i < func->parameters.size() &&
+                                  func->parameters[i].typeName.size() > 4 &&
+                                  func->parameters[i].typeName.rfind("ptr<", 0) == 0;
+                if (!isTypedPtr)
+                    function->addParamAttr(i, llvm::Attribute::NoAlias);
                 function->addParamAttr(i, llvm::Attribute::NonNull);
                 // OmScript arrays always have a valid header (at least 8 bytes
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(*context, 8));
@@ -5095,7 +5206,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
                 function->addParamAttr(i, llvm::Attribute::NonNull);
-                function->addParamAttr(i, llvm::Attribute::NoAlias);
+                // Skip noalias for typed-pointer (*T) params — may alias caller data.
+                bool isTypedPtr = i < func->parameters.size() &&
+                                  func->parameters[i].typeName.size() > 4 &&
+                                  func->parameters[i].typeName.rfind("ptr<", 0) == 0;
+                if (!isTypedPtr)
+                    function->addParamAttr(i, llvm::Attribute::NoAlias);
                 // OmScript arrays always have a valid header (at least 8 bytes).
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(*context, 8));
                 function->addParamAttr(i, llvm::Attribute::getWithAlignment(*context, llvm::Align(16)));
@@ -5108,7 +5224,16 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     if (!inOptMaxFunction && !currentFuncHintHot_ && !func->hintRestrict && !fileNoAlias_) {
         for (unsigned i = 0; i < function->arg_size(); ++i) {
             if (function->getArg(i)->getType()->isPointerTy()) {
-                function->addParamAttr(i, llvm::Attribute::NoAlias);
+                // ── Skip noalias for typed-pointer (*T / ptr<T>) parameters ──
+                // Raw C-style pointer params may alias caller-visible data
+                // (e.g. array-to-pointer decay passes a pointer into an array
+                // that the caller still holds a reference to).  Adding noalias
+                // in that case is UB and breaks write-through stores.
+                bool isTypedPtr = i < func->parameters.size() &&
+                                  func->parameters[i].typeName.size() > 4 &&
+                                  func->parameters[i].typeName.rfind("ptr<", 0) == 0;
+                if (!isTypedPtr)
+                    function->addParamAttr(i, llvm::Attribute::NoAlias);
                 function->addParamAttr(i, llvm::Attribute::NonNull);
                 // OmScript arrays always have a valid header: at least 8 bytes
                 function->addParamAttr(i, llvm::Attribute::getWithDereferenceableBytes(*context, 8));
@@ -5221,12 +5346,18 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     funcArenaUsedBytes_ = 0u;
     arenaPtrVarNames_.clear();
     lastAllocWasArena_ = false;
+    // Reset per-function jmp/label state.
+    labelBlocks_.clear();
 
     // Expose all global variables inside this function so that reads,
     // writes, and assignments resolve through the normal namedValues path.
     for (auto& entry : globalVars_) {
         namedValues[entry.getKey().str()] = entry.getValue();
     }
+    // Pre-populate stringVars_ for global variables declared as type "string"
+    // so that isStringExpr() treats them correctly inside this function body.
+    for (auto& gsn : globalStringVarNames_)
+        stringVars_.insert(gsn.getKey().str());
 
     // Pre-populate stringVars_ for parameters known to receive string arguments.
     auto paramStrIt = funcParamStringTypes_.find(func->name);
@@ -5251,6 +5382,21 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
         // Annotate parameter with its declared type for signed/unsigned tracking.
         if (!param.typeName.empty())
             varTypeAnnotations_[param.name] = param.typeName;
+
+        // Register typed-pointer parameters (*T / ptr<T>) so that p[i], *p, p->field
+        // and pointer arithmetic inside the function body use C-pointer semantics
+        // (raw GEP, no fat-pointer header offset).
+        if (param.typeName.size() > 4 && param.typeName.rfind("ptr<", 0) == 0 &&
+            param.typeName.back() == '>') {
+            const std::string elemType = param.typeName.substr(4, param.typeName.size() - 5);
+            ptrVarNames_.insert(param.name);
+            ptrElemTypes_[param.name] = elemType;
+        }
+        // funcptr parameters: fn(T...) -> R desugars to "funcptr".
+        if (param.typeName == "funcptr") {
+            funcptrVarNames_.insert(param.name);
+            ptrVarNames_.insert(param.name);
+        }
 
         if (paramStrIt != funcParamStringTypes_.end() && paramStrIt->second.count(paramIdx))
             stringVars_.insert(param.name);
@@ -5393,6 +5539,8 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     }
 
     // Generate function body
+    // Pre-scan for label statements so that forward jumps resolve correctly.
+    prescanLabels(func->body.get(), function);
     generateBlock(func->body.get());
 
     // Add default return if needed
@@ -5417,8 +5565,12 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
             }
         }
         llvm::Type* retTy = function->getReturnType();
-        if (retTy->isDoubleTy())
+        if (retTy->isVoidTy())
+            builder->CreateRetVoid();
+        else if (retTy->isDoubleTy())
             builder->CreateRet(llvm::ConstantFP::get(retTy, 0.0));
+        else if (retTy->isPointerTy())
+            builder->CreateRet(llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(retTy)));
         else
             builder->CreateRet(llvm::ConstantInt::get(*context, llvm::APInt(64, 0)));
     }
@@ -5479,25 +5631,59 @@ void CodeGenerator::generateStatement(Statement* stmt) {
     case ASTNodeType::FOR_EACH_STMT:
         generateForEach(static_cast<ForEachStmt*>(stmt));
         break;
-    case ASTNodeType::BREAK_STMT:
+    case ASTNodeType::BREAK_STMT: {
+        auto* breakNode = static_cast<BreakStmt*>(stmt);
         if (loopStack.empty()) {
             codegenError("break used outside of a loop", stmt);
         }
-        builder->CreateBr(loopStack.back().breakTarget);
-        break;
-    case ASTNodeType::CONTINUE_STMT: {
-        // Search backwards through the loop stack for the nearest enclosing loop
-        llvm::BasicBlock* continueTarget = nullptr;
-        for (auto it = loopStack.rbegin(); it != loopStack.rend(); ++it) {
-            if (it->continueTarget != nullptr) {
-                continueTarget = it->continueTarget;
-                break;
+        if (breakNode->label.empty()) {
+            // Unlabeled break: target nearest enclosing loop
+            builder->CreateBr(loopStack.back().breakTarget);
+        } else {
+            // Labeled break: search for the loop with the matching label
+            llvm::BasicBlock* target = nullptr;
+            for (auto it = loopStack.rbegin(); it != loopStack.rend(); ++it) {
+                if (it->label == breakNode->label) {
+                    target = it->breakTarget;
+                    break;
+                }
             }
+            if (!target) {
+                codegenError("break: no enclosing loop with label '" + breakNode->label + "'", stmt);
+            }
+            builder->CreateBr(target);
         }
-        if (!continueTarget) {
-            codegenError("continue used outside of a loop", stmt);
+        break;
+    }
+    case ASTNodeType::CONTINUE_STMT: {
+        auto* contNode = static_cast<ContinueStmt*>(stmt);
+        if (contNode->label.empty()) {
+            // Unlabeled continue: search backwards for nearest enclosing loop with a continue target
+            llvm::BasicBlock* continueTarget = nullptr;
+            for (auto it = loopStack.rbegin(); it != loopStack.rend(); ++it) {
+                if (it->continueTarget != nullptr) {
+                    continueTarget = it->continueTarget;
+                    break;
+                }
+            }
+            if (!continueTarget) {
+                codegenError("continue used outside of a loop", stmt);
+            }
+            builder->CreateBr(continueTarget);
+        } else {
+            // Labeled continue: search for matching label
+            llvm::BasicBlock* target = nullptr;
+            for (auto it = loopStack.rbegin(); it != loopStack.rend(); ++it) {
+                if (it->label == contNode->label && it->continueTarget != nullptr) {
+                    target = it->continueTarget;
+                    break;
+                }
+            }
+            if (!target) {
+                codegenError("continue: no enclosing loop with label '" + contNode->label + "'", stmt);
+            }
+            builder->CreateBr(target);
         }
-        builder->CreateBr(continueTarget);
         break;
     }
     case ASTNodeType::BLOCK:
@@ -5551,6 +5737,12 @@ void CodeGenerator::generateStatement(Statement* stmt) {
     case ASTNodeType::PIPELINE_STMT:
         generatePipeline(static_cast<PipelineStmt*>(stmt));
         break;
+    case ASTNodeType::JMP_STMT:
+        generateJmp(static_cast<JmpStmt*>(stmt));
+        break;
+    case ASTNodeType::LABEL_STMT:
+        generateLabel(static_cast<LabelStmt*>(stmt));
+        break;
     default:
         codegenError("Unknown statement type", stmt);
     }
@@ -5587,6 +5779,8 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateDerefAssign(static_cast<DerefAssignExpr*>(expr));
     case ASTNodeType::STRUCT_LITERAL_EXPR:
         return generateStructLiteral(static_cast<StructLiteralExpr*>(expr));
+    case ASTNodeType::TUPLE_EXPR:
+        return generateTuple(static_cast<TupleExpr*>(expr));
     case ASTNodeType::FIELD_ACCESS_EXPR:
         return generateFieldAccess(static_cast<FieldAccessExpr*>(expr));
     case ASTNodeType::FIELD_ASSIGN_EXPR:
@@ -6828,6 +7022,39 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
                 fx.mergeFrom(exprEffects(fv.second.get(), self));
             break;
         }
+        case ASTNodeType::DEREF_ASSIGN_EXPR: {
+            // *p = v — write-through dereference.  Marks the pointer variable
+            // that is being dereferenced as mutated so the optimizer does NOT
+            // add 'readonly' to that parameter.
+            auto* da = static_cast<const DerefAssignExpr*>(expr);
+            fx.writesMemory = true;
+            fx.hasMutation = true;
+            // Walk through any unary * chains to get the base pointer name.
+            const Expression* base = da->ptr.get();
+            while (base && base->type == ASTNodeType::UNARY_EXPR) {
+                auto* u = static_cast<const UnaryExpr*>(base);
+                if (u->op == "*")
+                    base = u->operand.get();
+                else
+                    break;
+            }
+            if (base && self) {
+                std::string n = identName(base);
+                if (!n.empty()) {
+                    for (std::size_t i = 0; i < self->parameters.size(); ++i) {
+                        if (self->parameters[i].name == n) {
+                            fx.paramMutated[i] = true;
+                            break;
+                        }
+                    }
+                    if (globalNames.count(n))
+                        fx.writesGlobal = true;
+                }
+            }
+            fx.mergeFrom(exprEffects(da->ptr.get(), self));
+            fx.mergeFrom(exprEffects(da->value.get(), self));
+            break;
+        }
         default:
             // Literals, move/borrow/freeze — no effects.
             break;
@@ -7736,10 +7963,93 @@ void CodeGenerator::generateGlobals(Program* program) {
                         initVal = llvm::ConstantFP::get(ty, lit->floatValue);
                     else
                         initVal = llvm::ConstantInt::get(ty, static_cast<uint64_t>(lit->floatValue), true);
+                } else if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+                    // String global: point to an interned fat-pointer constant so the
+                    // global starts with a valid pointer (not null) at module load time.
+                    // The global is ptr-typed; internString() returns a GlobalVariable*
+                    // which is a Constant* of the same opaque-pointer type.
+                    initVal = internString(lit->stringValue);
                 }
-                // String or other: fall back to null (runtime init unsupported for top-level globals)
+            } else if (gv->initializer->type == ASTNodeType::ARRAY_EXPR) {
+                // Array literal initializer: build a writable data global and point to it.
+                // Layout: [N+1 x i64] { N, elem0, elem1, ... }
+                // The array pointer global (ptr-typed) is initialized to point at
+                // this data global so that operations like len/index/pop work without
+                // a runtime call at startup.
+                auto* arrExpr = static_cast<ArrayExpr*>(gv->initializer.get());
+                bool allConst = true;
+                // Detect the element type by peeking at the first element.
+                bool isStringElems = false;
+                if (!arrExpr->elements.empty() && arrExpr->elements[0]->type == ASTNodeType::LITERAL_EXPR) {
+                    auto* firstLit = static_cast<LiteralExpr*>(arrExpr->elements[0].get());
+                    isStringElems = (firstLit->literalType == LiteralExpr::LiteralType::STRING);
+                }
+
+                if (isStringElems) {
+                    // String array: [N+1 x i64] where elements are ptrtoint(str_global).
+                    auto* i64Ty = llvm::Type::getInt64Ty(*context);
+                    std::vector<llvm::Constant*> vals;
+                    vals.reserve(arrExpr->elements.size() + 1);
+                    vals.push_back(llvm::ConstantInt::get(i64Ty, static_cast<int64_t>(arrExpr->elements.size())));
+                    for (const auto& el : arrExpr->elements) {
+                        if (el->type != ASTNodeType::LITERAL_EXPR ||
+                            static_cast<LiteralExpr*>(el.get())->literalType != LiteralExpr::LiteralType::STRING) {
+                            allConst = false;
+                            break;
+                        }
+                        auto* strGV = internString(static_cast<LiteralExpr*>(el.get())->stringValue);
+                        vals.push_back(llvm::ConstantExpr::getPtrToInt(strGV, i64Ty));
+                    }
+                    if (allConst) {
+                        auto* arrTy = llvm::ArrayType::get(i64Ty, arrExpr->elements.size() + 1);
+                        auto* arrConst = llvm::ConstantArray::get(arrTy, vals);
+                        auto* dataGV = new llvm::GlobalVariable(*module, arrTy, /*isConstant=*/false,
+                                                                llvm::GlobalValue::PrivateLinkage, arrConst,
+                                                                llvmName + ".data");
+                        dataGV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+                        dataGV->setAlignment(llvm::Align(8));
+                        initVal = dataGV;
+                    }
+                } else {
+                    std::vector<int64_t> elems;
+                    for (const auto& el : arrExpr->elements) {
+                        if (el->type == ASTNodeType::LITERAL_EXPR) {
+                            auto* lit2 = static_cast<LiteralExpr*>(el.get());
+                            if (lit2->literalType == LiteralExpr::LiteralType::INTEGER) {
+                                elems.push_back(lit2->intValue);
+                            } else if (lit2->literalType == LiteralExpr::LiteralType::FLOAT) {
+                                // Store as float bit pattern so a bitcast reads back correctly.
+                                double fv = lit2->floatValue;
+                                int64_t bits;
+                                std::memcpy(&bits, &fv, sizeof(bits));
+                                elems.push_back(bits);
+                            } else {
+                                allConst = false;
+                                break;
+                            }
+                        } else {
+                            allConst = false;
+                            break;
+                        }
+                    }
+                    if (allConst) {
+                        auto* i64Ty = llvm::Type::getInt64Ty(*context);
+                        std::vector<llvm::Constant*> vals;
+                        vals.reserve(elems.size() + 1);
+                        vals.push_back(llvm::ConstantInt::get(i64Ty, static_cast<int64_t>(elems.size())));
+                        for (int64_t v : elems)
+                            vals.push_back(llvm::ConstantInt::get(i64Ty, v));
+                        auto* arrTy = llvm::ArrayType::get(i64Ty, elems.size() + 1);
+                        auto* arrConst = llvm::ConstantArray::get(arrTy, vals);
+                        auto* dataGV = new llvm::GlobalVariable(*module, arrTy, /*isConstant=*/false,
+                                                                llvm::GlobalValue::PrivateLinkage, arrConst,
+                                                                llvmName + ".data");
+                        dataGV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+                        dataGV->setAlignment(llvm::Align(8));
+                        initVal = dataGV;
+                    }
+                }
             }
-            // Non-literal initializers at top level: zero-init the global.
         }
 
         // If a global with this name already exists (e.g. from a previous import
@@ -7754,6 +8064,8 @@ void CodeGenerator::generateGlobals(Program* program) {
                                                 llvm::GlobalValue::ExternalLinkage, initVal, llvmName);
         llvmGV->setAlignment(llvm::MaybeAlign(8));
         globalVars_[llvmName] = llvmGV;
+        if (gv->typeName == "string")
+            globalStringVarNames_.insert(llvmName);
     }
 }
 

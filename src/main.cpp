@@ -4,7 +4,6 @@
 #include "diagnostic.h"
 #include "lexer.h"
 #include "parser.h"
-#include "preprocessor.h"
 #include "project.h"
 #include <chrono>
 #include <csignal>
@@ -1528,6 +1527,8 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "STRING";
     case omscript::TokenType::BYTES_LITERAL:
         return "BYTES_LITERAL";
+    case omscript::TokenType::CHAR_LITERAL:
+        return "CHAR_LITERAL";
     case omscript::TokenType::IDENTIFIER:
         return "IDENTIFIER";
     case omscript::TokenType::FN:
@@ -2579,6 +2580,30 @@ int main(int argc, char* argv[]) {
     bool parsingRunArgs = false;
     bool keepTemps = false;
     std::vector<std::string> runArgs;
+    // -D NAME[=VALUE] defines injected as comptime constants (Phase 2 comptime flags).
+    std::vector<std::pair<std::string, std::string>> userDefines; // name → raw string value ("" = integer 1)
+
+    // Helper: inject all collected -D defines into a Parser instance.
+    // Integer values are stored as comptime int constants; everything else as string constants.
+    auto applyUserDefines = [&](omscript::Parser& p) {
+        for (const auto& [name, value] : userDefines) {
+            if (value.empty()) {
+                p.setComptimeInt(name, 1);
+            } else {
+                try {
+                    size_t pos = 0;
+                    const long long ival = std::stoll(value, &pos);
+                    if (pos == value.size()) {
+                        p.setComptimeInt(name, ival);
+                    } else {
+                        p.setComptimeString(name, value);
+                    }
+                } catch (...) {
+                    p.setComptimeString(name, value);
+                }
+            }
+        }
+    };
 
     // Parse command line arguments
     for (int i = argIndex; i < argc; i++) {
@@ -2674,6 +2699,25 @@ int main(int argc, char* argv[]) {
             } else {
                 std::cerr << "Error: -o/--output requires an argument\n";
                 return 1;
+            }
+        } else if (!parsingRunArgs && arg.size() >= 2 && arg[0] == '-' && arg[1] == 'D') {
+            // -DNAME or -DNAME=VALUE — inject as a comptime constant.
+            const std::string def = arg.substr(2);
+            if (def.empty()) {
+                // -D NAME (space-separated)
+                if (i + 1 < argc) {
+                    userDefines.emplace_back(argv[++i], "");
+                } else {
+                    std::cerr << "Error: -D requires a name\n";
+                    return 1;
+                }
+            } else {
+                const size_t eq = def.find('=');
+                if (eq == std::string::npos) {
+                    userDefines.emplace_back(def, ""); // -DNAME  → integer 1
+                } else {
+                    userDefines.emplace_back(def.substr(0, eq), def.substr(eq + 1));
+                }
             }
         } else if (!parsingRunArgs && !arg.empty() && arg[0] == '-') {
             std::cerr << "Error: unknown option '" << arg << "'\n";
@@ -2851,11 +2895,6 @@ int main(int argc, char* argv[]) {
             command == Command::Check) {
             auto lexStart = std::chrono::steady_clock::now();
             std::string source = readSourceFile(sourceFile);
-            omscript::Preprocessor pp(sourceFile);
-            source = pp.process(source);
-            for (const auto& w : pp.warnings()) {
-                std::cerr << w << "\n";
-            }
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
             auto lexEnd = std::chrono::steady_clock::now();
@@ -2872,6 +2911,8 @@ int main(int argc, char* argv[]) {
 
             auto parseStart = std::chrono::steady_clock::now();
             omscript::Parser parser(tokens);
+            parser.setSourceFile(sourceFile);
+            applyUserDefines(parser);
             auto program = parser.parse();
             for (const auto& w : parser.warnings()) {
                 std::cerr << w << "\n";
@@ -2955,17 +2996,14 @@ int main(int argc, char* argv[]) {
             // For compile/run with --dry-run: lex, parse, codegen but don't write files.
             auto lexStart = std::chrono::steady_clock::now();
             std::string source = readSourceFile(sourceFile);
-            omscript::Preprocessor pp(sourceFile);
-            source = pp.process(source);
-            for (const auto& w : pp.warnings()) {
-                std::cerr << w << "\n";
-            }
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
             auto lexEnd = std::chrono::steady_clock::now();
 
             auto parseStart = std::chrono::steady_clock::now();
             omscript::Parser parser(tokens);
+            parser.setSourceFile(sourceFile);
+            applyUserDefines(parser);
             auto program = parser.parse();
             for (const auto& w : parser.warnings()) {
                 std::cerr << w << "\n";
@@ -3004,14 +3042,11 @@ int main(int argc, char* argv[]) {
         if (emitObjOnly) {
             // Compile to object file only (no linking).
             std::string source = readSourceFile(sourceFile);
-            omscript::Preprocessor pp(sourceFile);
-            source = pp.process(source);
-            for (const auto& w : pp.warnings()) {
-                std::cerr << w << "\n";
-            }
             omscript::Lexer lexer(source);
             auto tokens = lexer.tokenize();
             omscript::Parser parser(tokens);
+            parser.setSourceFile(sourceFile);
+            applyUserDefines(parser);
             auto program = parser.parse();
             for (const auto& w : parser.warnings()) {
                 std::cerr << w << "\n";
@@ -3066,6 +3101,25 @@ int main(int argc, char* argv[]) {
         compiler.setDebugMode(flagDebug);
         compiler.setNoOwnershipChecks(flagNoOwnershipChecks);
         compiler.setMemSanitize(flagMemSanitize);
+        // Inject -D defines as comptime constants.
+        for (const auto& [name, value] : userDefines) {
+            if (value.empty()) {
+                compiler.addDefine(name, 1);
+            } else {
+                // Try to parse as integer first; fall back to string.
+                try {
+                    size_t pos = 0;
+                    const long long ival = std::stoll(value, &pos);
+                    if (pos == value.size()) {
+                        compiler.addDefine(name, ival);
+                    } else {
+                        compiler.addDefineString(name, value);
+                    }
+                } catch (...) {
+                    compiler.addDefineString(name, value);
+                }
+            }
+        }
         if (quiet) {
             compiler.setVerbose(false);
             compiler.setQuiet(true);

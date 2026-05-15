@@ -32,13 +32,30 @@ class Parser {
         baseDir_ = dir;
     }
 
+    /// Set the source file name, making it available as the built-in `FILE` comptime string.
+    void setSourceFile(const std::string& file) {
+        currentFile_ = file;
+    }
+
+    /// Inject an integer comptime constant before parsing begins.
+    /// Equivalent to prepending `comptime { const name: int = val; }` to the source.
+    /// Used to pass -D NAME[=VALUE] CLI flags.
+    void setComptimeInt(const std::string& name, long long val) {
+        comptimeConstants_[name] = val;
+    }
+
+    /// Inject a string comptime constant before parsing begins.
+    void setComptimeString(const std::string& name, const std::string& val) {
+        comptimeStrings_[name] = val;
+    }
+
     /// Returns collected parse errors (populated when multi-error mode is active).
     [[nodiscard]] const std::vector<std::string>& errors() const noexcept {
         return errors_;
     }
 
-    /// Returns non-fatal parse warnings (e.g. conflicting annotations, preprocessor
-    /// warnings from imported files).  Populated alongside errors() during parse().
+    /// Returns non-fatal parse warnings (e.g. conflicting annotations).
+    /// Populated alongside errors() during parse().
     [[nodiscard]] const std::vector<std::string>& warnings() const noexcept {
         return warnings_;
     }
@@ -86,6 +103,9 @@ class Parser {
     /// Base directory for resolving import paths.
     std::string baseDir_;
 
+    /// Source file name — exposed as the built-in `FILE` comptime string constant.
+    std::string currentFile_;
+
     /// Set of already-imported file paths (prevents circular imports).
     std::shared_ptr<std::unordered_set<std::string>> importedFiles_;
 
@@ -122,6 +142,8 @@ class Parser {
     std::unique_ptr<Statement> parseReturnStmt();
     std::unique_ptr<Statement> parseBreakStmt();
     std::unique_ptr<Statement> parseContinueStmt();
+    std::unique_ptr<Statement> parseJmpStmt();
+    std::unique_ptr<Statement> parseLabelStmt();
     std::unique_ptr<Statement> parseSwitchStmt();
     std::unique_ptr<Statement> parseCatchStmt();
     std::unique_ptr<Statement> parseThrowStmt();
@@ -143,6 +165,7 @@ class Parser {
     std::unique_ptr<Statement> parseWithStmt();
     std::unique_ptr<Statement> parsePipelineStmt();
     std::vector<std::unique_ptr<Statement>> parseDestructuringDecl(bool isConst);
+    std::vector<std::unique_ptr<Statement>> parseTupleDestructuringDecl(bool isConst);
     std::unique_ptr<EnumDecl> parseEnumDecl();
     std::unique_ptr<StructDecl> parseStructDecl(StructRepr repr = StructRepr::Auto, int reprAlignN = 0);
     std::unique_ptr<Expression> parseStructLiteral(const std::string& name, int line, int col);
@@ -181,6 +204,7 @@ class Parser {
     /// Pre-scan all tokens for `operator SYMBOL (` patterns and populate
     /// customOperatorSymbols_ before the main parse pass.
     void prescanCustomOperators();
+    void prescanFunctionParams();
 
     /// Try to match a registered custom operator at the current token position.
     /// Returns the longest matching operator symbol string, or "" if none match.
@@ -196,6 +220,11 @@ class Parser {
 
     /// Known enum names for scope resolution validation.
     std::unordered_set<std::string> enumNames_;
+
+    /// Parameter names for user-defined functions, populated during the
+    /// forward-declaration pre-scan pass.  Used to resolve named call
+    /// arguments: foo(height: 3, width: 4) → reorder to match decl order.
+    std::unordered_map<std::string, std::vector<std::string>> funcParamNames_;
 
     /// Namespace registry populated by 'import "file" as alias' statements.
     ///
@@ -247,13 +276,21 @@ class Parser {
     std::unique_ptr<Expression> parseAddition();
     std::unique_ptr<Expression> parseMultiplication();
     std::unique_ptr<Expression> parsePower();
+    std::unique_ptr<Expression> parseCast();
     std::unique_ptr<Expression> parseUnary();
     std::unique_ptr<Expression> parsePostfix();
     std::unique_ptr<Expression> parseCall();
     std::unique_ptr<Expression> parsePrimary();
     std::unique_ptr<Expression> parseArrayLiteral();
     std::unique_ptr<Expression> parseLambda();
+    std::unique_ptr<Expression> parseArrowLambda(const std::vector<std::string>& params,
+                                                  const std::vector<std::string>& paramTypes, const Token& arrowTok);
+    std::unique_ptr<Expression> parseSwitchExpr();
     std::unique_ptr<Expression> parsePipe();
+
+    /// Returns true when the current token is '(' and the matching ')'
+    /// is immediately followed by '=>' (FAT_ARROW) — indicating an arrow lambda.
+    bool isArrowLambdaParens() const;
 
     /// Parse a type annotation (e.g. "int", "int[]", "string[][]", "Point").
     std::string parseTypeAnnotation();

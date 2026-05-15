@@ -1,0 +1,45 @@
+// jmp_test.om — exercises the `jmp` keyword (deprecated unconditional jump).
+//
+// Expected behaviour:
+//   1. Forward jump: skip an unreachable block.
+//   2. Backward jump: manual counted loop (accumulate 1+2+3+4 = 10).
+//   3. Chained forward jumps.
+//
+// Exit code encodes: pass1 + pass2 + pass3 = 1 + 4 + 2 = 7
+
+fn main() -> int {
+    var score: int = 0;
+
+    // ── test 1: simple forward jump skips unreachable code ────────────────
+    jmp skip_block;
+    score = score + 99;   // must be skipped
+    label skip_block:
+    score = score + 1;    // score == 1
+
+    // ── test 2: backward jump implements a counted loop ───────────────────
+    //   Accumulate i = 1..4 into total: expected 10.
+    var i: int = 1;
+    var total: int = 0;
+
+    label loop_top:
+    total = total + i;
+    i = i + 1;
+    if (i <= 4) {
+        jmp loop_top;
+    }
+    // total == 10; encode as pass2 = (total == 10) ? 4 : 0
+    if (total == 10) {
+        score = score + 4;
+    }
+
+    // ── test 3: chained forward jumps ─────────────────────────────────────
+    jmp chain_a;
+    score = score + 88;   // skipped
+    label chain_a:
+    jmp chain_b;
+    score = score + 77;   // skipped
+    label chain_b:
+    score = score + 2;    // score += 2
+
+    return score;   // expected: 1 + 4 + 2 = 7
+}

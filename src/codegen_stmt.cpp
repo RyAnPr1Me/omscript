@@ -253,6 +253,26 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                 }
             }
             initValue = generateExpression(stmt->initializer.get());
+            // Fix: if this is a funcptr variable and the initializer is a string
+            // literal (from a lambda desugaring, e.g. |x| x*2 → "__lambda_0"),
+            // resolve the string name to the actual LLVM Function* so that the
+            // variable holds a callable function pointer rather than a data pointer.
+            // Use stmt->typeName directly since funcptrVarNames_ is populated later.
+            if (stmt->typeName == "funcptr" && initValue &&
+                stmt->initializer->type == ASTNodeType::LITERAL_EXPR) {
+                auto* lit = static_cast<LiteralExpr*>(stmt->initializer.get());
+                if (lit->literalType == LiteralExpr::LiteralType::STRING) {
+                    const std::string& fnName = lit->stringValue;
+                    llvm::Function* targetFn = module->getFunction(fnName);
+                    if (!targetFn && functionDecls_.count(fnName)) {
+                        llvm::FunctionType* fty =
+                            llvm::FunctionType::get(getDefaultType(), /*Params=*/{}, /*isVarArg=*/false);
+                        targetFn = llvm::Function::Create(fty, llvm::Function::ExternalLinkage, fnName, module.get());
+                    }
+                    if (targetFn)
+                        initValue = targetFn;
+                }
+            }
             if (useReadOnlyGlobal) {
                 pendingArrayReadOnlyGlobal_ = false;
                 readOnlyGlobalArrays_.insert(stmt->name);
@@ -275,7 +295,8 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         // fat-pointer layout ([ len | cap | data... ]) we cannot use strdup
         // (which interprets the header bytes as a C string).  Instead allocate
         // a new fat-pointer block and memcpy the data.
-        if (!stmt->isConst && stmt->initializer->type == ASTNodeType::LITERAL_EXPR &&
+        if (!stmt->isConst && stmt->typeName != "funcptr" &&
+            stmt->initializer->type == ASTNodeType::LITERAL_EXPR &&
             static_cast<LiteralExpr*>(stmt->initializer.get())->literalType == LiteralExpr::LiteralType::STRING) {
             if (doesVarHaveOnlyReadOnlyUses(stmt->name)) {
                 // Static: use the literal pointer directly — no allocation.
@@ -525,6 +546,8 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
                     call->callee == "array_rotate" || call->callee == "array_zip" || call->callee == "array_take" ||
                     call->callee == "array_drop" || call->callee == "range" || call->callee == "range_step" ||
                     call->callee == "str_split" || call->callee == "str_chars" ||
+                    call->callee == "array_sorted" || call->callee == "array_reverse" ||
+                    call->callee == "str_words" ||
                     arrayReturningFunctions_.count(call->callee)) {
                     isArray = true;
                 }
@@ -580,6 +603,16 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
     }
 
     bindVariableAnnotated(stmt->name, alloca, stmt->typeName, stmt->isConst);
+
+    // Track tuple-typed variables so field access (.0, .1, ...) can recover the struct type.
+    if (stmt->typeName.rfind("tuple<", 0) == 0 && stmt->typeName.back() == '>') {
+        tupleVarTypes_[stmt->name] = stmt->typeName;
+        // Eagerly populate the struct-type cache so generateFieldAccess never misses.
+        if (!tupleAnnotStructTypes_.count(stmt->typeName))
+            resolveAnnotatedType(stmt->typeName); // side-effect: caches the struct type
+    } else {
+        tupleVarTypes_.erase(stmt->name);
+    }
 
     // If the initializer was a borrow expression, register the alias mapping
     if (stmt->initializer && stmt->initializer->type == ASTNodeType::BORROW_EXPR) {
@@ -1192,6 +1225,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         builder->CreateBr(bodyBB);
         builder->SetInsertPoint(bodyBB);
         loopStack.push_back({endBB, bodyBB});
+        loopStack.back().label = stmt->label;
         auto savedLenCacheWI = std::move(loopArrayLenCache_);
         loopArrayLenCache_.clear();
         generateStatement(stmt->body.get());
@@ -1269,6 +1303,7 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     // Body block
     builder->SetInsertPoint(bodyBB);
     loopStack.push_back({endBB, condBB});
+    loopStack.back().label = stmt->label;
 
     auto savedLenCacheW = std::move(loopArrayLenCache_);
     loopArrayLenCache_.clear();
@@ -1403,6 +1438,7 @@ void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
     // Body block
     builder->SetInsertPoint(bodyBB);
     loopStack.push_back({endBB, condBB});
+    loopStack.back().label = stmt->label;
     auto savedLenCacheDW = std::move(loopArrayLenCache_);
     loopArrayLenCache_.clear();
     generateStatement(stmt->body.get());
@@ -1890,6 +1926,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     }
 
     loopStack.push_back({endBB, incBB});
+    loopStack.back().label = stmt->label;
     // Clear per-iteration array length cache so inner-body bounds checks
     // get fresh values.  Save outer cache for nested loop restore.
     auto savedLenCache = std::move(loopArrayLenCache_);
@@ -2348,6 +2385,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
             builder->CreateAlignedStore(iterVal, iterAllocaR, iterAllocaR->getAlign());
 
             loopStack.push_back({endBBR, incBBR});
+            loopStack.back().label = stmt->label;
             auto savedLenCacheR = std::move(loopArrayLenCache_);
             loopArrayLenCache_.clear();
             generateStatement(stmt->body.get());
@@ -2526,6 +2564,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     }
 
     loopStack.push_back({endBB, incBB});
+    loopStack.back().label = stmt->label;
     auto savedLenCacheFE = std::move(loopArrayLenCache_);
     loopArrayLenCache_.clear();
     generateStatement(stmt->body.get());
@@ -4527,6 +4566,87 @@ std::unordered_map<std::string, bool> CodeGenerator::preScanLoopArrayAccesses(co
     std::unordered_set<std::string> badArrays;
     scanStmtForArrayAccesses(body, iterVar, goodArrays, badArrays);
     return goodArrays;
+}
+
+// ── jmp / label codegen ──────────────────────────────────────────────────────
+
+void CodeGenerator::prescanLabels(Statement* body, llvm::Function* fn) {
+    if (!body) return;
+    if (body->type == ASTNodeType::LABEL_STMT) {
+        const auto* ls = static_cast<const LabelStmt*>(body);
+        const std::string bbName = "label." + ls->labelName;
+        if (!labelBlocks_.count(ls->labelName)) {
+            auto* bb = llvm::BasicBlock::Create(*context, bbName, fn);
+            labelBlocks_[ls->labelName] = bb;
+        }
+        return;
+    }
+    // Recurse into compound statements.
+    switch (body->type) {
+    case ASTNodeType::BLOCK:
+        for (const auto& s : static_cast<const BlockStmt*>(body)->statements)
+            prescanLabels(s.get(), fn);
+        break;
+    case ASTNodeType::IF_STMT: {
+        const auto* is = static_cast<const IfStmt*>(body);
+        prescanLabels(is->thenBranch.get(), fn);
+        prescanLabels(is->elseBranch.get(), fn);
+        break;
+    }
+    case ASTNodeType::WHILE_STMT:
+        prescanLabels(static_cast<const WhileStmt*>(body)->body.get(), fn);
+        break;
+    case ASTNodeType::DO_WHILE_STMT:
+        prescanLabels(static_cast<const DoWhileStmt*>(body)->body.get(), fn);
+        break;
+    case ASTNodeType::FOR_STMT:
+        prescanLabels(static_cast<const ForStmt*>(body)->body.get(), fn);
+        break;
+    case ASTNodeType::FOR_EACH_STMT:
+        prescanLabels(static_cast<const ForEachStmt*>(body)->body.get(), fn);
+        break;
+    default:
+        break;
+    }
+}
+
+void CodeGenerator::generateJmp(JmpStmt* stmt) {
+    // Look up the pre-created target BasicBlock.
+    auto it = labelBlocks_.find(stmt->targetLabel);
+    if (it == labelBlocks_.end()) {
+        // This should have been caught by the parser, but guard defensively.
+        codegenError("'jmp " + stmt->targetLabel + "': label '" + stmt->targetLabel +
+                         "' not found in current function (parser validation failed)",
+                     stmt);
+    }
+    llvm::BasicBlock* target = it->second;
+
+    // Terminate the current block with an unconditional branch.
+    if (!builder->GetInsertBlock()->getTerminator())
+        builder->CreateBr(target);
+
+    // Any statements after an unconditional jmp in the same block are
+    // unreachable.  Create a new dead block so that subsequent generateStatement
+    // calls have a valid insert point (LLVM requires a current BB).
+    llvm::Function* fn = builder->GetInsertBlock()->getParent();
+    auto* deadBB = llvm::BasicBlock::Create(*context, "jmp.dead", fn);
+    builder->SetInsertPoint(deadBB);
+}
+
+void CodeGenerator::generateLabel(LabelStmt* stmt) {
+    auto it = labelBlocks_.find(stmt->labelName);
+    if (it == labelBlocks_.end()) {
+        codegenError("label '" + stmt->labelName + "' was not pre-scanned (internal compiler error)", stmt);
+    }
+    llvm::BasicBlock* labelBB = it->second;
+
+    // If the current block has no terminator, fall through into the label block
+    // with an unconditional branch (makes the CFG well-formed).
+    if (!builder->GetInsertBlock()->getTerminator())
+        builder->CreateBr(labelBB);
+
+    // Continue code generation in the label's block.
+    builder->SetInsertPoint(labelBB);
 }
 
 } // namespace omscript

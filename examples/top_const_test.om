@@ -1,0 +1,46 @@
+import std;
+// top_const_test.om — Round-69b
+//
+// Verifies that top-level  const NAME [: TYPE] = VALUE;  works as a shorthand
+// for  global const NAME [: TYPE] = VALUE;
+//
+// Expected exit code = 10
+
+const PI: f64 = 3.14159265358979;
+const E: f64  = 2.71828182845905;
+const ANSWER: int = 42;
+const GREETING: string = "hello";
+const FLAG: bool = true;
+
+fn circle_area(r: f64) -> f64 {
+    return PI * r * r;
+}
+
+fn main() -> int {
+    var score: int = 0;
+
+    // T1: integer const
+    score += (ANSWER == 42);
+
+    // T2: float const in expression
+    score += (PI > 3.14);
+    score += (E > 2.71);
+
+    // T3: const used in function call
+    var area: f64 = circle_area(1.0);
+    score += (area > 3.14 && area < 3.15);
+
+    // T4: string const
+    score += (GREETING == "hello");
+    score += (len(GREETING) == 5);
+
+    // T5: bool const
+    score += (FLAG == true);
+    score += (!FLAG == false);
+
+    // T6: arithmetic with consts
+    score += (ANSWER * 2 == 84);
+    score += (ANSWER - 2 == 40);
+
+    return score;
+}

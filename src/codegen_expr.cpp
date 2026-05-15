@@ -636,6 +636,11 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
                 return builder->CreateLoad(gv->getValueType(), gv, expr->name);
             }
         }
+        // NULL — C-style null pointer constant (zero-value ptr)
+        if (expr->name == "NULL" || expr->name == "nullptr") {
+            return llvm::ConstantPointerNull::get(
+                llvm::PointerType::getUnqual(*context));
+        }
         // Predefined integer range constants: INTTYPE_MAX, INTTYPE_MIN, UINTTYPE_MAX.
         // Supported names: I{N}_MAX, I{N}_MIN, U{N}_MAX, INT_MAX, INT_MIN, UINT_MAX,
         // BOOL_MAX, BOOL_MIN, and common aliases (INT8_MAX etc.).
@@ -643,6 +648,27 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
             llvm::Value* rangeConst = tryResolvePredefinedConstant(expr->name, expr);
             if (rangeConst)
                 return rangeConst;
+        }
+        // Bare function name used as a first-class value — implicit funcptr_from.
+        // When the identifier names a known function (in functionDecls_ or already
+        // emitted into the module), return the LLVM Function* directly so that it
+        // can be stored in a fn(…)->… variable or passed as a call argument.
+        //
+        // Example:  var fp: fn(int)->int = double_it;
+        //           apply(triple, 5);           // pass fn by name
+        {
+            const bool isFnDecl = functionDecls_.count(expr->name) != 0;
+            if (isFnDecl || module->getFunction(expr->name)) {
+                llvm::Function* targetFn = module->getFunction(expr->name);
+                if (!targetFn) {
+                    // Forward-declare with a generic signature; the linker resolves it.
+                    llvm::FunctionType* fty =
+                        llvm::FunctionType::get(getDefaultType(), /*Params=*/{}, /*isVarArg=*/false);
+                    targetFn = llvm::Function::Create(fty, llvm::Function::ExternalLinkage,
+                                                      expr->name, module.get());
+                }
+                return targetFn;
+            }
         }
         // Build "did you mean?" suggestion from known variables.
         std::string msg = "Unknown variable: " + expr->name;
@@ -710,8 +736,15 @@ llvm::Value* CodeGenerator::generateIdentifier(IdentifierExpr* expr) {
 
     // Register-promotion strategy: prefetched variables go straight to
     auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(it->second);
+    auto* globalVar = llvm::dyn_cast<llvm::GlobalVariable>(it->second);
 
-    llvm::Type* loadType = alloca ? alloca->getAllocatedType() : getDefaultType();
+    // For global variables, use their declared value type so that e.g.
+    // string globals (ptr-typed) are loaded as ptr rather than defaulting
+    // to i64.  For ordinary allocas use the alloca's element type.
+    // Everything else (e.g. prefetched function args) falls back to i64.
+    llvm::Type* loadType = alloca      ? alloca->getAllocatedType()
+                           : globalVar ? globalVar->getValueType()
+                                       : getDefaultType();
 
     const bool isVol = volatileVars_.count(expr->name) != 0;
     const bool isAtom = atomicVars_.count(expr->name) != 0;
@@ -1856,6 +1889,47 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
         // fall through to the integer path.
     }
 
+    // ── Pointer arithmetic (must precede the ptrtoint fallback below) ──────────
+    // ptr - ptr: signed byte distance (ptrdiff_t semantics).
+    if (expr->op == "-" && left->getType()->isPointerTy() && right->getType()->isPointerTy()) {
+        const llvm::DataLayout& DL = module->getDataLayout();
+        llvm::Type* intptrTy = DL.getIntPtrType(*context);
+        auto* lInt = builder->CreatePtrToInt(left, intptrTy, "ptrdiff.l");
+        auto* rInt = builder->CreatePtrToInt(right, intptrTy, "ptrdiff.r");
+        auto* diff = builder->CreateSub(lInt, rInt, "ptrdiff");
+        if (diff->getType() != getDefaultType())
+            diff = builder->CreateSExt(diff, getDefaultType(), "ptrdiff.ext");
+        return diff;
+    }
+    // ptr ± int: element-aware GEP advance/retreat.
+    auto emitPtrArith = [&](llvm::Value* ptrVal, llvm::Value* intVal, bool negate,
+                             const Expression* ptrExpr) -> llvm::Value* {
+        const llvm::DataLayout& DL = module->getDataLayout();
+        llvm::Type* idxTy = DL.getIndexType(ptrVal->getType());
+        llvm::Value* offset = intVal;
+        if (offset->getType()->isDoubleTy() || offset->getType()->isFloatTy())
+            offset = builder->CreateFPToSI(offset, idxTy, "ptrarith.ftoi");
+        if (negate)
+            offset = builder->CreateNeg(offset, "ptrarith.neg");
+        offset = builder->CreateIntCast(offset, idxTy, /*isSigned=*/true, "ptrarith.idx");
+        llvm::Type* gepElemTy = llvm::Type::getInt8Ty(*context);
+        if (ptrExpr && ptrExpr->type == ASTNodeType::IDENTIFIER_EXPR) {
+            const auto* id = static_cast<const IdentifierExpr*>(ptrExpr);
+            auto it = ptrElemTypes_.find(id->name);
+            if (it != ptrElemTypes_.end())
+                gepElemTy = resolveAnnotatedType(it->second);
+        }
+        return builder->CreateGEP(gepElemTy, ptrVal, offset, "ptrarith");
+    };
+    if ((expr->op == "+" || expr->op == "-") && left->getType()->isPointerTy() &&
+        right->getType()->isIntegerTy()) {
+        return emitPtrArith(left, right, expr->op == "-", expr->left.get());
+    }
+    // int + ptr: commutative form (no subtraction allowed in C here).
+    if (expr->op == "+" && right->getType()->isPointerTy() && left->getType()->isIntegerTy()) {
+        return emitPtrArith(right, left, false, expr->right.get());
+    }
+
     // Convert pointer types to i64 for integer operations (fallback).
     // For comparison operators between two pointers, prefer direct pointer icmp
     // to preserve provenance and avoid unnecessary ptrtoint round-trips.
@@ -1973,8 +2047,9 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
     if (left->getType()->isIntegerTy() && right->getType()->isIntegerTy() && left->getType() != right->getType()) {
         const unsigned leftBits = left->getType()->getIntegerBitWidth();
         const unsigned rightBits = right->getType()->getIntegerBitWidth();
-        const bool leftUnsigned = unsignedExprs_.count(left) || isUnsignedValue(left);
-        const bool rightUnsigned = unsignedExprs_.count(right) || isUnsignedValue(right);
+        // i1 (bool) is always logically 0 or 1; zero-extend it like an unsigned type.
+        const bool leftUnsigned = (leftBits == 1) || unsignedExprs_.count(left) || isUnsignedValue(left);
+        const bool rightUnsigned = (rightBits == 1) || unsignedExprs_.count(right) || isUnsignedValue(right);
         if (leftBits < rightBits) {
             if (leftUnsigned) {
                 left = builder->CreateZExt(left, right->getType(), "zext",
@@ -5019,6 +5094,14 @@ llvm::Value* CodeGenerator::generateUnary(UnaryExpr* expr) {
             auto* idExpr = static_cast<IdentifierExpr*>(expr->operand.get());
             auto it = namedValues.find(idExpr->name);
             if (it != namedValues.end() && it->second) {
+                // For struct variables, the alloca holds a ptr to the struct
+                // data (double-indirection).  &struct_var must yield the address
+                // of the struct data, i.e. the VALUE stored in the alloca.
+                if (structVars_.count(idExpr->name)) {
+                    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+                    return builder->CreateAlignedLoad(ptrTy, it->second, llvm::MaybeAlign(8),
+                                                      (idExpr->name + ".addr").c_str());
+                }
                 // namedValues stores AllocaInst* or GlobalVariable* — both are
                 // already pointer-typed values.
                 return it->second;
@@ -5420,8 +5503,82 @@ llvm::Value* CodeGenerator::generateIncDec(Expression* operandExpr, const std::s
     }
 
     // Handle array element increment/decrement: arr[i]++ / ++arr[i]
-    if (operandExpr->type != ASTNodeType::INDEX_EXPR && operandExpr->type != ASTNodeType::IDENTIFIER_EXPR) {
+    if (operandExpr->type != ASTNodeType::INDEX_EXPR &&
+        operandExpr->type != ASTNodeType::IDENTIFIER_EXPR &&
+        operandExpr->type != ASTNodeType::FIELD_ACCESS_EXPR &&
+        !(operandExpr->type == ASTNodeType::UNARY_EXPR &&
+          static_cast<const UnaryExpr*>(operandExpr)->op == "deref")) {
         codegenError("Increment/decrement operators require an lvalue operand", errorNode);
+    }
+
+    // ── Deref inc/dec: (*p)++ / ++(*p) ──────────────────────────────────────
+    if (operandExpr->type == ASTNodeType::UNARY_EXPR &&
+        static_cast<const UnaryExpr*>(operandExpr)->op == "deref") {
+        auto* ue = static_cast<const UnaryExpr*>(operandExpr);
+        llvm::Value* ptrVal = generateExpression(ue->operand.get());
+        auto* opaquePtrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* addr =
+            ptrVal->getType()->isPointerTy()
+                ? ptrVal
+                : builder->CreateIntToPtr(ptrVal, opaquePtrTy, "incdec.deref.addr");
+        llvm::Value* current =
+            builder->CreateAlignedLoad(getDefaultType(), addr, llvm::MaybeAlign(8), "incdec.deref.val");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(current)->setMetadata(llvm::LLVMContext::MD_noundef,
+                                                                llvm::MDNode::get(*context, {}));
+        llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
+        llvm::Value* updated = (op == "++")
+                                   ? builder->CreateAdd(current, delta, "incdec.deref.inc",
+                                                        /*HasNUW=*/false, /*HasNSW=*/true)
+                                   : builder->CreateSub(current, delta, "incdec.deref.dec",
+                                                        /*HasNUW=*/false, /*HasNSW=*/true);
+        builder->CreateAlignedStore(updated, addr, llvm::MaybeAlign(8));
+        return isPostfix ? current : updated;
+    }
+
+    // ── Field access inc/dec: s.field++ / ++s.field ─────────────────────────
+    if (operandExpr->type == ASTNodeType::FIELD_ACCESS_EXPR) {
+        auto* fa = static_cast<const FieldAccessExpr*>(operandExpr);
+        const std::string structHint = resolveStructType(fa->object.get());
+        const ResolvedField rf = resolveField(structHint, fa->fieldName, errorNode);
+
+        llvm::Value* objVal = generateExpression(fa->object.get());
+        auto* opaquePtrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* basePtr = objVal->getType()->isPointerTy()
+                                   ? objVal
+                                   : builder->CreateIntToPtr(objVal, opaquePtrTy, "incdec.field.base");
+
+        llvm::Type* elemTy = rf.fieldType ? rf.fieldType : getDefaultType();
+        llvm::Value* elemPtr;
+        if (rf.structType) {
+            elemPtr = builder->CreateStructGEP(rf.structType, basePtr, static_cast<unsigned>(rf.index),
+                                               "incdec.field.ptr");
+        } else {
+            elemPtr = builder->CreateInBoundsGEP(
+                getDefaultType(), basePtr, llvm::ConstantInt::get(getDefaultType(), rf.index), "incdec.field.ptr");
+        }
+        const llvm::Align fieldAlign = module->getDataLayout().getABITypeAlign(elemTy);
+        llvm::Value* current =
+            builder->CreateAlignedLoad(elemTy, elemPtr, fieldAlign, "incdec.field.val");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(current)->setMetadata(llvm::LLVMContext::MD_noundef,
+                                                                llvm::MDNode::get(*context, {}));
+        // Lift to i64 for arithmetic (field may be i8/i32 etc.)
+        llvm::Value* widened = (elemTy == getDefaultType())
+                                   ? current
+                                   : builder->CreateSExt(current, getDefaultType(), "incdec.field.widen");
+        llvm::Value* delta = llvm::ConstantInt::get(getDefaultType(), 1, true);
+        llvm::Value* updatedWide = (op == "++")
+                                       ? builder->CreateAdd(widened, delta, "incdec.field.inc",
+                                                            /*HasNUW=*/false, /*HasNSW=*/true)
+                                       : builder->CreateSub(widened, delta, "incdec.field.dec",
+                                                            /*HasNUW=*/false, /*HasNSW=*/true);
+        llvm::Value* updated = (elemTy == getDefaultType())
+                                   ? updatedWide
+                                   : builder->CreateTrunc(updatedWide, elemTy, "incdec.field.trunc");
+        builder->CreateAlignedStore(updated, elemPtr, fieldAlign);
+        // Return wide (i64) value to match the convention of generateFieldAccess.
+        return isPostfix ? widened : updatedWide;
     }
     IndexExpr* indexExpr =
         (operandExpr->type == ASTNodeType::INDEX_EXPR) ? static_cast<IndexExpr*>(operandExpr) : nullptr;
@@ -6200,6 +6357,33 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
 
     idxVal = toDefaultType(idxVal);
 
+    // ── Typed pointer indexed access: p[i] on *T / ptr<T> variables ──────────
+    // C semantics: p[i]  ≡  *(p + i) — raw GEP+load, no bounds check, no
+    // OmScript array-header offset.  Applies whenever the base expression is a
+    // variable tracked in ptrVarNames_ (i.e. declared as ptr<T> / *T).
+    if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const std::string& ptrName = static_cast<IdentifierExpr*>(expr->array.get())->name;
+        if (ptrVarNames_.count(ptrName) && !psliceVarNames_.count(ptrName)) {
+            // Determine the element type from ptrElemTypes_.
+            llvm::Type* elemTy = getDefaultType();
+            auto elemIt = ptrElemTypes_.find(ptrName);
+            if (elemIt != ptrElemTypes_.end() && elemIt->second != "ptr")
+                elemTy = resolveAnnotatedType(elemIt->second);
+            // Ensure the pointer is an LLVM pointer type.
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            llvm::Value* base =
+                arrVal->getType()->isPointerTy() ? arrVal
+                                                 : builder->CreateIntToPtr(arrVal, ptrTy, "ptridx.baseptr");
+            // GEP into the i-th element (identical to C pointer indexing).
+            llvm::Value* elemPtr = builder->CreateInBoundsGEP(elemTy, base, idxVal, "ptridx.elemptr");
+            auto* elemLoad = builder->CreateLoad(elemTy, elemPtr, "ptridx.load");
+            // Widen narrow integers to i64 for consistent downstream types.
+            if (elemTy->isIntegerTy() && elemTy != getDefaultType())
+                return builder->CreateSExt(elemLoad, getDefaultType(), "ptridx.widen");
+            return elemLoad;
+        }
+    }
+
     // ── pslice indexed access: bounds-checked element load ───────────────────
     // For a variable declared as `pslice<T>`, p[i] emits a compile-time check
     // when both i and the slice length are constants; otherwise emits a runtime
@@ -6460,6 +6644,36 @@ llvm::Value* CodeGenerator::generateIndexAssign(IndexAssignExpr* expr) {
     newVal = toDefaultType(newVal);
     idxVal = toDefaultType(idxVal);
 
+    // ── Typed pointer indexed store: p[i] = val on *T / ptr<T> variables ──────
+    // C semantics: p[i] = val  ≡  *(p + i) = val — raw GEP+store, no bounds
+    // check, no OmScript array-header offset.
+    if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const std::string& ptrName = static_cast<IdentifierExpr*>(expr->array.get())->name;
+        if (ptrVarNames_.count(ptrName) && !psliceVarNames_.count(ptrName)) {
+            llvm::Type* elemTy = getDefaultType();
+            auto elemIt = ptrElemTypes_.find(ptrName);
+            if (elemIt != ptrElemTypes_.end() && elemIt->second != "ptr")
+                elemTy = resolveAnnotatedType(elemIt->second);
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            llvm::Value* base =
+                arrVal->getType()->isPointerTy() ? arrVal
+                                                 : builder->CreateIntToPtr(arrVal, ptrTy, "ptridxs.baseptr");
+            llvm::Value* elemPtr = builder->CreateInBoundsGEP(elemTy, base, idxVal, "ptridxs.elemptr");
+            // Truncate/extend value to match element storage type.
+            llvm::Value* storeVal = newVal;
+            if (storeVal->getType() != elemTy) {
+                if (elemTy->isIntegerTy() && storeVal->getType()->isIntegerTy())
+                    storeVal = builder->CreateIntCast(storeVal, elemTy, /*isSigned=*/true, "ptridxs.cast");
+                else if (elemTy->isFloatingPointTy() && storeVal->getType()->isIntegerTy())
+                    storeVal = builder->CreateSIToFP(storeVal, elemTy, "ptridxs.itofp");
+                else if (elemTy->isIntegerTy() && storeVal->getType()->isFloatingPointTy())
+                    storeVal = builder->CreateFPToSI(storeVal, elemTy, "ptridxs.ftoi");
+            }
+            builder->CreateStore(storeVal, elemPtr);
+            return newVal;
+        }
+    }
+
     // ── pslice indexed store: p[i] = val with bounds check ───────────────────
     if (expr->array->type == ASTNodeType::IDENTIFIER_EXPR) {
         const std::string& sliceName = static_cast<IdentifierExpr*>(expr->array.get())->name;
@@ -6691,6 +6905,34 @@ CodeGenerator::ResolvedField CodeGenerator::resolveField(const std::string& stru
     return rf;
 }
 
+llvm::Value* CodeGenerator::generateTuple(TupleExpr* expr) {
+    // Build the LLVM anonymous struct type from the element types.
+    std::vector<llvm::Value*> vals;
+    std::vector<llvm::Type*> types;
+    vals.reserve(expr->elements.size());
+    types.reserve(expr->elements.size());
+    for (auto& elem : expr->elements) {
+        llvm::Value* v = generateExpression(elem.get());
+        vals.push_back(v);
+        types.push_back(v->getType());
+    }
+    llvm::StructType* structTy = llvm::StructType::get(*context, types);
+
+    // Allocate the tuple on the entry block (like structs) and store each field.
+    llvm::Function* curFn = builder->GetInsertBlock()->getParent();
+    llvm::IRBuilder<> entryBuilder(&curFn->getEntryBlock(),
+                                   curFn->getEntryBlock().begin());
+    llvm::AllocaInst* alloca = entryBuilder.CreateAlloca(structTy, nullptr, "tuple.alloca");
+    alloca->setAlignment(module->getDataLayout().getPrefTypeAlign(structTy));
+
+    for (unsigned i = 0; i < vals.size(); ++i) {
+        llvm::Value* gep = builder->CreateStructGEP(structTy, alloca, i, "tuple.init.ptr");
+        llvm::Align al = module->getDataLayout().getABITypeAlign(types[i]);
+        builder->CreateAlignedStore(vals[i], gep, al);
+    }
+    return alloca;
+}
+
 llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
     auto it = structDefs_.find(expr->structName);
     if (it == structDefs_.end()) {
@@ -6764,6 +7006,60 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
 }
 
 llvm::Value* CodeGenerator::generateFieldAccess(FieldAccessExpr* expr) {
+    // ── Tuple element access: t.0, t.1, ... ─────────────────────────────────
+    // If the field name is a non-negative integer, treat it as a tuple element index.
+    {
+        bool allDigits = !expr->fieldName.empty();
+        for (char ch : expr->fieldName)
+            if (!std::isdigit(static_cast<unsigned char>(ch))) { allDigits = false; break; }
+        if (allDigits) {
+            unsigned idx = static_cast<unsigned>(std::stoul(expr->fieldName));
+            // Determine the tuple struct type from the object's annotation.
+            std::string tupleAnn;
+            if (expr->object->type == ASTNodeType::IDENTIFIER_EXPR) {
+                const auto& name = static_cast<IdentifierExpr*>(expr->object.get())->name;
+                auto it = tupleVarTypes_.find(name);
+                if (it != tupleVarTypes_.end())
+                    tupleAnn = it->second;
+            }
+            llvm::Value* objPtr = generateExpression(expr->object.get());
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            if (!objPtr->getType()->isPointerTy())
+                objPtr = builder->CreateIntToPtr(objPtr, ptrTy, "tuple.baseptr");
+            if (!tupleAnn.empty()) {
+                // Look up the cached LLVM StructType (resolveAnnotatedType returns ptr for tuples).
+                auto stIt = tupleAnnotStructTypes_.find(tupleAnn);
+                if (stIt != tupleAnnotStructTypes_.end()) {
+                    llvm::StructType* st = stIt->second;
+                    if (idx < st->getNumElements()) {
+                        llvm::Value* elemPtr = builder->CreateStructGEP(st, objPtr, idx, "tuple.elem.ptr");
+                        llvm::Type* elemTy = st->getElementType(idx);
+                        llvm::Align al = module->getDataLayout().getABITypeAlign(elemTy);
+                        return builder->CreateAlignedLoad(elemTy, elemPtr, al, "tuple.elem.val");
+                    }
+                } else {
+                    // Annotation not yet cached — populate it by calling resolveAnnotatedType
+                    // which has a side-effect of building and caching the struct type.
+                    resolveAnnotatedType(tupleAnn);
+                    auto stIt2 = tupleAnnotStructTypes_.find(tupleAnn);
+                    if (stIt2 != tupleAnnotStructTypes_.end()) {
+                        llvm::StructType* st = stIt2->second;
+                        if (idx < st->getNumElements()) {
+                            llvm::Value* elemPtr = builder->CreateStructGEP(st, objPtr, idx, "tuple.elem.ptr");
+                            llvm::Type* elemTy = st->getElementType(idx);
+                            llvm::Align al = module->getDataLayout().getABITypeAlign(elemTy);
+                            return builder->CreateAlignedLoad(elemTy, elemPtr, al, "tuple.elem.val");
+                        }
+                    }
+                }
+            }
+            // Fallback: GEP with default type when annotation is unavailable.
+            llvm::Value* elemPtr = builder->CreateInBoundsGEP(
+                getDefaultType(), objPtr, llvm::ConstantInt::get(getDefaultType(), idx), "tuple.elem.ptr");
+            return builder->CreateLoad(getDefaultType(), elemPtr, "tuple.elem.val");
+        }
+    }
+    // ── Regular struct field access ───────────────────────────────────────────
     const std::string structHint = resolveStructType(expr->object.get());
     const ResolvedField rf = resolveField(structHint, expr->fieldName, expr);
 

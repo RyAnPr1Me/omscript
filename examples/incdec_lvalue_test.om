@@ -1,0 +1,89 @@
+import std;
+
+struct Counter { count: int, step: int }
+struct Pair { a: int, b: int }
+
+fn Counter::tick(self: *Counter) {
+    self->count += self->step;
+}
+
+fn main() -> int {
+    var score: int = 0;
+
+    // T1: postfix ++ on (*p)
+    var x1: int = 5;
+    var p1: *int = &x1;
+    (*p1)++;
+    score += (x1 == 6);
+
+    // T2: prefix ++ on (*p)
+    var x2: int = 5;
+    var p2: *int = &x2;
+    ++(*p2);
+    score += (x2 == 6);
+
+    // T3: postfix -- on (*p)
+    var x3: int = 10;
+    var p3: *int = &x3;
+    (*p3)--;
+    score += (x3 == 9);
+
+    // T4: prefix -- on (*p)
+    var x4: int = 10;
+    var p4: *int = &x4;
+    --(*p4);
+    score += (x4 == 9);
+
+    // T5: postfix ++ preserves old value
+    var x5: int = 7;
+    var p5: *int = &x5;
+    var old5: int = (*p5)++;
+    score += (old5 == 7 && x5 == 8);
+
+    // T6: prefix ++ returns new value
+    var x6: int = 7;
+    var p6: *int = &x6;
+    var new6: int = ++(*p6);
+    score += (new6 == 8 && x6 == 8);
+
+    // T7: s.field++ postfix
+    var c: Counter = Counter { count: 3, step: 1 };
+    c.count++;
+    score += (c.count == 4);
+
+    // T8: ++s.field prefix
+    var d: Counter = Counter { count: 3, step: 1 };
+    ++d.count;
+    score += (d.count == 4);
+
+    // T9: s.field-- postfix
+    var e: Pair = Pair { a: 10, b: 20 };
+    e.a--;
+    score += (e.a == 9);
+
+    // T10: --s.field prefix
+    var f: Pair = Pair { a: 10, b: 20 };
+    --f.b;
+    score += (f.b == 19);
+
+    // T11: multiple (*p)++ in a loop
+    var total: int = 0;
+    var pt: *int = &total;
+    var i: int = 0;
+    while (i < 5) {
+        (*pt)++;
+        i++;
+    }
+    score += (total == 5);
+
+    // T12: field++ inside loop
+    var c2: Counter = Counter { count: 0, step: 1 };
+    var j: int = 0;
+    while (j < 7) {
+        c2.count++;
+        j++;
+    }
+    score += (c2.count == 7);
+
+    return score;
+}

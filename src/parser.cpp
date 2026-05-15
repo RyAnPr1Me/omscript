@@ -1,7 +1,6 @@
 #include "parser.h"
 #include "diagnostic.h"
 #include "pass_utils.h" // isIntWidthTypeName, isKnownScalarTypeName
-#include "preprocessor.h"
 #include <filesystem>
 #include <fstream>
 #include <llvm/Support/ErrorHandling.h>
@@ -9,6 +8,10 @@
 #include <stdexcept>
 
 namespace omscript {
+
+/// Maximum number of hops followed when resolving a transitive type alias chain.
+/// Must match the same constant in codegen.cpp.
+static constexpr int kMaxTypeAliasHops = 32;
 
 Parser::Parser(const std::vector<Token>& tokens)
     : tokens(tokens), current(0), inOptMaxFunction(false),
@@ -360,10 +363,72 @@ void Parser::prescanCustomOperators() {
     current = saved;
 }
 
+// Pre-scan to collect parameter names for every user-defined function so
+// that named call arguments (e.g. foo(height: 3, width: 4)) can be reordered
+// to match the declaration order before building the CallExpr.
+void Parser::prescanFunctionParams() {
+    const size_t saved = current;
+    for (size_t i = 0; i + 2 < tokens.size(); ++i) {
+        // Match `fn` followed by an identifier (or ident :: ident for methods),
+        // then `(`.  Collect param names from `name :` pairs inside `(...)`.
+        if (tokens[i].type != TokenType::FN) continue;
+        // Advance past 'fn'
+        size_t j = i + 1;
+        // Skip optional attributes like @hot etc. — skip anything that's not an IDENTIFIER or SCOPE
+        while (j < tokens.size() && tokens[j].type == TokenType::AT) {
+            // skip @attr(...) block
+            j++; // skip '@'
+            if (j < tokens.size() && tokens[j].type == TokenType::IDENTIFIER) j++; // attr name
+            if (j < tokens.size() && tokens[j].type == TokenType::LPAREN) {
+                int depth = 1; j++;
+                while (j < tokens.size() && depth > 0) {
+                    if (tokens[j].type == TokenType::LPAREN) depth++;
+                    else if (tokens[j].type == TokenType::RPAREN) depth--;
+                    j++;
+                }
+            }
+        }
+        if (j >= tokens.size() || tokens[j].type != TokenType::IDENTIFIER) continue;
+        // Collect function name (may be  Name :: method)
+        std::string fnName = tokens[j].lexeme;
+        j++;
+        while (j + 1 < tokens.size() && tokens[j].type == TokenType::SCOPE &&
+               tokens[j+1].type == TokenType::IDENTIFIER) {
+            fnName += "::" + tokens[j+1].lexeme;
+            j += 2;
+        }
+        if (j >= tokens.size() || tokens[j].type != TokenType::LPAREN) continue;
+        j++; // skip '('
+        // Collect parameter names: `name :` patterns
+        std::vector<std::string> params;
+        int depth = 1;
+        while (j < tokens.size() && depth > 0) {
+            if (tokens[j].type == TokenType::RPAREN) {
+                depth--;
+                if (depth == 0) break;
+                j++; continue;
+            }
+            if (tokens[j].type == TokenType::LPAREN) { depth++; j++; continue; }
+            // A param name is an IDENTIFIER followed by COLON at depth == 1
+            if (depth == 1 && tokens[j].type == TokenType::IDENTIFIER &&
+                j + 1 < tokens.size() && tokens[j+1].type == TokenType::COLON) {
+                params.push_back(tokens[j].lexeme);
+            }
+            j++;
+        }
+        if (!params.empty()) {
+            funcParamNames_[fnName] = std::move(params);
+        }
+    }
+    current = saved;
+}
+
 std::unique_ptr<Program> Parser::parse() {
     // Pre-scan to collect custom operator symbols so that multi-token infix
     // operators (e.g. "<=>" or "^><") are recognisable during expression parsing.
     prescanCustomOperators();
+    // Pre-scan to collect function parameter names for named-argument support.
+    prescanFunctionParams();
 
     std::vector<std::unique_ptr<FunctionDecl>> functions;
     std::vector<std::unique_ptr<EnumDecl>> enums;
@@ -395,6 +460,32 @@ std::unique_ptr<Program> Parser::parse() {
             try {
                 auto gv = parseGlobalDecl();
                 globals.push_back(std::move(gv));
+            } catch (const std::exception& e) {
+                errors_.push_back(e.what());
+                synchronize();
+            }
+            continue;
+        }
+        // Top-level `const NAME [: TYPE] = VALUE;` — shorthand for `global const`.
+        // This is a common pattern; accept it to avoid confusing "Expected 'fn'" errors.
+        if (check(TokenType::CONST)) {
+            try {
+                advance(); // consume 'const'
+                const Token name = consume(TokenType::IDENTIFIER, "Expected variable name after 'const'");
+                std::string typeName;
+                if (match(TokenType::COLON)) {
+                    typeName = parseTypeAnnotation();
+                }
+                std::unique_ptr<Expression> init = nullptr;
+                if (match(TokenType::ASSIGN)) {
+                    init = parseExpression();
+                }
+                consume(TokenType::SEMICOLON, "Expected ';' after const declaration");
+                auto decl = std::make_unique<VarDecl>(name.lexeme, std::move(init), /*isConst=*/true, typeName);
+                decl->isGlobal = true;
+                decl->line = name.line;
+                decl->column = name.column;
+                globals.push_back(std::move(decl));
             } catch (const std::exception& e) {
                 errors_.push_back(e.what());
                 synchronize();
@@ -447,7 +538,15 @@ std::unique_ptr<Program> Parser::parse() {
         if (check(TokenType::COMPTIME)) {
             try {
                 advance(); // consume 'comptime'
-                consume(TokenType::LBRACE, "Expected '{' after 'comptime'");
+
+                // ── Detect `comptime if COND { ... }` shorthand ──────────────
+                // This is syntactic sugar for `comptime { if (COND) { ... } }`.
+                // The condition is evaluated without surrounding parentheses so
+                // bare boolean flags work: `comptime if BUILD_DEBUG { ... }`.
+                const bool isComptimeIf = check(TokenType::IF);
+                if (!isComptimeIf) {
+                    consume(TokenType::LBRACE, "Expected '{' after 'comptime'");
+                }
 
                 // ── comptime condition-value helper ──────────────────────────
                 // A value in a condition expression — either a signed integer or
@@ -462,9 +561,12 @@ std::unique_ptr<Program> Parser::parse() {
                 };
 
                 // Retrieve a comptime value by name.  Checks the built-in
-                // OS/ARCH/VERSION symbols first, then the int constant map,
-                // then the string constant map.  Returns an empty optional if
-                // the name is not defined.
+                // constants in priority order:
+                //   OS, ARCH, VERSION  → string constants (platform-detected)
+                //   FILE               → string constant (current source file path)
+                //   comptimeConstants_ → user-defined / CLI-injected integer constants
+                //   comptimeStrings_   → user-defined / CLI-injected string constants
+                // Returns an empty optional if the name is not defined.
                 auto getComptimeVar = [&](const std::string& name) -> std::optional<CVal> {
 #if defined(_WIN32) || defined(_WIN64)
                     static constexpr const char* kOS = "windows";
@@ -488,6 +590,8 @@ std::unique_ptr<Program> Parser::parse() {
                         return CVal{true, 0, kArch};
                     if (name == "VERSION")
                         return CVal{true, 0, OMSC_VERSION};
+                    if (name == "FILE")
+                        return CVal{true, 0, currentFile_};
                     {
                         auto it = comptimeConstants_.find(name);
                         if (it != comptimeConstants_.end())
@@ -556,8 +660,9 @@ std::unique_ptr<Program> Parser::parse() {
                     // Identifier — comptime var ref or defined(name) predicate
                     if (check(TokenType::IDENTIFIER)) {
                         const std::string name = advance().lexeme;
-                        // defined(NAME) — tests whether the name exists in
-                        // either the int or the string comptime constant maps.
+                        // defined(NAME) — tests whether the name is recognised by
+                        // getComptimeVar (covers built-ins, user constants, and
+                        // constants pre-populated from -D CLI flags before parse()).
                         if (name == "defined" && check(TokenType::LPAREN)) {
                             advance(); // consume '('
                             std::string dname;
@@ -565,7 +670,7 @@ std::unique_ptr<Program> Parser::parse() {
                                 dname = advance().lexeme;
                             if (check(TokenType::RPAREN))
                                 advance(); // consume ')'
-                            const bool isDef = comptimeConstants_.count(dname) > 0 || comptimeStrings_.count(dname) > 0;
+                            const bool isDef = getComptimeVar(dname).has_value();
                             return CVal{false, isDef ? 1LL : 0LL, ""};
                         }
                         auto v = getComptimeVar(name);
@@ -868,8 +973,38 @@ std::unique_ptr<Program> Parser::parse() {
                     }
                 };
 
-                parseBody(/*active=*/true);
-                consume(TokenType::RBRACE, "Expected '}' to close comptime block");
+                if (isComptimeIf) {
+                    // ── `comptime if COND { ... } [else if COND { ... }]* [else { ... }]` ──
+                    // Condition is evaluated without parentheses; body is the same as
+                    // the `if (COND) { ... }` form inside a regular comptime block.
+                    advance(); // consume 'if'
+                    const bool cond = evalOr();
+                    consume(TokenType::LBRACE, "Expected '{' after comptime if condition");
+                    parseBody(cond);
+                    consume(TokenType::RBRACE, "Expected '}' to close comptime if block");
+                    bool handled = cond;
+                    while (check(TokenType::ELSE)) {
+                        advance(); // consume 'else'
+                        if (match(TokenType::IF)) {
+                            // else if COND { ... } — no parens required
+                            const bool elseIfCond = evalOr();
+                            consume(TokenType::LBRACE, "Expected '{' after comptime else if condition");
+                            parseBody(!handled && elseIfCond);
+                            consume(TokenType::RBRACE, "Expected '}' to close comptime else if block");
+                            if (elseIfCond)
+                                handled = true;
+                        } else {
+                            // plain else { ... }
+                            consume(TokenType::LBRACE, "Expected '{' after 'else' in comptime if");
+                            parseBody(!handled);
+                            consume(TokenType::RBRACE, "Expected '}' to close comptime else block");
+                            break;
+                        }
+                    }
+                } else {
+                    parseBody(/*active=*/true);
+                    consume(TokenType::RBRACE, "Expected '}' to close comptime block");
+                }
             } catch (const std::exception& e) {
                 errors_.push_back(e.what());
                 synchronize();
@@ -877,43 +1012,19 @@ std::unique_ptr<Program> Parser::parse() {
             continue;
         }
         // Top-level `type Alias = TypeExpr` — defines a type alias.
-        // Supports `u64x{N}` where N is a comptime constant.
         if (check(TokenType::TYPE)) {
             try {
                 advance(); // consume 'type'
                 const Token aliasName = consume(TokenType::IDENTIFIER, "Expected alias name after 'type'");
                 consume(TokenType::ASSIGN, "Expected '=' after type alias name");
-                // Parse the right-hand side type (possibly u64x{N} or other SIMD type)
-                std::string typeName;
-                if (check(TokenType::IDENTIFIER)) {
-                    typeName = advance().lexeme;
-                    // Handle parameterised SIMD types: u64x{IDENT} or u64x{INTEGER}
-                    if (check(TokenType::LBRACE)) {
-                        advance(); // consume '{'
-                        std::string sizeStr;
-                        if (check(TokenType::IDENTIFIER)) {
-                            const std::string ident = advance().lexeme;
-                            auto it = comptimeConstants_.find(ident);
-                            if (it != comptimeConstants_.end())
-                                sizeStr = std::to_string(it->second);
-                            else
-                                sizeStr = ident; // keep as-is; may resolve later
-                        } else if (check(TokenType::INTEGER)) {
-                            sizeStr = std::to_string(advance().intValue);
-                        }
-                        consume(TokenType::RBRACE, "Expected '}' after SIMD lane count");
-                        typeName = typeName + sizeStr;
-                    }
-                    // Handle array suffix: type[]
-                    while (check(TokenType::LBRACKET) && current + 1 < tokens.size() &&
-                           tokens[current + 1].type == TokenType::RBRACKET) {
-                        advance();
-                        advance();
-                        typeName += "[]";
-                    }
-                } else {
+                // Parse the right-hand side type using the full type annotation
+                // parser so that *T, **T, (T1,T2), ptr<T>, fn(T)->R, etc. all work.
+                if (!check(TokenType::IDENTIFIER) && !check(TokenType::STAR) &&
+                    !check(TokenType::STAR_STAR) && !check(TokenType::LPAREN) &&
+                    !check(TokenType::AMPERSAND) && !check(TokenType::FN)) {
                     error("Expected type name after '=' in type alias");
                 }
+                const std::string typeName = parseTypeAnnotation();
                 consume(TokenType::SEMICOLON, "Expected ';' after type alias");
                 typeAliases_[aliasName.lexeme] = typeName;
             } catch (const std::exception& e) {
@@ -1459,8 +1570,25 @@ std::unique_ptr<Program> Parser::parse() {
     }
     pendingGlobals_.clear();
 
+    // ── Transitive type alias resolution ─────────────────────────────────────
+    // Replace every alias value that itself names another alias, up to 32 hops.
+    // This turns  type A = B; type B = int;  into  A → "int", B → "int".
+    // If a cycle is detected the original value is kept (the parser already
+    // rejected it as an unknown annotation during parsing).
+    for (auto& entry : typeAliases_) {
+        std::string resolved = entry.second;
+        for (int hop = 0; hop < kMaxTypeAliasHops; ++hop) {
+            auto it = typeAliases_.find(resolved);
+            if (it == typeAliases_.end()) break;
+            if (it->second == resolved) break; // trivial self-cycle guard
+            resolved = it->second;
+        }
+        entry.second = resolved;
+    }
+
     return std::make_unique<Program>(std::move(functions), std::move(enums), std::move(structs), fileNoAlias,
-                                     std::move(globals), globallyImportedNamespaces_);
+                                     std::move(globals), globallyImportedNamespaces_,
+                                     typeAliases_);
 }
 
 void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
@@ -1560,14 +1688,7 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     }
     std::string source((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 
-    // Preprocess then lex the imported file
-    {
-        Preprocessor importPP(fullPath);
-        source = importPP.process(source);
-        for (const auto& w : importPP.warnings()) {
-            warnings_.push_back(w);
-        }
-    }
+    // Lex the imported file
     Lexer importLexer(std::move(source));
     std::vector<Token> importTokens = importLexer.tokenize();
 
@@ -1714,6 +1835,70 @@ std::string Parser::parseTypeAnnotation() {
     if (match(TokenType::AMPERSAND)) {
         prefix = "&";
     }
+    // ── *T typed pointer syntax (C/Rust style) ────────────────────────────────
+    // `*T`  →  desugared to `ptr<T>` internally.  Chains: `**T` → `ptr<ptr<T>>`.
+    // `ptr` (bare) and `ptr<T>` remain valid for raw/fat pointers.
+    if (check(TokenType::STAR)) {
+        advance(); // consume '*'
+        std::string inner = parseTypeAnnotation(); // recursively parse pointed-to type
+        return prefix + "ptr<" + inner + ">";
+    }
+    // `**T` — the lexer produces a STAR_STAR token; desugar as two pointer levels.
+    if (check(TokenType::STAR_STAR)) {
+        advance(); // consume '**'
+        std::string inner = parseTypeAnnotation();
+        return prefix + "ptr<ptr<" + inner + ">>";
+    }
+    // ── Tuple type: (T1, T2, ...) ─────────────────────────────────────────────
+    // Parsed as "tuple<T1,T2,...>" internally; lowered to an anonymous LLVM struct.
+    if (check(TokenType::LPAREN)) {
+        advance(); // consume '('
+        std::vector<std::string> elemTypes;
+        if (!check(TokenType::RPAREN)) {
+            elemTypes.push_back(parseTypeAnnotation());
+            while (match(TokenType::COMMA)) {
+                if (check(TokenType::RPAREN)) break; // trailing comma
+                elemTypes.push_back(parseTypeAnnotation());
+            }
+        }
+        consume(TokenType::RPAREN, "Expected ')' to close tuple type");
+        if (elemTypes.empty())
+            return prefix + "void"; // () == void / unit
+        std::string tupleAnn = "tuple<";
+        for (size_t i = 0; i < elemTypes.size(); ++i) {
+            if (i) tupleAnn += ',';
+            tupleAnn += elemTypes[i];
+        }
+        tupleAnn += '>';
+        return prefix + tupleAnn;
+    }
+    // ── fn(T1, T2, ...) -> R  function-pointer type annotation ───────────────
+    // C-style typed function pointers.  `fn(int, int) -> int` desugars to the
+    // internal `funcptr` type so that all funcptr codegen paths handle it
+    // transparently.  The parameter / return type names are stored in a
+    // side-channel string for potential future typed-call improvements.
+    if (check(TokenType::FN)) {
+        advance(); // consume 'fn'
+        consume(TokenType::LPAREN, "Expected '(' in fn(...) type annotation");
+        std::vector<std::string> paramTypes;
+        if (!check(TokenType::RPAREN)) {
+            paramTypes.push_back(parseTypeAnnotation());
+            while (match(TokenType::COMMA)) {
+                if (check(TokenType::RPAREN)) break; // trailing comma
+                paramTypes.push_back(parseTypeAnnotation());
+            }
+        }
+        consume(TokenType::RPAREN, "Expected ')' to close fn(...) type annotation");
+        std::string retType = "void";
+        if (check(TokenType::ARROW)) {
+            advance(); // consume '->'
+            retType = parseTypeAnnotation();
+        }
+        // Build a canonical description for diagnostics but lower to "funcptr"
+        // for codegen — LLVM function pointers are opaque ptrs at IR level.
+        (void)paramTypes; (void)retType; // suppress unused warning for now
+        return prefix + "funcptr";
+    }
     // Accept identifiers and the 'struct' keyword as type names
     std::string typeName;
     if (check(TokenType::STRUCT)) {
@@ -1784,11 +1969,14 @@ std::string Parser::parseTypeAnnotation() {
         }
         typeName += "[" + typeParams + "]";
     }
-    // Resolve type aliases (e.g. VEC → u64x2 from a prior `type VEC = u64x{LANES}`)
-    {
+    // Resolve type aliases transitively (e.g. A → B → int from
+    //   type A = B; type B = int;).  Chase up to 32 hops to avoid infinite
+    //   loops on cycles while still catching arbitrarily deep alias chains.
+    for (int hop = 0; hop < kMaxTypeAliasHops; ++hop) {
         auto it = typeAliases_.find(typeName);
-        if (it != typeAliases_.end())
-            typeName = it->second;
+        if (it == typeAliases_.end()) break;
+        if (it->second == typeName) break; // self-cycle guard
+        typeName = it->second;
     }
     return prefix + typeName;
 }
@@ -1874,8 +2062,15 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 
     // Optional return type annotation: -> type
     std::string returnType;
+    bool neverReturn = false; // set by `-> never` syntax
     if (match(TokenType::ARROW)) {
         returnType = parseTypeAnnotation();
+        // `-> never` is syntactic sugar for `@noreturn` with void return type.
+        // This mirrors Rust's `-> !` and C23's `[[noreturn]]` attribute.
+        if (returnType == "never") {
+            neverReturn = true;
+            returnType = "void";
+        }
     }
 
     std::unique_ptr<BlockStmt> body;
@@ -1942,10 +2137,119 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
 
     inOptMaxFunction = savedOptMaxState;
 
+    // ── Post-parse jmp/label validation ──────────────────────────────────────
+    // Collect all labels defined in this function (recursively) and all jmp
+    // targets; then:
+    //   1. Error on any jmp target that has no matching label.
+    //   2. Error on any forward jmp that skips over a var declaration at the
+    //      top level of the function body (skipped initializer = uninitialized
+    //      variable).
+    if (body) {
+        // Flatten the top-level statement list for linear-order analysis.
+        const auto& stmts = body->statements;
+
+        // --- Collect all label names (recursive) ----------------------------
+        std::unordered_map<std::string, int /*line*/> definedLabels;
+        std::function<void(const Statement*)> collectLabels = [&](const Statement* s) {
+            if (!s) return;
+            if (s->type == ASTNodeType::LABEL_STMT) {
+                const auto* ls = static_cast<const LabelStmt*>(s);
+                definedLabels[ls->labelName] = ls->line;
+                return;
+            }
+            // Recurse into blocks/branches/loops.
+            auto recurseBlock = [&](const BlockStmt* blk) {
+                if (!blk) return;
+                for (const auto& sub : blk->statements) collectLabels(sub.get());
+            };
+            switch (s->type) {
+            case ASTNodeType::BLOCK: recurseBlock(static_cast<const BlockStmt*>(s)); break;
+            case ASTNodeType::IF_STMT: {
+                const auto* is = static_cast<const IfStmt*>(s);
+                collectLabels(is->thenBranch.get());
+                collectLabels(is->elseBranch.get());
+                break;
+            }
+            case ASTNodeType::WHILE_STMT: collectLabels(static_cast<const WhileStmt*>(s)->body.get()); break;
+            case ASTNodeType::DO_WHILE_STMT: collectLabels(static_cast<const DoWhileStmt*>(s)->body.get()); break;
+            case ASTNodeType::FOR_STMT: collectLabels(static_cast<const ForStmt*>(s)->body.get()); break;
+            case ASTNodeType::FOR_EACH_STMT: collectLabels(static_cast<const ForEachStmt*>(s)->body.get()); break;
+            default: break;
+            }
+        };
+        for (const auto& s : stmts) collectLabels(s.get());
+
+        // --- Validate each jmp (recursive) ----------------------------------
+        std::function<void(const Statement*)> validateJmps = [&](const Statement* s) {
+            if (!s) return;
+            if (s->type == ASTNodeType::JMP_STMT) {
+                const auto* js = static_cast<const JmpStmt*>(s);
+                if (!definedLabels.count(js->targetLabel)) {
+                    error("'jmp " + js->targetLabel + "': label '" + js->targetLabel +
+                          "' is not defined in this function");
+                }
+                return;
+            }
+            // Recurse same as collectLabels.
+            switch (s->type) {
+            case ASTNodeType::BLOCK:
+                for (const auto& sub : static_cast<const BlockStmt*>(s)->statements)
+                    validateJmps(sub.get());
+                break;
+            case ASTNodeType::IF_STMT: {
+                const auto* is = static_cast<const IfStmt*>(s);
+                validateJmps(is->thenBranch.get());
+                validateJmps(is->elseBranch.get());
+                break;
+            }
+            case ASTNodeType::WHILE_STMT: validateJmps(static_cast<const WhileStmt*>(s)->body.get()); break;
+            case ASTNodeType::DO_WHILE_STMT: validateJmps(static_cast<const DoWhileStmt*>(s)->body.get()); break;
+            case ASTNodeType::FOR_STMT: validateJmps(static_cast<const ForStmt*>(s)->body.get()); break;
+            case ASTNodeType::FOR_EACH_STMT: validateJmps(static_cast<const ForEachStmt*>(s)->body.get()); break;
+            default: break;
+            }
+        };
+        for (const auto& s : stmts) validateJmps(s.get());
+
+        // --- Forward-jump-over-var-decl check (top-level linear scan) --------
+        // For each `jmp` at the top level of the function body, find the matching
+        // `label` that appears later in the same linear statement list.  Any
+        // `var` declaration between them is an error (initializer would be skipped).
+        for (size_t i = 0; i < stmts.size(); ++i) {
+            if (stmts[i]->type != ASTNodeType::JMP_STMT) continue;
+            const auto* js = static_cast<const JmpStmt*>(stmts[i].get());
+            // Find the label in the top-level list (forward only).
+            for (size_t j = i + 1; j < stmts.size(); ++j) {
+                if (stmts[j]->type == ASTNodeType::LABEL_STMT) {
+                    const auto* ls = static_cast<const LabelStmt*>(stmts[j].get());
+                    if (ls->labelName == js->targetLabel) {
+                        // Found a forward jump. Scan statements between i and j for var decls.
+                        for (size_t k = i + 1; k < j; ++k) {
+                            if (stmts[k]->type == ASTNodeType::VAR_DECL) {
+                                const auto* vd = static_cast<const VarDecl*>(stmts[k].get());
+                                error("'jmp " + js->targetLabel + "' at line " +
+                                      std::to_string(js->line) +
+                                      " jumps forward over declaration of variable '" +
+                                      vd->name + "' at line " +
+                                      std::to_string(vd->line) +
+                                      "; the initializer would be skipped. "
+                                      "Move the declaration before the 'jmp' or after the label.");
+                            }
+                        }
+                        break; // Only check the first matching label.
+                    }
+                }
+            }
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     auto funcDecl = std::make_unique<FunctionDecl>(name.lexeme, std::move(typeParams), std::move(parameters),
                                                    std::move(body), isOptMax, returnType);
     funcDecl->line = name.line;
     funcDecl->column = name.column;
+    if (neverReturn)
+        funcDecl->hintNoReturn = true;
     return funcDecl;
 }
 
@@ -1992,6 +2296,34 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->line = hintKw.line;
         stmt->column = hintKw.column;
         return stmt;
+    }
+    // Labeled loop: label_name: while/for/foreach/forever/loop/repeat/do/until { ... }
+    // Enables `break label_name;` and `continue label_name;` to target specific outer loops.
+    if (check(TokenType::IDENTIFIER) && current + 1 < tokens.size() &&
+        tokens[current + 1].type == TokenType::COLON && current + 2 < tokens.size()) {
+        const TokenType nextNext = tokens[current + 2].type;
+        const bool isLoopKeyword =
+            nextNext == TokenType::WHILE || nextNext == TokenType::FOR || nextNext == TokenType::FOREACH ||
+            nextNext == TokenType::FOREVER || nextNext == TokenType::LOOP || nextNext == TokenType::REPEAT ||
+            nextNext == TokenType::DO || nextNext == TokenType::UNTIL;
+        if (isLoopKeyword) {
+            const std::string loopLabel = tokens[current].lexeme;
+            const Token labelTok = tokens[current];
+            advance(); // consume identifier
+            advance(); // consume ':'
+            // Now parse the loop statement normally and attach the label.
+            auto loopStmt = parseStatement();
+            if (auto* ws = dynamic_cast<WhileStmt*>(loopStmt.get())) {
+                ws->label = loopLabel;
+            } else if (auto* fs = dynamic_cast<ForStmt*>(loopStmt.get())) {
+                fs->label = loopLabel;
+            } else if (auto* fe = dynamic_cast<ForEachStmt*>(loopStmt.get())) {
+                fe->label = loopLabel;
+            }
+            loopStmt->line = labelTok.line;
+            loopStmt->column = labelTok.column;
+            return loopStmt;
+        }
     }
     if (match(TokenType::IF)) {
         const Token kw = tokens[current - 1];
@@ -2073,6 +2405,13 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
+    }
+    if (match(TokenType::JMP)) {
+        // parseJmpStmt reads tokens[current-1] for the warning location.
+        return parseJmpStmt();
+    }
+    if (match(TokenType::LABEL)) {
+        return parseLabelStmt();
     }
     if (match(TokenType::SWITCH)) {
         const Token kw = tokens[current - 1];
@@ -2181,11 +2520,48 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         return stmt;
     }
     if (match(TokenType::VAR)) {
+        // Tuple destructuring: var (a, b) = expr;
+        if (check(TokenType::LPAREN)) {
+            auto decls = parseTupleDestructuringDecl(false);
+            consume(TokenType::SEMICOLON, "Expected ';' after tuple destructuring declaration");
+            // Wrap multiple decls in a block statement
+            auto blk = std::make_unique<BlockStmt>(std::move(decls));
+            blk->line = tokens[current - 1].line;
+            blk->column = tokens[current - 1].column;
+            return blk;
+        }
+        // Array destructuring: var [a, b, c] = expr;
+        if (check(TokenType::LBRACKET)) {
+            auto decls = parseDestructuringDecl(false);
+            consume(TokenType::SEMICOLON, "Expected ';' after destructuring declaration");
+            auto blk = std::make_unique<BlockStmt>(std::move(decls));
+            blk->line = tokens[current - 1].line;
+            blk->column = tokens[current - 1].column;
+            return blk;
+        }
         auto decl = parseVarDecl(false);
         consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
         return decl;
     }
     if (match(TokenType::CONST)) {
+        // Tuple destructuring: const (a, b) = expr;
+        if (check(TokenType::LPAREN)) {
+            auto decls = parseTupleDestructuringDecl(true);
+            consume(TokenType::SEMICOLON, "Expected ';' after tuple destructuring declaration");
+            auto blk = std::make_unique<BlockStmt>(std::move(decls));
+            blk->line = tokens[current - 1].line;
+            blk->column = tokens[current - 1].column;
+            return blk;
+        }
+        // Array destructuring: const [a, b, c] = expr;
+        if (check(TokenType::LBRACKET)) {
+            auto decls = parseDestructuringDecl(true);
+            consume(TokenType::SEMICOLON, "Expected ';' after destructuring declaration");
+            auto blk = std::make_unique<BlockStmt>(std::move(decls));
+            blk->line = tokens[current - 1].line;
+            blk->column = tokens[current - 1].column;
+            return blk;
+        }
         auto decl = parseVarDecl(true);
         consume(TokenType::SEMICOLON, "Expected ';' after variable declaration");
         return decl;
@@ -2651,6 +3027,13 @@ std::unique_ptr<BlockStmt> Parser::parseBlock() {
                     statements.push_back(std::move(d));
                 }
                 consume(TokenType::SEMICOLON, "Expected ';' after destructuring declaration");
+            } else if (check(TokenType::LPAREN)) {
+                // Tuple destructuring: var (a, b) = expr;
+                auto decls = parseTupleDestructuringDecl(isConst);
+                for (auto& d : decls) {
+                    statements.push_back(std::move(d));
+                }
+                consume(TokenType::SEMICOLON, "Expected ';' after tuple destructuring declaration");
             } else {
                 // Multi-variable declarations: var a:T = 1, b = 2, c = 3;
                 // The type annotation on the first variable is propagated to
@@ -2819,9 +3202,11 @@ std::unique_ptr<VarDecl> Parser::parseGlobalDecl() {
 }
 
 std::unique_ptr<Statement> Parser::parseIfStmt() {
-    consume(TokenType::LPAREN, "Expected '(' after 'if'");
+    // Allow optional parentheses: `if (cond) { }` and `if cond { }` both work.
+    const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
-    consume(TokenType::RPAREN, "Expected ')' after condition");
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after condition");
 
     auto thenBranch = parseStatement();
     std::unique_ptr<Statement> elseBranch = nullptr;
@@ -2840,9 +3225,11 @@ std::unique_ptr<Statement> Parser::parseIfStmt() {
 }
 
 std::unique_ptr<Statement> Parser::parseWhileStmt() {
-    consume(TokenType::LPAREN, "Expected '(' after 'while'");
+    // Allow optional parentheses: `while (cond) { }` and `while cond { }` both work.
+    const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
-    consume(TokenType::RPAREN, "Expected ')' after condition");
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after condition");
 
     LoopConfig loopHints;
     if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
@@ -2890,7 +3277,13 @@ std::unique_ptr<Statement> Parser::parseDoWhileStmt() {
 }
 
 std::unique_ptr<Statement> Parser::parseForStmt() {
-    consume(TokenType::LPAREN, "Expected '(' after 'for'");
+    // Allow optional parentheses: `for (var in ...)` and `for var in ...` both work.
+    // Also support:
+    //   for x in arr { }           -- paren-free for-each over array/string
+    //   for i in start..end { }    -- paren-free half-open range (exclusive end)
+    //   for i in start..=end { }   -- paren-free inclusive range
+    //   for i in start...end { }   -- classic OmScript range (exclusive, parens optional)
+    const bool hasParen = match(TokenType::LPAREN);
 
     // Parse: for (var in start...end) or for (var in start...end...step)
     //    or: for (var in collection)  -- for-each over array
@@ -2902,7 +3295,8 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         const Token itemName = consume(TokenType::IDENTIFIER, "Expected item variable after ',' in for");
         consume(TokenType::IN, "Expected 'in' after for variables");
         auto collection = parseExpression();
-        consume(TokenType::RPAREN, "Expected ')' after for-each collection");
+        if (hasParen)
+            consume(TokenType::RPAREN, "Expected ')' after for-each collection");
         auto body = parseStatement();
 
         // Desugar to: { var __arr = collection; for (idx in 0...len(__arr)) { var item = __arr[idx]; body } }
@@ -2957,6 +3351,35 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
 
     auto firstExpr = parseExpression();
 
+    // `..=` inclusive range: for i in start..=end  => for (i in start...end+1)
+    // Peek ahead to detect `..=` before consuming anything.
+    if (check(TokenType::DOT_DOT) && peek(1).type == TokenType::ASSIGN) {
+        advance(); // consume '..'
+        advance(); // consume '='
+        auto endExpr = parseExpression();
+        // Desugar: end+1
+        auto one = std::make_unique<LiteralExpr>(static_cast<long long>(1));
+        auto endPlusOne = std::make_unique<BinaryExpr>("+", std::move(endExpr), std::move(one));
+
+        std::unique_ptr<Expression> step = nullptr;
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "step") {
+            advance(); // consume 'step'
+            step = parseExpression();
+        }
+        if (hasParen)
+            consume(TokenType::RPAREN, "Expected ')' after for range");
+        LoopConfig loopHints;
+        if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
+            advance(); advance();
+            loopHints = parseLoopAnnotation();
+        }
+        auto body = parseStatement();
+        auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(endPlusOne),
+                                                 std::move(step), std::move(body), iteratorType);
+        forStmt->loopHints = loopHints;
+        return forStmt;
+    }
+
     // If next token is '...' or '..', this is a range-based for loop
     if (match(TokenType::RANGE) || match(TokenType::DOT_DOT)) {
         auto end = parseExpression();
@@ -2970,7 +3393,8 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
             step = parseExpression();
         }
 
-        consume(TokenType::RPAREN, "Expected ')' after for range");
+        if (hasParen)
+            consume(TokenType::RPAREN, "Expected ')' after for range");
         LoopConfig loopHints;
         if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
             advance(); // @
@@ -2995,7 +3419,8 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
             auto stepExpr = parseExpression();
             // The step is positive in user syntax, we negate it for downto
             // Desugar to: for (i in start...end...-step)
-            consume(TokenType::RPAREN, "Expected ')' after for downto range");
+            if (hasParen)
+                consume(TokenType::RPAREN, "Expected ')' after for downto range");
             LoopConfig loopHints;
             if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
                 advance(); // @
@@ -3010,7 +3435,8 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
             return forStmt;
         }
 
-        consume(TokenType::RPAREN, "Expected ')' after for downto range");
+        if (hasParen)
+            consume(TokenType::RPAREN, "Expected ')' after for downto range");
         LoopConfig loopHints;
         if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].lexeme == "loop") {
             advance(); // @
@@ -3026,25 +3452,67 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
     }
 
     // Otherwise this is a for-each loop: for (var in collection)
-    consume(TokenType::RPAREN, "Expected ')' after for-each collection");
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after for-each collection");
     auto body = parseStatement();
     return std::make_unique<ForEachStmt>(varName.lexeme, std::move(firstExpr), std::move(body));
 }
 
 std::unique_ptr<Statement> Parser::parseBreakStmt() {
+    auto stmt = std::make_unique<BreakStmt>();
+    // Labeled break: break label_name;
+    if (check(TokenType::IDENTIFIER)) {
+        stmt->label = tokens[current].lexeme;
+        advance();
+    }
     consume(TokenType::SEMICOLON, "Expected ';' after 'break'");
-    return std::make_unique<BreakStmt>();
+    return stmt;
 }
 
 std::unique_ptr<Statement> Parser::parseContinueStmt() {
+    auto stmt = std::make_unique<ContinueStmt>();
+    // Labeled continue: continue label_name;
+    if (check(TokenType::IDENTIFIER)) {
+        stmt->label = tokens[current].lexeme;
+        advance();
+    }
     consume(TokenType::SEMICOLON, "Expected ';' after 'continue'");
-    return std::make_unique<ContinueStmt>();
+    return stmt;
+}
+
+std::unique_ptr<Statement> Parser::parseJmpStmt() {
+    // `jmp` keyword was already consumed by the caller.
+    // Emit a deprecation warning at the use site.
+    const Token jmpTok = tokens[current - 1];
+    warnings_.push_back("line " + std::to_string(jmpTok.line) + ":" +
+                        std::to_string(jmpTok.column) +
+                        ": warning: `jmp` is deprecated; prefer structured control flow "
+                        "(if / while / for / break / continue). "
+                        "`jmp` will be removed in a future version of OmScript.");
+    const Token labelTok = consume(TokenType::IDENTIFIER, "Expected label name after 'jmp'");
+    consume(TokenType::SEMICOLON, "Expected ';' after 'jmp <label>'");
+    auto stmt = std::make_unique<JmpStmt>(labelTok.lexeme);
+    stmt->line = jmpTok.line;
+    stmt->column = jmpTok.column;
+    return stmt;
+}
+
+std::unique_ptr<Statement> Parser::parseLabelStmt() {
+    // `label` keyword was already consumed by the caller.
+    const Token labelTok = consume(TokenType::IDENTIFIER, "Expected label name after 'label'");
+    consume(TokenType::COLON, "Expected ':' after label name (syntax: 'label name:')");
+    auto stmt = std::make_unique<LabelStmt>(labelTok.lexeme);
+    stmt->line = labelTok.line;
+    stmt->column = labelTok.column;
+    return stmt;
 }
 
 std::unique_ptr<Statement> Parser::parseSwitchStmt() {
-    consume(TokenType::LPAREN, "Expected '(' after 'switch'");
+    // Paren-free form: switch x { ... }  (same as if/while/for Round-70)
+    const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
-    consume(TokenType::RPAREN, "Expected ')' after switch condition");
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after switch condition");
     consume(TokenType::LBRACE, "Expected '{' after switch condition");
 
     std::vector<SwitchCase> cases;
@@ -3250,9 +3718,11 @@ std::unique_ptr<Statement> Parser::parseGuardStmt() {
 // when (expr) { val1 => { stmts }, val2, val3 => { stmts }, _ => { stmts } }
 // Desugars to a switch statement with fat-arrow syntax
 std::unique_ptr<Statement> Parser::parseWhenStmt() {
-    consume(TokenType::LPAREN, "Expected '(' after 'when'");
+    // Paren-free form: when x { ... }  (same as if/while/for Round-70)
+    const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
-    consume(TokenType::RPAREN, "Expected ')' after when expression");
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after when expression");
     consume(TokenType::LBRACE, "Expected '{' after when expression");
 
     std::vector<SwitchCase> cases;
@@ -3380,9 +3850,11 @@ std::unique_ptr<Statement> Parser::parseForEachStmt() {
 // elif (condition) { ... } [elif (...) { ... }] [else { ... }]
 // Desugars to: if (condition) { ... } [else if (...) { ... }] [else { ... }]
 std::unique_ptr<Statement> Parser::parseElifStmt() {
-    consume(TokenType::LPAREN, "Expected '(' after 'elif'");
+    // Allow optional parentheses: `elif (cond)` and `elif cond` both work.
+    const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
-    consume(TokenType::RPAREN, "Expected ')' after elif condition");
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after elif condition");
 
     auto thenBranch = parseStatement();
     std::unique_ptr<Statement> elseBranch = nullptr;
@@ -3611,6 +4083,75 @@ std::vector<std::unique_ptr<Statement>> Parser::parseDestructuringDecl(bool isCo
         varDecl->isCompilerGenerated = true;
         varDecl->line = lbracket.line;
         varDecl->column = lbracket.column;
+        stmts.push_back(std::move(varDecl));
+    }
+
+    return stmts;
+}
+
+// var (a, b, c) = expr;  or  const (a, b) = expr;
+// Desugars to:
+//   { var __tdestr_N = expr;
+//     var a = __tdestr_N.0;
+//     var b = __tdestr_N.1; }
+// Use '_' to skip an element.
+std::vector<std::unique_ptr<Statement>> Parser::parseTupleDestructuringDecl(bool isConst) {
+    const Token lparen = consume(TokenType::LPAREN, "Expected '(' for tuple destructuring");
+
+    std::vector<std::string> names;
+    if (!check(TokenType::RPAREN)) {
+        auto parseName = [&]() {
+            if (check(TokenType::IDENTIFIER) && peek().lexeme == "_") {
+                advance();
+                names.push_back("_");
+            } else {
+                const Token n = consume(TokenType::IDENTIFIER, "Expected variable name in tuple destructuring");
+                names.push_back(n.lexeme);
+            }
+        };
+        parseName();
+        while (match(TokenType::COMMA)) {
+            if (check(TokenType::RPAREN)) break; // trailing comma
+            parseName();
+        }
+    }
+    consume(TokenType::RPAREN, "Expected ')' after tuple destructuring names");
+
+    if (names.empty()) {
+        error("Tuple destructuring must have at least one variable name");
+    }
+
+    consume(TokenType::ASSIGN, "Expected '=' after tuple destructuring pattern");
+    auto initializer = parseExpression();
+
+    // Desugar to individual field-access assignments
+    static int tdestrCounter = 0;
+    const std::string tmpName = "__tdestr_" + std::to_string(tdestrCounter++);
+
+    std::vector<std::unique_ptr<Statement>> stmts;
+
+    // var __tdestr_N = expr;
+    auto tmpDecl = std::make_unique<VarDecl>(tmpName, std::move(initializer), false);
+    tmpDecl->isCompilerGenerated = true;
+    tmpDecl->line = lparen.line;
+    tmpDecl->column = lparen.column;
+    stmts.push_back(std::move(tmpDecl));
+
+    // var a = __tdestr_N.0; var b = __tdestr_N.1; ...
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (names[i] == "_") continue;
+
+        auto tmpRef = std::make_unique<IdentifierExpr>(tmpName);
+        // Use FieldAccessExpr with numeric field name (e.g. "0", "1")
+        // — generateFieldAccess handles integer field names as tuple indices.
+        auto fieldExpr = std::make_unique<FieldAccessExpr>(std::move(tmpRef), std::to_string(i));
+        fieldExpr->line = lparen.line;
+        fieldExpr->column = lparen.column;
+
+        auto varDecl = std::make_unique<VarDecl>(names[i], std::move(fieldExpr), isConst);
+        varDecl->isCompilerGenerated = true;
+        varDecl->line = lparen.line;
+        varDecl->column = lparen.column;
         stmts.push_back(std::move(varDecl));
     }
 
@@ -4079,9 +4620,39 @@ std::unique_ptr<Expression> Parser::parseAssignment() {
             node->line = expr->line;
             node->column = expr->column;
             return node;
+        } else if (expr->type == ASTNodeType::UNARY_EXPR) {
+            // Desugar: *ptr op= rhs  =>  *ptr = *ptr op rhs
+            auto* ue = static_cast<UnaryExpr*>(expr.get());
+            if (ue->op != "deref")
+                error("Compound assignment target must be a variable, *ptr, arr[i], or struct.field");
+            auto rhs = parseAssignment();
+            // We need two copies of the pointer expression.  The common case is
+            // that the pointer operand is a simple identifier; duplicate it.
+            auto ptrOp = std::move(ue->operand);
+            std::unique_ptr<Expression> ptrRef2;
+            if (ptrOp->type == ASTNodeType::IDENTIFIER_EXPR) {
+                auto* pid = static_cast<IdentifierExpr*>(ptrOp.get());
+                ptrRef2 = std::make_unique<IdentifierExpr>(pid->name);
+                ptrRef2->line = ptrOp->line;
+                ptrRef2->column = ptrOp->column;
+            } else {
+                error("Compound assignment '*p op= rhs' requires a simple pointer variable (e.g. '*p += 1')");
+            }
+            // Build: *ptr op rhs  (read side)
+            auto readDeref = std::make_unique<UnaryExpr>("deref", std::move(ptrRef2));
+            readDeref->line = expr->line;
+            readDeref->column = expr->column;
+            auto binExpr = std::make_unique<BinaryExpr>(binOp, std::move(readDeref), std::move(rhs));
+            binExpr->line = expr->line;
+            binExpr->column = expr->column;
+            // Build: *ptr = (*ptr op rhs)  (write side)
+            auto node = std::make_unique<DerefAssignExpr>(std::move(ptrOp), std::move(binExpr));
+            node->line = expr->line;
+            node->column = expr->column;
+            return node;
         } else {
-            error("Compound assignment (e.g., '+=') is only supported on variables, array elements (arr[i]), and "
-                  "struct fields (s.x)");
+            error("Compound assignment (e.g., '+=') is only supported on variables, array elements (arr[i]), "
+                  "struct fields (s.x), and pointer dereferences (*p)");
         }
     }
 
@@ -4426,6 +4997,28 @@ std::unique_ptr<Expression> Parser::parseComparison() {
     }
 
 check_in:
+    // 'not in' operator: x not in arr → !array_contains(arr, x)
+    // 'not' is parsed as an IDENTIFIER (no dedicated keyword), so check for
+    // IDENTIFIER with lexeme "not" followed by the IN keyword.
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "not" &&
+        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::IN) {
+        const Token notToken = tokens[current];
+        advance(); // consume 'not'
+        advance(); // consume 'in'
+        auto container = parseShift();
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(std::move(container));
+        args.push_back(std::move(left));
+        auto callExpr = std::make_unique<CallExpr>("array_contains", std::move(args));
+        callExpr->fromStdNamespace = true;
+        callExpr->line = notToken.line;
+        callExpr->column = notToken.column;
+        auto notExpr = std::make_unique<UnaryExpr>("!", std::move(callExpr));
+        notExpr->line = notToken.line;
+        notExpr->column = notToken.column;
+        return notExpr;
+    }
+
     // 'in' operator: x in arr → array_contains(arr, x)
     // Placed at comparison precedence so it binds like other relational ops.
     if (match(TokenType::IN)) {
@@ -4501,7 +5094,7 @@ std::unique_ptr<Expression> Parser::parseMultiplication() {
 }
 
 std::unique_ptr<Expression> Parser::parsePower() {
-    auto left = parseUnary();
+    auto left = parseCast();
 
     if (match(TokenType::STAR_STAR)) {
         // Right-associative: 2 ** 3 ** 2 = 2 ** (3 ** 2) = 2 ** 9 = 512
@@ -4510,6 +5103,29 @@ std::unique_ptr<Expression> Parser::parsePower() {
     }
 
     return left;
+}
+
+// ── parseCast ─────────────────────────────────────────────────────────────────
+// Handles `expr as TypeName` with LOWER precedence than all unary prefix
+// operators (&, *, -, !, ~) but HIGHER than multiplication/power.
+// This ensures `&x as *T` parses as `(&x) as *T` (C semantics), not
+// `&(x as *T)`.
+std::unique_ptr<Expression> Parser::parseCast() {
+    auto expr = parseUnary();
+
+    while (check(TokenType::IDENTIFIER) && peek().lexeme == "as") {
+        const Token asTok = advance(); // consume 'as'
+        const std::string targetType = parseTypeAnnotation();
+        auto typeExpr = std::make_unique<IdentifierExpr>(targetType);
+        typeExpr->line = asTok.line;
+        typeExpr->column = asTok.column;
+        auto castExpr = std::make_unique<BinaryExpr>("as", std::move(expr), std::move(typeExpr));
+        castExpr->line = asTok.line;
+        castExpr->column = asTok.column;
+        expr = std::move(castExpr);
+    }
+
+    return expr;
 }
 
 std::unique_ptr<Expression> Parser::parseUnary() {
@@ -4586,7 +5202,13 @@ std::unique_ptr<Expression> Parser::parseUnary() {
     if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
         const Token opToken = tokens[current - 1];
         auto operand = parseUnary();
-        if (operand->type != ASTNodeType::IDENTIFIER_EXPR && operand->type != ASTNodeType::INDEX_EXPR) {
+        const bool isDeref =
+            operand->type == ASTNodeType::UNARY_EXPR &&
+            static_cast<UnaryExpr*>(operand.get())->op == "deref";
+        if (operand->type != ASTNodeType::IDENTIFIER_EXPR &&
+            operand->type != ASTNodeType::INDEX_EXPR &&
+            operand->type != ASTNodeType::FIELD_ACCESS_EXPR &&
+            !isDeref) {
             error("Prefix " + opToken.lexeme + " requires an lvalue operand");
         }
         auto node = std::make_unique<PrefixExpr>(opToken.lexeme, std::move(operand));
@@ -4612,24 +5234,16 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
     auto expr = parseCall();
 
     while (true) {
-        // `expr as TypeName` — type cast / reinterpret expression.
-        // Desugared to a BinaryExpr with op "as" and an IdentifierExpr(TypeName) on the right.
-        if (check(TokenType::IDENTIFIER) && peek().lexeme == "as") {
-            const Token asTok = advance(); // consume 'as'
-            const std::string targetType = parseTypeAnnotation();
-            auto typeExpr = std::make_unique<IdentifierExpr>(targetType);
-            typeExpr->line = asTok.line;
-            typeExpr->column = asTok.column;
-            auto castExpr = std::make_unique<BinaryExpr>("as", std::move(expr), std::move(typeExpr));
-            castExpr->line = asTok.line;
-            castExpr->column = asTok.column;
-            expr = std::move(castExpr);
-            continue;
-        }
         // Handle postfix operators
         if (match(TokenType::PLUSPLUS) || match(TokenType::MINUSMINUS)) {
             const Token opToken = tokens[current - 1];
-            if (expr->type != ASTNodeType::IDENTIFIER_EXPR && expr->type != ASTNodeType::INDEX_EXPR) {
+            const bool isDeref =
+                expr->type == ASTNodeType::UNARY_EXPR &&
+                static_cast<UnaryExpr*>(expr.get())->op == "deref";
+            if (expr->type != ASTNodeType::IDENTIFIER_EXPR &&
+                expr->type != ASTNodeType::INDEX_EXPR &&
+                expr->type != ASTNodeType::FIELD_ACCESS_EXPR &&
+                !isDeref) {
                 error("Postfix " + opToken.lexeme + " requires an lvalue operand");
             }
             expr = std::make_unique<PostfixExpr>(opToken.lexeme, std::move(expr));
@@ -4684,6 +5298,16 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
         // Handle field access (dot notation) or method call (obj.method(args))
         else if (match(TokenType::DOT)) {
             const Token dotToken = tokens[current - 1];
+            // Tuple element access: t.0, t.1, t.2, ...
+            // An integer literal immediately after '.' is a tuple index.
+            if (check(TokenType::INTEGER)) {
+                const Token idxToken = advance();
+                const std::string idxStr = std::to_string(idxToken.intValue);
+                auto fieldExpr = std::make_unique<FieldAccessExpr>(std::move(expr), idxStr);
+                fieldExpr->line = dotToken.line;
+                fieldExpr->column = dotToken.column;
+                expr = std::move(fieldExpr);
+            } else {
             // Accept IDENTIFIER or SWAP (and any future keyword that doubles as a
             // field/method name) after '.'.  This mirrors C/C++ where keywords are
             // valid struct member names when disambiguated by the '.' context.
@@ -4721,6 +5345,7 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
                 fieldExpr->column = dotToken.column;
                 expr = std::move(fieldExpr);
             }
+            } // end else (non-integer field)
         }
         // Handle C-style arrow operator: ptr->field / ptr->method(args)
         // Identical semantics to ptr.field / ptr.method(args) — OmScript's
@@ -4778,6 +5403,15 @@ std::unique_ptr<Expression> Parser::parseCall() {
             auto idExpr = dynamic_cast<IdentifierExpr*>(expr.get());
             std::vector<std::unique_ptr<Expression>> arguments;
 
+            // Named arguments: foo(width: 4, height: 5)
+            // Detect if any argument uses the `name: expr` form.
+            // Named and positional args may be mixed: positional args come first,
+            // named args can appear in any order after positional args.
+            struct NamedArg { std::string name; std::unique_ptr<Expression> value; };
+            std::vector<std::unique_ptr<Expression>> positionalArgs;
+            std::vector<NamedArg> namedArgs;
+            bool seenNamed = false;
+
             if (!check(TokenType::RPAREN)) {
                 do {
                     // Spread argument: ...expr
@@ -4787,9 +5421,27 @@ std::unique_ptr<Expression> Parser::parseCall() {
                         auto node = std::make_unique<SpreadExpr>(std::move(operand));
                         node->line = spreadToken.line;
                         node->column = spreadToken.column;
-                        arguments.push_back(std::move(node));
+                        if (seenNamed) {
+                            error("Positional/spread arguments cannot follow named arguments");
+                        }
+                        positionalArgs.push_back(std::move(node));
                     } else {
-                        arguments.push_back(parseExpression());
+                        // Peek: if next is IDENT COLON, it's a named arg
+                        bool isNamed = (check(TokenType::IDENTIFIER) &&
+                                        current + 1 < tokens.size() &&
+                                        tokens[current + 1].type == TokenType::COLON);
+                        if (isNamed) {
+                            seenNamed = true;
+                            const std::string argName = advance().lexeme; // consume name
+                            advance(); // consume ':'
+                            auto val = parseExpression();
+                            namedArgs.push_back({argName, std::move(val)});
+                        } else {
+                            if (seenNamed) {
+                                error("Positional arguments cannot follow named arguments");
+                            }
+                            positionalArgs.push_back(parseExpression());
+                        }
                     }
                 } while (match(TokenType::COMMA));
             }
@@ -4797,13 +5449,58 @@ std::unique_ptr<Expression> Parser::parseCall() {
             consume(TokenType::RPAREN, "Expected ')' after arguments");
 
             // Resolve bare function calls from globally-imported user namespaces.
-            // e.g. after `import Math;`, `add(x)` maps to `Math::add(x)`.
             std::string calleeName = idExpr->name;
             {
                 auto bif = bareImportedFunctions_.find(calleeName);
                 if (bif != bareImportedFunctions_.end())
                     calleeName = bif->second;
             }
+
+            if (!seenNamed) {
+                // Fast path: no named args — use positional args as-is
+                arguments = std::move(positionalArgs);
+            } else {
+                // Reorder named args to match the function's declaration order.
+                auto pit = funcParamNames_.find(calleeName);
+                if (pit == funcParamNames_.end()) {
+                    // Also try the unqualified name (may have been mangled)
+                    pit = funcParamNames_.find(idExpr->name);
+                }
+                if (pit != funcParamNames_.end()) {
+                    const auto& paramNames = pit->second;
+                    // Start with positional args already in order
+                    arguments = std::move(positionalArgs);
+                    // Build a map of named args
+                    std::unordered_map<std::string, size_t> namedArgIdx;
+                    for (size_t k = 0; k < namedArgs.size(); ++k)
+                        namedArgIdx[namedArgs[k].name] = k;
+                    // Fill remaining positions using param order
+                    const size_t posCount = arguments.size();
+                    for (size_t k = posCount; k < paramNames.size(); ++k) {
+                        auto it = namedArgIdx.find(paramNames[k]);
+                        if (it != namedArgIdx.end()) {
+                            arguments.push_back(std::move(namedArgs[it->second].value));
+                        } else {
+                            error("Named argument call missing argument for parameter '" + paramNames[k] + "'");
+                        }
+                    }
+                    // Check for extra named args (names not in the param list)
+                    for (const auto& na : namedArgs) {
+                        bool found = false;
+                        for (const auto& pn : paramNames)
+                            if (pn == na.name) { found = true; break; }
+                        if (!found && na.value != nullptr) {
+                            error("Unknown named argument '" + na.name + "' for function '" + calleeName + "'");
+                        }
+                    }
+                } else {
+                    // Unknown function — append named args in the order given
+                    arguments = std::move(positionalArgs);
+                    for (auto& na : namedArgs)
+                        arguments.push_back(std::move(na.value));
+                }
+            }
+
             auto callExpr = std::make_unique<CallExpr>(calleeName, std::move(arguments));
             callExpr->line = expr->line;
             callExpr->column = expr->column;
@@ -4888,6 +5585,16 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
     if (match(TokenType::FLOAT)) {
         const Token token = tokens[current - 1];
         auto expr = std::make_unique<LiteralExpr>(token.floatValue);
+        expr->line = token.line;
+        expr->column = token.column;
+        return expr;
+    }
+
+    // Character literal: 'A', '\n', '\u0041' — yields i32 code point.
+    if (match(TokenType::CHAR_LITERAL)) {
+        const Token token = tokens[current - 1];
+        long long codePoint = std::stoll(token.lexeme);
+        auto expr = std::make_unique<LiteralExpr>(codePoint);
         expr->line = token.line;
         expr->column = token.column;
         return expr;
@@ -5035,19 +5742,81 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         long long byteSize = 8; // default (pointer/int64)
         if (typeName == "bool" || typeName == "i8" || typeName == "u8" || typeName == "byte")
             byteSize = 1;
-        else if (typeName == "i16" || typeName == "u16")
+        else if (typeName == "i16" || typeName == "u16" || typeName == "c_short" || typeName == "c_ushort")
             byteSize = 2;
-        else if (typeName == "i32" || typeName == "u32" || typeName == "f32" || typeName == "float32")
+        else if (typeName == "i32" || typeName == "u32" || typeName == "f32" || typeName == "float32" ||
+                 typeName == "c_float" ||
+                 typeName == "char" || typeName == "c_int" || typeName == "c_uint")
             byteSize = 4;
         else if (typeName == "i64" || typeName == "u64" || typeName == "int" || typeName == "uint" ||
                  typeName == "float" || typeName == "double" || typeName == "f64" || typeName == "float64" ||
-                 typeName == "ptr" || typeName.rfind("ptr<", 0) == 0 || typeName == "string" || typeName == "bigint")
+                 typeName == "c_double" || typeName == "c_long_double" ||
+                 typeName == "ptr" || typeName.rfind("ptr<", 0) == 0 || typeName == "string" || typeName == "bigint" ||
+                 typeName == "usize" || typeName == "isize" ||
+                 typeName == "c_long" || typeName == "c_ulong" ||
+                 typeName == "c_longlong" || typeName == "c_ulonglong" ||
+                 typeName == "c_size_t" || typeName == "c_ssize_t" ||
+                 typeName == "intptr_t" || typeName == "uintptr_t" || typeName == "ptrdiff_t" ||
+                 typeName == "c_intptr" || typeName == "c_uintptr" || typeName == "c_ptrdiff" ||
+                 typeName == "c_FILE" || typeName == "c_dir" || typeName == "c_DIR" || typeName == "c_jmp_buf")
             byteSize = 8;
         else if (typeName == "i128" || typeName == "u128")
             byteSize = 16;
         else if (typeName == "i256" || typeName == "u256")
             byteSize = 32;
-        else {
+        else if (typeName.rfind("tuple<", 0) == 0 && typeName.back() == '>') {
+            // Conservative tight-packed tuple size: sum of element sizes.
+            // Actual size may be larger due to LLVM struct alignment padding.
+            std::string inner = typeName.substr(6, typeName.size() - 7);
+            long long total = 0;
+            // Split elements on commas (depth-aware to handle nested types).
+            int depth = 0;
+            std::string cur;
+            for (char ch : inner) {
+                if (ch == '<') depth++;
+                else if (ch == '>') depth--;
+                if (ch == ',' && depth == 0) {
+                    // Recursively compute element size using same rules.
+                    // Re-use the sizeof parse-time table via a helper lambda.
+                    auto elemSize = [&](const std::string& t) -> long long {
+                        if (t == "bool" || t == "i8" || t == "u8" || t == "byte") return 1;
+                        if (t == "i16" || t == "u16") return 2;
+                        if (t == "i32" || t == "u32" || t == "f32" || t == "char" || t == "c_int" || t == "c_uint") return 4;
+                        if (t == "i128" || t == "u128") return 16;
+                        if (t == "i256" || t == "u256") return 32;
+                        const char* s = t.c_str();
+                        if ((s[0]=='i'||s[0]=='u') && s[1]!='\0') {
+                            int bits = std::atoi(s+1);
+                            if (bits>=1 && bits<=256) return (bits+7)/8;
+                        }
+                        return 8; // pointer/int64/float default
+                    };
+                    // Strip leading/trailing whitespace from cur
+                    while (!cur.empty() && cur.front()==' ') cur.erase(0,1);
+                    while (!cur.empty() && cur.back()==' ') cur.pop_back();
+                    total += elemSize(cur);
+                    cur.clear();
+                } else {
+                    cur += ch;
+                }
+            }
+            if (!cur.empty()) {
+                while (!cur.empty() && cur.front()==' ') cur.erase(0,1);
+                while (!cur.empty() && cur.back()==' ') cur.pop_back();
+                auto elemSize2 = [](const std::string& t) -> long long {
+                    if (t == "bool" || t == "i8" || t == "u8" || t == "byte") return 1;
+                    if (t == "i16" || t == "u16") return 2;
+                    if (t == "i32" || t == "u32" || t == "f32" || t == "char" || t == "c_int" || t == "c_uint") return 4;
+                    if (t == "i128" || t == "u128") return 16;
+                    if (t == "i256" || t == "u256") return 32;
+                    const char* s = t.c_str();
+                    if ((s[0]=='i'||s[0]=='u') && s[1]!='\0') { int bits=std::atoi(s+1); if (bits>=1&&bits<=256) return (bits+7)/8; }
+                    return 8;
+                };
+                total += elemSize2(cur);
+            }
+            byteSize = total;
+        } else {
             // iN / uN — compute from bit width
             const char* s = typeName.c_str();
             if ((s[0] == 'i' || s[0] == 'u') && s[1] != '\0') {
@@ -5097,8 +5866,16 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
 
                     // Canonical type groups
                     static const std::unordered_set<std::string> kIntTypes{"int", "i64", "i32", "i16", "i8",
-                                                                           "u64", "u32", "u16", "u8",  "uint"};
-                    static const std::unordered_set<std::string> kFloatTypes{"float", "f64", "f32", "double"};
+                                                                           "u64", "u32", "u16", "u8",  "uint",
+                                                                           "usize", "isize",
+                                                                           "c_int", "c_uint", "c_short", "c_ushort",
+                                                                           "c_long", "c_ulong", "c_longlong", "c_ulonglong",
+                                                                           "c_size_t", "c_ssize_t", "c_char", "c_uchar",
+                                                                           "intptr_t", "uintptr_t", "ptrdiff_t",
+                                                                           "c_intptr", "c_uintptr", "c_ptrdiff",
+                                                                           "char"};
+                    static const std::unordered_set<std::string> kFloatTypes{"float", "f64", "f32", "double",
+                                                                             "c_float", "c_double", "c_long_double"};
                     static const std::unordered_set<std::string> kStrTypes{"string", "str"};
                     static const std::unordered_set<std::string> kArrTypes{"array", "arr"};
                     static const std::unordered_set<std::string> kBoolTypes{"bool"};
@@ -5553,7 +6330,40 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                     e->column = token.column;
                     return e;
                 }
-                // ── Priority 3: unknown namespace — hard error ─────────────────
+                // ── Priority 3: struct static-method call ──────────────────────
+                // If the first segment is a known struct name (e.g. Counter),
+                // treat  Counter::new(args)  as a static/class-method call by
+                // emitting a CallExpr with the fully-qualified mangled name.
+                // Codegen will find it in the function map directly (function was
+                // declared as  fn Counter::new(...)  which stores name "Counter::new").
+                if (structNames_.count(segments[0])) {
+                    // Build mangled callee name: "Counter::new" or deeper.
+                    std::string callee = segments[0];
+                    for (int si = 1; si < (int)segments.size(); ++si)
+                        callee += "::" + segments[si];
+                    advance(); // consume '('
+                    std::vector<std::unique_ptr<Expression>> args;
+                    if (!check(TokenType::RPAREN)) {
+                        do {
+                            if (check(TokenType::RANGE)) {
+                                advance();
+                                auto spreadArg = parseExpression();
+                                auto se = std::make_unique<SpreadExpr>(std::move(spreadArg));
+                                se->line = token.line;
+                                se->column = token.column;
+                                args.push_back(std::move(se));
+                            } else {
+                                args.push_back(parseExpression());
+                            }
+                        } while (match(TokenType::COMMA));
+                    }
+                    consume(TokenType::RPAREN, "Expected ')' after arguments");
+                    auto e = std::make_unique<CallExpr>(callee, std::move(args));
+                    e->line = token.line;
+                    e->column = token.column;
+                    return e;
+                }
+                // ── Priority 4: unknown namespace — hard error ─────────────────
                 // resolveNamespacedPath() returned empty, meaning no namespace
                 // prefix in the registry matched.  This is always a compile
                 // error: either the namespace was never imported, it was
@@ -5689,6 +6499,13 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             advance(); // consume ':'
             advance(); // consume type name
         }
+        // Single-parameter arrow lambda without parentheses: x => expr
+        // Only trigger when '=>' immediately follows the identifier (no type
+        // annotation consumed above) to avoid ambiguity with ternary / when arms.
+        if (check(TokenType::FAT_ARROW)) {
+            const Token arrowTok = advance(); // consume '=>'
+            return parseArrowLambda({token.lexeme}, {"i64"}, arrowTok);
+        }
         return expr;
     }
 
@@ -5702,10 +6519,63 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         return expr;
     }
 
+    // Switch expression: switch(cond) { case v: expr, default: expr }
+    // Also supports paren-free form: switch cond { ... }
+    // Desugared at parse time to an IIFE call (see parseSwitchExpr).
+    if (check(TokenType::SWITCH)) {
+        advance(); // consume 'switch'
+        return parseSwitchExpr();
+    }
+
+    // Arrow lambda: (params) => expr  or  () => expr
+    // Detected via look-ahead: LPAREN...RPAREN FAT_ARROW
+    if (isArrowLambdaParens()) {
+        const Token lpTok = tokens[current]; // '(' not yet consumed
+        advance(); // consume '('
+
+        std::vector<std::string> params;
+        std::vector<std::string> paramTypes;
+
+        if (!check(TokenType::RPAREN)) {
+            // Parse comma-separated  name[:type]  entries
+            do {
+                if (check(TokenType::RPAREN))
+                    break; // trailing comma
+                const Token pname = consume(TokenType::IDENTIFIER, "Expected parameter name in arrow lambda");
+                std::string ptype = "i64"; // default
+                if (match(TokenType::COLON))
+                    ptype = parseTypeAnnotation();
+                params.push_back(pname.lexeme);
+                paramTypes.push_back(ptype);
+            } while (match(TokenType::COMMA));
+        }
+        consume(TokenType::RPAREN, "Expected ')' after arrow lambda parameters");
+        const Token arrowTok = consume(TokenType::FAT_ARROW, "Expected '=>' in arrow lambda");
+        return parseArrowLambda(params, paramTypes, arrowTok);
+    }
+
     if (match(TokenType::LPAREN)) {
-        auto expr = parseExpression();
+        const Token lpTok = tokens[current - 1];
+        // Tuple literal: (e1, e2, ...) — two or more comma-separated expressions.
+        // Single-element or empty parens are just grouping (parenthesized expression).
+        // Strategy: parse the first expression, then check for a comma.
+        auto firstExpr = parseExpression();
+        if (check(TokenType::COMMA)) {
+            // It's a tuple literal — gather all elements.
+            std::vector<std::unique_ptr<Expression>> elements;
+            elements.push_back(std::move(firstExpr));
+            while (match(TokenType::COMMA)) {
+                if (check(TokenType::RPAREN)) break; // trailing comma
+                elements.push_back(parseExpression());
+            }
+            consume(TokenType::RPAREN, "Expected ')' after tuple elements");
+            auto tupleExpr = std::make_unique<TupleExpr>(std::move(elements));
+            tupleExpr->line = lpTok.line;
+            tupleExpr->column = lpTok.column;
+            return tupleExpr;
+        }
         consume(TokenType::RPAREN, "Expected ')' after expression");
-        return expr;
+        return firstExpr;
     }
 
     if (match(TokenType::LBRACKET)) {
@@ -5817,10 +6687,12 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         fnDecl->column = orToken.column;
         lambdaFunctions_.push_back(std::move(fnDecl));
 
-        auto nameLit = std::make_unique<LiteralExpr>(lambdaName);
-        nameLit->line = orToken.line;
-        nameLit->column = orToken.column;
-        return nameLit;
+        // Return the lambda name as an identifier (generates LLVM Function* in codegen,
+        // works for both funcptr stores and array_map/filter/reduce via extractFnName).
+        auto nameId = std::make_unique<IdentifierExpr>(lambdaName);
+        nameId->line = orToken.line;
+        nameId->column = orToken.column;
+        return nameId;
     }
 
     error("Expected expression");
@@ -5890,32 +6762,35 @@ std::unique_ptr<Expression> Parser::parseLambda() {
 
     consume(TokenType::PIPE, "Expected '|' after lambda parameters");
 
-    // Parse the lambda body expression
-    auto body = parseExpression();
-
-    auto node = std::make_unique<LambdaExpr>(std::move(params), std::move(body));
-    node->line = pipeToken.line;
-    node->column = pipeToken.column;
-
-    // Desugar: generate a named function and return its name as a string literal
+    // Desugar: generate a named function and return its name as an identifier.
     const std::string lambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
 
-    // Create the function: fn __lambda_N(params...) { return body; }
-    // Lambda parameters carry their resolved type annotations (default: i64).
+    // Parse the lambda body: either a block `{ stmts; }` or a single expression.
+    // Create the function: fn __lambda_N(params...) { body }
     std::vector<Parameter> fnParams;
-    for (size_t i = 0; i < node->params.size(); ++i) {
-        Parameter p(node->params[i]);
+    for (size_t i = 0; i < params.size(); ++i) {
+        Parameter p(params[i]);
         p.typeName = (i < paramTypes.size()) ? paramTypes[i] : "i64";
         fnParams.push_back(std::move(p));
     }
-    auto returnStmt = std::make_unique<ReturnStmt>(std::move(node->body));
-    returnStmt->line = pipeToken.line;
-    returnStmt->column = pipeToken.column;
-    std::vector<std::unique_ptr<Statement>> stmts;
-    stmts.push_back(std::move(returnStmt));
-    auto block = std::make_unique<BlockStmt>(std::move(stmts));
-    block->line = pipeToken.line;
-    block->column = pipeToken.column;
+    std::unique_ptr<BlockStmt> block;
+    if (check(TokenType::LBRACE)) {
+        // Block-body lambda: |params| { stmts; return val; }
+        block = parseBlock();
+        block->line = pipeToken.line;
+        block->column = pipeToken.column;
+    } else {
+        // Expression-body lambda: |params| expr  (implicit return)
+        auto body = parseExpression();
+        auto returnStmt = std::make_unique<ReturnStmt>(std::move(body));
+        returnStmt->line = pipeToken.line;
+        returnStmt->column = pipeToken.column;
+        std::vector<std::unique_ptr<Statement>> stmts;
+        stmts.push_back(std::move(returnStmt));
+        block = std::make_unique<BlockStmt>(std::move(stmts));
+        block->line = pipeToken.line;
+        block->column = pipeToken.column;
+    }
     auto fnDecl =
         std::make_unique<FunctionDecl>(lambdaName, std::vector<std::string>{}, std::move(fnParams), std::move(block));
     fnDecl->line = pipeToken.line;
@@ -5923,11 +6798,193 @@ std::unique_ptr<Expression> Parser::parseLambda() {
 
     lambdaFunctions_.push_back(std::move(fnDecl));
 
-    // Return the lambda name as a string literal (for use with array_map, etc.)
-    auto nameLit = std::make_unique<LiteralExpr>(lambdaName);
-    nameLit->line = pipeToken.line;
-    nameLit->column = pipeToken.column;
-    return nameLit;
+    // Return the lambda name as an identifier (generates LLVM Function* in codegen,
+    // works for both funcptr stores and array_map/filter/reduce via extractFnName).
+    auto nameId = std::make_unique<IdentifierExpr>(lambdaName);
+    nameId->line = pipeToken.line;
+    nameId->column = pipeToken.column;
+    return nameId;
+}
+
+// ── isArrowLambdaParens ──────────────────────────────────────────────────────
+// Look-ahead predicate: returns true when tokens[current] is '(' and the
+// matching ')' is immediately followed by '=>' (FAT_ARROW).
+// Used in parsePrimary to disambiguate  (expr)  from  (params) => body .
+bool Parser::isArrowLambdaParens() const {
+    if (tokens[current].type != TokenType::LPAREN)
+        return false;
+    size_t pos = current + 1; // first token inside the '('
+    int depth = 1;
+    while (pos < tokens.size() && depth > 0) {
+        if (tokens[pos].type == TokenType::LPAREN)
+            ++depth;
+        else if (tokens[pos].type == TokenType::RPAREN)
+            --depth;
+        ++pos;
+    }
+    // pos now points to the token immediately after the closing ')'
+    return pos < tokens.size() && tokens[pos].type == TokenType::FAT_ARROW;
+}
+
+// ── parseArrowLambda ─────────────────────────────────────────────────────────
+// Shared desugar helper: given an already-collected param name / type list
+// and the source location token, parse the body expression (after '=>') and
+// emit an anonymous named function + return its name as a string literal
+// (identical to parseLambda desugar so array_map etc. continue to work).
+std::unique_ptr<Expression> Parser::parseArrowLambda(const std::vector<std::string>& params,
+                                                      const std::vector<std::string>& paramTypes,
+                                                      const Token& arrowTok) {
+    // Desugar: generate a named function and return its name as an identifier.
+    const std::string lambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
+
+    std::vector<Parameter> fnParams;
+    for (size_t i = 0; i < params.size(); ++i) {
+        Parameter p(params[i]);
+        p.typeName = (i < paramTypes.size() && !paramTypes[i].empty()) ? paramTypes[i] : "i64";
+        fnParams.push_back(std::move(p));
+    }
+
+    // Parse the lambda body: either a block `{ stmts; }` or a single expression.
+    std::unique_ptr<BlockStmt> block;
+    if (check(TokenType::LBRACE)) {
+        // Block-body arrow lambda: (params) => { stmts; return val; }
+        block = parseBlock();
+        block->line = arrowTok.line;
+        block->column = arrowTok.column;
+    } else {
+        // Expression-body arrow lambda: (params) => expr  (implicit return)
+        auto body = parseExpression();
+        auto returnStmt = std::make_unique<ReturnStmt>(std::move(body));
+        returnStmt->line = arrowTok.line;
+        returnStmt->column = arrowTok.column;
+        std::vector<std::unique_ptr<Statement>> stmts;
+        stmts.push_back(std::move(returnStmt));
+        block = std::make_unique<BlockStmt>(std::move(stmts));
+        block->line = arrowTok.line;
+        block->column = arrowTok.column;
+    }
+    auto fnDecl =
+        std::make_unique<FunctionDecl>(lambdaName, std::vector<std::string>{}, std::move(fnParams), std::move(block));
+    fnDecl->line = arrowTok.line;
+    fnDecl->column = arrowTok.column;
+    lambdaFunctions_.push_back(std::move(fnDecl));
+
+    // Return the lambda name as an identifier (generates LLVM Function* in codegen,
+    // works for both funcptr stores and array_map/filter/reduce via extractFnName).
+    auto nameId = std::make_unique<IdentifierExpr>(lambdaName);
+    nameId->line = arrowTok.line;
+    nameId->column = arrowTok.column;
+    return nameId;
+}
+
+// ── parseSwitchExpr ──────────────────────────────────────────────────────────
+// switch(cond) { case v: expr, case v2, v3: expr, default: expr }
+//
+// Desugars at parse time to an IIFE: a helper function __switch_N(__sw: i64)
+// is generated with a proper switch statement where each arm returns the
+// corresponding expression.  The call __switch_N(cond) is returned.
+// This strategy cleanly handles side-effectful conditions and is optimised
+// by LLVM (the call is inlined and the switch statement is lowered).
+std::unique_ptr<Expression> Parser::parseSwitchExpr() {
+    const Token kw = tokens[current - 1]; // the 'switch' token
+
+    // Optional parens — paren-free or paren form both accepted.
+    const bool hasParen = match(TokenType::LPAREN);
+    auto condition = parseExpression();
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after switch expression condition");
+    consume(TokenType::LBRACE, "Expected '{' after switch expression condition");
+
+    const std::string switchName = "__switch_" + std::to_string(lambdaCounter_++);
+    const std::string paramName  = "__sw";
+
+    std::vector<SwitchCase> cases;
+    bool hasDefault = false;
+
+    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        if (match(TokenType::CASE)) {
+            // One or more comma-separated values followed by ':'
+            std::vector<std::unique_ptr<Expression>> caseValues;
+            caseValues.push_back(parseExpression());
+            while (match(TokenType::COMMA)) {
+                if (check(TokenType::COLON))
+                    break; // trailing comma before ':'
+                caseValues.push_back(parseExpression());
+            }
+            consume(TokenType::COLON, "Expected ':' after case value(s) in switch expression");
+            auto resultExpr = parseExpression();
+            auto retStmt    = std::make_unique<ReturnStmt>(std::move(resultExpr));
+            retStmt->line   = kw.line;
+            retStmt->column = kw.column;
+            std::vector<std::unique_ptr<Statement>> bodyStmts;
+            bodyStmts.push_back(std::move(retStmt));
+            cases.emplace_back(std::move(caseValues), std::move(bodyStmts), false);
+            match(TokenType::COMMA); // optional trailing comma between arms
+        } else if (match(TokenType::DEFAULT)) {
+            if (hasDefault)
+                error("Duplicate default case in switch expression");
+            hasDefault = true;
+            consume(TokenType::COLON, "Expected ':' after 'default' in switch expression");
+            auto resultExpr = parseExpression();
+            auto retStmt    = std::make_unique<ReturnStmt>(std::move(resultExpr));
+            retStmt->line   = kw.line;
+            retStmt->column = kw.column;
+            std::vector<std::unique_ptr<Statement>> bodyStmts;
+            bodyStmts.push_back(std::move(retStmt));
+            cases.emplace_back(std::vector<std::unique_ptr<Expression>>{}, std::move(bodyStmts), true);
+            match(TokenType::COMMA); // optional trailing comma
+        } else {
+            error("Expected 'case' or 'default' in switch expression");
+        }
+    }
+    consume(TokenType::RBRACE, "Expected '}' after switch expression body");
+
+    // Ensure there is always a default arm (return 0 if unspecified).
+    if (!hasDefault) {
+        auto zeroLit    = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+        zeroLit->line   = kw.line;
+        zeroLit->column = kw.column;
+        auto retStmt    = std::make_unique<ReturnStmt>(std::move(zeroLit));
+        retStmt->line   = kw.line;
+        retStmt->column = kw.column;
+        std::vector<std::unique_ptr<Statement>> bodyStmts;
+        bodyStmts.push_back(std::move(retStmt));
+        cases.emplace_back(std::vector<std::unique_ptr<Expression>>{}, std::move(bodyStmts), true);
+    }
+
+    // Build switch statement: switch(__sw) { case ... }
+    auto swCond = std::make_unique<IdentifierExpr>(paramName);
+    swCond->line   = kw.line;
+    swCond->column = kw.column;
+    auto switchStmt = std::make_unique<SwitchStmt>(std::move(swCond), std::move(cases));
+    switchStmt->line   = kw.line;
+    switchStmt->column = kw.column;
+
+    // Wrap in an IIFE function: fn __switch_N(__sw: i64) { switch(__sw) { ... } }
+    std::vector<std::unique_ptr<Statement>> fnBodyStmts;
+    fnBodyStmts.push_back(std::move(switchStmt));
+    auto fnBlock    = std::make_unique<BlockStmt>(std::move(fnBodyStmts));
+    fnBlock->line   = kw.line;
+    fnBlock->column = kw.column;
+
+    std::vector<Parameter> fnParams;
+    Parameter p(paramName);
+    p.typeName = "i64";
+    fnParams.push_back(std::move(p));
+
+    auto fnDecl = std::make_unique<FunctionDecl>(switchName, std::vector<std::string>{}, std::move(fnParams),
+                                                 std::move(fnBlock));
+    fnDecl->line   = kw.line;
+    fnDecl->column = kw.column;
+    lambdaFunctions_.push_back(std::move(fnDecl));
+
+    // Return the call: __switch_N(condition)
+    std::vector<std::unique_ptr<Expression>> callArgs;
+    callArgs.push_back(std::move(condition));
+    auto callExpr    = std::make_unique<CallExpr>(switchName, std::move(callArgs));
+    callExpr->line   = kw.line;
+    callExpr->column = kw.column;
+    return callExpr;
 }
 
 OptMaxConfig Parser::parseOptMaxConfig() {

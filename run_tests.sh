@@ -910,6 +910,27 @@ ptest_program "examples/http_test.om" 0
 ptest_program "examples/predefined_constants_test.om" 23
 ptest_program "examples/addr_of_test.om" 5
 ptest_program "examples/as_operator_test.om" 10
+ptest_program "examples/jmp_test.om" 7
+ptest_program "examples/type_system_test.om" 11
+ptest_program "examples/fnptr_test.om" 10
+ptest_program "examples/ptr_mutation_test.om" 8
+ptest_program "examples/compound_deref_test.om" 8
+ptest_program "examples/struct_param_test.om" 8
+ptest_program "examples/incdec_lvalue_test.om" 12
+ptest_program "examples/bare_fnptr_test.om" 9
+ptest_program "examples/global_string_test.om" 10
+ptest_program "examples/global_array_test.om" 9
+ptest_program "examples/global_str_array_test.om" 11
+ptest_program "examples/switch_string_return_test.om" 7
+ptest_program "examples/struct_static_call_test.om" 11
+ptest_program "examples/top_const_test.om" 10
+ptest_program "examples/paren_free_test.om" 12
+ptest_program "examples/round71_test.om" 0
+ptest_program "examples/round72_test.om" 23
+ptest_program "examples/round73_test.om" 38
+ptest_program "examples/round74_test.om" 0
+ptest_program "examples/round75_test.om" 0
+ptest_program "examples/round76_test.om" 23
 flush_ptests
 
 echo ""

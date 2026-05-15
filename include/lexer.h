@@ -20,7 +20,8 @@ enum class TokenType {
     INTEGER,
     FLOAT,
     STRING,
-    BYTES_LITERAL, // 0x"AABBCC" — hex byte array literal
+    BYTES_LITERAL,  // 0x"AABBCC" — hex byte array literal
+    CHAR_LITERAL,   // 'A' / '\n' / '\u0041' — Unicode scalar value as i32
     IDENTIFIER,
 
     // Keywords
@@ -85,6 +86,8 @@ enum class TokenType {
     OWN,       // own      — explicit unique-ownership declaration (Ω spec §3.1)
     CONSTRUCT, // construct — in-place field initialization of allocated memory
     NAMESPACE, // namespace — user-defined namespace block
+    JMP,       // jmp       — unconditional jump to a named label (deprecated)
+    LABEL,     // label     — declares a named jump target
 
     // Operators
     PLUS,
@@ -196,7 +199,12 @@ class Lexer {
     Token scanIdentifier();
     Token scanString();
     Token scanMultiLineString();
+    Token scanRawString();
+    Token scanRawMultiLineString();
     void scanInterpolatedString(std::vector<Token>& tokens);
+    /// Scan an f"..." interpolated string.  Called when 'f' has already been
+    /// consumed; position is now pointing at the opening '"'.
+    void scanFString(std::vector<Token>& tokens);
 };
 
 } // namespace omscript

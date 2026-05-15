@@ -1,0 +1,45 @@
+import std;
+
+// global_str_array_test.om — Round-68: global string/float array initializer.
+
+global const COLORS: string[] = ["red", "green", "blue"];
+global const NAMES: string[] = ["alice", "bob", "carol"];
+global var TAGS: string[] = ["alpha", "beta"];
+
+fn join_all(arr: string[]) -> string {
+    var result: string = "";
+    for (s in arr) {
+        if (len(result) > 0) result = str_concat(result, ",");
+        result = str_concat(result, s);
+    }
+    return result;
+}
+
+fn main() -> int {
+    var score: int = 0;
+
+    // T1: len of global string arrays
+    score += (len(COLORS) == 3);
+    score += (len(NAMES) == 3);
+
+    // T2: index access on global string arrays
+    score += (COLORS[0] == "red");
+    score += (COLORS[1] == "green");
+    score += (COLORS[2] == "blue");
+
+    // T3: index access on second array
+    score += (NAMES[0] == "alice");
+    score += (NAMES[2] == "carol");
+
+    // T4: mutable global string array
+    score += (TAGS[0] == "alpha");
+    score += (TAGS[1] == "beta");
+
+    // T5: iteration via for-in
+    score += (join_all(COLORS) == "red,green,blue");
+
+    // T6: pass global string array to function
+    score += (join_all(NAMES) == "alice,bob,carol");
+
+    return score;
+}

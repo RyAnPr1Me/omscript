@@ -1,0 +1,157 @@
+import std;
+
+// Round-73 feature tests:
+// 1. Raw strings r"..." — no escape processing
+// 2. Raw triple-quoted strings r"""..."""
+// 3. str_is_empty(s) builtin
+// 4. str_capitalize(s) builtin
+// 5. array_first(arr) builtin
+// 6. map_copy(d) builtin
+// 7. map_clear(d) builtin
+
+fn main() -> int {
+    var pass = 0;
+
+    // ── 1. Raw strings: backslashes are literal ─────────────────────────────
+    var raw1 = r"\n is a newline escape";
+    if str_eq(raw1, "\\n is a newline escape") { pass = pass + 1; }  // +1
+
+    // Backslash-t is literal
+    var raw2 = r"\t is a tab escape";
+    if str_eq(raw2, "\\t is a tab escape") { pass = pass + 1; }  // +2
+
+    // Windows-style path
+    var path = r"C:\Users\Alice\Documents";
+    if str_starts_with(path, "C:") { pass = pass + 1; }  // +3
+    if str_contains(path, "\\Alice\\") { pass = pass + 1; }  // +4
+
+    // Regex-like pattern (no special escaping needed)
+    var pattern = r"\d+\.\d+";
+    if str_eq(pattern, "\\d+\\.\\d+") { pass = pass + 1; }  // +5
+
+    // Empty raw string
+    var empty_raw = r"";
+    if str_eq(empty_raw, "") { pass = pass + 1; }  // +6
+
+    // ── 2. Raw triple-quoted strings ────────────────────────────────────────
+    var multi = r"""Hello
+World""";
+    if str_contains(multi, "Hello") { pass = pass + 1; }  // +7
+    if str_contains(multi, "World") { pass = pass + 1; }  // +8
+
+    var sql = r"""SELECT *
+FROM users
+WHERE name = 'Alice'""";
+    if str_starts_with(sql, "SELECT") { pass = pass + 1; }  // +9
+    if str_contains(sql, "FROM users") { pass = pass + 1; }  // +10
+
+    // Backslashes in triple-quoted raw string are also literal
+    var raw_triple = r"""\n\t\r""";
+    if str_eq(raw_triple, "\\n\\t\\r") { pass = pass + 1; }  // +11
+
+    // ── 3. str_is_empty(s) ──────────────────────────────────────────────────
+    var e1 = "";
+    var e2 = "hello";
+
+    if str_is_empty(e1) == 1 { pass = pass + 1; }  // +12
+    if str_is_empty(e2) == 0 { pass = pass + 1; }  // +13
+
+    // Compile-time fold: literal empty string
+    var ct_empty = str_is_empty("");
+    if ct_empty == 1 { pass = pass + 1; }  // +14
+
+    // Compile-time fold: literal non-empty
+    var ct_nonempty = str_is_empty("x");
+    if ct_nonempty == 0 { pass = pass + 1; }  // +15
+
+    // After trimming to empty
+    var trimmed = str_trim("   ");
+    if str_is_empty(trimmed) == 1 { pass = pass + 1; }  // +16
+
+    // ── 4. str_capitalize(s) ────────────────────────────────────────────────
+    var cap1 = str_capitalize("hello world");
+    if str_eq(cap1, "Hello world") { pass = pass + 1; }  // +17
+
+    var cap2 = str_capitalize("HELLO");
+    if str_eq(cap2, "Hello") { pass = pass + 1; }  // +18
+
+    var cap3 = str_capitalize("");
+    if str_eq(cap3, "") { pass = pass + 1; }  // +19
+
+    var cap4 = str_capitalize("a");
+    if str_eq(cap4, "A") { pass = pass + 1; }  // +20
+
+    // Compile-time fold
+    var cap5 = str_capitalize("omscript");
+    if str_eq(cap5, "Omscript") { pass = pass + 1; }  // +21
+
+    // ── 5. array_first(arr) ─────────────────────────────────────────────────
+    var arr1 = [10, 20, 30, 40];
+    var first1 = array_first(arr1);
+    if first1 == 10 { pass = pass + 1; }  // +22
+
+    var arr2 = [99];
+    var first2 = array_first(arr2);
+    if first2 == 99 { pass = pass + 1; }  // +23
+
+    // array_first + array_last consistency
+    var arr3 = [1, 2, 3, 4, 5];
+    var f3 = array_first(arr3);
+    var l3 = array_last(arr3);
+    if f3 == 1 { pass = pass + 1; }  // +24
+    if l3 == 5 { pass = pass + 1; }  // +25
+
+    // After push: first unchanged, last is new element
+    push(arr3, 6);
+    if array_first(arr3) == 1 { pass = pass + 1; }  // +26
+    if array_last(arr3) == 6 { pass = pass + 1; }   // +27
+
+    // ── 6. map_copy(d) ──────────────────────────────────────────────────────
+    var orig = map_new();
+    orig = map_set(orig, "a", 1);
+    orig = map_set(orig, "b", 2);
+    orig = map_set(orig, "c", 3);
+
+    var copy1 = map_copy(orig);
+
+    // Copy has same entries
+    if map_get(copy1, "a", 0) == 1 { pass = pass + 1; }  // +28
+    if map_get(copy1, "b", 0) == 2 { pass = pass + 1; }  // +29
+    if map_get(copy1, "c", 0) == 3 { pass = pass + 1; }  // +30
+
+    // Modifying original after copy doesn't affect copy
+    orig = map_set(orig, "a", 99);
+    if map_get(copy1, "a", 0) == 1 { pass = pass + 1; }  // +31
+
+    // Modifying copy doesn't affect original
+    copy1 = map_set(copy1, "b", 77);
+    if map_get(orig, "b", 0) == 2 { pass = pass + 1; }  // +32
+
+    // Copy preserves size
+    if map_size(copy1) == 3 { pass = pass + 1; }  // +33
+
+    // ── 7. map_clear(d) ─────────────────────────────────────────────────────
+    var m2 = map_new();
+    m2 = map_set(m2, "x", 10);
+    m2 = map_set(m2, "y", 20);
+
+    // Before clear
+    if map_size(m2) == 2 { pass = pass + 1; }  // +34
+
+    m2 = map_clear(m2);
+
+    // After clear: empty map
+    if map_size(m2) == 0 { pass = pass + 1; }  // +35
+    if map_has(m2, "x") == 0 { pass = pass + 1; }  // +36
+
+    // Can reuse the cleared map
+    m2 = map_set(m2, "z", 42);
+    if map_get(m2, "z", 0) == 42 { pass = pass + 1; }  // +37
+
+    // Clear an already-empty map is fine
+    var m3 = map_new();
+    m3 = map_clear(m3);
+    if map_size(m3) == 0 { pass = pass + 1; }  // +38
+
+    return pass;
+}
