@@ -4041,7 +4041,7 @@ bool CodeGenerator::isStringArrayExpr(Expression* expr) const {
     // str_split() always returns an array of strings.
     if (expr->type == ASTNodeType::CALL_EXPR) {
         auto* call = static_cast<CallExpr*>(expr);
-        if (call->callee == "str_split" || call->callee == "str_words")
+        if (call->callee == "str_split" || call->callee == "str_words" || call->callee == "str_to_lines")
             return true;
         if ((call->callee == "push" || call->callee == "unshift" || call->callee == "array_copy") &&
             !call->arguments.empty())

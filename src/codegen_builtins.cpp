@@ -309,6 +309,11 @@ enum class BuiltinId : uint8_t {
     STR_WORDS,      ///< str_words(s)          → split on whitespace → string[]
     STR_TITLE,      ///< str_title(s)          → title-case each word
     STR_SWAPCASE,   ///< str_swapcase(s)       → swap upper↔lower for each ASCII char
+    // ── Round-75 additions ───────────────────────────────────────────────────
+    ARRAY_FLATTEN,  ///< array_flatten(arr)    → flatten one level: int[][]→int[]
+    ARRAY_MIN_BY,   ///< array_min_by(arr,fn)  → element with minimum key fn(elem)
+    ARRAY_MAX_BY,   ///< array_max_by(arr,fn)  → element with maximum key fn(elem)
+    STR_TO_LINES,   ///< str_to_lines(s)       → split on \n / \r\n → string[]
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -567,6 +572,11 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"str_words",      BuiltinId::STR_WORDS},
     {"str_title",      BuiltinId::STR_TITLE},
     {"str_swapcase",   BuiltinId::STR_SWAPCASE},
+    // Round-75
+    {"array_flatten",  BuiltinId::ARRAY_FLATTEN},
+    {"array_min_by",   BuiltinId::ARRAY_MIN_BY},
+    {"array_max_by",   BuiltinId::ARRAY_MAX_BY},
+    {"str_to_lines",   BuiltinId::STR_TO_LINES},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -3219,7 +3229,422 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return hdr;
     }
 
-    // ── End Round-74 builtins ────────────────────────────────────────────────
+    // ── Round-75 builtins ────────────────────────────────────────────────────
+
+    // array_flatten(arr) → flatten one level of array nesting.
+    // The outer array's elements are i64 values that are pointers to inner arrays.
+    // Returns a new flat array with all inner elements concatenated in order.
+    if (bid == BuiltinId::ARRAY_FLATTEN) {
+        validateArgCount(expr, "array_flatten", 1);
+        llvm::Value* outerArg = generateExpression(expr->arguments[0].get());
+        outerArg = toDefaultType(outerArg);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* outerPtr = builder->CreateIntToPtr(outerArg, ptrTy, "flat.outerptr");
+        llvm::Value* outerLen = emitLoadArrayLen(outerPtr, "flat.outerlen");
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        // ── Pass 1: sum all inner-array lengths ─────────────────────────────
+        llvm::BasicBlock* p1PreBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* p1LoopBB = llvm::BasicBlock::Create(*context, "flat.p1loop", parentFn);
+        llvm::BasicBlock* p1BodyBB = llvm::BasicBlock::Create(*context, "flat.p1body", parentFn);
+        llvm::BasicBlock* p1DoneBB = llvm::BasicBlock::Create(*context, "flat.p1done", parentFn);
+        auto* p1SkipW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(builder->CreateICmpSGT(outerLen, zero, "flat.p1gt0"), p1LoopBB, p1DoneBB, p1SkipW);
+
+        builder->SetInsertPoint(p1LoopBB);
+        llvm::PHINode* p1i    = builder->CreatePHI(getDefaultType(), 2, "flat.p1i");
+        llvm::PHINode* p1total= builder->CreatePHI(getDefaultType(), 2, "flat.p1total");
+        p1i->addIncoming(zero, p1PreBB);
+        p1total->addIncoming(zero, p1PreBB);
+        builder->CreateCondBr(builder->CreateICmpSLT(p1i, outerLen, "flat.p1cond"), p1BodyBB, p1DoneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(p1BodyBB);
+        llvm::Value* p1slotIdx  = builder->CreateAdd(p1i, one, "flat.p1slot", true, true);
+        llvm::Value* p1elemPtr  = builder->CreateInBoundsGEP(getDefaultType(), outerPtr, p1slotIdx, "flat.p1eptr");
+        llvm::Value* p1elemI64  = emitLoadArrayElem(p1elemPtr, "flat.p1elem");
+        // Each element is a pointer-to-inner-array stored as i64.
+        llvm::Value* innerPtr1  = builder->CreateIntToPtr(p1elemI64, ptrTy, "flat.p1iptr");
+        llvm::Value* innerLen1  = emitLoadArrayLen(innerPtr1, "flat.p1ilen");
+        llvm::Value* p1newTotal = builder->CreateAdd(p1total, innerLen1, "flat.p1ntotal", false, true);
+        llvm::Value* p1next     = builder->CreateAdd(p1i, one, "flat.p1next", true, true);
+        p1i->addIncoming(p1next, builder->GetInsertBlock());
+        p1total->addIncoming(p1newTotal, builder->GetInsertBlock());
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(p1LoopBB)));
+
+        builder->SetInsertPoint(p1DoneBB);
+        llvm::PHINode* totalLen = builder->CreatePHI(getDefaultType(), 2, "flat.total");
+        totalLen->addIncoming(zero, p1PreBB);
+        totalLen->addIncoming(p1total, p1LoopBB);
+        nonNegValues_.insert(totalLen);
+
+        // ── Allocate output array (totalLen + 1) * 8 bytes ──────────────────
+        llvm::Value* eight  = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* slots  = builder->CreateAdd(totalLen, one, "flat.slots", true, true);
+        llvm::Value* bytes  = builder->CreateMul(slots, eight, "flat.bytes", true, true);
+        llvm::Value* outBuf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "flat.outbuf");
+        llvm::cast<llvm::CallInst>(outBuf)->addRetAttr(llvm::Attribute::NonNull);
+        emitStoreArrayLen(totalLen, outBuf);
+
+        // ── Pass 2: copy elements from each inner array ──────────────────────
+        llvm::BasicBlock* p2PreBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* p2LoopBB = llvm::BasicBlock::Create(*context, "flat.p2loop", parentFn);
+        llvm::BasicBlock* p2BodyBB = llvm::BasicBlock::Create(*context, "flat.p2body", parentFn);
+        llvm::BasicBlock* p2DoneBB = llvm::BasicBlock::Create(*context, "flat.p2done", parentFn);
+        auto* p2SkipW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(builder->CreateICmpSGT(outerLen, zero, "flat.p2gt0"), p2LoopBB, p2DoneBB, p2SkipW);
+
+        builder->SetInsertPoint(p2LoopBB);
+        llvm::PHINode* p2i   = builder->CreatePHI(getDefaultType(), 2, "flat.p2i");
+        llvm::PHINode* p2dst = builder->CreatePHI(getDefaultType(), 2, "flat.p2dst");
+        p2i->addIncoming(zero, p2PreBB);
+        p2dst->addIncoming(one, p2PreBB); // output slot index starts at 1 (skip header)
+        builder->CreateCondBr(builder->CreateICmpSLT(p2i, outerLen, "flat.p2cond"), p2BodyBB, p2DoneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(p2BodyBB);
+        llvm::Value* p2slotIdx = builder->CreateAdd(p2i, one, "flat.p2slot", true, true);
+        llvm::Value* p2elemPtr = builder->CreateInBoundsGEP(getDefaultType(), outerPtr, p2slotIdx, "flat.p2eptr");
+        llvm::Value* p2elemI64 = emitLoadArrayElem(p2elemPtr, "flat.p2elem");
+        llvm::Value* innerPtr2 = builder->CreateIntToPtr(p2elemI64, ptrTy, "flat.p2iptr");
+        llvm::Value* innerLen2 = emitLoadArrayLen(innerPtr2, "flat.p2ilen");
+
+        // Inner copy loop: for j in 0..innerLen2: outBuf[p2dst+j] = innerArr[j+1]
+        llvm::BasicBlock* icPreBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* icLoopBB = llvm::BasicBlock::Create(*context, "flat.icloop", parentFn);
+        llvm::BasicBlock* icBodyBB = llvm::BasicBlock::Create(*context, "flat.icbody", parentFn);
+        llvm::BasicBlock* icDoneBB = llvm::BasicBlock::Create(*context, "flat.icdone", parentFn);
+        auto* icSkipW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(builder->CreateICmpSGT(innerLen2, zero, "flat.icgt0"), icLoopBB, icDoneBB, icSkipW);
+
+        builder->SetInsertPoint(icLoopBB);
+        llvm::PHINode* icj = builder->CreatePHI(getDefaultType(), 2, "flat.icj");
+        icj->addIncoming(zero, icPreBB);
+        builder->CreateCondBr(builder->CreateICmpSLT(icj, innerLen2, "flat.iccond"), icBodyBB, icDoneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(icBodyBB);
+        llvm::Value* srcIdx = builder->CreateAdd(icj, one, "flat.icsrcidx", true, true);
+        llvm::Value* srcPtr = builder->CreateInBoundsGEP(getDefaultType(), innerPtr2, srcIdx, "flat.icsrcptr");
+        llvm::Value* elem   = emitLoadArrayElem(srcPtr, "flat.icelem");
+        llvm::Value* dstIdx = builder->CreateAdd(p2dst, icj, "flat.icdstidx", false, true);
+        llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), outBuf, dstIdx, "flat.icdstptr");
+        auto* icSt = builder->CreateStore(elem, dstPtr);
+        icSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* icnext = builder->CreateAdd(icj, one, "flat.icnext", true, true);
+        icj->addIncoming(icnext, builder->GetInsertBlock());
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(icLoopBB)));
+
+        builder->SetInsertPoint(icDoneBB);
+        // Advance p2dst by innerLen2 and p2i by 1
+        llvm::Value* p2dstNext = builder->CreateAdd(p2dst, innerLen2, "flat.p2dstnext", false, true);
+        llvm::Value* p2next    = builder->CreateAdd(p2i, one, "flat.p2next", true, true);
+        p2i->addIncoming(p2next, builder->GetInsertBlock());
+        p2dst->addIncoming(p2dstNext, builder->GetInsertBlock());
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(p2LoopBB)));
+
+        builder->SetInsertPoint(p2DoneBB);
+        arrayReturningFunctions_.insert("array_flatten");
+        return outBuf;
+    }
+
+    // array_min_by(arr, fn) → element of arr with minimum fn(element)
+    // array_max_by(arr, fn) → element of arr with maximum fn(element)
+    // Both return 0 (and skip the loop) when arr is empty.
+    if (bid == BuiltinId::ARRAY_MIN_BY || bid == BuiltinId::ARRAY_MAX_BY) {
+        const bool isMax = (bid == BuiltinId::ARRAY_MAX_BY);
+        const char* builtinName = isMax ? "array_max_by" : "array_min_by";
+        validateArgCount(expr, builtinName, 2);
+
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* arrPtr = builder->CreateIntToPtr(arrArg, ptrTy, "amby.ptr");
+        llvm::Value* arrLen = emitLoadArrayLen(arrPtr, "amby.len");
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        // Extract the key function name.
+        llvm::Function* keyFn = nullptr;
+        {
+            const std::string kname = extractFnName(expr->arguments[1].get());
+            if (!kname.empty()) keyFn = module->getFunction(kname);
+        }
+        if (!keyFn) {
+            llvm::errs() << "warning: " << builtinName
+                         << " could not resolve key function; returning 0\n";
+            return llvm::ConstantInt::get(getDefaultType(), 0);
+        }
+
+        llvm::BasicBlock* preBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "amby.loop", parentFn);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "amby.body", parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "amby.done", parentFn);
+
+        // Load first element as initial best (or skip if empty).
+        llvm::Value* firstPtr  = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, one, "amby.fptr");
+        llvm::Value* firstElem = emitLoadArrayElem(firstPtr, "amby.felem");
+        // firstKey = fn(firstElem)
+        llvm::Value* firstKey  = builder->CreateCall(keyFn, {firstElem}, "amby.fkey");
+        firstKey = toDefaultType(firstKey);
+
+        // Guard: if len == 0 skip loop, return 0.
+        auto* skipW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(builder->CreateICmpSGT(arrLen, zero, "amby.gt0"), loopBB, doneBB, skipW);
+
+        // Loop starting at index 1 (we already initialised best from index 0).
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx      = builder->CreatePHI(getDefaultType(), 2, "amby.idx");
+        llvm::PHINode* bestElem = builder->CreatePHI(getDefaultType(), 2, "amby.best");
+        llvm::PHINode* bestKey  = builder->CreatePHI(getDefaultType(), 2, "amby.bestkey");
+        idx->addIncoming(one, preBB);
+        bestElem->addIncoming(firstElem, preBB);
+        bestKey->addIncoming(firstKey, preBB);
+        builder->CreateCondBr(builder->CreateICmpSLT(idx, arrLen, "amby.cond"), bodyBB, doneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* slotIdx  = builder->CreateAdd(idx, one, "amby.slot", true, true);
+        llvm::Value* elemPtr  = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, slotIdx, "amby.eptr");
+        llvm::Value* curElem  = emitLoadArrayElem(elemPtr, "amby.cur");
+        llvm::Value* curKey   = builder->CreateCall(keyFn, {curElem}, "amby.ckey");
+        curKey = toDefaultType(curKey);
+        // isBetter: for max use curKey > bestKey, for min use curKey < bestKey
+        llvm::Value* isBetter = isMax
+            ? builder->CreateICmpSGT(curKey, bestKey, "amby.isbetter")
+            : builder->CreateICmpSLT(curKey, bestKey, "amby.isbetter");
+        llvm::Value* newBestElem = builder->CreateSelect(isBetter, curElem, bestElem, "amby.newbest");
+        llvm::Value* newBestKey  = builder->CreateSelect(isBetter, curKey,  bestKey,  "amby.newbkey");
+        llvm::Value* next = builder->CreateAdd(idx, one, "amby.next", true, true);
+        idx->addIncoming(next, builder->GetInsertBlock());
+        bestElem->addIncoming(newBestElem, builder->GetInsertBlock());
+        bestKey->addIncoming(newBestKey, builder->GetInsertBlock());
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 2, "amby.result");
+        result->addIncoming(zero, preBB);          // empty array → 0
+        result->addIncoming(bestElem, loopBB);
+        return result;
+    }
+
+    // str_to_lines(s) → split s on newlines (\n, \r\n) and return string[].
+    // Each line is a freshly allocated string fat-pointer (no trailing \n/\r).
+    // Empty trailing line (s ends with \n) is excluded (Python str.splitlines behaviour).
+    if (bid == BuiltinId::STR_TO_LINES) {
+        validateArgCount(expr, "str_to_lines", 1);
+
+        // Compile-time fold: if the argument is a string literal, fold now.
+        if (auto sConst = tryFoldStr(expr->arguments[0].get())) {
+            // Split by \n (strip \r)
+            std::vector<std::string> lines;
+            size_t start = 0;
+            for (size_t i = 0; i <= sConst->size(); ++i) {
+                if (i == sConst->size() || (*sConst)[i] == '\n') {
+                    std::string line = sConst->substr(start, i - start);
+                    if (!line.empty() && line.back() == '\r') line.pop_back();
+                    lines.push_back(line);
+                    start = i + 1;
+                }
+            }
+            // Remove empty trailing line produced by a terminal \n.
+            if (!lines.empty() && lines.back().empty()) lines.pop_back();
+
+            const int64_t nLines = static_cast<int64_t>(lines.size());
+            llvm::Value* eight  = llvm::ConstantInt::get(getDefaultType(), 8);
+            llvm::Value* slots  = llvm::ConstantInt::get(getDefaultType(), nLines + 1);
+            llvm::Value* bytes  = builder->CreateMul(slots, eight, "stl.bytes", true, true);
+            llvm::Value* outBuf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "stl.out");
+            llvm::cast<llvm::CallInst>(outBuf)->addRetAttr(llvm::Attribute::NonNull);
+            emitStoreArrayLen(llvm::ConstantInt::get(getDefaultType(), nLines), outBuf);
+            for (int64_t li = 0; li < nLines; ++li) {
+                llvm::Value* strPtr = internString(lines[static_cast<size_t>(li)]);
+                llvm::Value* asInt  = builder->CreatePtrToInt(strPtr, getDefaultType(), "stl.sint");
+                llvm::Value* slot   = llvm::ConstantInt::get(getDefaultType(), li + 1);
+                llvm::Value* dst    = builder->CreateInBoundsGEP(getDefaultType(), outBuf, slot, "stl.dst");
+                auto* st = builder->CreateStore(asInt, dst);
+                st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+            }
+            arrayReturningFunctions_.insert("str_to_lines");
+            stringReturningFunctions_.insert("str_to_lines");
+            return outBuf;
+        }
+
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* strPtr = strArg->getType()->isPointerTy()
+                                  ? strArg
+                                  : builder->CreateIntToPtr(strArg, ptrTy, "stl.sptr");
+        llvm::Value* strLen  = emitStringLen(strPtr, "stl.slen");
+        llvm::Value* strData = emitStringData(strPtr, "stl.sdata");
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* i8zero = llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0);
+        llvm::Value* nlChar = llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), '\n');
+        llvm::Value* crChar = llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), '\r');
+
+        // ── Pass 1: count lines (newline-separated) ─────────────────────────
+        llvm::BasicBlock* c1PreBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* c1LoopBB = llvm::BasicBlock::Create(*context, "stl.c1loop", parentFn);
+        llvm::BasicBlock* c1BodyBB = llvm::BasicBlock::Create(*context, "stl.c1body", parentFn);
+        llvm::BasicBlock* c1DoneBB = llvm::BasicBlock::Create(*context, "stl.c1done", parentFn);
+        auto* c1SkipW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(builder->CreateICmpSGT(strLen, zero, "stl.c1gt0"), c1LoopBB, c1DoneBB, c1SkipW);
+
+        builder->SetInsertPoint(c1LoopBB);
+        llvm::PHINode* c1i   = builder->CreatePHI(getDefaultType(), 2, "stl.c1i");
+        llvm::PHINode* c1cnt = builder->CreatePHI(getDefaultType(), 2, "stl.c1cnt");
+        c1i->addIncoming(zero, c1PreBB);
+        c1cnt->addIncoming(one, c1PreBB); // start with 1 line (the first line before any \n)
+        builder->CreateCondBr(builder->CreateICmpSLT(c1i, strLen, "stl.c1cond"), c1BodyBB, c1DoneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(c1BodyBB);
+        llvm::Value* c1cp  = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strData, c1i, "stl.c1cp");
+        llvm::Value* c1ch  = builder->CreateLoad(llvm::Type::getInt8Ty(*context), c1cp, "stl.c1ch");
+        llvm::Value* isNL1 = builder->CreateICmpEQ(c1ch, nlChar, "stl.isnl1");
+        llvm::Value* c1inc = builder->CreateAdd(c1cnt, one, "stl.c1inc", false, true);
+        llvm::Value* c1new = builder->CreateSelect(isNL1, c1inc, c1cnt, "stl.c1new");
+        llvm::Value* c1nx  = builder->CreateAdd(c1i, one, "stl.c1nx", true, true);
+        c1i->addIncoming(c1nx, builder->GetInsertBlock());
+        c1cnt->addIncoming(c1new, builder->GetInsertBlock());
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(c1LoopBB)));
+
+        builder->SetInsertPoint(c1DoneBB);
+        llvm::PHINode* rawCount = builder->CreatePHI(getDefaultType(), 2, "stl.rawcnt");
+        rawCount->addIncoming(zero, c1PreBB);
+        rawCount->addIncoming(c1cnt, c1LoopBB);
+        // Subtract 1 if the string ends with \n (trailing empty line not included)
+        llvm::Value* lastIdx  = builder->CreateSub(strLen, one, "stl.lastidx", false, true);
+        llvm::Value* lastCp   = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strData, lastIdx, "stl.lcp");
+        // Guard: only load if strLen > 0 (we're already past the len==0 check above)
+        llvm::Value* lastCh   = builder->CreateLoad(llvm::Type::getInt8Ty(*context), lastCp, "stl.lch");
+        llvm::Value* endsNL   = builder->CreateICmpEQ(lastCh, nlChar, "stl.endsnl");
+        llvm::Value* lineCount = builder->CreateSelect(
+            builder->CreateAnd(builder->CreateICmpSGT(strLen, zero), endsNL),
+            builder->CreateSub(rawCount, one, "stl.lcdec", false, true),
+            rawCount, "stl.linecount");
+        nonNegValues_.insert(lineCount);
+
+        // ── Allocate output array ─────────────────────────────────────────────
+        llvm::Value* slots  = builder->CreateAdd(lineCount, one, "stl.slots", true, true);
+        llvm::Value* bytes  = builder->CreateMul(slots, eight, "stl.bytes", true, true);
+        llvm::Value* outBuf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "stl.outbuf");
+        llvm::cast<llvm::CallInst>(outBuf)->addRetAttr(llvm::Attribute::NonNull);
+        emitStoreArrayLen(lineCount, outBuf);
+
+        // ── Pass 2: extract each line as a fat-pointer string ────────────────
+        llvm::BasicBlock* p2PreBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* p2LoopBB = llvm::BasicBlock::Create(*context, "stl.p2loop", parentFn);
+        llvm::BasicBlock* p2BodyBB = llvm::BasicBlock::Create(*context, "stl.p2body", parentFn);
+        llvm::BasicBlock* p2DoneBB = llvm::BasicBlock::Create(*context, "stl.p2done", parentFn);
+        auto* p2SkipW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(builder->CreateICmpSGT(lineCount, zero, "stl.p2gt0"), p2LoopBB, p2DoneBB, p2SkipW);
+
+        builder->SetInsertPoint(p2LoopBB);
+        llvm::PHINode* p2i    = builder->CreatePHI(getDefaultType(), 2, "stl.p2i");
+        llvm::PHINode* p2pos  = builder->CreatePHI(getDefaultType(), 2, "stl.p2pos"); // byte offset of line start
+        llvm::PHINode* p2out  = builder->CreatePHI(getDefaultType(), 2, "stl.p2out"); // output slot index
+        p2i->addIncoming(zero, p2PreBB);
+        p2pos->addIncoming(zero, p2PreBB);
+        p2out->addIncoming(one, p2PreBB);
+        builder->CreateCondBr(builder->CreateICmpSLT(p2i, lineCount, "stl.p2cond"), p2BodyBB, p2DoneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        // Body: find the end of the current line (scan forward to \n or end)
+        builder->SetInsertPoint(p2BodyBB);
+        // Inner scan loop to find end of line
+        llvm::BasicBlock* scanPreBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* scanLoopBB = llvm::BasicBlock::Create(*context, "stl.scan", parentFn);
+        llvm::BasicBlock* scanDoneBB = llvm::BasicBlock::Create(*context, "stl.scandone", parentFn);
+        builder->CreateBr(scanLoopBB);
+
+        builder->SetInsertPoint(scanLoopBB);
+        llvm::PHINode* scani = builder->CreatePHI(getDefaultType(), 2, "stl.scani");
+        scani->addIncoming(p2pos, scanPreBB);
+        llvm::Value* scanCond = builder->CreateICmpSLT(scani, strLen, "stl.scancond");
+        // Also stop at \n
+        llvm::BasicBlock* scanCheckBB = llvm::BasicBlock::Create(*context, "stl.scancheck", parentFn);
+        builder->CreateCondBr(scanCond, scanCheckBB, scanDoneBB);
+
+        builder->SetInsertPoint(scanCheckBB);
+        llvm::Value* scanCp = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strData, scani, "stl.scancp");
+        llvm::Value* scanCh = builder->CreateLoad(llvm::Type::getInt8Ty(*context), scanCp, "stl.scanch");
+        llvm::Value* isNLs  = builder->CreateICmpEQ(scanCh, nlChar, "stl.isnls");
+        llvm::Value* scanNext = builder->CreateAdd(scani, one, "stl.scannx", true, true);
+        scani->addIncoming(scanNext, scanCheckBB);
+        builder->CreateCondBr(isNLs, scanDoneBB, scanLoopBB);
+
+        builder->SetInsertPoint(scanDoneBB);
+        llvm::PHINode* lineEnd = builder->CreatePHI(getDefaultType(), 3, "stl.lineend");
+        lineEnd->addIncoming(scani, scanLoopBB);   // hit end-of-string
+        lineEnd->addIncoming(scani, scanCheckBB);  // hit \n
+
+        // lineLen = lineEnd - p2pos  (strip trailing \r if present)
+        llvm::Value* rawLineLen = builder->CreateSub(lineEnd, p2pos, "stl.rawll", false, true);
+        // Check if last char of the line is \r
+        llvm::BasicBlock* crCheckBB  = llvm::BasicBlock::Create(*context, "stl.crcheck", parentFn);
+        llvm::BasicBlock* crMergeBB  = llvm::BasicBlock::Create(*context, "stl.crmerge", parentFn);
+        builder->CreateCondBr(builder->CreateICmpSGT(rawLineLen, zero, "stl.llgt0"), crCheckBB, crMergeBB);
+
+        builder->SetInsertPoint(crCheckBB);
+        llvm::Value* crIdx = builder->CreateSub(lineEnd, one, "stl.cridx", false, true);
+        llvm::Value* crCp  = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strData, crIdx, "stl.crcp");
+        llvm::Value* crCh  = builder->CreateLoad(llvm::Type::getInt8Ty(*context), crCp, "stl.crch");
+        llvm::Value* isCR  = builder->CreateICmpEQ(crCh, crChar, "stl.iscr");
+        builder->CreateBr(crMergeBB);
+
+        builder->SetInsertPoint(crMergeBB);
+        llvm::PHINode* isCRPhi = builder->CreatePHI(builder->getInt1Ty(), 2, "stl.iscrphi");
+        isCRPhi->addIncoming(builder->getFalse(), scanDoneBB);
+        isCRPhi->addIncoming(isCR, crCheckBB);
+        llvm::Value* lineLen = builder->CreateSelect(
+            isCRPhi,
+            builder->CreateSub(rawLineLen, one, "stl.lldec", false, true),
+            rawLineLen, "stl.linelen");
+        nonNegValues_.insert(lineLen);
+
+        // Allocate a fat-pointer string for this line: len=lineLen, data=strData+p2pos
+        llvm::Value* lineHdr  = emitAllocString(lineLen, lineLen, "stl.lhdr");
+        llvm::Value* lineData = emitStringData(lineHdr, "stl.ldata");
+        llvm::Value* srcStart = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), strData, p2pos, "stl.srcst");
+        // Copy lineLen bytes + null terminator
+        llvm::Value* copySize = builder->CreateAdd(lineLen, one, "stl.cpsize", true, true);
+        builder->CreateCall(getOrDeclareMemcpy(), {lineData, srcStart, copySize});
+        // Ensure null terminator at position lineLen
+        llvm::Value* nullPos = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), lineData, lineLen, "stl.np");
+        builder->CreateStore(i8zero, nullPos);
+
+        // Store fat-pointer as i64 into output array
+        llvm::Value* lineHdrInt = builder->CreatePtrToInt(lineHdr, getDefaultType(), "stl.lhint");
+        llvm::Value* outSlotPtr = builder->CreateInBoundsGEP(getDefaultType(), outBuf, p2out, "stl.outslot");
+        auto* outSt = builder->CreateStore(lineHdrInt, outSlotPtr);
+        outSt->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+
+        // Advance: next line starts at lineEnd+1 (skip the \n); p2out++; p2i++
+        llvm::Value* nextPos = builder->CreateAdd(lineEnd, one, "stl.nextpos", true, true);
+        llvm::Value* nextOut = builder->CreateAdd(p2out, one, "stl.nextout", true, true);
+        llvm::Value* nextI   = builder->CreateAdd(p2i, one, "stl.nexti", true, true);
+        p2i->addIncoming(nextI, builder->GetInsertBlock());
+        p2pos->addIncoming(nextPos, builder->GetInsertBlock());
+        p2out->addIncoming(nextOut, builder->GetInsertBlock());
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(p2LoopBB)));
+
+        builder->SetInsertPoint(p2DoneBB);
+        arrayReturningFunctions_.insert("str_to_lines");
+        stringReturningFunctions_.insert("str_to_lines");
+        return outBuf;
+    }
+
+    // ── End Round-75 builtins ────────────────────────────────────────────────
     if (bid == BuiltinId::ASSERT) {
         validateArgCount(expr, "assert", 1);
         llvm::Value* condVal = generateExpression(expr->arguments[0].get());

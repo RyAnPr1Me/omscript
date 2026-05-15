@@ -6722,32 +6722,35 @@ std::unique_ptr<Expression> Parser::parseLambda() {
 
     consume(TokenType::PIPE, "Expected '|' after lambda parameters");
 
-    // Parse the lambda body expression
-    auto body = parseExpression();
-
-    auto node = std::make_unique<LambdaExpr>(std::move(params), std::move(body));
-    node->line = pipeToken.line;
-    node->column = pipeToken.column;
-
-    // Desugar: generate a named function and return its name as a string literal
+    // Desugar: generate a named function and return its name as an identifier.
     const std::string lambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
 
-    // Create the function: fn __lambda_N(params...) { return body; }
-    // Lambda parameters carry their resolved type annotations (default: i64).
+    // Parse the lambda body: either a block `{ stmts; }` or a single expression.
+    // Create the function: fn __lambda_N(params...) { body }
     std::vector<Parameter> fnParams;
-    for (size_t i = 0; i < node->params.size(); ++i) {
-        Parameter p(node->params[i]);
+    for (size_t i = 0; i < params.size(); ++i) {
+        Parameter p(params[i]);
         p.typeName = (i < paramTypes.size()) ? paramTypes[i] : "i64";
         fnParams.push_back(std::move(p));
     }
-    auto returnStmt = std::make_unique<ReturnStmt>(std::move(node->body));
-    returnStmt->line = pipeToken.line;
-    returnStmt->column = pipeToken.column;
-    std::vector<std::unique_ptr<Statement>> stmts;
-    stmts.push_back(std::move(returnStmt));
-    auto block = std::make_unique<BlockStmt>(std::move(stmts));
-    block->line = pipeToken.line;
-    block->column = pipeToken.column;
+    std::unique_ptr<BlockStmt> block;
+    if (check(TokenType::LBRACE)) {
+        // Block-body lambda: |params| { stmts; return val; }
+        block = parseBlock();
+        block->line = pipeToken.line;
+        block->column = pipeToken.column;
+    } else {
+        // Expression-body lambda: |params| expr  (implicit return)
+        auto body = parseExpression();
+        auto returnStmt = std::make_unique<ReturnStmt>(std::move(body));
+        returnStmt->line = pipeToken.line;
+        returnStmt->column = pipeToken.column;
+        std::vector<std::unique_ptr<Statement>> stmts;
+        stmts.push_back(std::move(returnStmt));
+        block = std::make_unique<BlockStmt>(std::move(stmts));
+        block->line = pipeToken.line;
+        block->column = pipeToken.column;
+    }
     auto fnDecl =
         std::make_unique<FunctionDecl>(lambdaName, std::vector<std::string>{}, std::move(fnParams), std::move(block));
     fnDecl->line = pipeToken.line;
@@ -6791,10 +6794,7 @@ bool Parser::isArrowLambdaParens() const {
 std::unique_ptr<Expression> Parser::parseArrowLambda(const std::vector<std::string>& params,
                                                       const std::vector<std::string>& paramTypes,
                                                       const Token& arrowTok) {
-    // Body: the expression after '=>'
-    auto body = parseExpression();
-
-    // Desugar: generate a named function and return its name as a string literal
+    // Desugar: generate a named function and return its name as an identifier.
     const std::string lambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
 
     std::vector<Parameter> fnParams;
@@ -6803,14 +6803,26 @@ std::unique_ptr<Expression> Parser::parseArrowLambda(const std::vector<std::stri
         p.typeName = (i < paramTypes.size() && !paramTypes[i].empty()) ? paramTypes[i] : "i64";
         fnParams.push_back(std::move(p));
     }
-    auto returnStmt = std::make_unique<ReturnStmt>(std::move(body));
-    returnStmt->line = arrowTok.line;
-    returnStmt->column = arrowTok.column;
-    std::vector<std::unique_ptr<Statement>> stmts;
-    stmts.push_back(std::move(returnStmt));
-    auto block = std::make_unique<BlockStmt>(std::move(stmts));
-    block->line = arrowTok.line;
-    block->column = arrowTok.column;
+
+    // Parse the lambda body: either a block `{ stmts; }` or a single expression.
+    std::unique_ptr<BlockStmt> block;
+    if (check(TokenType::LBRACE)) {
+        // Block-body arrow lambda: (params) => { stmts; return val; }
+        block = parseBlock();
+        block->line = arrowTok.line;
+        block->column = arrowTok.column;
+    } else {
+        // Expression-body arrow lambda: (params) => expr  (implicit return)
+        auto body = parseExpression();
+        auto returnStmt = std::make_unique<ReturnStmt>(std::move(body));
+        returnStmt->line = arrowTok.line;
+        returnStmt->column = arrowTok.column;
+        std::vector<std::unique_ptr<Statement>> stmts;
+        stmts.push_back(std::move(returnStmt));
+        block = std::make_unique<BlockStmt>(std::move(stmts));
+        block->line = arrowTok.line;
+        block->column = arrowTok.column;
+    }
     auto fnDecl =
         std::make_unique<FunctionDecl>(lambdaName, std::vector<std::string>{}, std::move(fnParams), std::move(block));
     fnDecl->line = arrowTok.line;

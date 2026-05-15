@@ -4596,6 +4596,66 @@ println(array_every(a, is_pos));  // 1
 
 ---
 
+#### `array_min_by(array, fn) → i64`
+
+**Signature:** `array_min_by(array, function) → i64`  
+**Semantics:** Return the element `e` in `array` for which `fn(e)` produces the smallest value. If multiple elements produce the same minimum key, the first one encountered is returned. Returns `0` if the array is empty.  
+**Time:** O(n * cost(fn))
+
+```omscript
+fn last_digit(x: int) -> int { return x % 10; }
+
+var a = [15, 3, 27, 9, 42];
+// last digits: 5, 3, 7, 9, 2  →  minimum key is 2  →  element is 42
+var m = array_min_by(a, last_digit);   // 42
+
+// Block-body lambda form:
+var m2 = array_min_by(a, |x: int| {
+    var d = x % 10;
+    return d;
+});  // 42
+```
+
+---
+
+#### `array_max_by(array, fn) → i64`
+
+**Signature:** `array_max_by(array, function) → i64`  
+**Semantics:** Return the element `e` in `array` for which `fn(e)` produces the largest value. If multiple elements produce the same maximum key, the first one encountered is returned. Returns `0` if the array is empty.  
+**Time:** O(n * cost(fn))
+
+```omscript
+fn last_digit(x: int) -> int { return x % 10; }
+
+var a = [15, 3, 27, 9, 42];
+// last digits: 5, 3, 7, 9, 2  →  maximum key is 9  →  element is 9
+var m = array_max_by(a, last_digit);   // 9
+```
+
+---
+
+#### `array_flatten(array) → array`
+
+**Signature:** `array_flatten(array) → array`  
+**Semantics:** Flatten one level of array nesting. The outer array's elements must be integer values holding pointers to inner arrays (obtained by casting with `as int`). Returns a new array containing all elements from all inner arrays concatenated in outer-array order. Returns an empty array if the outer array is empty; empty inner arrays contribute zero elements.  
+**Time:** O(total elements across all inner arrays)
+
+```omscript
+var a: int[] = [1, 2, 3];
+var b: int[] = [4, 5];
+var c: int[] = [6];
+
+// Build outer array of pointers
+var nested: int[] = [a as int, b as int, c as int];
+
+var flat: int[] = array_flatten(nested);
+// flat == [1, 2, 3, 4, 5, 6], len(flat) == 6
+println(flat[0]);  // 1
+println(flat[5]);  // 6
+```
+
+---
+
 ### 11.8 Array-of-string special handling
 
 **String-array tracking:** When an array is known to contain string pointers (i.e., every element is an i64 holding a `char*`), the compiler tracks it in `stringArrays_` set. This enables:
@@ -5012,6 +5072,34 @@ println(str_reverse("hello"));  // "olleh"
 var words = str_split("a,b,c", ",");
 println(len(words));  // 3
 println(words[0]);    // "a"
+```
+
+---
+
+#### `str_to_lines(string) → string[]`
+
+**Signature:** `str_to_lines(string) → string[]`  
+**Semantics:** Split `string` at newline characters and return the resulting lines as an array of strings. Both Unix (`\n`) and Windows (`\r\n`) line endings are handled — any trailing `\r` is stripped from each line before it is stored. A trailing newline at the end of the input does **not** produce an empty final element (matches Python's `str.splitlines()` behaviour). Compile-time folded for string literals.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+var text = "hello\nworld\nfoo";
+var lines: string[] = str_to_lines(text);
+println(len(lines));       // 3
+println(lines[0]);         // hello
+println(lines[2]);         // foo
+
+// Trailing newline excluded:
+var t2 = "alpha\nbeta\n";
+var l2: string[] = str_to_lines(t2);
+println(len(l2));          // 2  (no empty final element)
+
+// CRLF line endings:
+var t3 = "one\r\ntwo\r\nthree";
+var l3: string[] = str_to_lines(t3);
+println(len(l3));          // 3
+println(l3[0]);            // one  (no trailing \r)
 ```
 
 ---
@@ -8066,28 +8154,43 @@ if (file_exists("config.txt")) {
 
 ## 22. Lambda Expressions
 
-OmScript lambdas are anonymous functions with a lightweight `|params| body` syntax, designed primarily for use with the higher-order array built-ins (`array_map`, `array_filter`, `array_reduce`, `array_any`, `array_every`, `array_count`, `array_find`).
+OmScript lambdas are anonymous functions with a lightweight `|params| body` or `(params) => body` syntax, designed primarily for use with the higher-order array built-ins (`array_map`, `array_filter`, `array_reduce`, `array_any`, `array_every`, `array_count`, `array_find`, `array_min_by`, `array_max_by`).
 
-**Implementation model — important:** Lambdas are *not* runtime closures. The parser desugars every lambda into a top-level named function (`__lambda_N`) and replaces the lambda expression with a string literal containing that name. The higher-order built-ins receive that string and resolve it to the generated function at code-gen time. The consequences are:
+**Implementation model — important:** Lambdas are *not* runtime closures. The parser desugars every lambda into a top-level named function (`__lambda_N`) and replaces the lambda expression with an identifier referring to that function. The higher-order built-ins receive that function reference at code-gen time. The consequences are:
 
 - Lambdas **cannot capture** variables from the enclosing scope. Reference any non-parameter identifier and you reference a top-level / `global` symbol of the same name, not a local.
-- A lambda's runtime *value* is a `string` (the generated function's name), not a callable. You can store it in a variable, but you cannot directly invoke it as `f(x)` from OmScript code — it can only flow into a built-in that knows how to call it by name.
+- A lambda's runtime *value* is a function pointer. You can store it in a `fn(T)->R` typed variable and call it directly.
 - All lambdas with the same body produce distinct generated functions; there is no deduplication.
 
 ### 22.1 Syntax
 
+Two lambda forms are supported. Both accept either an **expression body** (implicit return) or a **block body** (explicit `return`):
+
 ```ebnf
-lambda      ::= '|' [params] '|' expression
-params      ::= param { ',' param }
-param       ::= identifier [ ':' type ]
+pipe_lambda       ::= '|' [params] '|' ( expression | block )
+arrow_lambda      ::= param_list '=>' ( expression | block )
+params            ::= param { ',' param }
+param             ::= identifier [ ':' type ]
+param_list        ::= identifier
+                    | '(' [ params ] ')'
+block             ::= '{' { statement } '}'
 ```
 
-- The body is **a single expression** (no statement block, no `return` keyword). Whatever the expression evaluates to becomes the function's return value.
-- Parameters with no type annotation default to `i64` (this is the only inferred type — there is no full inference at parse time).
-- Annotate explicitly when the element type is anything else: `|x:float| x * 2.0`, `|s:string| str_len(s)`.
-- Empty parameter list is written as `||`: `var make_zero = || 0;`.
+**Expression-body (single expression, implicit `return`):**
+- The expression after `|` (pipe form) or `=>` (arrow form) is implicitly returned.
+- No `return` keyword is written.
 
-**Examples:**
+**Block-body (multi-statement, explicit `return`):**
+- When `{` immediately follows the closing `|` (pipe form) or `=>` (arrow form), the parser reads a full block statement.
+- The block may contain variable declarations, conditionals, loops, and any other statements.
+- Results must be returned explicitly with `return`.
+- An implicit `return` is NOT added — a block lambda that falls off the end returns `0`.
+
+- Parameters with no type annotation default to `i64`.
+- Annotate explicitly when the element type is anything else: `|x:float| x * 2.0`, `|s:string| str_len(s)`.
+- Empty parameter list is written as `||` (pipe form) or `()` (arrow form): `var make_zero: fn()->int = || 0;`.
+
+**Examples — expression body:**
 
 ```omscript
 |x| x * 2                    // i64 → i64
@@ -8096,6 +8199,36 @@ param       ::= identifier [ ':' type ]
 |acc, x| acc + x             // for array_reduce
 |s:string| str_len(s)        // string → i64
 || 42                        // () → i64
+
+x => x * 2                   // single-param shorthand
+(x: int) => x * 2
+(x: int, y: int) => x + y
+() => 42
+```
+
+**Examples — block body:**
+
+```omscript
+// Pipe lambda with block body
+var doubled = array_map(arr, |x: int| {
+    var y = x * 2;
+    return y;
+});
+
+// Arrow lambda with block body
+var transformed: int[] = array_map(arr, (x: int) => {
+    if x < 0 {
+        return -x;
+    }
+    return x * 2;
+});
+
+// Stored in a funcptr variable
+var adder: fn(int)->int = (x: int) => {
+    var bump = 100;
+    return x + bump;
+};
+println(adder(7));   // 107
 ```
 
 ---
@@ -8119,32 +8252,33 @@ Inside the generated `__lambda_N` function, `factor` is an unbound name — it r
        return array_map(arr, |x| x * 2);    // ✅ literal 2
    }
    ```
-3. **Write a named helper function** and reference it by name (which is what the higher-order built-ins want anyway):
+3. **Write a named helper function** and reference it by name:
    ```omscript
    fn double(x) { return x * 2; }
-   var doubled = array_map(arr, "double");  // pass the name as a string
+   var doubled = array_map(arr, double);    // ✅ pass the identifier
    ```
 
 ---
 
 ### 22.3 First-class function values
 
-The built-ins that accept a lambda also accept a **string literal containing a function name**, because that's what a lambda compiles to. Both forms are interchangeable:
+Lambdas evaluate to a `fn(T)->R` function reference that can be stored in a typed variable and invoked directly:
 
 ```omscript
-fn square(n) { return n * n; }
+fn square(n: int) -> int { return n * n; }
 
-var a = array_map([1, 2, 3], |x| x * x);  // lambda form
-var b = array_map([1, 2, 3], "square");   // named-function form (identical effect)
+var f: fn(int)->int = |x: int| x * x;    // store lambda
+println(f(5));                             // 25 ✅
+
+var g: fn(int)->int = square;             // store named function
+println(g(5));                             // 25 ✅
 ```
-
-Functions cannot be passed as bare identifiers in this position — only string literals or lambdas. This is what allows the parser to resolve the target at compile time and emit a direct call.
 
 ---
 
 ### 22.4 Higher-order built-in interaction
 
-The following built-ins accept a lambda or a function-name string. See §11.7 for full signatures.
+The following built-ins accept a lambda or a named function reference. See §11.7 for full signatures.
 
 | Built-in | Lambda shape |
 | --- | --- |
@@ -8155,31 +8289,25 @@ The following built-ins accept a lambda or a function-name string. See §11.7 fo
 | `array_every(arr, fn)` | `|x| → bool` |
 | `array_count(arr, fn)` | `|x| → bool` |
 | `array_find(arr, fn)` | `|x| → bool`, returns first matching index or `-1` |
+| `array_min_by(arr, fn)` | `|x| → key`, returns element with minimum key |
+| `array_max_by(arr, fn)` | `|x| → key`, returns element with maximum key |
 
 ---
 
 ### 22.5 Pipe-forward and spread interaction
 
-Because a lambda evaluates to a function-name string and **cannot be invoked as a normal call**, it cannot appear directly on the right side of `|>`. This is illegal:
+Lambdas stored in `fn(T)->R` variables can be used as pipe targets:
 
 ```omscript
-5 |> |x| x * 2     // ❌ pipe target must be a callable named function
+var double: fn(int)->int = x => x * 2;
+var y = 5 |> double;                           // ✅ 10
 ```
 
-Use a named function, or pipe into a higher-order built-in:
-
-```omscript
-fn double(x) { return x * 2; }
-var y = 5 |> double;                          // ✅ 10
-
-var doubled = [1, 2, 3] |> array_map(|x| x * 2);  // ✅ — array_map is the pipe target
-```
-
-The spread operator `...arr` expands an array as positional arguments to a *function call*, independently of any lambdas:
+The spread operator `...arr` expands an array as positional arguments to a function call, independently of any lambdas:
 
 ```omscript
 var a = [1, 2, 3];
-var s = sum(...a);   // sum(1, 2, 3) — `sum` is a built-in, not a lambda
+var s = sum(...a);   // sum(1, 2, 3)
 ```
 
 ---
