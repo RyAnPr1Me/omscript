@@ -341,6 +341,11 @@ class CodeGenerator {
         return optStats_;
     }
 
+    /// Return all non-fatal warnings collected during code generation.
+    [[nodiscard]] const std::vector<omscript::Diagnostic>& getWarnings() const noexcept {
+        return codegenWarnings_;
+    }
+
     /// Return the unified optimization context (non-null after generate()).
     [[nodiscard]] const OptimizationContext* optimizationContext() const noexcept {
         return optCtx_.get();
@@ -1088,6 +1093,9 @@ class CodeGenerator {
     llvm::AllocaInst* createEntryBlockAlloca(llvm::Function* function, const std::string& name,
                                              llvm::Type* type = nullptr);
     [[noreturn]] [[gnu::cold]] void codegenError(const std::string& message, const ASTNode* node);
+    /// Emit a non-fatal diagnostic warning.  The warning is stored internally
+    /// and exposed via getWarnings(); the caller never needs to handle it.
+    void codegenWarning(const std::string& message, const ASTNode* node = nullptr);
     void validateArgCount(const CallExpr* expr, const std::string& funcName, size_t expected);
 
     /// Declare a C library function with common attributes (NoUnwind, WillReturn, NoFree, NoSync).
@@ -1189,6 +1197,7 @@ class CodeGenerator {
     std::string pgoUsePath_;            // --pgo-use=<path>: read profile data from this file
     bool lto_ = false;                  // LTO mode: use pre-link pipeline
     bool verbose_ = false;              // -V: print optimization pass messages
+    std::vector<omscript::Diagnostic> codegenWarnings_; // accumulated non-fatal warnings
 
     // DWARF debug info infrastructure
     bool debugMode_ = false;                        // -g: emit debug metadata
@@ -1300,8 +1309,10 @@ class CodeGenerator {
     llvm::Function* getOrDeclareAccess();
     llvm::Function* getOrDeclarePthreadCreate();
     llvm::Function* getOrDeclarePthreadJoin();
+    llvm::Function* getOrDeclarePthreadDetach();
     llvm::Function* getOrDeclarePthreadMutexInit();
     llvm::Function* getOrDeclarePthreadMutexLock();
+    llvm::Function* getOrDeclarePthreadMutexTryLock();
     llvm::Function* getOrDeclarePthreadMutexUnlock();
     llvm::Function* getOrDeclarePthreadMutexDestroy();
     llvm::Function* getOrDeclareGetenv();

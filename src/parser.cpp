@@ -199,8 +199,10 @@ void Parser::registerStdNamespace() {
         // ── Threading ────────────────────────────────────────────────────────
         {"thread_create", "thread_create"},
         {"thread_join", "thread_join"},
+        {"thread_detach", "thread_detach"},
         {"mutex_new", "mutex_new"},
         {"mutex_lock", "mutex_lock"},
+        {"mutex_try_lock", "mutex_try_lock"},
         {"mutex_unlock", "mutex_unlock"},
         {"mutex_destroy", "mutex_destroy"},
         // ── Assertions / hints ────────────────────────────────────────────────
@@ -331,6 +333,24 @@ void Parser::synchronize() {
 }
 
 // ---------------------------------------------------------------------------
+// Error accumulation helper.
+// ---------------------------------------------------------------------------
+// Records an exception into both the plain-string errors_ vector (backward
+// compatibility) and the structured diagnostics_ vector (rich diagnostics).
+// Preserves source location when the exception is a DiagnosticError.
+// ---------------------------------------------------------------------------
+static void recordException(std::vector<std::string>& errors, std::vector<omscript::Diagnostic>& diagnostics,
+                      const std::exception& e) {
+    errors.push_back(e.what());
+    if (const auto* de = dynamic_cast<const omscript::DiagnosticError*>(&e)) {
+        diagnostics.push_back(de->diagnostic());
+    } else {
+        diagnostics.push_back(
+            omscript::Diagnostic{omscript::DiagnosticSeverity::Error, {}, std::string(e.what())});
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Pre-scan: collect all custom operator symbols before the main parse.
 // ---------------------------------------------------------------------------
 // Walks the token stream looking for the pattern:
@@ -442,7 +462,7 @@ std::unique_ptr<Program> Parser::parse() {
             try {
                 parseImport(functions, enums, structs, globals);
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -451,7 +471,7 @@ std::unique_ptr<Program> Parser::parse() {
             try {
                 parseNamespace(functions, enums, structs);
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -461,7 +481,7 @@ std::unique_ptr<Program> Parser::parse() {
                 auto gv = parseGlobalDecl();
                 globals.push_back(std::move(gv));
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -487,7 +507,7 @@ std::unique_ptr<Program> Parser::parse() {
                 decl->column = name.column;
                 globals.push_back(std::move(decl));
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -510,7 +530,7 @@ std::unique_ptr<Program> Parser::parse() {
             try {
                 enums.push_back(parseEnumDecl());
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1006,7 +1026,7 @@ std::unique_ptr<Program> Parser::parse() {
                     consume(TokenType::RBRACE, "Expected '}' to close comptime block");
                 }
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1028,7 +1048,7 @@ std::unique_ptr<Program> Parser::parse() {
                 consume(TokenType::SEMICOLON, "Expected ';' after type alias");
                 typeAliases_[aliasName.lexeme] = typeName;
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1037,7 +1057,7 @@ std::unique_ptr<Program> Parser::parse() {
             try {
                 structs.push_back(parseStructDecl());
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1076,7 +1096,7 @@ std::unique_ptr<Program> Parser::parse() {
                 consume(TokenType::STRUCT, "Expected 'struct' after @repr(...)");
                 structs.push_back(parseStructDecl(repr, reprAlignN));
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1090,7 +1110,7 @@ std::unique_ptr<Program> Parser::parse() {
                 consume(TokenType::STRUCT, "Expected 'struct' after @packed");
                 structs.push_back(parseStructDecl(StructRepr::Packed, 0));
             } catch (const std::exception& e) {
-                errors_.push_back(e.what());
+                recordException(errors_, diagnostics_, e);
                 synchronize();
             }
             continue;
@@ -1119,7 +1139,8 @@ std::unique_ptr<Program> Parser::parse() {
             }
             // Parse optional function annotations: @inline, @noinline, @cold,
             // @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll,
-            // @restrict, @vectorize, @novectorize, @minsize, @optnone, @nounwind
+            // @restrict, @vectorize, @novectorize, @minsize, @optnone, @nounwind,
+            // @deprecated, @deprecated("msg")
             bool hintInline = false, hintNoInline = false, hintCold = false;
             bool hintHot = false, hintPure = false, hintNoReturn = false;
             bool hintStatic = false, hintFlatten = false;
@@ -1140,6 +1161,8 @@ std::unique_ptr<Program> Parser::parse() {
             int allocatorCountParam = -1;
             FunctionDecl::MemoryEffect hintMemoryEffect = FunctionDecl::MemoryEffect::Default;
             bool hintNoAliasReturn = false;
+            bool hintDeprecated = false;
+            std::string deprecatedMsg;
             while (check(TokenType::AT)) {
                 advance(); // consume '@'
                 const Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
@@ -1307,6 +1330,16 @@ std::unique_ptr<Program> Parser::parse() {
                     // ── Non-compound annotations kept as-is ──────────────────────
                 } else if (ann.lexeme == "static") {
                     hintStatic = true;
+                } else if (ann.lexeme == "deprecated") {
+                    hintDeprecated = true;
+                    // Accept optional string message: @deprecated("msg")
+                    if (check(TokenType::LPAREN)) {
+                        advance(); // consume '('
+                        if (check(TokenType::STRING)) {
+                            deprecatedMsg = advance().lexeme;
+                        }
+                        consume(TokenType::RPAREN, "Expected ')' after @deprecated message");
+                    }
                 } else if (ann.lexeme == "optmax") {
                     isOptMaxFromAnnotation = true;
                     if (check(TokenType::LPAREN)) {
@@ -1440,7 +1473,7 @@ std::unique_ptr<Program> Parser::parse() {
                           "            inaccessiblemem, inaccessiblemem_or_argmem,\n"
                           "            noalias_ret,\n"
                           "            allocator, size=N, count=M\n"
-                          "  Other   : @static, @optmax, @optmax(...)");
+                          "  Other   : @static, @optmax, @optmax(...), @deprecated, @deprecated(\"msg\")");
                 }
             }
             auto func = parseFunction(optMaxTagActive || isOptMaxFromAnnotation);
@@ -1472,6 +1505,8 @@ std::unique_ptr<Program> Parser::parse() {
             func->allocatorCountParam = allocatorCountParam;
             func->hintMemoryEffect = hintMemoryEffect;
             func->hintNoAliasReturn = hintNoAliasReturn;
+            func->hintDeprecated = hintDeprecated;
+            func->deprecatedMsg = std::move(deprecatedMsg);
             if (isOptMaxFromAnnotation) {
                 func->isOptMax = true;
                 func->optMaxConfig = optMaxCfgFromAnnotation;
@@ -1536,7 +1571,7 @@ std::unique_ptr<Program> Parser::parse() {
             }
             functions.push_back(std::move(func));
         } catch (const std::exception& e) {
-            errors_.push_back(e.what());
+            recordException(errors_, diagnostics_, e);
             synchronize();
         }
     }
@@ -1546,16 +1581,27 @@ std::unique_ptr<Program> Parser::parse() {
     }
 
     if (!errors_.empty()) {
+        // When there is exactly one structured diagnostic, re-throw it directly so
+        // that its raw message and source location are preserved without the
+        // "error at line X: ..." prefix that format() bakes into the combined string.
+        if (diagnostics_.size() == 1) {
+            throw DiagnosticError(diagnostics_.front());
+        }
+
+        // Multiple errors: throw a MultiDiagnosticError so the driver can emit
+        // each one individually with full source-location and snippet support.
+        if (diagnostics_.size() > 1) {
+            throw MultiDiagnosticError(diagnostics_);
+        }
+
+        // Fallback (plain-string errors without structured diagnostics).
         std::string combined;
         for (size_t i = 0; i < errors_.size(); ++i) {
             if (i > 0)
                 combined += "\n";
             combined += errors_[i];
         }
-        // Errors already contain formatted location information from individual
-        // DiagnosticError exceptions; wrap in a DiagnosticError so callers can
-        // catch a single exception type for all compilation failures.
-        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, combined});
+        throw DiagnosticError(Diagnostic{DiagnosticSeverity::Error, {}, combined});
     }
 
     // Append generated lambda functions to the program
@@ -5129,6 +5175,33 @@ std::unique_ptr<Expression> Parser::parseCast() {
 }
 
 std::unique_ptr<Expression> Parser::parseUnary() {
+    auto makeThreadKeywordCall = [this](const std::string& callee, const Token& kw, std::vector<std::unique_ptr<Expression>> args)
+        -> std::unique_ptr<Expression> {
+        auto call = std::make_unique<CallExpr>(callee, std::move(args));
+        call->line = kw.line;
+        call->column = kw.column;
+        return call;
+    };
+
+    auto parseSpawnTargetCompact = [this]() -> std::unique_ptr<Expression> {
+        if (match(TokenType::IDENTIFIER)) {
+            const Token t = tokens[current - 1];
+            auto id = std::make_unique<IdentifierExpr>(t.lexeme);
+            id->line = t.line;
+            id->column = t.column;
+            return id;
+        }
+        if (match(TokenType::STRING)) {
+            const Token t = tokens[current - 1];
+            auto lit = std::make_unique<LiteralExpr>(t.lexeme);
+            lit->line = t.line;
+            lit->column = t.column;
+            return lit;
+        }
+        error("Expected function name after 'spawn' (identifier or string literal)");
+        return nullptr;
+    };
+
     // ── @range[lo, hi] expr ───────────────────────────────────────────────
     // Internal range-bound annotation.  Parses two integer literals (each
     // with an optional unary minus) and wraps the following unary
@@ -5167,6 +5240,79 @@ std::unique_ptr<Expression> Parser::parseUnary() {
         node->line = atTok.line;
         node->column = atTok.column;
         return node;
+    }
+
+    // Threading keyword sugar:
+    //   spawn f()        => thread_create(f)
+    //   spawn f(x)       => thread_create(f, x)
+    //   join t           => thread_join(t)
+    //   detach t         => thread_detach(t)
+    //   lock m           => mutex_lock(m)
+    //   unlock m         => mutex_unlock(m)
+    //   trylock m        => mutex_try_lock(m)
+    if (match(TokenType::SPAWN)) {
+        const Token kw = tokens[current - 1];
+        std::vector<std::unique_ptr<Expression>> args;
+
+        if (match(TokenType::LPAREN)) {
+            args.push_back(parseExpression());
+            if (match(TokenType::COMMA)) {
+                args.push_back(parseExpression());
+            }
+            consume(TokenType::RPAREN, "Expected ')' after spawn(...)");
+        } else {
+            args.push_back(parseSpawnTargetCompact());
+            if (!match(TokenType::LPAREN)) {
+                error("Expected '(' after spawn target; use spawn worker() or spawn worker(arg)");
+            }
+            if (!check(TokenType::RPAREN)) {
+                args.push_back(parseExpression());
+                if (check(TokenType::COMMA)) {
+                    error("spawn target(arg) accepts at most one argument");
+                }
+            }
+            consume(TokenType::RPAREN, "Expected ')' after spawn target argument");
+        }
+
+        if (args.empty() || args.size() > 2) {
+            error("spawn expects one target and optional one argument");
+        }
+        return makeThreadKeywordCall("thread_create", kw, std::move(args));
+    }
+
+    if (match(TokenType::JOIN)) {
+        const Token kw = tokens[current - 1];
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(parseUnary());
+        return makeThreadKeywordCall("thread_join", kw, std::move(args));
+    }
+
+    if (match(TokenType::DETACH)) {
+        const Token kw = tokens[current - 1];
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(parseUnary());
+        return makeThreadKeywordCall("thread_detach", kw, std::move(args));
+    }
+
+    if (match(TokenType::LOCK)) {
+        const Token kw = tokens[current - 1];
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(parseUnary());
+        return makeThreadKeywordCall("mutex_lock", kw, std::move(args));
+    }
+
+    if (match(TokenType::UNLOCK)) {
+        const Token kw = tokens[current - 1];
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(parseUnary());
+        return makeThreadKeywordCall("mutex_unlock", kw, std::move(args));
+    }
+
+    if (match(TokenType::TRYLOCK)) {
+        const Token kw = tokens[current - 1];
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(parseUnary());
+        return makeThreadKeywordCall("mutex_try_lock", kw, std::move(args));
     }
 
     if (match(TokenType::MINUS) || match(TokenType::NOT) || match(TokenType::TILDE)) {

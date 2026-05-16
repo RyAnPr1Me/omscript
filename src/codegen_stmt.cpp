@@ -347,12 +347,10 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         // Warn at compile time if the type can't be promoted to a register
         // (arrays, structs, pointers/strings are not promotable by mem2reg).
         if (allocaType->isArrayTy() || allocaType->isStructTy() || allocaType->isPointerTy()) {
-            const Diagnostic warn{DiagnosticSeverity::Warning,
-                                  {"", stmt->line, stmt->column},
-                                  "'register' variable '" + stmt->name +
-                                      "' has a type that cannot be promoted to a CPU register; "
-                                      "the keyword will have no effect"};
-            std::cerr << warn.format() << "\n";
+            codegenWarning("'register' variable '" + stmt->name +
+                               "' has a type that cannot be promoted to a CPU register; "
+                               "the keyword will have no effect",
+                           stmt);
         } else {
             registerVars_.insert(stmt->name);
             // Emit llvm.lifetime.start so the register live-range is tightly

@@ -11,6 +11,7 @@
 /// generics, and structured error recovery.
 
 #include "ast.h"
+#include "diagnostic.h"
 #include "lexer.h"
 #include <memory>
 #include <set>
@@ -54,6 +55,13 @@ class Parser {
         return errors_;
     }
 
+    /// Returns structured diagnostics for all parse errors collected so far.
+    /// Preserves source location (line, column) and error codes, enabling rich
+    /// diagnostic display (source snippets, colors) by the compiler driver.
+    [[nodiscard]] const std::vector<omscript::Diagnostic>& diagnostics() const noexcept {
+        return diagnostics_;
+    }
+
     /// Returns non-fatal parse warnings (e.g. conflicting annotations).
     /// Populated alongside errors() during parse().
     [[nodiscard]] const std::vector<std::string>& warnings() const noexcept {
@@ -65,6 +73,7 @@ class Parser {
     size_t current;
     bool inOptMaxFunction;
     std::vector<std::string> errors_;
+    std::vector<omscript::Diagnostic> diagnostics_; ///< Structured errors with source locations.
     std::vector<std::string> warnings_;
     int lambdaCounter_ = 0;
     int recursionDepth_ = 0;

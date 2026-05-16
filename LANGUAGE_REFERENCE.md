@@ -45,19 +45,35 @@
 
 ## 1. Overview
 
-OmScript is a **statically typed**, compiled programming language designed for high-performance computing with an emphasis on optimization, control, and clarity. All variable declarations require explicit type annotations. Arrays, maps, strings, and structs are represented as typed pointers in LLVM IR — there are no runtime type tags and no boxing. It compiles to native code via LLVM, offering manual control over optimization strategies while maintaining modern language ergonomics.
+OmScript is a **statically typed**, compiled programming language built for native performance, predictable behavior, and practical systems programming ergonomics. It compiles through LLVM and exposes both low-level control surfaces and high-level productivity features (collections, lambdas, structured diagnostics, and keyword sugar).
+
+Type annotations are supported across declarations and signatures, and local variable declarations may also use initializer-driven typing (for example `var score = 0;`). Composite runtime values such as arrays, maps, and strings are represented by runtime-managed heap structures accessed through typed pointers in generated IR.
+
+### 1.1 Document Scope and Conformance
+
+This document is the **language and tooling reference** for OmScript. It mixes:
+
+- **Normative language rules** (syntax/semantics the compiler enforces)
+- **Operational/tooling behavior** (CLI flags, diagnostics modes, optimization controls)
+- **Implementation notes** (internal pipeline and optimizer architecture)
+
+When this document uses RFC-style terms:
+
+- **MUST / MUST NOT** = mandatory compiler/runtime behavior
+- **SHOULD / SHOULD NOT** = recommended behavior or best practice
+- **MAY** = optional behavior/usage pattern
 
 ### Design Goals
 
-- **Performance**: Native compilation through LLVM with a multi-layer optimizer (AST pre-passes → E-graph → superoptimizer → HGOE)
-- **Control**: Fine-grained control over optimization strategies, vectorization, memory layout, and per-function annotations
-- **Explicit memory**: Arrays, maps, and strings are heap-allocated (`malloc`/`free`); the compiler promotes safe allocations to stack or read-only globals automatically; typed values are represented as LLVM pointer types throughout — no `ptrtoint` round-trips for typed array/struct/map variables
-- **Ergonomics**: Modern syntax with mandatory type annotations, functional programming builtins, lambdas, and pipe operator
-- **Compiler transparency**: Optimization feedback (`-v`), LLVM IR emission (`emit-ir`), and direct access to compiler hints via `@opt`, `@semantics`, `@memory`
+- **Performance**: Native LLVM-backed compilation with optimization controls for real workloads
+- **Control**: Fine-grained control over optimization strategy, memory behavior, and function-level hints
+- **Safety-oriented explicitness**: Ownership/memory rules are exposed as language features instead of hidden runtime magic
+- **Ergonomics**: Modern syntax with strong built-in collection/string APIs, lambdas, and concise keyword sugar
+- **Compiler transparency**: Diagnostics, optimization feedback, and IR emission are first-class toolchain features
 
 ### Source of Truth
 
-This reference is derived exclusively from the OmScript compiler implementation (lexer, parser, preprocessor, semantic analyzer, and code generator). Every feature, keyword, operator, and semantic rule documented here is verified against the source code in `src/` and `include/` directories. All code examples are working programs drawn from or validated against the `examples/` test suite.
+This reference is grounded in the OmScript implementation (`src/`, `include/`) and validated examples (`examples/`). If an inconsistency is discovered, **compiler behavior is authoritative** and this document should be updated accordingly.
 
 ### Compilation Pipeline
 
@@ -65,7 +81,7 @@ OmScript source code undergoes the following compilation stages:
 
 1. **Lexer** — Tokenizes source text into a stream of lexical tokens (keywords, identifiers, literals, operators, punctuation)
 2. **Parser** — Constructs an Abstract Syntax Tree (AST) from the token stream, enforcing syntactic rules; evaluates `comptime {}` blocks for conditional compilation and constant injection
-3. **Semantic Analysis** — Validates type consistency, resolves identifiers, enforces mandatory type annotations, and checks control-flow constraints
+3. **Semantic Analysis** — Validates type consistency, resolves identifiers, enforces declaration typing rules, and checks control-flow constraints
 4. **Code Generation** — Traverses the AST to emit LLVM IR, applying function annotations and optimization hints
 5. **Optimization Passes** — LLVM's optimization pipeline transforms the IR (inlining, vectorization, constant folding, dead-code elimination, loop transformations)
 6. **Object Code Emission** — LLVM backend generates native machine code for the target architecture
@@ -75,7 +91,7 @@ OmScript source code undergoes the following compilation stages:
 
 - **Lexical structure**: Keywords, identifiers, literals (integer, float, string, bytes, interpolated), operators, comments (§2)
 - **Conditional compilation**: `comptime {}` blocks, `comptime if COND {}` shorthand, built-in constants `OS`/`ARCH`/`VERSION`/`FILE`, `-D NAME[=VALUE]` CLI flags, `defined(NAME)` predicate (§3, §5.9)
-- **Type system**: Scalar types (signed/unsigned integers, floats, bool, string), composite types (arrays, dicts, structs, enums, pointers, SIMD vectors, bigint), mandatory type annotations (§4)
+- **Type system**: Scalar types (signed/unsigned integers, floats, bool, string), composite types (arrays, dicts, structs, enums, pointers, SIMD vectors, bigint), declaration typing rules (§4)
 - **Variables and constants**: `var`, `const`, `register var`, `atomic var`, `volatile var`, `global`, `comptime`, compound assignment, destructuring (§5)
 - **Functions**: Declaration syntax, parameters, return types, default parameters, expression-body functions, generics, annotations (`@opt(hot)`, `@semantics(pure)`, `@memory(allocator)`, etc.), tail calls, lambdas (§6)
 - **Control flow**: `if`/`elif`/`else`, `unless`, `guard`, `switch`, `when`, `defer`, `with`, branch hints (§7)
@@ -138,7 +154,7 @@ The following identifiers are reserved as keywords. They are grouped by category
 
 **Control flow:**
 | Keyword | Purpose |
-|---------|---------|
+| --- | --- |
 | `if` | Conditional branch |
 | `elif` | Else-if chain |
 | `else` | Alternative branch |
@@ -151,7 +167,7 @@ The following identifiers are reserved as keywords. They are grouped by category
 
 **Loops:**
 | Keyword | Purpose |
-|---------|---------|
+| --- | --- |
 | `while` | Pre-test loop |
 | `do` | Post-test loop (with `while` or `until`) |
 | `until` | Inverted loop condition |
@@ -165,9 +181,19 @@ The following identifiers are reserved as keywords. They are grouped by category
 | `break` | Exit loop |
 | `continue` | Skip to next iteration |
 
+**Threading:**
+| Keyword | Purpose |
+| --- | --- |
+| `spawn` | Sugar for `thread_create(...)` |
+| `join` | Sugar for `thread_join(...)` |
+| `detach` | Sugar for `thread_detach(...)` |
+| `lock` | Sugar for `mutex_lock(...)` |
+| `unlock` | Sugar for `mutex_unlock(...)` |
+| `trylock` | Sugar for `mutex_try_lock(...)` |
+
 **Declarations:**
 | Keyword | Purpose |
-|---------|---------|
+| --- | --- |
 | `fn` | Function declaration |
 | `var` | Mutable variable |
 | `const` | Immutable constant |
@@ -180,14 +206,14 @@ The following identifiers are reserved as keywords. They are grouped by category
 
 **Exception handling:**
 | Keyword | Purpose |
-|---------|---------|
+| --- | --- |
 | `catch` | Top-level handler block: `catch(N) { ... }` (see §16) |
 | `throw` | Raise an integer error code: `throw 42;` (see §16) |
 | `try` | **Reserved** for future use — not currently a parser keyword (no `try { }` block exists in the language) |
 
 **Ownership and memory:**
 | Keyword | Purpose |
-|---------|---------|
+| --- | --- |
 | `move` | Transfer ownership |
 | `borrow` | Borrow reference |
 | `reborrow` | Re-borrow from existing borrow |
@@ -202,7 +228,7 @@ The following identifiers are reserved as keywords. They are grouped by category
 
 **Literals:**
 | Keyword | Purpose |
-|---------|---------|
+| --- | --- |
 | `true` | Boolean true |
 | `false` | Boolean false |
 | `null` | Null pointer literal (zero address) |
@@ -210,13 +236,13 @@ The following identifiers are reserved as keywords. They are grouped by category
 
 **Operators and punctuation:**
 | Keyword | Purpose |
-|---------|---------|
+| --- | --- |
 | `in` | Membership test / for-loop iterator |
 | `return` | Function return |
 
 **Compiler hints:**
 | Keyword | Purpose |
-|---------|---------|
+| --- | --- |
 | `prefetch` | Memory prefetch hint |
 | `likely` | Branch likely hint |
 | `unlikely` | Branch unlikely hint |
@@ -224,7 +250,7 @@ The following identifiers are reserved as keywords. They are grouped by category
 
 **Special constructs:**
 | Keyword | Purpose |
-|---------|---------|
+| --- | --- |
 | `defer` | Execute at scope exit (LIFO) |
 | `with` | Scoped variable binding |
 | `import` | File inclusion |
@@ -234,7 +260,7 @@ The following identifiers are reserved as keywords. They are grouped by category
 
 **Optimization markers:**
 | Token | Purpose |
-|-------|---------|
+| --- | --- |
 | `OPTMAX=:` | Begin OPTMAX optimization region |
 | `OPTMAX!:` | End OPTMAX optimization region |
 
@@ -316,11 +342,26 @@ Type: `bool` (1-bit logical value, represented as `i1` in LLVM)
 
 #### 2.5.4 Character Literals
 
-OmScript **does not have a distinct character literal syntax** like `'c'`. Single characters are represented as:
-- Single-character strings: `"A"`
-- Integer character codes: `65` (ASCII 'A')
-- The `char_at` function extracts characters from strings
-- The `char_code` function converts characters to ASCII codes
+OmScript supports **character literals** using single quotes. The result type is `i32` (a Unicode code point).
+
+**Syntax:**
+```omscript
+var c: int = 'A';        // 65
+var nl: int = '\n';      // 10 (newline)
+var tab: int = '\t';     // 9
+var bs: int = '\\';      // 92 (backslash)
+var sq: int = '\'';      // 39 (single quote)
+var nul: int = '\0';     // 0 (null code point — valid in char literals only)
+var u: int = '\u0041';   // 65 (Unicode scalar: 'A')
+var U: int = '\U00000041'; // 65 (long Unicode scalar form)
+```
+
+**Rules:**
+- Exactly one character (or one escape sequence) between the single quotes
+- Supported escapes: `\n`, `\t`, `\r`, `\b`, `\f`, `\v`, `\\`, `\'`, `\0`, `\xHH` (two hex digits), `\uHHHH` (four hex digits), `\UHHHHHHHH` (eight hex digits)
+- This escape list applies to **character literals**; string literals use their own table below and reject null-byte escapes.
+- Yields a compile-time integer constant of type `i32` (the Unicode code point)
+- Character literals may be compared with integers directly: `c == 65` or `c == 'A'`
 
 #### 2.5.5 String Literals
 
@@ -345,7 +386,7 @@ var poem: string = """
 
 **Escape sequences**:
 | Escape | Meaning | Byte Value |
-|--------|---------|------------|
+| --- | --- | --- |
 | `\n` | Newline (LF) | `0x0A` |
 | `\t` | Horizontal tab | `0x09` |
 | `\r` | Carriage return | `0x0D` |
@@ -419,6 +460,14 @@ var arr: int[] = [1, 2, 3];
 var info: string = $"length is {len(arr)}";         // "length is 3"
 ```
 
+**Alternative prefix `f"..."`**: The `f"..."` prefix is an alias for `$"..."` and provides the same interpolation semantics. Both forms are accepted by the lexer.
+
+```omscript
+var n: int = 42;
+var s1: string = $"value is {n}";   // $"..." form
+var s2: string = f"value is {n}";   // f"..." alias — identical result
+```
+
 **Nested interpolations**: Not supported directly; use intermediate variables.
 
 #### 2.5.8 Null Literal
@@ -437,7 +486,7 @@ The following tokens represent operators and punctuation. They are listed with t
 
 **Arithmetic operators:**
 | Token | Symbol | Name |
-|-------|--------|------|
+| --- | --- | --- |
 | `PLUS` | `+` | Addition |
 | `MINUS` | `-` | Subtraction / Unary negation |
 | `STAR` | `*` | Multiplication |
@@ -447,7 +496,7 @@ The following tokens represent operators and punctuation. They are listed with t
 
 **Comparison operators:**
 | Token | Symbol | Name |
-|-------|--------|------|
+| --- | --- | --- |
 | `EQ` | `==` | Equality |
 | `NE` | `!=` | Inequality |
 | `LT` | `<` | Less than |
@@ -457,14 +506,14 @@ The following tokens represent operators and punctuation. They are listed with t
 
 **Logical operators:**
 | Token | Symbol | Name |
-|-------|--------|------|
+| --- | --- | --- |
 | `AND` | `&&` | Logical AND (short-circuit) |
 | `OR` | `||` | Logical OR (short-circuit) |
 | `NOT` | `!` | Logical NOT |
 
 **Bitwise operators:**
 | Token | Symbol | Name |
-|-------|--------|------|
+| --- | --- | --- |
 | `AMPERSAND` | `&` | Bitwise AND / Address-of |
 | `PIPE` | `|` | Bitwise OR |
 | `CARET` | `^` | Bitwise XOR |
@@ -474,7 +523,7 @@ The following tokens represent operators and punctuation. They are listed with t
 
 **Assignment operators:**
 | Token | Symbol | Name |
-|-------|--------|------|
+| --- | --- | --- |
 | `ASSIGN` | `=` | Assignment |
 | `PLUS_ASSIGN` | `+=` | Add-assign |
 | `MINUS_ASSIGN` | `-=` | Subtract-assign |
@@ -493,13 +542,13 @@ The following tokens represent operators and punctuation. They are listed with t
 
 **Increment/decrement:**
 | Token | Symbol | Name |
-|-------|--------|------|
+| --- | --- | --- |
 | `PLUSPLUS` | `++` | Increment (prefix/postfix) |
 | `MINUSMINUS` | `--` | Decrement (prefix/postfix) |
 
 **Special operators:**
 | Token | Symbol | Name |
-|-------|--------|------|
+| --- | --- | --- |
 | `QUESTION` | `?` | Ternary conditional |
 | `NULL_COALESCE` | `??` | Null coalescing |
 | `PIPE_FORWARD` | `|>` | Pipe-forward (function application) |
@@ -513,7 +562,7 @@ The following tokens represent operators and punctuation. They are listed with t
 
 **Delimiters:**
 | Token | Symbol | Name |
-|-------|--------|------|
+| --- | --- | --- |
 | `LPAREN` | `(` | Left parenthesis |
 | `RPAREN` | `)` | Right parenthesis |
 | `LBRACE` | `{` | Left brace |
@@ -553,7 +602,7 @@ OPTMAX!:
 **Contextual keywords (not in the lexer's keyword table):** A handful of names act as keywords *only inside specific grammar productions* — outside those contexts they are ordinary identifiers and may be used as variable / function names:
 
 | Word | Where it is contextual | Outside that context |
-|------|------------------------|----------------------|
+| --- | --- | --- |
 | `downto` | Second token of a `for (i in HI downto LO ...)` range loop (§8.5) | Plain identifier |
 | `step` | Optional trailing modifier of a `for (i in A...B step N)` loop (§8.5) | Plain identifier |
 | `deopt` | Optional marker in `assume(c) else deopt { ... }` (§7.10) | Plain identifier |
@@ -564,14 +613,16 @@ These do not appear in the keyword table in §2.4 and you may shadow them, but d
 
 ---
 
-## 3. Preprocessor (Removed — Migrate to `comptime {}`)
+## 3. Preprocessor
+
+> **Status:** Removed. Migrate all legacy preprocessor usage to `comptime {}` blocks.
 
 The OmScript preprocessor has been **removed**. Preprocessor directives (`#define`, `#ifdef`, `#if`, `#include`, etc.) are no longer supported and will produce a compile-time error if present in source code.
 
 **Migration:** Replace all preprocessor usage with `comptime {}` blocks (§5.9). A complete migration table is provided in §5.9.1.
 
 | C/C++ preprocessor | OmScript `comptime {}` equivalent |
-|---|---|
+| --- | --- |
 | `#define MAX 1024` | `comptime { const MAX: int = 1024; }` |
 | `#define PI 3.14` | `comptime { const PI: float = 3.14; }` |
 | `#define NAME "hi"` | n/a — use a local `var` or string literal directly |
@@ -592,7 +643,7 @@ For a full migration guide and examples, see **§5.9.1** (`comptime {}` blocks).
 
 ## 4. Type System Overview
 
-OmScript is **statically typed** with **mandatory type annotations** on variable declarations (with limited inference). The type system includes scalar types (integers, floats, booleans, strings), composite types (arrays, dictionaries, structs, enums), pointer types, SIMD vectors, and arbitrary-precision integers (bigint).
+OmScript is **statically typed**. Variable declarations may be typed explicitly (`var x: int = 1;`) or inferred from an initializer (`var x = 1;`). The type system includes scalar types (integers, floats, booleans, strings), composite types (arrays, dictionaries, structs, enums), pointer types, SIMD vectors, and arbitrary-precision integers (bigint).
 
 ### 4.1 Type Annotation Syntax
 
@@ -613,27 +664,29 @@ fn add(a: int, b: int) -> int {
 
 **Return types**: Arrow `->` precedes the return type.
 
-### 4.2 Mandatory Type Annotations on Declarations
+### 4.2 Declaration Typing Rules
 
-**User-written variable declarations require explicit type annotations**. The compiler enforces this rule to ensure clarity and prevent accidental type mismatches.
+Variable declarations follow this rule:
 
-**Valid**:
+- A declaration MUST include either an explicit type annotation or an initializer expression.
+- A bare declaration with neither type nor initializer is invalid.
+
+**Valid examples**:
 ```omscript
 var x: int = 10;
 const pi: float = 3.14;
+var y = 20;
+const name = "Alice";
 ```
 
-**Invalid** (causes a parse error):
+**Invalid example** (causes a parse error):
 ```omscript
-var y = 20;       // Error: missing type annotation
-const name = "Alice";  // Error: missing type annotation
+var y;  // Error: requires type annotation or initializer
 ```
 
-**Exceptions**:
-- Compiler-generated variables (e.g., for-loop iterators, destructuring temporaries) are exempt
-- Variables with inherited type from multi-declaration (see §5.3)
-
-**Recent enforcement**: The mandatory type annotation rule was recently added; older code examples in the test suite may omit annotations, but current compiler versions require them.
+**Additional notes**:
+- In multi-variable declarations, later entries may inherit type from the first declaration.
+- Inside OPTMAX-restricted contexts, explicit annotations are required by parser rules.
 
 ### 4.3 Scalar Types
 
@@ -642,7 +695,7 @@ const name = "Alice";  // Error: missing type annotation
 OmScript provides signed and unsigned integer types of various widths:
 
 | Type | Width | Signedness | Range | LLVM Type |
-|------|-------|------------|-------|-----------|
+| --- | --- | --- | --- | --- |
 | `i8` | 8 bits | Signed | -128 to 127 | `i8` |
 | `i16` | 16 bits | Signed | -32,768 to 32,767 | `i16` |
 | `i32` | 32 bits | Signed | -2³¹ to 2³¹-1 | `i32` |
@@ -669,7 +722,7 @@ OmScript provides signed and unsigned integer types of various widths:
 #### Floating-Point Types
 
 | Type | Width | Precision | Range | LLVM Type |
-|------|-------|-----------|-------|-----------|
+| --- | --- | --- | --- | --- |
 | `f32` | 32 bits | Single (IEEE 754) | ≈1.2e-38 to ≈3.4e38 | `float` |
 | `f64` | 64 bits | Double (IEEE 754) | ≈2.2e-308 to ≈1.8e308 | `double` |
 | `float` | 64 bits | Alias for `f64` | Same as `f64` | `double` |
@@ -684,7 +737,7 @@ OmScript provides signed and unsigned integer types of various widths:
 #### Boolean Type
 
 | Type | Width | Values | LLVM Type |
-|------|-------|--------|-----------|
+| --- | --- | --- | --- |
 | `bool` | 1 bit (logical) | `true`, `false` | `i1` |
 
 **Memory representation**: `bool` occupies 1 byte in memory (for alignment) but is represented as `i1` in LLVM (1-bit integer).
@@ -694,7 +747,7 @@ OmScript provides signed and unsigned integer types of various widths:
 #### String Type
 
 | Type | Representation | Encoding | LLVM Type |
-|------|----------------|----------|-----------|
+| --- | --- | --- | --- |
 | `string` | Heap-allocated, immutable | UTF-8 | `ptr` (opaque) |
 
 **Semantics**:
@@ -711,7 +764,7 @@ OmScript provides signed and unsigned integer types of various widths:
 OmScript provides a `byte` type as an alias for `u8` (unsigned 8-bit integer, range 0–255).
 
 | Type | Width | Signedness | Range | LLVM Type | Notes |
-|------|-------|------------|-------|-----------|-------|
+| --- | --- | --- | --- | --- | --- |
 | `byte` | 8 bits | Unsigned | 0 to 255 | `i8` | Alias for `u8` |
 
 **Array of bytes**: `byte[]` denotes an array of byte values (same representation as `u8[]`).
@@ -756,7 +809,7 @@ The `char_at(s, i)` function returns the integer ASCII code of the character at 
 #### Void Type
 
 | Type | Meaning | LLVM Type |
-|------|---------|-----------|
+| --- | --- | --- |
 | `void` | No value / absent return | `void` |
 
 **Usage**: Functions without a `return` statement or with `return;` (no expression) have return type `void`.
@@ -842,7 +895,7 @@ directly.
 natural SSE / AVX / AVX-512 width:
 
 | Lane width | SSE2 (128-bit) | AVX2 (256-bit) | AVX-512 (512-bit) |
-|------------|----------------|----------------|-------------------|
+| --- | --- | --- | --- |
 | 8-bit  | `i8x16`, `u8x16`     | `i8x32`, `u8x32`        | — |
 | 16-bit | `i16x8`, `u16x8`     | `i16x16`, `u16x16`      | — |
 | 32-bit | `i32x4`, `u32x4`, `f32x4` | `i32x8`, `u32x8`, `f32x8` | `i32x16`, `u32x16`, `f32x16` |
@@ -1014,7 +1067,7 @@ fn main() {
 Placed immediately before `struct`, `@repr(...)` controls the memory layout of the struct's fields:
 
 | Annotation | Effect |
-|---|---|
+| --- | --- |
 | `@repr(C)` | Stable, ABI-compatible C layout — fields in declaration order with natural alignment. Use for FFI interoperability. |
 | `@repr(packed)` | Minimal memory — no padding bytes inserted between fields. |
 | `@repr(align(N))` | Force the struct's alloca to be at least `N`-byte aligned (N must be a power of two). |
@@ -1215,7 +1268,7 @@ OmScript supports **limited type inference**:
 - Expression types: intermediate expression types are inferred (e.g., `var x: int = 1 + 2;` infers `1 + 2` as `int`)
 
 **Where inference is forbidden**:
-- Variable declarations: **explicit type annotation required** (user-written `var`/`const` statements)
+- Variable declarations without initializers: **explicit type annotation required** (a bare `var x;` with no type and no initializer is an error)
 - Function return types: **explicit annotation recommended** (omission may infer `void`)
 
 **Type propagation in multi-variable declarations**: In multi-variable declarations, the type annotation on the first variable propagates to subsequent variables without explicit annotation (see §5.3).
@@ -1276,6 +1329,12 @@ fn main() {
 ---
 
 
+
+## 5. Variables, Constants, and Comptime
+
+This section defines declaration forms (`var`, `const`, qualifiers like `register`/`atomic`/`volatile`/`global`), compile-time evaluation via `comptime {}`, assignment semantics, destructuring, scope behavior, and predefined integer constants.
+
+The declaration rule from §4.2 applies throughout this section: a declaration MUST include either an explicit type annotation or an initializer expression.
 
 ### 5.1 `var` Declaration
 
@@ -1510,7 +1569,7 @@ Placed at the top level of a source file (not inside a function), a `comptime {}
 **Supported statements inside a top-level comptime block:**
 
 | Statement | Description |
-|---|---|
+| --- | --- |
 | `const NAME [: TYPE] = VALUE;` | Define a compile-time constant |
 | `if (COND) { ... } [else if (...) { ... }]* [else { ... }]` | Conditional inclusion |
 | `error("message");` | Abort compilation with a diagnostic |
@@ -1519,7 +1578,7 @@ Placed at the top level of a source file (not inside a function), a `comptime {}
 **Supported value types** for `const`:
 
 | Form | Example | Stored as |
-|---|---|---|
+| --- | --- | --- |
 | Integer literal | `const MAX: int = 1024;` | `int` |
 | Float literal | `const PI: float = 3.14159;` | `float` |
 | String literal | `const GREETING: string = "hello";` | `string` |
@@ -1529,10 +1588,10 @@ Placed at the top level of a source file (not inside a function), a `comptime {}
 **Built-in comptime identifiers** (read-only):
 
 | Name | Type | Example value | Equivalent preprocessor macro |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `OS` | string | `"linux"` / `"windows"` / `"macos"` | `__OS__` |
 | `ARCH` | string | `"x86_64"` / `"aarch64"` / `"arm"` | `__ARCH__` |
-| `VERSION` | string | `"5.0.0"` | `__VERSION__` |
+| `VERSION` | string | `"4.9.0"` | `__VERSION__` |
 | `FILE` | string | `"src/main.om"` | `__FILE__` |
 
 > **Note:** Built-in string comptime constants (`OS`, `ARCH`, `VERSION`, `FILE`) are only available inside `comptime {}` condition expressions. They are not emitted as runtime string globals.
@@ -1608,7 +1667,7 @@ fn main() -> int {
 **Preprocessor migration guide:**
 
 | C/C++ preprocessor | OmScript `comptime {}` equivalent | Notes |
-|---|---|---|
+| --- | --- | --- |
 | `#define MAX 1024` | `comptime { const MAX: int = 1024; }` | Fully typed |
 | `#define PI 3.14159` | `comptime { const PI: float = 3.14159; }` | |
 | `#define NAME "hello"` | `comptime { const NAME: string = "hello"; }` | |
@@ -1686,7 +1745,7 @@ x = 20;
 
 **Compound assignment operators**:
 | Operator | Meaning | Example | Equivalent |
-|----------|---------|---------|------------|
+| --- | --- | --- | --- |
 | `+=` | Add-assign | `x += 5` | `x = x + 5` |
 | `-=` | Subtract-assign | `x -= 3` | `x = x - 3` |
 | `*=` | Multiply-assign | `x *= 2` | `x = x * 2` |
@@ -1776,7 +1835,7 @@ OmScript provides a set of built-in identifier constants for the minimum and max
 #### 5.13.1 Canonical names
 
 | Constant | Type | Value |
-|---|---|---|
+| --- | --- | --- |
 | `I1_MAX` | signed 1-bit | `0` (only representable non-negative value in signed 1-bit two's complement) |
 | `I1_MIN` | signed 1-bit | `-1` |
 | `I8_MAX` | signed 8-bit | `127` |
@@ -1811,7 +1870,7 @@ The pattern `I{N}_MAX`, `I{N}_MIN`, `U{N}_MAX`, `U{N}_MIN` extends to **any bit 
 #### 5.13.2 Convenience aliases
 
 | Alias | Equivalent |
-|---|---|
+| --- | --- |
 | `INT_MAX` | `I64_MAX` |
 | `INT_MIN` | `I64_MIN` |
 | `UINT_MAX` | `U64_MAX` |
@@ -1824,7 +1883,7 @@ The pattern `I{N}_MAX`, `I{N}_MIN`, `U{N}_MAX`, `U{N}_MIN` extends to **any bit 
 The C standard-library naming convention is also accepted:
 
 | C-style alias | Equivalent |
-|---|---|
+| --- | --- |
 | `INT8_MAX` / `INT8_MIN` | `I8_MAX` / `I8_MIN` |
 | `INT16_MAX` / `INT16_MIN` | `I16_MAX` / `I16_MIN` |
 | `INT32_MAX` / `INT32_MIN` | `I32_MAX` / `I32_MIN` |
@@ -1991,7 +2050,7 @@ Controls how the compiler optimizes this function.
 **Syntax**: `@opt(option, option, ...)` where options are:
 
 | Option | Effect |
-|--------|--------|
+| --- | --- |
 | `inline` | Force-inline at all call sites (`alwaysinline`) |
 | `noinline` | Never inline (`noinline`) |
 | `hot` | Mark as frequently executed; prioritizes optimization effort |
@@ -2045,7 +2104,7 @@ Declares behavioral contracts that the optimizer may rely on.
 **Syntax**: `@semantics(attr, attr, ...)` where attrs are:
 
 | Attribute | Effect |
-|-----------|--------|
+| --- | --- |
 | `pure` | No side effects; same inputs always produce same outputs (`readonly`/`readnone`) |
 | `speculatable` | May be hoisted across branches and into loop preheaders without observable cost |
 | `noreturn` | Function never returns (e.g., calls `exit()`, throws unconditionally) |
@@ -2099,7 +2158,7 @@ Provides memory-access level, aliasing, and allocator metadata so the optimizer 
 ##### Memory-Access Level (mutually exclusive)
 
 | Option | LLVM effect | Description |
-|--------|-------------|-------------|
+| --- | --- | --- |
 | `none` | `memory(none)` | No memory access at all. Implies `nounwind`, `nosync`, `willreturn`. |
 | `readonly` | `memory(read)` | Only reads memory; never writes. |
 | `writeonly` | `memory(write)` | Only writes memory; never reads. |
@@ -2112,13 +2171,13 @@ Provides memory-access level, aliasing, and allocator metadata so the optimizer 
 ##### Aliasing Hints
 
 | Option | LLVM effect | Description |
-|--------|-------------|-------------|
+| --- | --- | --- |
 | `noalias_ret` | `noalias` on return | Return pointer is guaranteed not to alias any pointer visible to the caller. Use for factory functions that return fresh objects but are not full allocators. |
 
 ##### Allocator Metadata
 
 | Option | LLVM effect | Description |
-|--------|-------------|-------------|
+| --- | --- | --- |
 | `allocator` | `allocsize(0)` + `noalias` return | Return pointer is a freshly allocated region; default size param is index 0. |
 | `size=N` | Overrides allocsize size-param index | Parameter at index `N` (0-based) holds the allocation byte count. |
 | `count=M` | Overrides allocsize count-param index | Parameter at index `M` is a count multiplied by `size`. |
@@ -2196,12 +2255,31 @@ fn hot_kernel(n: int) -> int {
 
 ---
 
+#### `@deprecated` / `@deprecated("message")` — Call-Site Deprecation Warning
+
+Marks a function as deprecated. Calls still compile, but each call site emits a warning.
+
+```omscript
+@deprecated
+fn old_api(x: int) -> int { return x * 2; }
+
+@deprecated("use new_api() instead")
+fn legacy(x: int) -> int { return x + 1; }
+```
+
+**Semantics:**
+- Warning is emitted at call sites, not only at declaration.
+- `@deprecated("message")` appends the custom message to the warning text.
+- Works with regular calls and desugared call forms.
+
+---
+
 #### Deprecated Flat Annotations
 
-The individual flat forms (`@hot`, `@cold`, `@inline`, `@pure`, `@noreturn`, etc.) are **deprecated**.  They still compile — the compiler emits a warning and applies the same effect — but all new code should use the compound forms above.
+The individual flat forms (`@hot`, `@cold`, `@inline`, `@pure`, `@noreturn`, etc.) are **deprecated**. They still compile — the compiler emits a warning and applies the same effect — but all new code should use the compound forms above.
 
 | Deprecated | Replacement |
-|------------|-------------|
+| --- | --- |
 | `@inline` | `@opt(inline)` |
 | `@noinline` | `@opt(noinline)` |
 | `@hot` | `@opt(hot)` |
@@ -2286,7 +2364,7 @@ OmScript provides the `funcptr` type for storing and calling native function poi
 **Summary of operations**:
 
 | Operation | Syntax | Semantics |
-|---|---|---|
+| --- | --- | --- |
 | Obtain address of a named function | `funcptr_from("name")` | Resolves the function `name` visible at link time and returns its address as a `funcptr`. |
 | Create from raw machine-code bytes | `funcptr_new(byteArr, n)` | Allocates a W^X page, copies `n` bytes from the `i64[]` array, returns a `funcptr`. |
 | Call | `*f` | Invokes the function as `fn() → i64`. |
@@ -2693,7 +2771,7 @@ A pure branch-prediction hint. Returns `value` unchanged but tags the comparison
 #### Comparison
 
 | Construct | Runtime check? | UB if violated? | Effect |
-|-----------|---------------|----------------|--------|
+| --- | --- | --- | --- |
 | `assert(cond)` (§16.3) | Yes | No (abort) | Real check, prints + aborts on failure |
 | `assume(cond)` | **No** | **Yes** | Optimizer hint via `llvm.assume` |
 | `assume(cond) else deopt { ... }` | Yes | No (runs deopt body) | Guarded fast-path / cold deopt path |
@@ -2779,14 +2857,14 @@ fn sum_to_four() -> int {
 **Compile-time safety checks:**
 
 | Violation | Severity | Message |
-|-----------|----------|---------|
+| --- | --- | --- |
 | Label not defined in current function | **Error** | `'jmp foo': label 'foo' is not defined in this function` |
 | Forward jump over `var` declaration | **Error** | `'jmp after' at line N jumps forward over declaration of variable 'x'...` |
 | Any use of `jmp` | **Warning** | `'jmp' is deprecated; prefer structured control flow (if / while / for / break / continue)` |
 
 **Migration guide:**
 | `jmp` pattern | Preferred replacement |
-|---------------|-----------------------|
+| --- | --- |
 | Skip optional block | `if (!condition) { ... }` |
 | Retry / retry loop | `while (condition) { ... }` |
 | Counted loop | `for i in start..end { ... }` |
@@ -2888,18 +2966,32 @@ for (i: int in 0..5) {
 
 **Syntax**:
 - `for (var in start downto end) { body }` — Descending loop
-- **No explicit step syntax** in basic `for`; use `for` with custom increment in body
+- `for (var in start..end step N) { body }` — Ascending loop with explicit step
+- `for (var in start downto end step N) { body }` — Descending loop with explicit step
 
 **`downto` semantics**: Decrements iterator from `start` to `end` (inclusive).
 
-**Example**:
+**`step` keyword**: An optional `step N` suffix controls the iteration increment. `N` must be a positive integer expression. Negative counts and zero are runtime errors. For descending loops, the user supplies a positive step value and the compiler negates it automatically.
+
+**Example (descending)**:
 ```omscript
 for (i: int in 10 downto 0) {
     println(i);  // Prints: 10, 9, 8, ..., 1, 0
 }
 ```
 
-**Custom step**: Use `range_step` function (see §10):
+**Example (step)**:
+```omscript
+for i in 0..20 step 2 {
+    println(i);  // Prints: 0, 2, 4, ..., 18
+}
+
+for i in 10 downto 0 step 2 {
+    println(i);  // Prints: 10, 8, 6, 4, 2, 0
+}
+```
+
+**Alternative (`range_step`)**: The `range_step` built-in generates an array for use with `foreach` or `for … in`:
 ```omscript
 var steps: int[] = range_step(0, 10, 2);  // [0, 2, 4, 6, 8]
 for (x in steps) {
@@ -3259,7 +3351,7 @@ for (i: int in 0...100) @loop(vectorize) @loop(unroll=8) {
 ### 9.1 Arithmetic Operators
 
 | Operator | Syntax | Meaning | Example |
-|----------|--------|---------|---------|
+| --- | --- | --- | --- |
 | `+` | `a + b` | Addition | `3 + 4` → `7` |
 | `-` | `a - b` | Subtraction | `10 - 3` → `7` |
 | `*` | `a * b` | Multiplication | `4 * 5` → `20` |
@@ -3282,7 +3374,7 @@ for (i: int in 0...100) @loop(vectorize) @loop(unroll=8) {
 ### 9.2 Comparison Operators
 
 | Operator | Syntax | Meaning | Example |
-|----------|--------|---------|---------|
+| --- | --- | --- | --- |
 | `==` | `a == b` | Equality | `5 == 5` → `true` |
 | `!=` | `a != b` | Inequality | `5 != 3` → `true` |
 | `<` | `a < b` | Less than | `3 < 5` → `true` |
@@ -3299,7 +3391,7 @@ for (i: int in 0...100) @loop(vectorize) @loop(unroll=8) {
 ### 9.3 Logical Operators
 
 | Operator | Syntax | Meaning | Short-circuit |
-|----------|--------|---------|---------------|
+| --- | --- | --- | --- |
 | `&&` | `a && b` | Logical AND | Yes (if `a` is false, `b` not evaluated) |
 | `||` | `a || b` | Logical OR | Yes (if `a` is true, `b` not evaluated) |
 | `!` | `!a` | Logical NOT | N/A (unary) |
@@ -3318,7 +3410,7 @@ if (ptr != null && ptr.value > 0) {
 ### 9.4 Bitwise Operators
 
 | Operator | Syntax | Meaning |
-|----------|--------|---------|
+| --- | --- | --- |
 | `&` | `a & b` | Bitwise AND |
 | `|` | `a | b` | Bitwise OR |
 | `^` | `a ^ b` | Bitwise XOR |
@@ -3511,7 +3603,7 @@ var msg: string = "Count: " + 42;  // "Count: 42" (integer auto-converted)
 Operators are listed from **highest to lowest** precedence. Operators on the same line have equal precedence and associate left-to-right unless noted.
 
 | Precedence | Operators | Associativity | Description |
-|------------|-----------|---------------|-------------|
+| --- | --- | --- | --- |
 | 1 (highest) | `::` | Left | Scope resolution |
 | 2 | `()` `[]` `.` | Left | Call, index, member access |
 | 3 | `++` `--` (postfix) | Left | Postfix increment/decrement |
@@ -3581,7 +3673,7 @@ var n: int = int(s);  // Parse string to int (may fail at runtime)
 #### 9.16.1 Integer ↔ Integer
 
 | Source width vs. Target width | Direction | LLVM instruction | Signedness rule |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Narrower → wider | Widening | `sext` (signed source) or `zext` (unsigned source) | Determined by the **source** variable's declared type (`u*` = unsigned → `zext`; `i*` or unqualified = signed → `sext`) |
 | Wider → narrower | Truncation | `trunc` | Wraps (no trap) |
 | Same width | Identity | None (SSA forwarded) | — |
@@ -3600,7 +3692,7 @@ var f: i8  = e as i8;   // truncate → low 8 bits
 #### 9.16.2 Integer ↔ Float
 
 | Conversion | LLVM instruction | Notes |
-|---|---|---|
+| --- | --- | --- |
 | signed int → float | `sitofp` | Default for `i*`-typed / unqualified variables |
 | unsigned int → float | `uitofp` | When source variable is declared with `u*` annotation |
 | float → signed int | `fptosi` | Default for `i*` target types |
@@ -3621,7 +3713,7 @@ var m: u8    = pi as u8;   // fptoui → 3
 #### 9.16.3 Float ↔ Float
 
 | Conversion | LLVM instruction |
-|---|---|
+| --- | --- |
 | `f32` → `f64` (widening) | `fpext` |
 | `f64` → `f32` (narrowing) | `fptrunc` |
 | Same width | Identity |
@@ -3637,7 +3729,7 @@ var c: f32 = b as f32;  // fptrunc → 1.5 (single precision)
 `expr as string` formats the value to a heap-allocated OmScript string using `snprintf`:
 
 | Source type | Format used | Example result |
-|---|---|---|
+| --- | --- | --- |
 | Integer (`i*` / `u*`) | `%lld` | `42 as string` → `"42"` |
 | Float (`f32` / `f64`) | `%g` | `3.14 as f64 as string` → `"3.14"` |
 | Pointer (`ptr`) | `%llu` (address as unsigned decimal) | `p as string` → `"140732…"` |
@@ -3656,7 +3748,7 @@ var addr: string = p as string; // unsigned decimal address
 #### 9.16.5 Pointer ↔ Integer
 
 | Conversion | LLVM instruction |
-|---|---|
+| --- | --- |
 | `ptr` → integer | `ptrtoint` |
 | integer → `ptr` | `inttoptr` |
 | `ptr` → `ptr` (any) | identity (opaque pointers) |
@@ -3670,7 +3762,7 @@ var q: ptr<int> = addr as ptr;   // inttoptr (unsafe!)
 #### 9.16.6 Complete cast table
 
 | Source | Target | Instruction |
-|---|---|---|
+| --- | --- | --- |
 | `iN` (signed) | `iM` (M > N) | `sext` |
 | `uN` (unsigned) | `iM`/`uM` (M > N) | `zext` |
 | `iN`/`uN` | `iM`/`uM` (M < N) | `trunc` |
@@ -3913,7 +4005,7 @@ var c = [1, ...a, 5];            // spread — creates a new 6-element array
 **Three-tier allocation strategy** (decided at the variable-declaration site):
 
 | Tier | Condition | IR emitted |
-|------|-----------|------------|
+| --- | --- | --- |
 | **Read-only global** (O2+) | All elements are compile-time integer constants AND the variable has only read-only uses | `private unnamed_addr constant [n+1 x i64]` global; pointer returned as `ptrtoint`. Zero runtime cost; length + data in a single cache line. |
 | **Stack alloca** (O1+) | Element count ≤ 512 AND variable doesn't escape its scope (or is `const`) | `alloca [n+1 x i64]` in function entry block; 16-byte aligned. Freed automatically on function exit. |
 | **Heap malloc** | Everything else (dynamic expressions, escaping variables, > 512 elements) | `malloc((n+1)*8)` with `nonnull` + `dereferenceable((n+1)*8)` return attributes. For empty arrays (`n=0`), pre-allocates `kMinArrayCapacity * 8 = 128` bytes. |
@@ -4538,6 +4630,23 @@ var c = array_zip(a, b);  // [1, 10, 2, 20, 3, 30]
 
 ---
 
+#### `array_zip_with(array, array, fn) → array`
+
+**Signature:** `array_zip_with(array, array, function) → array`  
+**Semantics:** Return a NEW array where `result[i] = fn(a[i], b[i])`. Length is `min(len(a), len(b))`.  
+**Time:** O(min(len(a), len(b)) * cost(fn))
+
+**Example:**
+```omscript
+fn add(a: int, b: int) -> int { return a + b; }
+
+var xs = [1, 2, 3];
+var ys = [10, 20];
+var sums = array_zip_with(xs, ys, add);  // [11, 22]
+```
+
+---
+
 ### 11.7 Higher-order array operations and lambda interaction
 
 #### `array_map(array, fn) → array`
@@ -4588,18 +4697,17 @@ var s = array_reduce(a, add, 0);  // 10
 
 ---
 
-#### `array_find(array, fn) → i64`
+#### `array_find(array, value) → i64`
 
-**Signature:** `array_find(array, function) → i64`  
-**Semantics:** Return the first element where `fn(element)` is truthy, or `-1` if none.  
-**Time:** O(n * cost(fn)) (short-circuits on first match)
+**Signature:** `array_find(array, value) → i64`  
+**Semantics:** Return the **index** of the first element equal to `value`, or `-1` if no element matches. Comparison is integer equality on each element.  
+**Time:** O(n) (short-circuits on first match)
 
 **Example:**
 ```omscript
-fn gt_10(x) { return x > 10; }
-
 var a = [5, 15, 25];
-var x = array_find(a, gt_10);  // 15
+var idx = array_find(a, 15);  // 1  (element 15 is at index 1)
+var miss = array_find(a, 99); // -1 (not found)
 ```
 
 ---
@@ -4616,6 +4724,23 @@ fn is_neg(x) { return x < 0; }
 
 var a = [1, 2, -3];
 println(array_any(a, is_neg));  // 1
+```
+
+---
+
+#### `array_find_index(array, fn) → i64`
+
+**Signature:** `array_find_index(array, function) → i64`  
+**Semantics:** Return the **index** of the first element for which `fn(element)` is truthy, or `-1` if no element matches. Short-circuits on first match.  
+**Time:** O(n × cost(fn))
+
+**Example:**
+```omscript
+fn gt_10(x: int) -> int { return x > 10; }
+
+var a = [5, 15, 25];
+var idx = array_find_index(a, gt_10);  // 1  (index of first element where gt_10 is true)
+var miss = array_find_index([1, 2, 3], gt_10); // -1 (none pass)
 ```
 
 ---
@@ -4693,6 +4818,25 @@ var flat: int[] = array_flatten(nested);
 println(flat[0]);  // 1
 println(flat[5]);  // 6
 ```
+
+---
+
+#### `array_chunk(array, i64) → array`
+
+**Signature:** `array_chunk(array, chunk_size) → array`  
+**Semantics:** Split an array into chunks of `chunk_size`. Returns an outer `int[]` where each element stores a sub-array pointer encoded as an integer; the final chunk may be shorter. `chunk_size` must be `>= 1`.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+var a = [1, 2, 3, 4, 5];
+var chunks = array_chunk(a, 2);
+var flat = array_flatten(chunks);   // [1, 2, 3, 4, 5]
+```
+
+**Notes:**
+- Use `array_flatten(chunks)` (or pass `chunks` into other array built-ins) when you need element-level access across all chunks.
+- This representation is low-level by design: each outer element is an encoded pointer to a sub-array.
 
 ---
 
@@ -4787,10 +4931,16 @@ var s3 = "tab\tseparated";
 - `\n` — newline (0x0A)
 - `\t` — tab (0x09)
 - `\r` — carriage return (0x0D)
+- `\b` — backspace (0x08)
+- `\f` — form feed (0x0C)
+- `\v` — vertical tab (0x0B)
 - `\\` — backslash
 - `\"` — double quote
 - `\xHH` — hex escape (two hex digits)
-- `\0` — null (0x00)
+
+**Not supported in string literals**:
+- `\0` (null byte) is rejected
+- `\x00` (null byte via hex escape) is rejected
 
 **Storage:** String literals are stored as LLVM global constants (`.rodata` section) and referenced via `GlobalString`.
 
@@ -4798,16 +4948,17 @@ var s3 = "tab\tseparated";
 
 ### 12.3 String interpolation full rules
 
-**Syntax:** Embedded expressions within string literals using `${...}`:
+**Syntax:** Interpolation is supported with `$"..."` and `f"..."` forms. Expressions are embedded as `{...}`:
 ```omscript
 var x = 42;
-var s = "The answer is ${x}";  // "The answer is 42"
+var s1 = $"The answer is {x}";
+var s2 = f"The answer is {x}";  // alias form
 ```
 
 **Implementation:**
-1. Parser rewrites `"...${expr}..."` into `str_concat("...", to_string(expr), ...)`.
-2. Multiple interpolations are chained: `str_concat(str_concat(a, b), c)`.
-3. Nested expressions are evaluated left-to-right.
+1. The lexer/parser rewrites `$"..."` / `f"..."` into concatenation + conversion steps.
+2. Multiple interpolations are chained left-to-right.
+3. Nested expressions inside `{...}` are evaluated left-to-right.
 
 **Supported expression types:**
 - Integers → converted via `snprintf("%lld", ...)`
@@ -4819,7 +4970,7 @@ var s = "The answer is ${x}";  // "The answer is 42"
 ```omscript
 var x = 10;
 var y = 20;
-println("x=${x}, y=${y}, sum=${x+y}");  // "x=10, y=20, sum=30"
+println($"x={x}, y={y}, sum={x+y}");  // "x=10, y=20, sum=30"
 ```
 
 ---
@@ -5047,18 +5198,6 @@ println(s);  // "hello"
 **Example:**
 ```omscript
 println(str_upper("hello"));  // "HELLO"
-```
-
----
-
-#### `str_lower(string) → string`
-
-**Semantics:** Return a NEW string with all uppercase letters converted to lowercase.  
-**Time:** O(n)
-
-**Example:**
-```omscript
-println(str_lower("HELLO"));  // "hello"
 ```
 
 ---
@@ -5349,6 +5488,51 @@ var bad: int = str_to_int("abc");   // 0
 ```omscript
 var f: float = str_to_float("3.14");   // 3.14
 var g: float = str_to_float("1e5");    // 100000.0
+```
+
+---
+
+#### `str_hex(i64) → string`
+
+**Signature:** `str_hex(number) → string`  
+**Semantics:** Format the integer as a lowercase hexadecimal string (no `0x` prefix). Value is formatted using 64-bit integer bits.  
+**Time:** O(1)
+
+**Example:**
+```omscript
+println(str_hex(255));   // "ff"
+println(str_hex(16));    // "10"
+println(str_hex(0));     // "0"
+```
+
+---
+
+#### `str_bin(i64) → string`
+
+**Signature:** `str_bin(number) → string`  
+**Semantics:** Format the integer as a binary string with no leading zeros (except `0` itself).  
+**Time:** O(64)
+
+**Example:**
+```omscript
+println(str_bin(10));    // "1010"
+println(str_bin(255));   // "11111111"
+println(str_bin(0));     // "0"
+```
+
+---
+
+#### `str_oct(i64) → string`
+
+**Signature:** `str_oct(number) → string`  
+**Semantics:** Format the integer as an octal string with no leading zeros (except `0` itself).  
+**Time:** O(1)
+
+**Example:**
+```omscript
+println(str_oct(8));     // "10"
+println(str_oct(511));   // "777"
+println(str_oct(0));     // "0"
 ```
 
 ---
@@ -6009,7 +6193,7 @@ Errors are reported in two tiers:
 | --- | --- |
 | Lexical | Unterminated string, invalid character, malformed numeric literal |
 | Syntactic | Missing `;`, mismatched braces, unexpected token |
-| Semantic | Undefined variable / function, duplicate `catch` key, `thread_create` non-literal arg, OPTMAX violation (§18.2) |
+| Semantic | Undefined variable / function, duplicate `catch` key, invalid `thread_create` target/signature, OPTMAX violation (§18.2) |
 | Type | OPTMAX type-annotation requirement, integer-cast on incompatible type |
 | Resource | Source file > 100 MB, parser nesting depth > 256, IR > 1,000,000 instructions |
 
@@ -6049,10 +6233,10 @@ OmScript's ownership system is designed as:
 
 ### 17.1 Ownership States
 
-Every variable is in one of six ownership states, tracked per-variable by the borrow checker:
+Every variable is in one of **seven** ownership states, tracked per-variable by the borrow checker:
 
 | State | Description | Read | Write | Move |
-|-------|-------------|------|-------|------|
+| --- | --- | --- | --- | --- |
 | `Owned` | Unique owner — full read/write access | ✓ | ✓ | ✓ |
 | `Borrowed` | Has ≥1 immutable borrows — readable but not writable | ✓ | ✗ | ✗ |
 | `MutBorrowed` | Has one mutable alias — source is completely locked | ✗ | ✗ | ✗ |
@@ -6226,7 +6410,7 @@ println(a);   // 42
 **Difference from `shared`:**
 
 | Property | `freeze` | `shared` |
-|----------|----------|----------|
+| --- | --- | --- |
 | Write blocked | ✓ permanent | ✓ until `own` |
 | LLVM `!invariant` | ✓ | ✗ |
 | Reversible | ✗ | ✓ via `own` |
@@ -6268,7 +6452,7 @@ The queue is a flat `vector<{AllocaInst*, Type*}>` — a contiguous array of 16-
 
 **Which types are freed:**
 | Type | Action |
-|------|--------|
+| --- | --- |
 | String | `free()` on string pointer |
 | Heap array | `free()` on array pointer |
 | Dict/map | Destructor + `free()` on wrapper |
@@ -6339,7 +6523,7 @@ println(r2);  // 42
 #### 17.9.1 Core Pointer Operations
 
 | Operation | Syntax | Description |
-|-----------|--------|-------------|
+| --- | --- | --- |
 | Declare | `var p: ptr<T> = ...` | Typed pointer variable |
 | Address-of | `&x` | Take address of `x`; produces `ptr<T>` |
 | Allocate | `alloc<T>(n)` / `new T(n)` | Allocate `n` elements of type `T` |
@@ -6357,7 +6541,7 @@ println(r2);  // 42
 `alloc<T>(n)` decides allocation strategy entirely at **compile time** — no runtime branching is emitted. Returns **raw (uninitialised)** memory. Three tiers:
 
 | Tier | Condition | Strategy | Notes |
-|------|-----------|----------|-------|
+| --- | --- | --- | --- |
 | **T1 Stack** | Constant `n` AND `n × sizeof(T) ≤ 8 KiB` | `alloca` in entry block | SROA/mem2reg eligible; `lifetime.start`/`end` scoped |
 | **T2 Arena** | Constant `n` AND fits in 64 KiB per-function slab | GEP into shared static slab | Zero heap involvement; all sub-allocations are compile-time GEPs |
 | **T3 Heap** | Dynamic `n` OR size exceeds slab | `malloc` / `aligned_alloc` | `nonnull` + `dereferenceable(N)` + alignment `llvm.assume` annotations emitted for LLVM AA |
@@ -6384,7 +6568,7 @@ var one: ptr<i64> = alloc<i64>();    // 1 element, raw
 For **struct element types**, `new T(n)` goes one step further than a flat `memset`: it emits explicit per-field typed stores (with per-field TBAA metadata) so the optimizer can see each field write individually and apply SROA, copy propagation, and alias analysis more aggressively.
 
 | Tier | Zero-init mechanism |
-|------|---------------------|
+| --- | --- |
 | **T1 Stack** | `alloca` + typed per-field `store zero` for structs; `memset(ptr, 0, n×sizeof(T))` for scalars |
 | **T2 Arena** | arena GEP + same field-by-field zero stores for structs; `memset` for scalars |
 | **T3 Heap** | `calloc(n, sizeof(T))` — OS-level zeroing, no extra call |
@@ -6408,7 +6592,7 @@ var pts: ptr<Point> = new Point(3);// T1: all 3 elements, all fields zero
 **When to use `alloc<T>` vs `new T`:**
 
 | Need | Use |
-|------|-----|
+| --- | --- |
 | Raw speed, you will write every field before reading | `alloc<T>(n)` |
 | Safety by default — zero is a valid sentinel / default | `new T(n)` |
 | Allocate + initialise specific fields immediately | `new T { field: val, ... }` |
@@ -6466,7 +6650,7 @@ Use `new T { ... }` when you want to initialise exactly the fields you need and 
 **Allocation + field comparison:**
 
 | Form | Allocates | Zero-fills all | Initialises specific fields | Count |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | `alloc<T>(n)` | ✓ | ✗ | ✗ | `n` |
 | `new T(n)` | ✓ | ✓ | ✗ | `n` |
 | `new T { f:v, ... }` | ✓ | ✗ | ✓ listed only | 1 |
@@ -6527,7 +6711,7 @@ if (p == q) { println("both null"); }
 #### 17.9.5 Allowed Pointer Initializers
 
 | Initializer | Example | Valid |
-|-------------|---------|-------|
+| --- | --- | --- |
 | Address-of | `&x` | ✓ |
 | `alloc<T>()` | `alloc<i64>(4)` | ✓ |
 | `malloc`/`calloc`/`realloc` | `malloc(100)` | ✓ |
@@ -6566,7 +6750,7 @@ The compiler does, however, emit `llvm.lifetime.end` for stack-allocated `alloc<
 ### 17.13 Pointer Conversions
 
 | Conversion | Legality | Notes |
-|------------|----------|-------|
+| --- | --- | --- |
 | `ptr` → `int` | Implicit | Pointer values stored as i64 |
 | `int` → `ptr` | Explicit (`IntToPtr`) | Reconstruct pointer from i64 |
 | `ptr<T>` → `ptr<U>` | Allowed | All ptrs are opaque at LLVM IR level |
@@ -6576,7 +6760,7 @@ The compiler does, however, emit `llvm.lifetime.end` for stack-allocated `alloc<
 ### 17.14 Borrow Checker Error Codes
 
 | Code | Name | Trigger |
-|------|------|---------|
+| --- | --- | --- |
 | E015 | `USE_AFTER_MOVE` | Read/write of moved or invalidated variable |
 | E016 | `BORROW_WRITE_CONFLICT` | Write to variable with active immutable borrow(s) |
 | E017 | `DOUBLE_MUT_BORROW` | Mutable borrow of already mutably-borrowed variable |
@@ -6598,7 +6782,7 @@ The compiler does, however, emit `llvm.lifetime.end` for stack-allocated `alloc<
 The following matrix summarizes which operations are permitted in each ownership state:
 
 | Operation | `Owned` | `Borrowed` | `MutBorrowed` | `Shared` | `Frozen` | `Moved` | `Invalidated` |
-|-----------|:-------:|:----------:|:-------------:|:--------:|:--------:|:-------:|:-------------:|
+| --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | Read | ✓ | ✓ | ✗ | ✓ | ✓ | ✗ | ✗ |
 | Write | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | `move` | ✓ | ✗ | ✗ | ✗ | ✓¹ | ✗ | ✗ |
@@ -6847,7 +7031,7 @@ println(line);
 
 ### 19.2 Math
 
-See section 11.6 from the research summary. Key functions:
+Core math built-ins. All functions operate on `i64` (integer) or `f64` (float) arguments unless noted; see §19.5.2 for type-conversion functions.
 
 #### `abs(numeric) → same`
 
@@ -7080,7 +7264,7 @@ Division with full IEEE 754 semantics.
 
 ### 19.4 Bit manipulation
 
-See section 11.6 from research summary. Key functions:
+Bit-manipulation built-ins for `i64` operands. All return `i64`.
 
 #### `popcount(i64) → i64`
 
@@ -7158,7 +7342,7 @@ println(typeof("hello")); // 3
 Return a human-readable **compile-time string** describing the OmScript type of the argument expression. Resolved purely from static LLVM IR type information — zero runtime overhead. The argument is evaluated for side-effects but the produced value is not used at runtime.
 
 | Return value | Meaning |
-|---|---|
+| --- | --- |
 | `"int"` | Any integer type: `i64`, `i32`, `i16`, `i8`, `u64`, `u32`, `u8`, `byte`, … |
 | `"float"` | Double-precision float (`f64`) |
 | `"f32"` | Single-precision float |
@@ -7832,16 +8016,15 @@ Right shift (divide by 2^n, floor).
 
 ### 19.13 The `std::` namespace
 
-**Built-in namespace:** Every standard library function is accessible as `std::name`. To call functions by bare name (without the `std::` prefix), add `import std;` at the top of the file.
+**Built-in namespace:** Every standard library function is accessible as `std::name`. Standard library functions are also accessible by their **bare names without any import statement** — `import std;` is optional and stylistic.
 
 **Dispatch rules:**
-- `std::abs(x)` resolves to the same function as `abs(x)` (when `import std;` is present).
-- Bare calls without `import std;` are a compile error.
-- No difference in semantics between `std::name` and bare `name`; purely a namespace prefix.
+- `std::abs(x)` resolves to the same function as `abs(x)`.
+- Bare names always work without `import std;` because builtins are registered globally.
+- `import std;` is a no-op for the standard library — it is provided only as a readable marker of intent in files that exclusively use stdlib.
 
 **List of std:: symbols:**
 
-See parser registration in `parser.cpp` lines 52-100. Key entries:
 - Math: `std::abs`, `std::min`, `std::max`, `std::pow`, `std::sqrt`, etc.
 - Trig: `std::sin`, `std::cos`, `std::tan`, `std::asin`, etc.
 - Bit ops: `std::popcount`, `std::clz`, `std::ctz`, `std::bitreverse`, etc.
@@ -7941,7 +8124,7 @@ Release a pointer previously returned by `malloc`. **Do not** call `free` on poi
 **Choosing between region, malloc, and managed types:**
 
 | Need | Recommended API |
-|------|-----------------|
+| --- | --- |
 | String / array / dict / struct | The managed type (no manual free; see §17) |
 | Many short-lived allocations with a clear lifetime | `newRegion` + `alloc` (bulk free at scope exit) |
 | Long-lived, irregular lifetime | `malloc` + `free` |
@@ -7952,6 +8135,41 @@ Release a pointer previously returned by `malloc`. **Do not** call `free` on poi
 ## 20. Concurrency
 
 OmScript's concurrency model is a thin layer over the host's POSIX threading primitives (`pthread_*`). All thread and mutex handles are passed around as plain `i64` values that wrap the underlying `pthread_t` / `pthread_mutex_t*`. There is no managed thread pool, no async runtime, no green threads, and no garbage-collection-aware safe-point machinery — threads run to completion, and the user is responsible for joining them and freeing mutexes.
+
+### 20.0 Threading keyword sugar
+
+OmScript provides direct keyword sugar for common thread and mutex operations:
+
+| Keyword form | Desugars to |
+| --- | --- |
+| `spawn target()` | `thread_create(target)` |
+| `spawn target(arg)` | `thread_create(target, arg)` |
+| `spawn(target[, arg])` | `thread_create(target[, arg])` |
+| `join x` | `thread_join(x)` |
+| `detach x` | `thread_detach(x)` |
+| `lock m` | `mutex_lock(m)` |
+| `unlock m` | `mutex_unlock(m)` |
+| `trylock m` | `mutex_try_lock(m)` |
+
+`target` follows the same validation rules as `thread_create`: identifier or string literal naming an existing top-level function with arity 0 or 1.
+
+`spawn` intentionally requires **call-shaped syntax** for compact target forms:
+
+- ✅ `spawn worker()`
+- ✅ `spawn worker(arg)`
+- ❌ `spawn worker`
+
+**Example:**
+```omscript
+var m = mutex_new();
+lock m;
+var t = spawn worker_add(5);
+var r = join t;
+var busy = trylock m;
+unlock m;
+detach spawn worker();
+mutex_destroy(m);
+```
 
 **Model summary:**
 
@@ -7964,37 +8182,51 @@ OmScript's concurrency model is a thin layer over the host's POSIX threading pri
 
 ### 20.1 Threads
 
-#### 20.1.1 `thread_create(fn_name: string) → i64`
+#### 20.1.1 `thread_create(fn_name: string|identifier [, arg: int]) → i64`
 
-**Description:** Spawn a new OS thread that calls the OmScript function named by `fn_name`. The argument **must be a string literal** containing the name of an existing top-level function — it is resolved at compile time, not at runtime, and a non-literal or unknown name is a compile-time error.
+**Description:** Spawn a new OS thread that calls a top-level OmScript function. `fn_name` can be either:
+- a string literal (`"worker"`)
+- a function identifier (`worker`)
 
-The spawned thread executes `fn_name()` with **no arguments**; the target function's return value is discarded. To pass data into the thread, use module-level (`global var`) state guarded by a mutex.
+The target function must accept **0 or 1 parameter(s)**:
+- 0-arg target: call as `thread_create(worker)`
+- 1-arg target: call as `thread_create(worker, arg)`
+
+`thread_create` checks the target signature at compile time and emits an error for unsupported arity.
 
 **Returns:** A thread handle (`pthread_t` reinterpreted as `i64`). Pass this value to `thread_join`.
 
 **Errors:**
-- *Compile-time:* `thread_create requires a string literal function name` if the argument is not a string literal.
-- *Compile-time:* `thread_create: unknown function 'foo'` if the named function does not exist in the current translation unit.
+- *Compile-time:* `thread_create requires a function name (identifier or string literal) as argument 1`
+- *Compile-time:* `thread_create: unknown function 'foo'` if the function does not exist in the current translation unit.
+- *Compile-time:* arity mismatch errors when target takes 0 or 1 arg but call shape does not match.
+- *Runtime:* fatal diagnostic + abort if `pthread_create` fails.
 
 **Example:**
 ```omscript
 global var counter: int = 0;
 global var lock: int = 0;  // initialized in main()
 
-fn worker() {
+fn worker() -> int {
     mutex_lock(lock);
     counter = counter + 1;
     mutex_unlock(lock);
+    return 1;
+}
+
+fn worker_add(v: int) -> int {
+    return v + 10;
 }
 
 fn main() {
     lock = mutex_new();
-    var t1 = thread_create("worker");
-    var t2 = thread_create("worker");
-    thread_join(t1);
-    thread_join(t2);
+    var t1 = thread_create(worker);
+    var t2 = thread_create("worker_add", 32);
+    var r1 = thread_join(t1);     // 1
+    var r2 = thread_join(t2);     // 42
     mutex_destroy(lock);
-    println(counter);   // 2
+    println(counter);   // 1
+    println(r1 + r2);   // 43
     return 0;
 }
 ```
@@ -8003,16 +8235,32 @@ fn main() {
 
 #### 20.1.2 `thread_join(tid: i64) → i64`
 
-**Description:** Block the calling thread until the thread identified by `tid` has terminated. Internally calls `pthread_join(tid, NULL)` — the joined thread's return value is **discarded**, not returned to OmScript.
+**Description:** Block the calling thread until the thread identified by `tid` has terminated.
 
-**Returns:** Always `0`. (The return value exists only so the call can be used as an expression.)
+**Returns:** The worker function's integer return value (`i64`).
 
-**Errors:** Passing an invalid or already-joined `tid` invokes platform-defined behaviour from `pthread_join` (typically returns `EINVAL` or `ESRCH`); OmScript does not surface this.
+**Errors:** Runtime fatal diagnostic + abort if `pthread_join` fails (invalid/already-joined handle, etc.).
 
 **Example:**
 ```omscript
 var t = thread_create("worker");
-thread_join(t);
+var result = thread_join(t);
+```
+
+---
+
+#### 20.1.3 `thread_detach(tid: i64) → i64`
+
+**Description:** Mark a thread as detached. Detached threads release their resources automatically on completion and must not be joined.
+
+**Returns:** `0` on success.
+
+**Errors:** Runtime fatal diagnostic + abort if `pthread_detach` fails.
+
+**Example:**
+```omscript
+var t = thread_create(worker);
+thread_detach(t);
 ```
 
 ---
@@ -8021,7 +8269,7 @@ thread_join(t);
 
 Mutexes are heap-allocated `pthread_mutex_t` structures, returned as opaque `i64` handles. The allocation is sized at **64 bytes** — enough to cover `pthread_mutex_t` on every supported platform (40 bytes on Linux x86_64, 64 bytes on macOS) — and initialized via `pthread_mutex_init` with default attributes. Default-attribute mutexes are **non-recursive**: a thread that locks the same mutex twice without unlocking deadlocks.
 
-> **Note:** OmScript currently exposes only the four operations below. There is **no `mutex_try_lock`**, no read/write lock, and no condition variables.
+> **Note:** OmScript now exposes `mutex_try_lock` in addition to lock/unlock/destroy. There are still no read/write locks or condition variables in the core builtins.
 
 #### 20.2.1 `mutex_new() → i64`
 
@@ -8063,7 +8311,19 @@ mutex_unlock(m);
 
 ---
 
-#### 20.2.4 `mutex_destroy(m: i64) → i64`
+#### 20.2.4 `mutex_try_lock(m: i64) → i64`
+
+**Description:** Attempt to acquire `m` without blocking.
+
+**Returns:**
+- `1` if the mutex was acquired
+- `0` if the mutex is currently busy
+
+**Errors:** Runtime fatal diagnostic + abort for non-busy pthread errors.
+
+---
+
+#### 20.2.5 `mutex_destroy(m: i64) → i64`
 
 **Description:** Destroy the mutex via `pthread_mutex_destroy` and free its backing allocation. After this call the handle `m` is invalid and **must not be used**.
 
@@ -8084,7 +8344,7 @@ OmScript provides first-class **atomic variables** via the `atomic` variable qua
 **IR mapping**:
 
 | OmScript source | LLVM IR |
-|----------------|---------|
+| --- | --- |
 | `atomic var x: i64 = 0;` | `store atomic i64 0, ptr %x seq_cst` (initializer) |
 | `x` (load) | `load atomic i64, ptr %x seq_cst` |
 | `x = v` | `store atomic i64 %v, ptr %x seq_cst` |
@@ -8146,7 +8406,7 @@ fn consumer() {
 OmScript offers three tiers of shared-memory semantics:
 
 | Mechanism | IR semantics | Ordering guarantee | Use case |
-|-----------|-------------|-------------------|---------|
+| --- | --- | --- | --- |
 | Plain `var` | Unordered load / store | None — data race is UB | Single-threaded, or reads protected by a mutex |
 | `atomic var` | `seq_cst` atomic load / store / RMW | Sequentially consistent — total order of all atomic ops | Lock-free counters, flags, producer/consumer handshakes |
 | `mutex_lock` / `mutex_unlock` | Acquire / release barrier | Acquire-release — publishes all prior writes to the next lock holder | Critical sections protecting complex invariants (structs, arrays, etc.) |
@@ -8268,7 +8528,7 @@ if (file_exists("config.txt")) {
 
 ## 22. Lambda Expressions
 
-OmScript lambdas are anonymous functions with a lightweight `|params| body` or `(params) => body` syntax, designed primarily for use with the higher-order array built-ins (`array_map`, `array_filter`, `array_reduce`, `array_any`, `array_every`, `array_count`, `array_find`, `array_min_by`, `array_max_by`).
+OmScript lambdas are anonymous functions with a lightweight `|params| body` or `(params) => body` syntax, designed primarily for use with the higher-order array built-ins (`array_map`, `array_filter`, `array_reduce`, `array_any`, `array_every`, `array_count`, `array_find_index`, `array_min_by`, `array_max_by`).
 
 **Implementation model — important:** Lambdas are *not* runtime closures. The parser desugars every lambda into a top-level named function (`__lambda_N`) and replaces the lambda expression with an identifier referring to that function. The higher-order built-ins receive that function reference at code-gen time. The consequences are:
 
@@ -8402,7 +8662,9 @@ The following built-ins accept a lambda or a named function reference. See §11.
 | `array_any(arr, fn)` | `|x| → bool` |
 | `array_every(arr, fn)` | `|x| → bool` |
 | `array_count(arr, fn)` | `|x| → bool` |
-| `array_find(arr, fn)` | `|x| → bool`, returns first matching index or `-1` |
+| `array_find(arr, value)` | plain value (not a function) — returns index of first equal element, or `-1` |
+| `array_find_index(arr, fn)` | `|x| → bool`, returns index of first matching element, or `-1` |
+| `array_zip_with(a, b, fn)` | `|x, y| → value`, returns element-wise map over `min(len(a), len(b))` |
 | `array_min_by(arr, fn)` | `|x| → key`, returns element with minimum key |
 | `array_max_by(arr, fn)` | `|x| → key`, returns element with maximum key |
 
@@ -8544,22 +8806,21 @@ std::array_map(a, f);
 
 **Alias-free:** `std::name` always resolves to the same function as `name` (no aliasing or shadowing).
 
-**`import std;` — mandatory namespace import:**
+**`import std;` — optional namespace import:**
 
-Use `import std;` (identifier form, no quotes) at the top of any file that calls standard library functions by their bare names (without `std::`).  
-**Without `import std;`, bare stdlib calls are a compile error.**
+Standard library functions are **always accessible by their bare names** without any import. `import std;` is provided as a convention for files that want to signal explicit stdlib use, but it is a no-op for the standard library.
 
 ```omscript
-import std;           // required to call stdlib functions without std::
+// import std;  ← optional, not required
 
 fn main() {
-    println("hello"); // ok — import std; is present
-    var x = abs(-5);  // ok — import std; is present
+    println("hello"); // works without import std;
+    var x = abs(-5);  // works without import std;
     return 0;
 }
 ```
 
-Alternatively, fully qualify every call with `std::` (no import required):
+Alternatively, fully qualify every call with `std::` (always works, no import required):
 
 ```omscript
 // No import std; needed when using std:: prefix
@@ -8642,9 +8903,9 @@ The OmScript compiler (`omsc`) supports three primary invocation patterns:
 ### 24.2 Subcommands
 
 | Subcommand           | Aliases                     | Description                                             |
-|----------------------|-----------------------------|---------------------------------------------------------|
+| --- | --- | --- |
 | `help`               | `-h`, `--help`              | Display usage information                               |
-| `version`            | `-v`, `--version`           | Print compiler version (`4.4.0`)                        |
+| `version`            | `-v`, `--version`           | Print compiler version                                  |
 | `build`, `compile`   | `--build`, `--compile`      | Compile source to executable (default subcommand)       |
 | `run`                | `-r`, `--run`               | Compile and execute, passing args after `--`            |
 | `check`              | `--check`                   | Validate syntax and types without code generation       |
@@ -8673,7 +8934,7 @@ Flags are organized by category. Most boolean flags support negation via `-fno-<
 #### Output Control
 
 | Flag              | Short | Default     | Description                                          |
-|-------------------|-------|-------------|------------------------------------------------------|
+| --- | --- | --- | --- |
 | `-o <path>`       | —     | `./a.out`   | Output file path                                     |
 | `--emit-obj`      | —     | `false`     | Emit object file (`.o`) only, skip linking           |
 | `--dry-run`       | —     | `false`     | Validate and codegen, but don't write files          |
@@ -8685,7 +8946,7 @@ Flags are organized by category. Most boolean flags support negation via `-fno-<
 #### Optimization
 
 | Flag                   | Short | Default         | Description                                             |
-|------------------------|-------|-----------------|---------------------------------------------------------|
+| --- | --- | --- | --- |
 | `-O0`                  | —     | —               | No optimization (debug builds)                          |
 | `-O1`                  | —     | —               | Basic optimization (-foptmax, loop mustprogress)        |
 | `-O2`                  | —     | (profile default) | Standard optimization (enables e-graph, superopt)     |
@@ -8705,7 +8966,7 @@ Flags are organized by category. Most boolean flags support negation via `-fno-<
 #### Target
 
 | Flag              | Short | Default    | Description                                          |
-|-------------------|-------|------------|------------------------------------------------------|
+| --- | --- | --- | --- |
 | `-march=<cpu>`    | —     | `native`   | Target CPU architecture (e.g., `x86-64-v3`, `znver3`) |
 | `-mtune=<cpu>`    | —     | (same as `-march`) | CPU model for scheduling tuning            |
 | `-fpic`           | —     | `true`     | Generate position-independent code                   |
@@ -8713,7 +8974,7 @@ Flags are organized by category. Most boolean flags support negation via `-fno-<
 #### Features
 
 | Flag              | Short | Default    | Description                                          |
-|-------------------|-------|------------|------------------------------------------------------|
+| --- | --- | --- | --- |
 | `-flto`           | —     | `false`    | Link-time optimization (whole-program analysis)      |
 | `-ffast-math`     | —     | `false`    | Unsafe floating-point optimizations (reassociation, reciprocals, ignore NaN/Inf) |
 | `-fstack-protector` | —   | `false`    | Stack canary protection against buffer overflows     |
@@ -8722,7 +8983,7 @@ Flags are organized by category. Most boolean flags support negation via `-fno-<
 #### Debug
 
 | Flag              | Short | Default    | Description                                          |
-|-------------------|-------|------------|------------------------------------------------------|
+| --- | --- | --- | --- |
 | `-g`, `--debug`   | `-g`  | `false`    | Emit DWARF debug info for GDB/LLDB                   |
 | `-s`, `--strip`   | `-s`  | `false`    | Strip symbols from output binary                     |
 | `-k`, `--keep-temps` | `-k` | `false` | Keep temporary files (for `run` command only)        |
@@ -8731,10 +8992,21 @@ Flags are organized by category. Most boolean flags support negation via `-fno-<
 
 The compiler emits structured diagnostics to stderr. Errors use exit code 1; warnings do not halt compilation.
 
+| Flag                       | Short | Default    | Description                                                        |
+| --- | --- | --- | --- |
+| `--color`                  | —     | auto-detect | Force ANSI colors in diagnostics (`--color=always`)               |
+| `--no-color`               | —     | —          | Disable ANSI colors in diagnostics (`--color=never`)               |
+| `--color=auto`             | —     | —          | Auto-detect TTY and enable colors if running in a terminal         |
+| `--error-format=human`     | —     | (default)  | Rich diagnostic output with source snippet and caret (`^`)         |
+| `--error-format=plain`     | —     | —          | Plain single-line diagnostics without ANSI or source context        |
+| `--error-format=json`      | —     | —          | One JSON object per diagnostic for tooling integration              |
+| `-Werror` / `--Werror`     | —     | `false`    | Promote all warnings to errors (non-zero exit if any warning emitted) |
+| `--max-errors=N`           | —     | `0`        | Stop after `N` errors (`0` = unlimited)                            |
+
 #### Memory Safety and Ownership
 
 | Flag                      | Short | Default | Description                                                  |
-|---------------------------|-------|---------|--------------------------------------------------------------|
+| --- | --- | --- | --- |
 | `--no-ownership-checks`   | —     | `false` | Disable borrow/ownership checks entirely (unsafe mode, Ω spec §6.2) |
 | `--mem-sanitize`          | —     | `false` | Compile-time path-sensitive memory-safety diagnostics (Ω spec §7) |
 
@@ -8761,7 +9033,7 @@ control path:
 #### PGO (Profile-Guided Optimization)
 
 | Flag              | Short | Default    | Description                                          |
-|-------------------|-------|------------|------------------------------------------------------|
+| --- | --- | --- | --- |
 | `-fpgo-gen=<path>` | —    | —          | Instrument binary to write profile to `<path>` on exit |
 | `-fpgo-use=<path>` | —    | —          | Use profile from `<path>` for guided optimization    |
 
@@ -8770,7 +9042,7 @@ Profile format: LLVM raw profile (`.profraw`), converted via `llvm-profdata merg
 #### Miscellaneous
 
 | Flag                | Short | Default | Description                                          |
-|---------------------|-------|---------|------------------------------------------------------|
+| --- | --- | --- | --- |
 | `--release`         | —     | —       | Shortcut for `--profile release`                     |
 | `--profile <name>`  | —     | `debug` | Use named profile from `oms.toml`                    |
 | `--profile=<name>`  | —     | —       | Alternate form of `--profile`                        |
@@ -8778,7 +9050,7 @@ Profile format: LLVM raw profile (`.profraw`), converted via `llvm-profdata merg
 ### 24.4 Output formats and file extensions
 
 | Mode           | Extension(s)         | Description                                             |
-|----------------|----------------------|---------------------------------------------------------|
+| --- | --- | --- |
 | Executable     | (none), `.exe`       | Native binary (default on Unix/Windows)                 |
 | Object file    | `.o`, `.obj`         | Produced with `--emit-obj`                              |
 | LLVM IR        | `.ll`                | Human-readable text (via `emit-ir`)                     |
@@ -8788,7 +9060,7 @@ Profile format: LLVM raw profile (`.profraw`), converted via `llvm-profdata merg
 ### 24.5 Optimization levels
 
 | Level | Passes Enabled                                                                 |
-|-------|--------------------------------------------------------------------------------|
+| --- | --- |
 | `-O0` | None. Debug mode: no inlining, no loop transforms, keep all assertions.       |
 | `-O1` | OPTMAX, loop mustprogress, basic constant folding, dead-code elimination.     |
 | `-O2` | **All O1 + e-graph equality saturation, superoptimizer (level 2), HGOE, polyhedral loop optimizations, vectorization, unrolling, inlining.** Default for most builds. |
@@ -8830,7 +9102,7 @@ omsc pkg <action> [args]
 ```
 
 | Action                           | Aliases               | Description                                                        |
-|----------------------------------|-----------------------|--------------------------------------------------------------------|
+| --- | --- | --- |
 | `install <name>`                 | `add <name>`          | Install a package from the registry into `om_packages/`            |
 | `remove <name>`                  | `uninstall`, `rm`     | Remove an installed package from `om_packages/` and `oms.toml`     |
 | `list`                           | `ls`                  | List all currently installed packages                              |
@@ -8856,7 +9128,7 @@ omsc pkg search json            # search registry for JSON-related packages
 #### `[project]` section
 
 | Key            | Type     | Description                                    |
-|----------------|----------|------------------------------------------------|
+| --- | --- | --- |
 | `name`         | `string` | Project name (used as default output filename) |
 | `version`      | `string` | Semantic version (informational)               |
 | `authors`      | `string[]` | Author names (informational)                 |
@@ -8877,7 +9149,7 @@ json = "https://github.com/user/omscript-json.git"
 Define build profiles. Built-in profiles are `debug` and `release`; custom profiles can be added.
 
 | Key              | Type   | Default (debug) | Default (release) | Description                              |
-|------------------|--------|-----------------|-------------------|------------------------------------------|
+| --- | --- | --- | --- | --- |
 | `opt_level`      | `int`  | `0`             | `3`               | Optimization level (0–3)                 |
 | `debug_info`     | `bool` | `true`          | `false`           | Emit DWARF debug info                    |
 | `strip`          | `bool` | `false`         | `true`            | Strip symbols                            |
@@ -8924,7 +9196,7 @@ fast_math = true
 ### 24.9 Environment variables
 
 | Variable             | Description                                                        |
-|----------------------|--------------------------------------------------------------------|
+| --- | --- |
 | `OMSC_BINARY_PATH`   | Override compiler installation path (for self-update)              |
 | `OMSC_REGISTRY_URL`  | Custom package registry URL (default: GitHub user-packages)        |
 | `OMSC_DUMP_SCHEDULE` | When set, dump HGOE scheduling decisions to stderr                 |
@@ -8933,7 +9205,7 @@ fast_math = true
 ### 24.10 Exit codes
 
 | Code | Meaning                                                              |
-|------|----------------------------------------------------------------------|
+| --- | --- |
 | `0`  | Success                                                              |
 | `1`  | Compilation error (lexer, parser, type checker, or codegen failure)  |
 | `2`  | File I/O error (cannot read source, cannot write output)             |
@@ -9003,7 +9275,7 @@ Every AST-level pass is described by a `PassMetadata` struct (`include/opt_pass.
 **`PassMetadata` fields** (`opt_pass.h:80-95`):
 
 | Field | Meaning |
-|-------|---------|
+| --- | --- |
 | `id` | Stable numeric ID assigned at registration time |
 | `name` | Short identifier (e.g. `"purity"`) used in diagnostics and tests |
 | `description` | One-line description for `--verbose` output |
@@ -9016,7 +9288,7 @@ Every AST-level pass is described by a `PassMetadata` struct (`include/opt_pass.
 **`PassPhase`** (`opt_pass.h:37-43`) — coarse pipeline stage assignment:
 
 | Value | Used for |
-|-------|----------|
+| --- | --- |
 | `Preprocessing` | Source-level analysis before semantic checks |
 | `EvaluationAnalysis` | Purity detection, effect inference, CF-CTRE |
 | `ASTTransform` | AST rewrites (e-graph, OPTMAX folder, loop fusion) |
@@ -9048,7 +9320,7 @@ A `PassContract` declares six lists:
 The four currently defined `IRInvariant` values (`opt_pass.h:203-208`):
 
 | Invariant | Meaning |
-|-----------|---------|
+| --- | --- |
 | `LoopSimplify` | Loops have dedicated preheaders and a single backedge |
 | `LCSSA` | Loop-Closed SSA form — uses of loop-defined values exit through PHIs |
 | `CanonicalIV` | Induction variables are in canonical form (IndVarSimplify completed) |
@@ -9090,7 +9362,7 @@ Read this as "the named fact depends on the listed facts": invalidating `purity`
 `PipelineStage` (`include/optimization_manager.h:83-109`) provides the stable vocabulary the `OptimizationManager` uses to label passes, schedule requests, and emit progress diagnostics. The six stages and their fixed ordering are:
 
 | Stage | Mandate |
-|-------|---------|
+| --- | --- |
 | `AST_ANALYSIS` (0) | Read-only AST analyses: string/array type pre-analysis, constant-return detection, purity inference, effect inference |
 | `AST_TRANSFORM` (1) | Semantics-preserving AST transforms: synthesis expansion, CF-CTRE, e-graph saturation, range analysis |
 | `IR_CANONICALIZE` (2) | LLVM IR normalization that establishes invariants for later loop transforms: LoopSimplify, LCSSA, IndVarSimplify, SimplifyCFG |
@@ -9177,11 +9449,11 @@ The code generator (`src/codegen.cpp`) applies a layered set of LLVM attributes 
 Every user-defined function receives the following attributes regardless of optimization level:
 
 | Attribute | Why |
-|-----------|-----|
+| --- | --- |
 | `nounwind` | OmScript uses a flag-based error model, never C++ exceptions |
 | `mustprogress` | Every loop in OmScript is finite (no `while(true)` without `break` or `return`); enables LICM and loop transforms |
 | `prefer-vector-width=N` | Set to the target's preferred SIMD width for autovectorization hints |
-| `nosync` | OmScript is single-threaded; no concurrent memory access |
+| `nosync` | Applied to functions that do not use concurrency primitives; suppressed for functions that use thread_create, mutexes, or atomics |
 | `nofree` | User functions never call `free()` directly |
 | `willreturn` | Asserts finite termination; enables DSE and load-forwarding across the call |
 | `noundef` (params + return) | OmScript always initializes variables before use |
@@ -9193,7 +9465,7 @@ Exception: functions that contain concurrency primitives (e.g. explicit atomic o
 #### O2+ additions
 
 | Attribute | When applied |
-|-----------|-------------|
+| --- | --- |
 | `noalias` + `nonnull` + `dereferenceable(8)` + `align(16)` + `nocapture` (pointer params) | All pointer parameters, because OmScript's ownership model prevents aliasing across function boundaries |
 | `nosync` (function-level reinforcement) | Explicit even for functions without concurrency primitives |
 | `nonnull` (pointer params) | Ownership model guarantees non-null pointer arguments |
@@ -9206,7 +9478,7 @@ At every user function call site, `generateCall` propagates the callee's
 function-level attributes to the `CallInst`:
 
 | Call-site attribute | Source |
-|--------------------|--------|
+| --- | --- |
 | `speculatable` | Callee has `@semantics(speculatable)` |
 | `willreturn` | Callee has `WillReturn` attribute |
 | `nosync` | Callee has `NoSync` attribute |
@@ -9219,7 +9491,7 @@ These are redundant with the function definition in theory, but LLVM's LICM, DSE
 #### Load/store metadata
 
 | Metadata | Location |
-|----------|----------|
+| --- | --- |
 | `!noundef` | All local variable loads and array element loads |
 | `!range` | Array-length loads and array-element loads of integer elements (range `[0, INT64_MAX)` for lengths) |
 | `!nonnull` | `stdout` global pointer load; `malloc`/`calloc` return values |
@@ -9343,7 +9615,7 @@ A successful match produces a `Subst` (`egraph.h:244`) — a map from wildcard n
 A `RewriteRule` (`egraph.h:263-275`) bundles four things:
 
 | Field | Meaning |
-|-------|---------|
+| --- | --- |
 | `name` | Human-readable rule name (used in diagnostics) |
 | `lhs` | Left-hand side `Pattern` to match |
 | `rhs` | `RhsBuilder` callback `ClassId(EGraph&, const Subst&)` that constructs the replacement |
@@ -9356,7 +9628,7 @@ The optional **guard** turns the engine from a purely syntactic rewriter into a 
 Once saturation completes, the engine **extracts** a single representative e-node per class to produce the final program. The cost is computed by `CostModel` (`egraph.h:306-323`) with two notable parameters beyond per-node latency:
 
 | Field | Default | Meaning |
-|-------|---------|---------|
+| --- | --- | --- |
 | `regBudget` | `13` | Architectural GPRs the extractor may assume are simultaneously available (16 x86-64 GPRs minus RSP, RBP, and one frame/scratch reserve). Set to 0 to disable register-pressure-aware extraction. |
 | `spillPenalty` | `5.0` | Cycles charged per excess simultaneously-live value beyond `regBudget`. Models a stack-slot spill+reload round-trip. |
 
@@ -9469,7 +9741,7 @@ clz(x-1) → bit_smear + 1 → 1 << (bw - ctlz(x-1))
 Controlled by `-fsuperopt-level=N` (default `2` — see `include/codegen.h:1267`). The superoptimizer runs only at `O2+` and only when `-fno-superopt` was not passed; it is gated on `enableSuperopt_ && optimizationLevel >= O2` in `src/codegen_opt.cpp:4369`.
 
 | Level | Idioms | Algebraic | Branch→Select | Synthesis | Synthesis tuning |
-|-------|--------|-----------|---------------|-----------|------------------|
+| --- | --- | --- | --- | --- | --- |
 | 0     | ✗      | ✗         | ✗             | ✗         | (superopt disabled entirely) |
 | 1     | ✓      | ✓         | ✗ (`enableBranchOpt = false`) | ✗ (`enableSynthesis = false`) | n/a |
 | 2     | ✓      | ✓         | ✓             | ✓         | `SynthesisConfig` defaults: `maxInstructions = 3`, `costThreshold = 1.0` |
@@ -9528,7 +9800,7 @@ HGOE models the target CPU as a directed graph of execution resources and schedu
 From `hardware_graph.cpp`, built-in profiles:
 
 | Profile          | `-march` Value       | L1D (KB) | L2 (KB) | Integer ALU Ports | Vector ALU Ports | FMA Units |
-|------------------|----------------------|----------|---------|-------------------|------------------|-----------|
+| --- | --- | --- | --- | --- | --- | --- |
 | **Generic x86-64** | `x86-64`          | 32       | 256     | 2                 | 1                | 0         |
 | **Skylake**      | `skylake`            | 32       | 256     | 4                 | 2                | 2         |
 | **Zen 3**        | `znver3`             | 32       | 512     | 4                 | 2                | 2         |
@@ -9543,7 +9815,7 @@ The cache cells in this table are illustrative; the authoritative numbers live i
 Independent of `-march`, HGOE supports per-variable / per-operation floating-point precision control via the `FPPrecision` enum (`include/hardware_graph.h:48-53`):
 
 | Level | Meaning |
-|-------|---------|
+| --- | --- |
 | `Strict` | Full IEEE-754 compliance. No reassociation, no NaN/Inf assumptions. |
 | `Medium` | Allow limited reassociation and some vectorization; preserve NaN/Inf. |
 | `Fast` | Equivalent to `-ffast-math`: reassociation, reciprocal transforms, ignoring NaN/Inf, fused operations all permitted. |
@@ -9555,7 +9827,7 @@ Independent of `-march`, HGOE supports per-variable / per-operation floating-poi
 HGOE includes a cache model used to choose tile sizes and software-prefetch distances. The `CacheModel` struct (`hardware_graph.h:80-90`, defaults shown) is built from the resolved `MicroarchProfile` via `buildCacheModel()`:
 
 | Field | Default | Meaning |
-|-------|---------|---------|
+| --- | --- | --- |
 | `l1Size` / `l1Latency` / `l1LineSize` | 32 KB / 4 cyc / 64 B | L1D parameters |
 | `l2Size` / `l2Latency` | 256 KB / 12 cyc | L2 parameters |
 | `l3Size` / `l3Latency` | 8192 KB / 40 cyc | L3 parameters |
@@ -9566,7 +9838,7 @@ Memory accesses inside loops are classified by an `AccessPattern` (`hardware_gra
 The cache-aware pass reports its work through `CacheOptStats` (`hardware_graph.h:107-112`):
 
 | Counter | Meaning |
-|---------|---------|
+| --- | --- |
 | `loopsTiled` | Loops with tiling metadata added |
 | `loopsInterchanged` | Loops reordered for locality |
 | `prefetchesInserted` | Software prefetch hints added |
@@ -9575,7 +9847,7 @@ The cache-aware pass reports its work through `CacheOptStats` (`hardware_graph.h
 #### Operation Classes
 
 | Class           | Example LLVM Ops                     | Typical Latency (cycles) |
-|-----------------|--------------------------------------|--------------------------|
+| --- | --- | --- |
 | `IntegerALU`    | `add`, `sub`, `and`, `or`, `xor`, `shl`, `shr` | 1             |
 | `IntegerMul`    | `mul i32`, `mul i64`                 | 3–4                      |
 | `IntegerDiv`    | `sdiv`, `udiv`                       | 10–40                    |
@@ -9791,7 +10063,7 @@ Transformed to:
 The optimizer **orchestrator** (not the optimization manager) tracks pass-execution statistics in an internal `RunStats` struct (`include/opt_orchestrator.h:120-127`):
 
 | Field | Meaning |
-|-------|---------|
+| --- | --- |
 | `passesRun` | Number of passes that actually executed |
 | `passesSkipped` | Number of passes whose precondition was already satisfied (analysis cache hit) |
 | `totalElapsedMs` | Wall-clock time across the whole pass pipeline (ms) |
@@ -9880,7 +10152,7 @@ Implemented in `src/polyopt.cpp` (~1,800 lines). The polyhedral optimizer:
 **Configuration knobs** (`include/polyopt.h:108-145`, all defaults shown):
 
 | Knob | Default | Meaning |
-|------|---------|---------|
+| --- | --- | --- |
 | `enableTiling` / `enableInterchange` / `enableSkewing` / `enableFusion` / `enableFission` / `enableReversal` | `true` | Per-transform on/off switches |
 | `l1CacheBytes` | `0` (auto-detect via TTI) | L1 data-cache size used to choose tile sizes |
 | `l2CacheBytes` | `0` (auto-detect) | L2 data-cache size for outer-tile sizing |
@@ -9929,7 +10201,7 @@ OmScript provides explicit integer type casts as built-in functions. These are c
 ### 27.1 Overview Table
 
 | Cast     | Signature        | Domain          | Result Type (LLVM) | Operation                          | Overflow Behavior |
-|----------|------------------|-----------------|--------------------|------------------------------------|--------------------|
+| --- | --- | --- | --- | --- | --- |
 | `u64(x)` | `int → int`      | Any integer     | `i64`              | Identity (no-op)                   | N/A                |
 | `i64(x)` | `int → int`      | Any integer     | `i64`              | Identity (no-op)                   | N/A                |
 | `int(x)` | `int → int`      | Any integer     | `i64`              | Identity (no-op)                   | N/A                |
@@ -10111,7 +10383,7 @@ var r: bool = bool(-5);   // r = 1
 When the argument to a cast is a **compile-time constant**, CF-CTRE folds the cast:
 
 | Cast     | Constant Folding Rule (C++ equivalent)                          |
-|----------|-----------------------------------------------------------------|
+| --- | --- |
 | `u64(x)` | `x`                                                             |
 | `i64(x)` | `x`                                                             |
 | `int(x)` | `x`                                                             |
@@ -10223,7 +10495,7 @@ CF-CTRE runs **after** purity inference (so it knows which functions to execute)
 #### Classes (from `cfctre.h`)
 
 | Class             | Purpose                                                                 |
-|-------------------|-------------------------------------------------------------------------|
+| --- | --- |
 | `CTValue`         | A single compile-time value (int, float, bool, string, array handle).  |
 | `CTInterval`      | Abstract domain for range analysis (lattice: BOTTOM, [lo, hi], TOP).   |
 | `CTArray`         | Fixed-length array stored on compile-time heap.                         |
@@ -10342,7 +10614,7 @@ CF-CTRE is an **AST interpreter**, not a bytecode interpreter. It evaluates OmSc
 #### Arithmetic Operations
 
 | AST Node        | Operands       | Semantics                                      |
-|-----------------|----------------|------------------------------------------------|
+| --- | --- | --- |
 | `ADD`           | `lhs, rhs`     | `lhs + rhs` with int64/float64 semantics       |
 | `SUB`           | `lhs, rhs`     | `lhs - rhs`                                    |
 | `MUL`           | `lhs, rhs`     | `lhs * rhs`                                    |
@@ -10355,7 +10627,7 @@ CF-CTRE is an **AST interpreter**, not a bytecode interpreter. It evaluates OmSc
 #### Comparison Operations
 
 | AST Node        | Operands       | Result                                         |
-|-----------------|----------------|------------------------------------------------|
+| --- | --- | --- |
 | `LT`            | `lhs, rhs`     | `CTValue::fromBool(lhs < rhs)`                 |
 | `LE`            | `lhs, rhs`     | `CTValue::fromBool(lhs <= rhs)`                |
 | `GT`            | `lhs, rhs`     | `CTValue::fromBool(lhs > rhs)`                 |
@@ -10368,7 +10640,7 @@ CF-CTRE is an **AST interpreter**, not a bytecode interpreter. It evaluates OmSc
 #### Logical Operations
 
 | AST Node        | Operands       | Semantics                                      |
-|-----------------|----------------|------------------------------------------------|
+| --- | --- | --- |
 | `LOG_AND`       | `lhs, rhs`     | Short-circuit: `lhs.isTruthy() && rhs.isTruthy()` |
 | `LOG_OR`        | `lhs, rhs`     | Short-circuit: `lhs.isTruthy() || rhs.isTruthy()` |
 | `LOG_NOT`       | `val`          | `!val.isTruthy()`                              |
@@ -10378,7 +10650,7 @@ CF-CTRE is an **AST interpreter**, not a bytecode interpreter. It evaluates OmSc
 #### Bitwise Operations
 
 | AST Node        | Operands       | Semantics                                      |
-|-----------------|----------------|------------------------------------------------|
+| --- | --- | --- |
 | `BIT_AND`       | `lhs, rhs`     | `lhs & rhs` (64-bit)                           |
 | `BIT_OR`        | `lhs, rhs`     | `lhs | rhs`                                    |
 | `BIT_XOR`       | `lhs, rhs`     | `lhs ^ rhs`                                    |
@@ -10389,7 +10661,7 @@ CF-CTRE is an **AST interpreter**, not a bytecode interpreter. It evaluates OmSc
 #### Array Operations
 
 | AST Node           | Operation                                      |
-|--------------------|------------------------------------------------|
+| --- | --- |
 | `ARRAY_LITERAL`    | Allocate `CTArray` on `CTHeap`, return handle  |
 | `INDEX_EXPR`       | `heap_.load(arr, idx)` — bounds-checked load   |
 | `INDEX_ASSIGN`     | `heap_.store(arr, idx, val)`                   |
@@ -10400,7 +10672,7 @@ CF-CTRE is an **AST interpreter**, not a bytecode interpreter. It evaluates OmSc
 #### String Operations
 
 | AST Node           | Operation                                      |
-|--------------------|------------------------------------------------|
+| --- | --- |
 | `STRING_LITERAL`   | `CTValue::fromString(str)`                     |
 | `STR_CONCAT`       | `lhs.str + rhs.str`                            |
 | `STR_LEN`          | `str.size()`                                   |
@@ -10409,7 +10681,7 @@ CF-CTRE is an **AST interpreter**, not a bytecode interpreter. It evaluates OmSc
 #### Control-Flow Operations
 
 | AST Node        | Semantics                                      |
-|-----------------|------------------------------------------------|
+| --- | --- |
 | `IF_STMT`       | Evaluate condition → execute then/else branch  |
 | `FOR_STMT`      | Iterate over range with symbolic loop reasoning |
 | `WHILE_STMT`    | Loop until condition false (fuel-bounded)      |
@@ -10532,7 +10804,7 @@ CF-CTRE produces:
 **Fuel and depth budgets are constants, not per-O-level knobs** (`include/cfctre.h:483-484`):
 
 | Constant | Value | Meaning |
-|----------|-------|---------|
+| --- | --- | --- |
 | `kMaxInstructions` | `10,000,000` | Total instructions the abstract interpreter may execute per CF-CTRE invocation |
 | `kMaxDepth` | `128` | Maximum call-frame depth (bounds recursive evaluation) |
 
@@ -10971,7 +11243,7 @@ local = { path = "../local-lib" }                 # (future) local path
 ### 30.5 Output Artifacts
 
 | Artifact       | Path                        | Description                                   |
-|----------------|-----------------------------|-----------------------------------------------|
+| --- | --- | --- |
 | Executable     | `target/<profile>/<name>`   | Final linked binary                           |
 | Object files   | `target/<profile>/<name>.o` | Intermediate object files (kept with `--emit-obj`) |
 | LLVM IR        | (stdout)                    | Human-readable IR (via `emit-ir` subcommand)  |
@@ -11006,9 +11278,9 @@ omsc pkg list            # shows installed packages
 
 ### Variables
 ```omscript
-var x: int = 42;          // mutable, type annotation required
-const y: int = 100;       // immutable
-var z: int = 0;           // explicit type annotation
+var x: int = 42;          // mutable, explicit type annotation
+const y: int = 100;       // immutable, explicit type annotation
+var z = 0;                // mutable, type inferred from initializer (i64)
 ```
 
 ### Functions
@@ -11161,7 +11433,7 @@ fn multiply_add(a: int, b: int, c: int) -> int {
 ## 32. Glossary
 
 | Term                  | Definition                                                                                                      |
-|-----------------------|-----------------------------------------------------------------------------------------------------------------|
+| --- | --- |
 | **OPTMAX**            | Block-level AST optimization pass that applies strength reduction, constant folding, and dead-code elimination before IR generation. |
 | **CF-CTRE**           | Cross-Function Compile-Time Reasoning Engine. Deterministic AST interpreter that executes pure functions at compile time to fold constants and eliminate dead branches. |
 | **HGOE**              | Hardware Graph Optimization Engine. Models target CPU as a directed graph of execution resources and schedules instructions to minimize pipeline stalls. |
@@ -11230,14 +11502,14 @@ fn multiply_add(a: int, b: int, c: int) -> int {
 
 ### Version
 
-**OmScript Compiler Version**: `4.4.0`
+**OmScript Compiler Version**: `4.9.0`
 
 Defined in `include/version.h`:
 ```cpp
 #define OMSCRIPT_VERSION_MAJOR 4
-#define OMSCRIPT_VERSION_MINOR 4
+#define OMSCRIPT_VERSION_MINOR 9
 #define OMSCRIPT_VERSION_PATCH 0
-#define OMSC_VERSION "4.4.0"
+#define OMSC_VERSION "4.9.0"
 ```
 
 ### Stability Statement

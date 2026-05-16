@@ -1,0 +1,13 @@
+// deprecated_inline_test.om
+// Tests that @inline emits a deprecation warning.
+// Used by run_tests.sh: "warning" / "error" checks with and without --Werror.
+import std;
+
+@inline
+fn add(x: int, y: int) -> int {
+    return x + y;
+}
+
+fn main() -> int {
+    return add(1, 2) - 3;
+}

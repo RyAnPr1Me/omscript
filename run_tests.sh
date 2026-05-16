@@ -529,7 +529,7 @@ ptest_compile_fail "examples/write_to_shared_error_test.om"
 ptest_compile_fail "examples/invalidate_while_borrowed_error_test.om"
 ptest_compile_fail "examples/own_on_frozen_error_test.om"
 flush_ptests
-test_cli_output "error-line-info" "line" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
+test_cli_output "error-location-arrow" "-->" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "error-includes-filename" "undefined_var.om" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "missing-semicolon-msg" "Expected ';'" 1 ./build/omsc examples/missing_semicolon.om -o /tmp/test_semicolon
 test_cli_output "int-overflow-msg" "Integer literal out of range" 1 ./build/omsc examples/int_overflow.om -o /tmp/test_overflow
@@ -547,6 +547,20 @@ test_cli_output "e019-double-invalidate-msg" "E019" 1 ./build/omsc examples/doub
 test_cli_output "e020-write-to-shared-msg" "E020" 1 ./build/omsc examples/write_to_shared_error_test.om -o /tmp/test_e020
 test_cli_output "e021-own-on-frozen-msg" "E021" 1 ./build/omsc examples/own_on_frozen_error_test.om -o /tmp/test_e021
 test_cli_output "e022-invalidate-while-borrowed-msg" "E022" 1 ./build/omsc examples/invalidate_while_borrowed_error_test.om -o /tmp/test_e022
+
+# Ω Diagnostic flag tests
+# --Werror: a deprecated @inline annotation should be a warning normally, error with --Werror
+test_cli_output "werror-promotes-warning" "error" 1 ./build/omsc check examples/deprecated_inline_test.om --Werror --no-color
+test_cli_output "warning-no-werror" "warning" 0 ./build/omsc check examples/deprecated_inline_test.om --no-color
+# --max-errors: multi-error file should stop after limit
+test_cli_output "max-errors-limit" "error limit reached" 1 ./build/omsc check examples/multi_error_test.om --max-errors=1 --no-color
+# --error-format=json: emits structured JSON
+test_cli_output "error-format-json" "\"severity\":\"error\"" 1 ./build/omsc check examples/missing_semicolon.om --error-format=json
+# --error-format=plain: no snippet
+test_cli_output "error-format-plain-has-colno" ":4:1: error:" 1 ./build/omsc check examples/missing_semicolon.om --error-format=plain --no-color
+# Multiple errors shown individually
+test_cli_output "multi-error-first-snippet" "examples/multi_error_test.om:8:5" 1 ./build/omsc check examples/multi_error_test.om --no-color
+test_cli_output "multi-error-second-snippet" "examples/multi_error_test.om:12:17" 1 ./build/omsc check examples/multi_error_test.om --no-color
 
 echo ""
 echo "============================================"
@@ -931,6 +945,9 @@ ptest_program "examples/round73_test.om" 38
 ptest_program "examples/round74_test.om" 0
 ptest_program "examples/round75_test.om" 0
 ptest_program "examples/round76_test.om" 23
+ptest_program "examples/round79_test.om" 28
+ptest_program "examples/round80_threading_test.om" 8
+ptest_program "examples/round81_thread_keywords_test.om" 6
 flush_ptests
 
 echo ""

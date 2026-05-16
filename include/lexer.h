@@ -88,6 +88,12 @@ enum class TokenType {
     NAMESPACE, // namespace — user-defined namespace block
     JMP,       // jmp       — unconditional jump to a named label (deprecated)
     LABEL,     // label     — declares a named jump target
+    SPAWN,     // spawn     — thread_create keyword sugar
+    JOIN,      // join      — thread_join keyword sugar
+    DETACH,    // detach    — thread_detach keyword sugar
+    LOCK,      // lock      — mutex_lock keyword sugar
+    UNLOCK,    // unlock    — mutex_unlock keyword sugar
+    TRYLOCK,   // trylock   — mutex_try_lock keyword sugar
 
     // Operators
     PLUS,

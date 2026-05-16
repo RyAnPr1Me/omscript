@@ -348,18 +348,42 @@ write("log.txt", "entry\n");                  // alias for file_write
 ### Threading
 ```omscript
 fn worker() {
-    println("hello from thread");
+    return 42;
+}
+
+fn worker_add(v: int) -> int {
+    return v + 7;
 }
 
 fn main() {
-    var t = thread_create("worker");   // function name as a string literal
-    thread_join(t);
+    var t1 = thread_create(worker);        // identifier form, 0-arg worker
+    var r1 = thread_join(t1);              // returns worker return value (42)
+    var t2 = thread_create("worker_add", 5); // string-literal form with argument
+    var r2 = thread_join(t2);              // 12
+    var m = mutex_new();
+    var got = mutex_try_lock(m);           // 1 if acquired, 0 if busy
+    if got {
+        mutex_unlock(m);
+    }
+    mutex_destroy(m);
     return 0;
 }
 ```
-`thread_create` takes the **name of a top-level function as a string literal** and runs it on a new pthread with no arguments. Use `global var` + a mutex to communicate with the worker. See §20 of the Language Reference for the full concurrency model.
+`thread_create` accepts either a function identifier or string-literal function name. Worker functions can take 0 or 1 argument, and `thread_join` returns the worker's integer return value. `thread_detach` and `mutex_try_lock` are also available for production-style concurrency flows. See §20 of the Language Reference for the full concurrency model.
 
-Mutex primitives: `mutex_new()`, `mutex_lock(m)`, `mutex_unlock(m)`, `mutex_destroy(m)`.
+Mutex primitives: `mutex_new()`, `mutex_lock(m)`, `mutex_try_lock(m)`, `mutex_unlock(m)`, `mutex_destroy(m)`.
+
+Keyword sugar is also available:
+```omscript
+var m = mutex_new();
+lock m;
+var t = spawn worker_add(5);   // -> thread_create(worker_add, 5)
+var r = join t;                // -> thread_join(t)
+var b = trylock m;             // -> mutex_try_lock(m)
+if b { unlock m; }
+detach spawn worker();         // -> thread_detach(thread_create(worker))
+mutex_destroy(m);
+```
 
 ### Lambda Expressions
 ```omscript
@@ -592,12 +616,20 @@ var x = 10; /* inline */
 ### Threading
 | Function | Description |
 |----------|-------------|
-| `thread_create(fn)` | Spawn thread, returns handle |
-| `thread_join(t)` | Wait for thread to finish |
+| `thread_create(fn[, arg])` | Spawn thread (0-arg or 1-arg worker), returns handle |
+| `thread_join(t)` | Wait for thread to finish and return worker result |
+| `thread_detach(t)` | Detach thread handle (non-joinable) |
 | `mutex_new()` | Create mutex |
 | `mutex_lock(m)` | Acquire mutex |
+| `mutex_try_lock(m)` | Try acquire mutex (1=acquired, 0=busy) |
 | `mutex_unlock(m)` | Release mutex |
 | `mutex_destroy(m)` | Free mutex |
+| `spawn ...` | Keyword sugar for `thread_create(...)` |
+| `join x` | Keyword sugar for `thread_join(x)` |
+| `detach x` | Keyword sugar for `thread_detach(x)` |
+| `lock m` | Keyword sugar for `mutex_lock(m)` |
+| `unlock m` | Keyword sugar for `mutex_unlock(m)` |
+| `trylock m` | Keyword sugar for `mutex_try_lock(m)` |
 
 ### Type / System / Optimizer Hints
 | Function | Description |
