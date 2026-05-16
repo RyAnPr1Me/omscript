@@ -5175,6 +5175,33 @@ std::unique_ptr<Expression> Parser::parseCast() {
 }
 
 std::unique_ptr<Expression> Parser::parseUnary() {
+    auto makeThreadKeywordCall = [this](const std::string& callee, const Token& kw, std::vector<std::unique_ptr<Expression>> args)
+        -> std::unique_ptr<Expression> {
+        auto call = std::make_unique<CallExpr>(callee, std::move(args));
+        call->line = kw.line;
+        call->column = kw.column;
+        return call;
+    };
+
+    auto parseSpawnTargetCompact = [this]() -> std::unique_ptr<Expression> {
+        if (match(TokenType::IDENTIFIER)) {
+            const Token t = tokens[current - 1];
+            auto id = std::make_unique<IdentifierExpr>(t.lexeme);
+            id->line = t.line;
+            id->column = t.column;
+            return id;
+        }
+        if (match(TokenType::STRING)) {
+            const Token t = tokens[current - 1];
+            auto lit = std::make_unique<LiteralExpr>(t.lexeme);
+            lit->line = t.line;
+            lit->column = t.column;
+            return lit;
+        }
+        error("Expected function name after 'spawn' (identifier or string literal)");
+        return nullptr;
+    };
+
     // ── @range[lo, hi] expr ───────────────────────────────────────────────
     // Internal range-bound annotation.  Parses two integer literals (each
     // with an optional unary minus) and wraps the following unary
@@ -5213,6 +5240,78 @@ std::unique_ptr<Expression> Parser::parseUnary() {
         node->line = atTok.line;
         node->column = atTok.column;
         return node;
+    }
+
+    // Threading keyword sugar:
+    //   spawn f          => thread_create(f)
+    //   spawn f(x)       => thread_create(f, x)
+    //   join t           => thread_join(t)
+    //   detach t         => thread_detach(t)
+    //   lock m           => mutex_lock(m)
+    //   unlock m         => mutex_unlock(m)
+    //   trylock m        => mutex_try_lock(m)
+    if (match(TokenType::SPAWN)) {
+        const Token kw = tokens[current - 1];
+        std::vector<std::unique_ptr<Expression>> args;
+
+        if (match(TokenType::LPAREN)) {
+            args.push_back(parseExpression());
+            if (match(TokenType::COMMA)) {
+                args.push_back(parseExpression());
+            }
+            consume(TokenType::RPAREN, "Expected ')' after spawn(...)");
+        } else {
+            args.push_back(parseSpawnTargetCompact());
+            if (match(TokenType::LPAREN)) {
+                if (!check(TokenType::RPAREN)) {
+                    args.push_back(parseExpression());
+                    if (check(TokenType::COMMA)) {
+                        error("spawn target(arg) accepts at most one argument");
+                    }
+                }
+                consume(TokenType::RPAREN, "Expected ')' after spawn target argument");
+            }
+        }
+
+        if (args.empty() || args.size() > 2) {
+            error("spawn expects one target and optional one argument");
+        }
+        return makeThreadKeywordCall("thread_create", kw, std::move(args));
+    }
+
+    if (match(TokenType::JOIN)) {
+        const Token kw = tokens[current - 1];
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(parseUnary());
+        return makeThreadKeywordCall("thread_join", kw, std::move(args));
+    }
+
+    if (match(TokenType::DETACH)) {
+        const Token kw = tokens[current - 1];
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(parseUnary());
+        return makeThreadKeywordCall("thread_detach", kw, std::move(args));
+    }
+
+    if (match(TokenType::LOCK)) {
+        const Token kw = tokens[current - 1];
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(parseUnary());
+        return makeThreadKeywordCall("mutex_lock", kw, std::move(args));
+    }
+
+    if (match(TokenType::UNLOCK)) {
+        const Token kw = tokens[current - 1];
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(parseUnary());
+        return makeThreadKeywordCall("mutex_unlock", kw, std::move(args));
+    }
+
+    if (match(TokenType::TRYLOCK)) {
+        const Token kw = tokens[current - 1];
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(parseUnary());
+        return makeThreadKeywordCall("mutex_try_lock", kw, std::move(args));
     }
 
     if (match(TokenType::MINUS) || match(TokenType::NOT) || match(TokenType::TILDE)) {

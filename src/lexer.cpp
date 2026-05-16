@@ -88,6 +88,12 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"namespace", TokenType::NAMESPACE},  // user-defined namespace block
     {"jmp",       TokenType::JMP},        // unconditional label jump (deprecated)
     {"label",     TokenType::LABEL},      // named jump target declaration
+    {"spawn",     TokenType::SPAWN},      // thread_create sugar
+    {"join",      TokenType::JOIN},       // thread_join sugar
+    {"detach",    TokenType::DETACH},     // thread_detach sugar
+    {"lock",      TokenType::LOCK},       // mutex_lock sugar
+    {"unlock",    TokenType::UNLOCK},     // mutex_unlock sugar
+    {"trylock",   TokenType::TRYLOCK},    // mutex_try_lock sugar
 };
 
 /// Throw a DiagnosticError with the given message and source location.

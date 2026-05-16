@@ -1782,6 +1782,22 @@ const char* tokenTypeToString(omscript::TokenType type) {
         return "CONSTRUCT";
     case omscript::TokenType::NAMESPACE:
         return "NAMESPACE";
+    case omscript::TokenType::JMP:
+        return "JMP";
+    case omscript::TokenType::LABEL:
+        return "LABEL";
+    case omscript::TokenType::SPAWN:
+        return "SPAWN";
+    case omscript::TokenType::JOIN:
+        return "JOIN";
+    case omscript::TokenType::DETACH:
+        return "DETACH";
+    case omscript::TokenType::LOCK:
+        return "LOCK";
+    case omscript::TokenType::UNLOCK:
+        return "UNLOCK";
+    case omscript::TokenType::TRYLOCK:
+        return "TRYLOCK";
     }
     return "UNKNOWN";
 }

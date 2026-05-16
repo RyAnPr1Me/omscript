@@ -373,6 +373,18 @@ fn main() {
 
 Mutex primitives: `mutex_new()`, `mutex_lock(m)`, `mutex_try_lock(m)`, `mutex_unlock(m)`, `mutex_destroy(m)`.
 
+Keyword sugar is also available:
+```omscript
+var m = mutex_new();
+lock m;
+var t = spawn worker_add(5);   // -> thread_create(worker_add, 5)
+var r = join t;                // -> thread_join(t)
+var b = trylock m;             // -> mutex_try_lock(m)
+if b { unlock m; }
+detach spawn worker;           // -> thread_detach(thread_create(worker))
+mutex_destroy(m);
+```
+
 ### Lambda Expressions
 ```omscript
 var doubled = array_map([1, 2, 3], |x| x * 2);     // [2, 4, 6]
@@ -612,6 +624,12 @@ var x = 10; /* inline */
 | `mutex_try_lock(m)` | Try acquire mutex (1=acquired, 0=busy) |
 | `mutex_unlock(m)` | Release mutex |
 | `mutex_destroy(m)` | Free mutex |
+| `spawn ...` | Keyword sugar for `thread_create(...)` |
+| `join x` | Keyword sugar for `thread_join(x)` |
+| `detach x` | Keyword sugar for `thread_detach(x)` |
+| `lock m` | Keyword sugar for `mutex_lock(m)` |
+| `unlock m` | Keyword sugar for `mutex_unlock(m)` |
+| `trylock m` | Keyword sugar for `mutex_try_lock(m)` |
 
 ### Type / System / Optimizer Hints
 | Function | Description |

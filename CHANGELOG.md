@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-81: Threading keyword syntax sugar (`spawn`/`join`/`detach`/`lock`/`unlock`/`trylock`)** (`include/lexer.h`, `src/lexer.cpp`, `src/parser.cpp`, `src/main.cpp`, `README.md`, `LANGUAGE_REFERENCE.md`):
+  - Added new reserved keywords for concurrency ergonomics: `spawn`, `join`, `detach`, `lock`, `unlock`, and `trylock`.
+  - Parser now desugars keyword forms directly into existing builtins:
+    - `spawn target` → `thread_create(target)`
+    - `spawn target(arg)` / `spawn(target[, arg])` → `thread_create(target[, arg])`
+    - `join x` → `thread_join(x)`
+    - `detach x` → `thread_detach(x)`
+    - `lock m` / `unlock m` / `trylock m` → corresponding mutex builtins
+  - Added token pretty-printer support so `omsc lex` and `--dump-tokens` show the new token names.
+  - Added `examples/round81_thread_keywords_test.om` and wired it into `run_tests.sh`.
+
 - **Round-80: Production threading overhaul — arg-aware thread create, join return values, detach, and try-lock mutex** (`include/codegen.h`, `src/codegen.cpp`, `src/codegen_builtins.cpp`, `src/parser.cpp`, `src/opt_context.cpp`, `README.md`, `LANGUAGE_REFERENCE.md`):
   - **`thread_create(fn[, arg])` upgraded**: now accepts either a function identifier (`thread_create(worker)`) or a string literal (`thread_create("worker")`) and supports worker functions with **0 or 1 parameter**. For 1-arg workers, the call shape is `thread_create(fn, arg)`.
   - **Compile-time signature validation**: `thread_create` now rejects unknown targets, missing function-name expressions, and unsupported arity (>1), with explicit diagnostics for mismatch cases (e.g., argument provided for 0-arg worker, missing argument for 1-arg worker).

@@ -1,0 +1,49 @@
+import std;
+// round81_thread_keywords_test.om
+// Verifies threading keyword sugar:
+//   spawn / join / detach / lock / unlock / trylock
+// Expected exit code: 6
+
+fn worker_noarg() -> int {
+    return 7;
+}
+
+fn worker_add(v: int) -> int {
+    return v + 3;
+}
+
+fn main() {
+    var score = 0;
+    var m = mutex_new();
+
+    lock m;
+
+    var t0 = spawn worker_noarg;
+    var t1 = spawn worker_add(10);
+
+    var r0 = join t0;
+    var r1 = join t1;
+    score = score + (r0 == 7);
+    score = score + (r1 == 13);
+
+    // m is still held by this thread, so trylock should report busy.
+    var busy = trylock m;
+    score = score + (busy == 0);
+
+    unlock m;
+
+    var got = trylock m;
+    score = score + (got == 1);
+    unlock m;
+
+    var t2 = spawn(worker_add, 5);
+    var r2 = join t2;
+    score = score + (r2 == 8);
+
+    var t3 = spawn worker_noarg;
+    var d = detach t3;
+    score = score + (d == 0);
+
+    mutex_destroy(m);
+    return score;
+}

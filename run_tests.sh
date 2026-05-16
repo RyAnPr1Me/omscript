@@ -947,6 +947,7 @@ ptest_program "examples/round75_test.om" 0
 ptest_program "examples/round76_test.om" 23
 ptest_program "examples/round79_test.om" 28
 ptest_program "examples/round80_threading_test.om" 8
+ptest_program "examples/round81_thread_keywords_test.om" 6
 flush_ptests
 
 echo ""

@@ -165,6 +165,16 @@ The following identifiers are reserved as keywords. They are grouped by category
 | `break` | Exit loop |
 | `continue` | Skip to next iteration |
 
+**Threading:**
+| Keyword | Purpose |
+|---------|---------|
+| `spawn` | Sugar for `thread_create(...)` |
+| `join` | Sugar for `thread_join(...)` |
+| `detach` | Sugar for `thread_detach(...)` |
+| `lock` | Sugar for `mutex_lock(...)` |
+| `unlock` | Sugar for `mutex_unlock(...)` |
+| `trylock` | Sugar for `mutex_try_lock(...)` |
+
 **Declarations:**
 | Keyword | Purpose |
 |---------|---------|
@@ -7952,6 +7962,35 @@ Release a pointer previously returned by `malloc`. **Do not** call `free` on poi
 ## 20. Concurrency
 
 OmScript's concurrency model is a thin layer over the host's POSIX threading primitives (`pthread_*`). All thread and mutex handles are passed around as plain `i64` values that wrap the underlying `pthread_t` / `pthread_mutex_t*`. There is no managed thread pool, no async runtime, no green threads, and no garbage-collection-aware safe-point machinery — threads run to completion, and the user is responsible for joining them and freeing mutexes.
+
+### 20.0 Threading keyword sugar
+
+OmScript provides direct keyword sugar for common thread and mutex operations:
+
+| Keyword form | Desugars to |
+| --- | --- |
+| `spawn target` | `thread_create(target)` |
+| `spawn target(arg)` | `thread_create(target, arg)` |
+| `spawn(target[, arg])` | `thread_create(target[, arg])` |
+| `join x` | `thread_join(x)` |
+| `detach x` | `thread_detach(x)` |
+| `lock m` | `mutex_lock(m)` |
+| `unlock m` | `mutex_unlock(m)` |
+| `trylock m` | `mutex_try_lock(m)` |
+
+`target` follows the same validation rules as `thread_create`: identifier or string literal naming an existing top-level function with arity 0 or 1.
+
+**Example:**
+```omscript
+var m = mutex_new();
+lock m;
+var t = spawn worker_add(5);
+var r = join t;
+var busy = trylock m;
+unlock m;
+detach spawn worker;
+mutex_destroy(m);
+```
 
 **Model summary:**
 
