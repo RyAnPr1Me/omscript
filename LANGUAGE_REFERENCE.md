@@ -342,11 +342,25 @@ Type: `bool` (1-bit logical value, represented as `i1` in LLVM)
 
 #### 2.5.4 Character Literals
 
-OmScript **does not have a distinct character literal syntax** like `'c'`. Single characters are represented as:
-- Single-character strings: `"A"`
-- Integer character codes: `65` (ASCII 'A')
-- The `char_at` function extracts characters from strings
-- The `char_code` function converts characters to ASCII codes
+OmScript supports **character literals** using single quotes. The result type is `i32` (a Unicode code point).
+
+**Syntax:**
+```omscript
+var c: int = 'A';        // 65
+var nl: int = '\n';      // 10 (newline)
+var tab: int = '\t';     // 9
+var bs: int = '\\';      // 92 (backslash)
+var sq: int = '\'';      // 39 (single quote)
+var nul: int = '\0';     // 0 (null code point — valid in char literals only)
+var u: int = '\u0041';   // 65 (Unicode scalar: 'A')
+var U: int = '\U00000041'; // 65 (long Unicode scalar form)
+```
+
+**Rules:**
+- Exactly one character (or one escape sequence) between the single quotes
+- Supported escapes: `\n`, `\t`, `\r`, `\b`, `\f`, `\v`, `\\`, `\'`, `\0`, `\xHH` (two hex digits), `\uHHHH` (four hex digits), `\UHHHHHHHH` (eight hex digits)
+- Yields a compile-time integer constant of type `i32` (the Unicode code point)
+- Character literals may be compared with integers directly: `c == 65` or `c == 'A'`
 
 #### 2.5.5 String Literals
 
@@ -443,6 +457,14 @@ var s: string = $"x squared is {x * x}";            // "x squared is 25"
 var t: string = $"flag is {x > 3 ? "yes" : "no"}";  // "flag is yes"
 var arr: int[] = [1, 2, 3];
 var info: string = $"length is {len(arr)}";         // "length is 3"
+```
+
+**Alternative prefix `f"..."`**: The `f"..."` prefix is an alias for `$"..."` and provides the same interpolation semantics. Both forms are accepted by the lexer.
+
+```omscript
+var n: int = 42;
+var s1: string = $"value is {n}";   // $"..." form
+var s2: string = f"value is {n}";   // f"..." alias — identical result
 ```
 
 **Nested interpolations**: Not supported directly; use intermediate variables.
@@ -1243,7 +1265,7 @@ OmScript supports **limited type inference**:
 - Expression types: intermediate expression types are inferred (e.g., `var x: int = 1 + 2;` infers `1 + 2` as `int`)
 
 **Where inference is forbidden**:
-- Variable declarations: **explicit type annotation required** (user-written `var`/`const` statements)
+- Variable declarations without initializers: **explicit type annotation required** (a bare `var x;` with no type and no initializer is an error)
 - Function return types: **explicit annotation recommended** (omission may infer `void`)
 
 **Type propagation in multi-variable declarations**: In multi-variable declarations, the type annotation on the first variable propagates to subsequent variables without explicit annotation (see §5.3).
@@ -1560,7 +1582,7 @@ Placed at the top level of a source file (not inside a function), a `comptime {}
 |---|---|---|---|
 | `OS` | string | `"linux"` / `"windows"` / `"macos"` | `__OS__` |
 | `ARCH` | string | `"x86_64"` / `"aarch64"` / `"arm"` | `__ARCH__` |
-| `VERSION` | string | `"5.0.0"` | `__VERSION__` |
+| `VERSION` | string | `"4.9.0"` | `__VERSION__` |
 | `FILE` | string | `"src/main.om"` | `__FILE__` |
 
 > **Note:** Built-in string comptime constants (`OS`, `ARCH`, `VERSION`, `FILE`) are only available inside `comptime {}` condition expressions. They are not emitted as runtime string globals.
@@ -2916,18 +2938,32 @@ for (i: int in 0..5) {
 
 **Syntax**:
 - `for (var in start downto end) { body }` — Descending loop
-- **No explicit step syntax** in basic `for`; use `for` with custom increment in body
+- `for (var in start..end step N) { body }` — Ascending loop with explicit step
+- `for (var in start downto end step N) { body }` — Descending loop with explicit step
 
 **`downto` semantics**: Decrements iterator from `start` to `end` (inclusive).
 
-**Example**:
+**`step` keyword**: An optional `step N` suffix controls the iteration increment. `N` must be a positive integer expression. Negative counts and zero are runtime errors. For descending loops, the user supplies a positive step value and the compiler negates it automatically.
+
+**Example (descending)**:
 ```omscript
 for (i: int in 10 downto 0) {
     println(i);  // Prints: 10, 9, 8, ..., 1, 0
 }
 ```
 
-**Custom step**: Use `range_step` function (see §10):
+**Example (step)**:
+```omscript
+for i in 0..20 step 2 {
+    println(i);  // Prints: 0, 2, 4, ..., 18
+}
+
+for i in 10 downto 0 step 2 {
+    println(i);  // Prints: 10, 8, 6, 4, 2, 0
+}
+```
+
+**Alternative (`range_step`)**: The `range_step` built-in generates an array for use with `foreach` or `for … in`:
 ```omscript
 var steps: int[] = range_step(0, 10, 2);  // [0, 2, 4, 6, 8]
 for (x in steps) {
@@ -4616,18 +4652,17 @@ var s = array_reduce(a, add, 0);  // 10
 
 ---
 
-#### `array_find(array, fn) → i64`
+#### `array_find(array, value) → i64`
 
-**Signature:** `array_find(array, function) → i64`  
-**Semantics:** Return the first element where `fn(element)` is truthy, or `-1` if none.  
-**Time:** O(n * cost(fn)) (short-circuits on first match)
+**Signature:** `array_find(array, value) → i64`  
+**Semantics:** Return the **index** of the first element equal to `value`, or `-1` if no element matches. Comparison is integer equality on each element.  
+**Time:** O(n) (short-circuits on first match)
 
 **Example:**
 ```omscript
-fn gt_10(x) { return x > 10; }
-
 var a = [5, 15, 25];
-var x = array_find(a, gt_10);  // 15
+var idx = array_find(a, 15);  // 1  (element 15 is at index 1)
+var miss = array_find(a, 99); // -1 (not found)
 ```
 
 ---
@@ -4644,6 +4679,23 @@ fn is_neg(x) { return x < 0; }
 
 var a = [1, 2, -3];
 println(array_any(a, is_neg));  // 1
+```
+
+---
+
+#### `array_find_index(array, fn) → i64`
+
+**Signature:** `array_find_index(array, function) → i64`  
+**Semantics:** Return the **index** of the first element for which `fn(element)` is truthy, or `-1` if no element matches. Short-circuits on first match.  
+**Time:** O(n × cost(fn))
+
+**Example:**
+```omscript
+fn gt_10(x: int) -> int { return x > 10; }
+
+var a = [5, 15, 25];
+var idx = array_find_index(a, gt_10);  // 1  (index of first element where gt_10 is true)
+var miss = array_find_index([1, 2, 3], gt_10); // -1 (none pass)
 ```
 
 ---
@@ -5075,18 +5127,6 @@ println(s);  // "hello"
 **Example:**
 ```omscript
 println(str_upper("hello"));  // "HELLO"
-```
-
----
-
-#### `str_lower(string) → string`
-
-**Semantics:** Return a NEW string with all uppercase letters converted to lowercase.  
-**Time:** O(n)
-
-**Example:**
-```omscript
-println(str_lower("HELLO"));  // "hello"
 ```
 
 ---
@@ -6077,7 +6117,7 @@ OmScript's ownership system is designed as:
 
 ### 17.1 Ownership States
 
-Every variable is in one of six ownership states, tracked per-variable by the borrow checker:
+Every variable is in one of **seven** ownership states, tracked per-variable by the borrow checker:
 
 | State | Description | Read | Write | Move |
 |-------|-------------|------|-------|------|
@@ -6875,7 +6915,7 @@ println(line);
 
 ### 19.2 Math
 
-See section 11.6 from the research summary. Key functions:
+Core math built-ins. All functions operate on `i64` (integer) or `f64` (float) arguments unless noted; see §19.5.2 for type-conversion functions.
 
 #### `abs(numeric) → same`
 
@@ -7108,7 +7148,7 @@ Division with full IEEE 754 semantics.
 
 ### 19.4 Bit manipulation
 
-See section 11.6 from research summary. Key functions:
+Bit-manipulation built-ins for `i64` operands. All return `i64`.
 
 #### `popcount(i64) → i64`
 
@@ -7860,16 +7900,15 @@ Right shift (divide by 2^n, floor).
 
 ### 19.13 The `std::` namespace
 
-**Built-in namespace:** Every standard library function is accessible as `std::name`. To call functions by bare name (without the `std::` prefix), add `import std;` at the top of the file.
+**Built-in namespace:** Every standard library function is accessible as `std::name`. Standard library functions are also accessible by their **bare names without any import statement** — `import std;` is optional and stylistic.
 
 **Dispatch rules:**
-- `std::abs(x)` resolves to the same function as `abs(x)` (when `import std;` is present).
-- Bare calls without `import std;` are a compile error.
-- No difference in semantics between `std::name` and bare `name`; purely a namespace prefix.
+- `std::abs(x)` resolves to the same function as `abs(x)`.
+- Bare names always work without `import std;` because builtins are registered globally.
+- `import std;` is a no-op for the standard library — it is provided only as a readable marker of intent in files that exclusively use stdlib.
 
 **List of std:: symbols:**
 
-See parser registration in `parser.cpp` lines 52-100. Key entries:
 - Math: `std::abs`, `std::min`, `std::max`, `std::pow`, `std::sqrt`, etc.
 - Trig: `std::sin`, `std::cos`, `std::tan`, `std::asin`, etc.
 - Bit ops: `std::popcount`, `std::clz`, `std::ctz`, `std::bitreverse`, etc.
@@ -8373,7 +8412,7 @@ if (file_exists("config.txt")) {
 
 ## 22. Lambda Expressions
 
-OmScript lambdas are anonymous functions with a lightweight `|params| body` or `(params) => body` syntax, designed primarily for use with the higher-order array built-ins (`array_map`, `array_filter`, `array_reduce`, `array_any`, `array_every`, `array_count`, `array_find`, `array_min_by`, `array_max_by`).
+OmScript lambdas are anonymous functions with a lightweight `|params| body` or `(params) => body` syntax, designed primarily for use with the higher-order array built-ins (`array_map`, `array_filter`, `array_reduce`, `array_any`, `array_every`, `array_count`, `array_find_index`, `array_min_by`, `array_max_by`).
 
 **Implementation model — important:** Lambdas are *not* runtime closures. The parser desugars every lambda into a top-level named function (`__lambda_N`) and replaces the lambda expression with an identifier referring to that function. The higher-order built-ins receive that function reference at code-gen time. The consequences are:
 
@@ -8507,7 +8546,8 @@ The following built-ins accept a lambda or a named function reference. See §11.
 | `array_any(arr, fn)` | `|x| → bool` |
 | `array_every(arr, fn)` | `|x| → bool` |
 | `array_count(arr, fn)` | `|x| → bool` |
-| `array_find(arr, fn)` | `|x| → bool`, returns first matching index or `-1` |
+| `array_find(arr, value)` | plain value (not a function) — returns index of first equal element, or `-1` |
+| `array_find_index(arr, fn)` | `|x| → bool`, returns index of first matching element, or `-1` |
 | `array_min_by(arr, fn)` | `|x| → key`, returns element with minimum key |
 | `array_max_by(arr, fn)` | `|x| → key`, returns element with maximum key |
 
@@ -8649,22 +8689,21 @@ std::array_map(a, f);
 
 **Alias-free:** `std::name` always resolves to the same function as `name` (no aliasing or shadowing).
 
-**`import std;` — mandatory namespace import:**
+**`import std;` — optional namespace import:**
 
-Use `import std;` (identifier form, no quotes) at the top of any file that calls standard library functions by their bare names (without `std::`).  
-**Without `import std;`, bare stdlib calls are a compile error.**
+Standard library functions are **always accessible by their bare names** without any import. `import std;` is provided as a convention for files that want to signal explicit stdlib use, but it is a no-op for the standard library.
 
 ```omscript
-import std;           // required to call stdlib functions without std::
+// import std;  ← optional, not required
 
 fn main() {
-    println("hello"); // ok — import std; is present
-    var x = abs(-5);  // ok — import std; is present
+    println("hello"); // works without import std;
+    var x = abs(-5);  // works without import std;
     return 0;
 }
 ```
 
-Alternatively, fully qualify every call with `std::` (no import required):
+Alternatively, fully qualify every call with `std::` (always works, no import required):
 
 ```omscript
 // No import std; needed when using std:: prefix
@@ -8749,7 +8788,7 @@ The OmScript compiler (`omsc`) supports three primary invocation patterns:
 | Subcommand           | Aliases                     | Description                                             |
 |----------------------|-----------------------------|---------------------------------------------------------|
 | `help`               | `-h`, `--help`              | Display usage information                               |
-| `version`            | `-v`, `--version`           | Print compiler version (`4.4.0`)                        |
+| `version`            | `-v`, `--version`           | Print compiler version                                  |
 | `build`, `compile`   | `--build`, `--compile`      | Compile source to executable (default subcommand)       |
 | `run`                | `-r`, `--run`               | Compile and execute, passing args after `--`            |
 | `check`              | `--check`                   | Validate syntax and types without code generation       |
@@ -8835,6 +8874,17 @@ Flags are organized by category. Most boolean flags support negation via `-fno-<
 #### Diagnostics
 
 The compiler emits structured diagnostics to stderr. Errors use exit code 1; warnings do not halt compilation.
+
+| Flag                       | Short | Default    | Description                                                        |
+|----------------------------|-------|------------|--------------------------------------------------------------------|
+| `--color`                  | —     | auto-detect | Force ANSI colors in diagnostics (`--color=always`)               |
+| `--no-color`               | —     | —          | Disable ANSI colors in diagnostics (`--color=never`)               |
+| `--color=auto`             | —     | —          | Auto-detect TTY and enable colors if running in a terminal         |
+| `--error-format=human`     | —     | (default)  | Rich diagnostic output with source snippet and caret (`^`)         |
+| `--error-format=plain`     | —     | —          | Plain single-line diagnostics without ANSI or source context        |
+| `--error-format=json`      | —     | —          | One JSON object per diagnostic for tooling integration              |
+| `-Werror` / `--Werror`     | —     | `false`    | Promote all warnings to errors (non-zero exit if any warning emitted) |
+| `--max-errors=N`           | —     | `0`        | Stop after `N` errors (`0` = unlimited)                            |
 
 #### Memory Safety and Ownership
 
@@ -9286,7 +9336,7 @@ Every user-defined function receives the following attributes regardless of opti
 | `nounwind` | OmScript uses a flag-based error model, never C++ exceptions |
 | `mustprogress` | Every loop in OmScript is finite (no `while(true)` without `break` or `return`); enables LICM and loop transforms |
 | `prefer-vector-width=N` | Set to the target's preferred SIMD width for autovectorization hints |
-| `nosync` | OmScript is single-threaded; no concurrent memory access |
+| `nosync` | Applied to functions that do not use concurrency primitives; suppressed for functions that use thread_create, mutexes, or atomics |
 | `nofree` | User functions never call `free()` directly |
 | `willreturn` | Asserts finite termination; enables DSE and load-forwarding across the call |
 | `noundef` (params + return) | OmScript always initializes variables before use |
@@ -11111,9 +11161,9 @@ omsc pkg list            # shows installed packages
 
 ### Variables
 ```omscript
-var x: int = 42;          // mutable, type annotation required
-const y: int = 100;       // immutable
-var z: int = 0;           // explicit type annotation
+var x: int = 42;          // mutable, explicit type annotation
+const y: int = 100;       // immutable, explicit type annotation
+var z = 0;                // mutable, type inferred from initializer (i64)
 ```
 
 ### Functions
