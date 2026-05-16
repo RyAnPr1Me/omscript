@@ -5243,7 +5243,7 @@ std::unique_ptr<Expression> Parser::parseUnary() {
     }
 
     // Threading keyword sugar:
-    //   spawn f          => thread_create(f)
+    //   spawn f()        => thread_create(f)
     //   spawn f(x)       => thread_create(f, x)
     //   join t           => thread_join(t)
     //   detach t         => thread_detach(t)
@@ -5262,15 +5262,16 @@ std::unique_ptr<Expression> Parser::parseUnary() {
             consume(TokenType::RPAREN, "Expected ')' after spawn(...)");
         } else {
             args.push_back(parseSpawnTargetCompact());
-            if (match(TokenType::LPAREN)) {
-                if (!check(TokenType::RPAREN)) {
-                    args.push_back(parseExpression());
-                    if (check(TokenType::COMMA)) {
-                        error("spawn target(arg) accepts at most one argument");
-                    }
-                }
-                consume(TokenType::RPAREN, "Expected ')' after spawn target argument");
+            if (!match(TokenType::LPAREN)) {
+                error("Expected '(' after spawn target; use spawn worker() or spawn worker(arg)");
             }
+            if (!check(TokenType::RPAREN)) {
+                args.push_back(parseExpression());
+                if (check(TokenType::COMMA)) {
+                    error("spawn target(arg) accepts at most one argument");
+                }
+            }
+            consume(TokenType::RPAREN, "Expected ')' after spawn target argument");
         }
 
         if (args.empty() || args.size() > 2) {

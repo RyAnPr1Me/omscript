@@ -381,7 +381,7 @@ var t = spawn worker_add(5);   // -> thread_create(worker_add, 5)
 var r = join t;                // -> thread_join(t)
 var b = trylock m;             // -> mutex_try_lock(m)
 if b { unlock m; }
-detach spawn worker;           // -> thread_detach(thread_create(worker))
+detach spawn worker();         // -> thread_detach(thread_create(worker))
 mutex_destroy(m);
 ```
 

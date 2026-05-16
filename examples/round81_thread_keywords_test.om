@@ -18,7 +18,7 @@ fn main() {
 
     lock m;
 
-    var t0 = spawn worker_noarg;
+    var t0 = spawn worker_noarg();
     var t1 = spawn worker_add(10);
 
     var r0 = join t0;
@@ -40,7 +40,7 @@ fn main() {
     var r2 = join t2;
     score = score + (r2 == 8);
 
-    var t3 = spawn worker_noarg;
+    var t3 = spawn worker_noarg();
     var d = detach t3;
     score = score + (d == 0);
 

@@ -7969,7 +7969,7 @@ OmScript provides direct keyword sugar for common thread and mutex operations:
 
 | Keyword form | Desugars to |
 | --- | --- |
-| `spawn target` | `thread_create(target)` |
+| `spawn target()` | `thread_create(target)` |
 | `spawn target(arg)` | `thread_create(target, arg)` |
 | `spawn(target[, arg])` | `thread_create(target[, arg])` |
 | `join x` | `thread_join(x)` |
@@ -7988,7 +7988,7 @@ var t = spawn worker_add(5);
 var r = join t;
 var busy = trylock m;
 unlock m;
-detach spawn worker;
+detach spawn worker();
 mutex_destroy(m);
 ```
 

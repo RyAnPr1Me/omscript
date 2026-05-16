@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Round-81: Threading keyword syntax sugar (`spawn`/`join`/`detach`/`lock`/`unlock`/`trylock`)** (`include/lexer.h`, `src/lexer.cpp`, `src/parser.cpp`, `src/main.cpp`, `README.md`, `LANGUAGE_REFERENCE.md`):
   - Added new reserved keywords for concurrency ergonomics: `spawn`, `join`, `detach`, `lock`, `unlock`, and `trylock`.
   - Parser now desugars keyword forms directly into existing builtins:
-    - `spawn target` → `thread_create(target)`
+    - `spawn target()` → `thread_create(target)` (bare `spawn target` is rejected)
     - `spawn target(arg)` / `spawn(target[, arg])` → `thread_create(target[, arg])`
     - `join x` → `thread_join(x)`
     - `detach x` → `thread_detach(x)`
