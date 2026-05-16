@@ -123,9 +123,13 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     } catch (const std::exception& e) {
         throw FileError(sourceFile + ": " + e.what());
     }
-    // Emit parser warnings to stderr so they are visible to the user at compile time.
+    // Emit parser warnings — via callback if set, else raw stderr.
     for (const auto& w : parser.warnings()) {
-        std::cerr << w << "\n";
+        if (warnCallback_) {
+            warnCallback_(Diagnostic{DiagnosticSeverity::Warning, SourceLocation{}, w});
+        } else {
+            std::cerr << w << "\n";
+        }
     }
     if (verbose_) {
         std::cout << "  Parse done [+" << elapsedMs(compileStart) << "ms, " << elapsedMs(parseStart)
@@ -171,6 +175,15 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
         throw;
     } catch (const std::exception& e) {
         throw FileError(sourceFile + ": " + e.what());
+    }
+
+    // Emit codegen warnings via callback (or raw stderr).
+    for (const auto& diag : codegen.getWarnings()) {
+        if (warnCallback_) {
+            warnCallback_(diag);
+        } else {
+            std::cerr << "warning: " << diag.message << "\n";
+        }
     }
 
     if (verbose_) {

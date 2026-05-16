@@ -1137,7 +1137,8 @@ std::unique_ptr<Program> Parser::parse() {
             }
             // Parse optional function annotations: @inline, @noinline, @cold,
             // @hot, @pure, @noreturn, @static, @flatten, @unroll, @nounroll,
-            // @restrict, @vectorize, @novectorize, @minsize, @optnone, @nounwind
+            // @restrict, @vectorize, @novectorize, @minsize, @optnone, @nounwind,
+            // @deprecated, @deprecated("msg")
             bool hintInline = false, hintNoInline = false, hintCold = false;
             bool hintHot = false, hintPure = false, hintNoReturn = false;
             bool hintStatic = false, hintFlatten = false;
@@ -1158,6 +1159,8 @@ std::unique_ptr<Program> Parser::parse() {
             int allocatorCountParam = -1;
             FunctionDecl::MemoryEffect hintMemoryEffect = FunctionDecl::MemoryEffect::Default;
             bool hintNoAliasReturn = false;
+            bool hintDeprecated = false;
+            std::string deprecatedMsg;
             while (check(TokenType::AT)) {
                 advance(); // consume '@'
                 const Token ann = consume(TokenType::IDENTIFIER, "Expected annotation name after '@'");
@@ -1325,6 +1328,16 @@ std::unique_ptr<Program> Parser::parse() {
                     // ── Non-compound annotations kept as-is ──────────────────────
                 } else if (ann.lexeme == "static") {
                     hintStatic = true;
+                } else if (ann.lexeme == "deprecated") {
+                    hintDeprecated = true;
+                    // Accept optional string message: @deprecated("msg")
+                    if (check(TokenType::LPAREN)) {
+                        advance(); // consume '('
+                        if (check(TokenType::STRING)) {
+                            deprecatedMsg = advance().lexeme;
+                        }
+                        consume(TokenType::RPAREN, "Expected ')' after @deprecated message");
+                    }
                 } else if (ann.lexeme == "optmax") {
                     isOptMaxFromAnnotation = true;
                     if (check(TokenType::LPAREN)) {
@@ -1458,7 +1471,7 @@ std::unique_ptr<Program> Parser::parse() {
                           "            inaccessiblemem, inaccessiblemem_or_argmem,\n"
                           "            noalias_ret,\n"
                           "            allocator, size=N, count=M\n"
-                          "  Other   : @static, @optmax, @optmax(...)");
+                          "  Other   : @static, @optmax, @optmax(...), @deprecated, @deprecated(\"msg\")");
                 }
             }
             auto func = parseFunction(optMaxTagActive || isOptMaxFromAnnotation);
@@ -1490,6 +1503,8 @@ std::unique_ptr<Program> Parser::parse() {
             func->allocatorCountParam = allocatorCountParam;
             func->hintMemoryEffect = hintMemoryEffect;
             func->hintNoAliasReturn = hintNoAliasReturn;
+            func->hintDeprecated = hintDeprecated;
+            func->deprecatedMsg = std::move(deprecatedMsg);
             if (isOptMaxFromAnnotation) {
                 func->isOptMax = true;
                 func->optMaxConfig = optMaxCfgFromAnnotation;

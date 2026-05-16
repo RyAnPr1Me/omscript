@@ -945,6 +945,7 @@ ptest_program "examples/round73_test.om" 38
 ptest_program "examples/round74_test.om" 0
 ptest_program "examples/round75_test.om" 0
 ptest_program "examples/round76_test.om" 23
+ptest_program "examples/round79_test.om" 28
 flush_ptests
 
 echo ""

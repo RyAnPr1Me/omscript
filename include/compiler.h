@@ -4,6 +4,8 @@
 #define COMPILER_H
 
 #include "codegen.h"
+#include "diagnostic.h"
+#include <functional>
 #include <string>
 #include <unordered_map>
 
@@ -179,6 +181,14 @@ class Compiler {
         return stringDefines_;
     }
 
+    /// Register a callback invoked once for each codegen or parser warning produced
+    /// during compile().  The callback receives the full Diagnostic object so that
+    /// the caller can apply its own formatting, --Werror promotion, etc.
+    using WarnCallback = std::function<void(const omscript::Diagnostic&)>;
+    void setWarningCallback(WarnCallback cb) {
+        warnCallback_ = std::move(cb);
+    }
+
   private:
     std::string readFile(const std::string& filename);
     bool verbose_ = false;
@@ -210,6 +220,7 @@ class Compiler {
     std::string pgoUsePath_;
     std::unordered_map<std::string, long long> defines_;      ///< -D NAME[=int] comptime flags
     std::unordered_map<std::string, std::string> stringDefines_; ///< -D NAME=str comptime flags
+    WarnCallback warnCallback_;                                ///< optional per-warning callback
 };
 
 } // namespace omscript

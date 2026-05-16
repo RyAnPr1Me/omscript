@@ -3313,6 +3313,14 @@ int main(int argc, char* argv[]) {
             compiler.setVerbose(false);
             compiler.setQuiet(true);
         }
+        // Wire up the warning callback so that codegen/parser warnings from
+        // compiler.compile() go through the same emitDiagnostics path as all
+        // other warnings (respects --Werror, --error-format, --color, etc.).
+        bool compilerWarnErr = false;
+        compiler.setWarningCallback([&](const omscript::Diagnostic& diag) {
+            if (emitDiagnostics(std::vector<omscript::Diagnostic>{diag}))
+                compilerWarnErr = true;
+        });
         // Pre-read source for rich diagnostic display.
         {
             std::ifstream f(sourceFile);
@@ -3322,6 +3330,8 @@ int main(int argc, char* argv[]) {
             }
         }
         compiler.compile(sourceFile, outputFile);
+        if (compilerWarnErr)
+            return 1;
 
         if (showTiming) {
             auto totalMs =

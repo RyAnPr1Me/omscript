@@ -319,6 +319,13 @@ enum class BuiltinId : uint8_t {
     ARRAY_SCAN,        ///< array_scan(arr, init, fn)   → prefix scan: result[i] = fn(result[i-1], arr[i])
     STR_REMOVE_PREFIX, ///< str_remove_prefix(s, prefix)→ s without leading prefix (if present)
     STR_REMOVE_SUFFIX, ///< str_remove_suffix(s, suffix)→ s without trailing suffix (if present)
+    // ── Round-79 additions ───────────────────────────────────────────────────
+    STR_HEX,           ///< str_hex(n)               → integer formatted as lowercase hex string
+    STR_BIN,           ///< str_bin(n)               → integer formatted as binary string
+    STR_OCT,           ///< str_oct(n)               → integer formatted as octal string
+    ARRAY_ZIP_WITH,    ///< array_zip_with(a, b, fn) → result[i] = fn(a[i], b[i])
+    ARRAY_CHUNK,       ///< array_chunk(arr, n)      → split into sub-arrays of size n
+    ARRAY_FIND_INDEX,  ///< array_find_index(arr, fn)→ index of first matching element (or -1)
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -587,6 +594,13 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"array_scan",       BuiltinId::ARRAY_SCAN},
     {"str_remove_prefix",BuiltinId::STR_REMOVE_PREFIX},
     {"str_remove_suffix",BuiltinId::STR_REMOVE_SUFFIX},
+    // ── Round-79 ─────────────────────────────────────────────────────────────
+    {"str_hex",          BuiltinId::STR_HEX},
+    {"str_bin",          BuiltinId::STR_BIN},
+    {"str_oct",          BuiltinId::STR_OCT},
+    {"array_zip_with",   BuiltinId::ARRAY_ZIP_WITH},
+    {"array_chunk",      BuiltinId::ARRAY_CHUNK},
+    {"array_find_index", BuiltinId::ARRAY_FIND_INDEX},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -4066,7 +4080,385 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return hdr;
     }
 
-    // ── End Round-76 builtins ────────────────────────────────────────────────
+    // ── Round-79 builtins ────────────────────────────────────────────────────
+
+    // str_hex(n) → lowercase hex string, e.g. str_hex(255) == "ff"
+    if (bid == BuiltinId::STR_HEX) {
+        validateArgCount(expr, "str_hex", 1);
+        // Compile-time fold
+        if (auto iv = tryFoldInt(expr->arguments[0].get())) {
+            char buf[20];
+            int written = std::snprintf(buf, sizeof(buf), "%llx", (unsigned long long)(uint64_t)*iv);
+            if (written > 0) {
+                llvm::GlobalVariable* gv = internString(buf);
+                stringReturningFunctions_.insert("str_hex");
+                return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                    gv->getValueType(), gv,
+                    llvm::ArrayRef<llvm::Constant*>{llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+            }
+        }
+        llvm::Value* nArg = generateExpression(expr->arguments[0].get());
+        nArg = toDefaultType(nArg);
+        llvm::Value* maxLen = llvm::ConstantInt::get(getDefaultType(), 16);
+        llvm::Value* hdr = emitAllocString(maxLen, maxLen, "strhex");
+        llvm::Value* bufData = emitStringData(hdr, "strhex.data");
+        llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 17);
+        llvm::GlobalVariable* fmtStr = module->getGlobalVariable("strhex_fmt", true);
+        if (!fmtStr)
+            fmtStr = builder->CreateGlobalString("%llx", "strhex_fmt");
+        llvm::Value* written =
+            builder->CreateCall(getOrDeclareSnprintf(), {bufData, bufSize, fmtStr, nArg}, "strhex.written");
+        llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "strhex.len", /*IsNonNeg=*/false);
+        nonNegValues_.insert(actualLen);
+        emitStoreStringLen(actualLen, hdr);
+        stringReturningFunctions_.insert("str_hex");
+        return hdr;
+    }
+
+    // str_bin(n) → binary string, e.g. str_bin(10) == "1010"
+    if (bid == BuiltinId::STR_BIN) {
+        validateArgCount(expr, "str_bin", 1);
+        // Compile-time fold
+        if (auto iv = tryFoldInt(expr->arguments[0].get())) {
+            uint64_t v = (uint64_t)*iv;
+            if (v == 0) {
+                llvm::GlobalVariable* gv = internString("0");
+                stringReturningFunctions_.insert("str_bin");
+                return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                    gv->getValueType(), gv,
+                    llvm::ArrayRef<llvm::Constant*>{llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+            }
+            char buf[65];
+            int pos = 64;
+            buf[pos] = '\0';
+            while (v && pos > 0) {
+                buf[--pos] = (char)('0' + (v & 1));
+                v >>= 1;
+            }
+            llvm::GlobalVariable* gv = internString(buf + pos);
+            stringReturningFunctions_.insert("str_bin");
+            return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                gv->getValueType(), gv,
+                llvm::ArrayRef<llvm::Constant*>{llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+        }
+        // Runtime: 64 bits max
+        llvm::Value* nArg = generateExpression(expr->arguments[0].get());
+        nArg = toDefaultType(nArg);
+        llvm::Value* maxBits = llvm::ConstantInt::get(getDefaultType(), 64);
+        llvm::Value* hdr = emitAllocString(maxBits, maxBits, "strbin");
+        llvm::Value* bufData = emitStringData(hdr, "strbin.data");
+        // Build binary digits: find highest set bit, then write down
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        // Special case: n == 0 → "0"
+        llvm::BasicBlock* zeroBB  = llvm::BasicBlock::Create(*context, "strbin.zero", parentFn);
+        llvm::BasicBlock* bitsBB  = llvm::BasicBlock::Create(*context, "strbin.bits", parentFn);
+        llvm::BasicBlock* loopBB  = llvm::BasicBlock::Create(*context, "strbin.loop", parentFn);
+        llvm::BasicBlock* bodyBB  = llvm::BasicBlock::Create(*context, "strbin.body", parentFn);
+        llvm::BasicBlock* doneBB  = llvm::BasicBlock::Create(*context, "strbin.done", parentFn);
+        llvm::Value* zero64 = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one64  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* isZero = builder->CreateICmpEQ(nArg, zero64, "strbin.iszero");
+        builder->CreateCondBr(isZero, zeroBB, bitsBB);
+
+        // zero path: store "0\0"
+        builder->SetInsertPoint(zeroBB);
+        auto* i8Ty = llvm::Type::getInt8Ty(*context);
+        auto* i32Ty = llvm::Type::getInt32Ty(*context);
+        auto* ch0 = llvm::ConstantInt::get(i8Ty, '0');
+        auto* chNull = llvm::ConstantInt::get(i8Ty, 0);
+        builder->CreateStore(ch0, builder->CreateInBoundsGEP(i8Ty, bufData, zero64, "strbin.z0"));
+        builder->CreateStore(chNull, builder->CreateInBoundsGEP(i8Ty, bufData, one64, "strbin.znul"));
+        emitStoreStringLen(one64, hdr);
+        builder->CreateBr(doneBB);
+
+        // find highest bit: clz, then bit = 63 - clz
+        builder->SetInsertPoint(bitsBB);
+        llvm::Function* clzFn = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::ctlz,
+                                                                 {getDefaultType()});
+        llvm::Value* clzVal = builder->CreateCall(clzFn, {nArg, llvm::ConstantInt::getFalse(*context)}, "strbin.clz");
+        llvm::Value* c63 = llvm::ConstantInt::get(getDefaultType(), 63);
+        llvm::Value* highBit = builder->CreateSub(c63, clzVal, "strbin.hb");
+        llvm::Value* totalLen = builder->CreateAdd(highBit, one64, "strbin.tlen", true, true);
+        // Store actual length
+        emitStoreStringLen(totalLen, hdr);
+        builder->CreateBr(loopBB);
+
+        // loop: for i = 0; i < totalLen; i++ { buf[i] = '0' + ((n >> (highBit - i)) & 1) }
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* bitI = builder->CreatePHI(getDefaultType(), 2, "strbin.i");
+        bitI->addIncoming(zero64, bitsBB);
+        builder->CreateCondBr(builder->CreateICmpSLT(bitI, totalLen, "strbin.cond"), bodyBB, doneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* shift = builder->CreateSub(highBit, bitI, "strbin.shift");
+        llvm::Value* shifted = builder->CreateLShr(nArg, shift, "strbin.shifted");
+        llvm::Value* bit = builder->CreateAnd(shifted, one64, "strbin.bit");
+        llvm::Value* digit8 = builder->CreateTrunc(
+            builder->CreateAdd(bit, llvm::ConstantInt::get(getDefaultType(), '0'), "strbin.dig64"),
+            i8Ty, "strbin.dig8");
+        builder->CreateStore(digit8, builder->CreateInBoundsGEP(i8Ty, bufData, bitI, "strbin.dp"));
+        llvm::Value* nextI = builder->CreateAdd(bitI, one64, "strbin.ni", true, true);
+        bitI->addIncoming(nextI, bodyBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+        builder->SetInsertPoint(doneBB);
+        // Null-terminate
+        llvm::PHINode* finalLen = builder->CreatePHI(getDefaultType(), 2, "strbin.fl");
+        finalLen->addIncoming(one64, zeroBB);
+        finalLen->addIncoming(totalLen, loopBB);
+        builder->CreateStore(chNull, builder->CreateInBoundsGEP(i8Ty, bufData, finalLen, "strbin.nul"));
+        (void)i32Ty; // suppress unused warning
+        stringReturningFunctions_.insert("str_bin");
+        return hdr;
+    }
+
+    // str_oct(n) → octal string, e.g. str_oct(8) == "10"
+    if (bid == BuiltinId::STR_OCT) {
+        validateArgCount(expr, "str_oct", 1);
+        // Compile-time fold
+        if (auto iv = tryFoldInt(expr->arguments[0].get())) {
+            char buf[24];
+            int written = std::snprintf(buf, sizeof(buf), "%llo", (unsigned long long)(uint64_t)*iv);
+            if (written > 0) {
+                llvm::GlobalVariable* gv = internString(buf);
+                stringReturningFunctions_.insert("str_oct");
+                return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                    gv->getValueType(), gv,
+                    llvm::ArrayRef<llvm::Constant*>{llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+            }
+        }
+        llvm::Value* nArg = generateExpression(expr->arguments[0].get());
+        nArg = toDefaultType(nArg);
+        llvm::Value* maxLen = llvm::ConstantInt::get(getDefaultType(), 22);
+        llvm::Value* hdr = emitAllocString(maxLen, maxLen, "stroct");
+        llvm::Value* bufData = emitStringData(hdr, "stroct.data");
+        llvm::Value* bufSize = llvm::ConstantInt::get(getDefaultType(), 23);
+        llvm::GlobalVariable* fmtStr = module->getGlobalVariable("stroct_fmt", true);
+        if (!fmtStr)
+            fmtStr = builder->CreateGlobalString("%llo", "stroct_fmt");
+        llvm::Value* written =
+            builder->CreateCall(getOrDeclareSnprintf(), {bufData, bufSize, fmtStr, nArg}, "stroct.written");
+        llvm::Value* actualLen = builder->CreateZExt(written, getDefaultType(), "stroct.len", /*IsNonNeg=*/false);
+        nonNegValues_.insert(actualLen);
+        emitStoreStringLen(actualLen, hdr);
+        stringReturningFunctions_.insert("str_oct");
+        return hdr;
+    }
+
+    // array_zip_with(a, b, fn) → result[i] = fn(a[i], b[i]), len = min(len(a), len(b))
+    if (bid == BuiltinId::ARRAY_ZIP_WITH) {
+        validateArgCount(expr, "array_zip_with", 3);
+        std::string fnName = extractFnName(expr->arguments[2].get());
+        if (fnName.empty())
+            codegenError("array_zip_with: third argument must be a function name or lambda", expr);
+
+        llvm::Value* aRaw = generateExpression(expr->arguments[0].get());
+        llvm::Value* bRaw = generateExpression(expr->arguments[1].get());
+        llvm::Value* aPtr = emitToArrayPtr(aRaw, "azw.aptr");
+        llvm::Value* bPtr = emitToArrayPtr(bRaw, "azw.bptr");
+
+        llvm::Value* aLen = emitLoadArrayLen(aPtr, "azw.alen");
+        llvm::Value* bLen = emitLoadArrayLen(bPtr, "azw.blen");
+        llvm::Value* aLtB = builder->CreateICmpSLT(aLen, bLen, "azw.altb");
+        llvm::Value* m    = builder->CreateSelect(aLtB, aLen, bLen, "azw.m");
+        nonNegValues_.insert(m);
+
+        llvm::Value* one   = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* slots = builder->CreateAdd(m, one, "azw.slots", true, true);
+        llvm::Value* bytes = builder->CreateMul(slots, eight, "azw.bytes", true, true);
+        llvm::Value* buf   = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "azw.buf");
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
+        emitStoreArrayLen(m, buf);
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "azw.loop", parentFn);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "azw.body", parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "azw.done", parentFn);
+
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        builder->CreateCondBr(builder->CreateICmpSGT(m, zero, "azw.mgt0"), loopBB, doneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "azw.i");
+        idx->addIncoming(zero, preBB);
+        builder->CreateCondBr(builder->CreateICmpSLT(idx, m, "azw.cond"), bodyBB, doneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* srcIdx = builder->CreateAdd(idx, one, "azw.srcidx", true, true);
+        llvm::Value* aEP    = builder->CreateInBoundsGEP(getDefaultType(), aPtr, srcIdx, "azw.aep");
+        llvm::Value* bEP    = builder->CreateInBoundsGEP(getDefaultType(), bPtr, srcIdx, "azw.bep");
+        llvm::Value* aElem  = emitLoadArrayElem(aEP, "azw.aelem");
+        llvm::Value* bElem  = emitLoadArrayElem(bEP, "azw.belem");
+
+        // Call fn(aElem, bElem)
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second)
+            codegenError("array_zip_with: unknown function '" + fnName + "'", expr);
+        llvm::Function* callee = calleeIt->second;
+        auto* res = builder->CreateCall(callee, {aElem, bElem}, "azw.res");
+
+        llvm::Value* dstIdx = builder->CreateAdd(idx, one, "azw.dstidx", true, true);
+        llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstIdx, "azw.dp");
+        emitStoreArrayElem(res, dstPtr);
+
+        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "azw.ni", true, true);
+        idx->addIncoming(nextIdx, bodyBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+        builder->SetInsertPoint(doneBB);
+        arrayReturningFunctions_.insert("array_zip_with");
+        return buf;
+    }
+
+    // array_chunk(arr, n) → int[] of sub-array pointers; last chunk may be shorter
+    if (bid == BuiltinId::ARRAY_CHUNK) {
+        validateArgCount(expr, "array_chunk", 2);
+
+        llvm::Value* arrRaw = generateExpression(expr->arguments[0].get());
+        llvm::Value* nRaw   = generateExpression(expr->arguments[1].get());
+        llvm::Value* arrPtr = emitToArrayPtr(arrRaw, "ach.arrptr");
+        llvm::Value* nVal   = toDefaultType(nRaw);
+
+        llvm::Value* arrLen = emitLoadArrayLen(arrPtr, "ach.alen");
+        llvm::Value* one    = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight  = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* zero   = llvm::ConstantInt::get(getDefaultType(), 0);
+
+        // Guard: n must be >= 1 to avoid division by zero
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+
+        // numChunks = (arrLen + n - 1) / n  (ceiling division)
+        llvm::Value* arrLenPlusNM1 = builder->CreateAdd(
+            arrLen, builder->CreateSub(nVal, one, "ach.nm1", false, true), "ach.lnm1", true, true);
+        llvm::Value* numChunks = builder->CreateSDiv(arrLenPlusNM1, nVal, "ach.nchunks");
+        nonNegValues_.insert(numChunks);
+
+        // Allocate outer array: (numChunks + 1) * 8 bytes
+        llvm::Value* outSlots = builder->CreateAdd(numChunks, one, "ach.outslots", true, true);
+        llvm::Value* outBytes = builder->CreateMul(outSlots, eight, "ach.outbytes", true, true);
+        llvm::Value* outBuf   = builder->CreateCall(getOrDeclareMalloc(), {outBytes}, "ach.outbuf");
+        llvm::cast<llvm::CallInst>(outBuf)->addRetAttr(llvm::Attribute::NonNull);
+        emitStoreArrayLen(numChunks, outBuf);
+
+        // Loop: for ci in 0..numChunks: build sub-array [ci*n .. min((ci+1)*n, arrLen)]
+        llvm::BasicBlock* preBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "ach.loop", parentFn);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "ach.body", parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "ach.done", parentFn);
+
+        builder->CreateCondBr(builder->CreateICmpSGT(numChunks, zero, "ach.mgt0"), loopBB, doneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* ci = builder->CreatePHI(getDefaultType(), 2, "ach.ci");
+        ci->addIncoming(zero, preBB);
+        builder->CreateCondBr(builder->CreateICmpSLT(ci, numChunks, "ach.cond"), bodyBB, doneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* start    = builder->CreateMul(ci, nVal, "ach.start");
+        llvm::Value* endRaw   = builder->CreateAdd(start, nVal, "ach.endraw", true, true);
+        llvm::Value* startGT  = builder->CreateICmpSGT(endRaw, arrLen, "ach.overrun");
+        llvm::Value* end      = builder->CreateSelect(startGT, arrLen, endRaw, "ach.end");
+        llvm::Value* chunkLen = builder->CreateSub(end, start, "ach.clen");
+
+        // Allocate sub-array: (chunkLen + 1) * 8 bytes
+        llvm::Value* chSlots = builder->CreateAdd(chunkLen, one, "ach.chslots", true, true);
+        llvm::Value* chBytes = builder->CreateMul(chSlots, eight, "ach.chbytes", true, true);
+        llvm::Value* chBuf   = builder->CreateCall(getOrDeclareMalloc(), {chBytes}, "ach.chbuf");
+        llvm::cast<llvm::CallInst>(chBuf)->addRetAttr(llvm::Attribute::NonNull);
+        emitStoreArrayLen(chunkLen, chBuf);
+
+        // Copy chunkLen elements from arr[start..end] into chBuf
+        llvm::Value* srcOffset = builder->CreateAdd(start, one, "ach.srcoff", true, true);
+        llvm::Value* srcPtr    = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, srcOffset, "ach.srcp");
+        llvm::Value* dstPtr    = builder->CreateInBoundsGEP(getDefaultType(), chBuf, one, "ach.dstp");
+        llvm::Value* copyBytes = builder->CreateMul(chunkLen, eight, "ach.cpbytes", true, true);
+        builder->CreateCall(getOrDeclareMemcpy(), {dstPtr, srcPtr, copyBytes});
+
+        // Store chBuf pointer (as int) into outBuf[ci+1]
+        llvm::Value* outDstIdx = builder->CreateAdd(ci, one, "ach.odidx", true, true);
+        llvm::Value* outDstPtr = builder->CreateInBoundsGEP(getDefaultType(), outBuf, outDstIdx, "ach.odp");
+        llvm::Value* chInt     = builder->CreatePtrToInt(chBuf, getDefaultType(), "ach.chint");
+        builder->CreateStore(chInt, outDstPtr);
+
+        llvm::Value* nextCi = builder->CreateAdd(ci, one, "ach.nci", true, true);
+        ci->addIncoming(nextCi, bodyBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+        builder->SetInsertPoint(doneBB);
+        arrayReturningFunctions_.insert("array_chunk");
+        return outBuf;
+    }
+
+    // array_find_index(arr, fn) → index of first element where fn(elem) != 0, else -1
+    if (bid == BuiltinId::ARRAY_FIND_INDEX) {
+        validateArgCount(expr, "array_find_index", 2);
+        std::string fnName = extractFnName(expr->arguments[1].get());
+        if (fnName.empty())
+            codegenError("array_find_index: second argument must be a function name or lambda", expr);
+
+        llvm::Value* arrRaw = generateExpression(expr->arguments[0].get());
+        llvm::Value* arrPtr = emitToArrayPtr(arrRaw, "afi.arrptr");
+        llvm::Value* arrLen = emitLoadArrayLen(arrPtr, "afi.len");
+
+        llvm::Value* zero    = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one     = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* negOne  = llvm::ConstantInt::get(getDefaultType(), (uint64_t)-1LL);
+
+        auto calleeIt = functions.find(fnName);
+        if (calleeIt == functions.end() || !calleeIt->second)
+            codegenError("array_find_index: unknown function '" + fnName + "'", expr);
+        llvm::Function* callee = calleeIt->second;
+
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preBB   = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB  = llvm::BasicBlock::Create(*context, "afi.loop", parentFn);
+        llvm::BasicBlock* bodyBB  = llvm::BasicBlock::Create(*context, "afi.body", parentFn);
+        llvm::BasicBlock* matchBB = llvm::BasicBlock::Create(*context, "afi.match", parentFn);
+        llvm::BasicBlock* incBB   = llvm::BasicBlock::Create(*context, "afi.inc",   parentFn);
+        llvm::BasicBlock* doneBB  = llvm::BasicBlock::Create(*context, "afi.done",  parentFn);
+
+        llvm::AllocaInst* resultA = createEntryBlockAlloca(parentFn, "afi.result", getDefaultType());
+        builder->CreateStore(negOne, resultA);
+
+        builder->CreateCondBr(builder->CreateICmpSGT(arrLen, zero, "afi.nonempty"), loopBB, doneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "afi.i");
+        idx->addIncoming(zero, preBB);
+        builder->CreateCondBr(builder->CreateICmpSLT(idx, arrLen, "afi.cond"), bodyBB, doneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* elemIdx = builder->CreateAdd(idx, one, "afi.ei", true, true);
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, elemIdx, "afi.ep");
+        llvm::Value* elem    = emitLoadArrayElem(elemPtr, "afi.elem");
+        llvm::Value* res     = builder->CreateCall(callee, {elem}, "afi.res");
+        llvm::Value* isTrue  = builder->CreateICmpNE(res, zero, "afi.istrue");
+        builder->CreateCondBr(isTrue, matchBB, incBB);
+
+        builder->SetInsertPoint(matchBB);
+        builder->CreateStore(idx, resultA);
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(incBB);
+        llvm::Value* nextIdx = builder->CreateAdd(idx, one, "afi.ni", true, true);
+        idx->addIncoming(nextIdx, incBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+
+        builder->SetInsertPoint(doneBB);
+        return builder->CreateAlignedLoad(getDefaultType(), resultA, llvm::MaybeAlign(8), "afi.final");
+    }
+
+    // ── End Round-79 builtins ────────────────────────────────────────────────
+
     if (bid == BuiltinId::STR_LEN) {
         validateArgCount(expr, "str_len", 1);
         // ── Compile-time str_len folding ────────────────────────────
@@ -11291,6 +11683,26 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             codegenError("OPTMAX function \"" + currentFunction + "\" cannot invoke non-OPTMAX function \"" +
                              expr->callee + "\"",
                          expr);
+        }
+    }
+
+    // Emit a call-site warning when the target function is @deprecated.
+    // This must come BEFORE any constant-folding early returns, so that
+    // the warning is always emitted even when the call is folded away.
+    {
+        auto dIt = functionDecls_.find(expr->callee);
+        if (dIt == functionDecls_.end()) {
+            // Check qualified name in case the call was desugared
+            auto cIt = functions.find(expr->callee);
+            if (cIt != functions.end())
+                dIt = functionDecls_.find(std::string(cIt->getKey()));
+        }
+        if (dIt != functionDecls_.end() && dIt->second && dIt->second->hintDeprecated) {
+            const std::string& depMsg = dIt->second->deprecatedMsg;
+            std::string warnText = "call to deprecated function '" + expr->callee + "'";
+            if (!depMsg.empty())
+                warnText += ": " + depMsg;
+            codegenWarning(warnText, expr);
         }
     }
 

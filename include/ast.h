@@ -695,6 +695,10 @@ class FunctionDecl : public ASTNode {
     /// when they are not full allocators (so @memory(allocator) would be wrong).
     bool hintNoAliasReturn = false;
 
+    /// @deprecated / @deprecated("msg") annotation — emits a call-site warning.
+    bool hintDeprecated = false;
+    std::string deprecatedMsg; ///< empty → generic warning; non-empty → custom message
+
     FunctionDecl(const std::string& n, std::vector<std::string> tps, std::vector<Parameter> params,
                  std::unique_ptr<BlockStmt> b, bool optMax = false, const std::string& retType = "")
         : ASTNode(ASTNodeType::FUNCTION), name(n), typeParams(std::move(tps)), parameters(std::move(params)),

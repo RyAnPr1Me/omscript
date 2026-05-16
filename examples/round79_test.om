@@ -1,0 +1,200 @@
+import std;
+// round79_test.om — Round-79 production-grade features
+// Tests: str_hex, str_bin, str_oct, array_zip_with, array_chunk,
+//        @deprecated annotation (call-site warning), array_find_index.
+// Expected return value: 0
+
+fn add(a: int, b: int) -> int {
+    return a + b;
+}
+
+fn mul(a: int, b: int) -> int {
+    return a * b;
+}
+
+fn is_even(x: int) -> int {
+    return x % 2 == 0;
+}
+
+fn gt5(x: int) -> int {
+    return x > 5;
+}
+
+@deprecated("use new_api() instead")
+fn old_api(x: int) -> int {
+    return x * 2;
+}
+
+@deprecated
+fn also_old(x: int) -> int {
+    return x + 1;
+}
+
+fn main() {
+    var total = 0;
+
+    // ── Test 1-6: str_hex ────────────────────────────────────────────────────
+    // Compile-time fold
+    var h1 = str_hex(255);
+    assert(h1 == "ff", "str_hex(255)=='ff'");
+    total = total + (h1 == "ff");  // +1
+    // total = 1
+
+    var h2 = str_hex(0);
+    assert(h2 == "0", "str_hex(0)=='0'");
+    total = total + (h2 == "0");  // +1
+    // total = 2
+
+    var h3 = str_hex(16);
+    assert(h3 == "10", "str_hex(16)=='10'");
+    total = total + (h3 == "10");  // +1
+    // total = 3
+
+    var h4 = str_hex(256);
+    assert(h4 == "100", "str_hex(256)=='100'");
+    total = total + (h4 == "100");  // +1
+    // total = 4
+
+    // Runtime path
+    var n = 0xDEAD;
+    var h5 = str_hex(n);
+    assert(h5 == "dead", "str_hex(0xDEAD)=='dead'");
+    total = total + (h5 == "dead");  // +1
+    // total = 5
+
+    var n2 = 1;
+    var h6 = str_hex(n2);
+    assert(h6 == "1", "str_hex(1)=='1'");
+    total = total + (h6 == "1");  // +1
+    // total = 6
+
+    // ── Test 7-10: str_bin ───────────────────────────────────────────────────
+    var b1 = str_bin(0);
+    assert(b1 == "0", "str_bin(0)=='0'");
+    total = total + (b1 == "0");  // +1
+    // total = 7
+
+    var b2 = str_bin(1);
+    assert(b2 == "1", "str_bin(1)=='1'");
+    total = total + (b2 == "1");  // +1
+    // total = 8
+
+    var b3 = str_bin(10);
+    assert(b3 == "1010", "str_bin(10)=='1010'");
+    total = total + (b3 == "1010");  // +1
+    // total = 9
+
+    var nb = 255;
+    var b4 = str_bin(nb);
+    assert(b4 == "11111111", "str_bin(255)=='11111111'");
+    total = total + (b4 == "11111111");  // +1
+    // total = 10
+
+    // ── Test 11-14: str_oct ──────────────────────────────────────────────────
+    var o1 = str_oct(0);
+    assert(o1 == "0", "str_oct(0)=='0'");
+    total = total + (o1 == "0");  // +1
+    // total = 11
+
+    var o2 = str_oct(8);
+    assert(o2 == "10", "str_oct(8)=='10'");
+    total = total + (o2 == "10");  // +1
+    // total = 12
+
+    var o3 = str_oct(64);
+    assert(o3 == "100", "str_oct(64)=='100'");
+    total = total + (o3 == "100");  // +1
+    // total = 13
+
+    var no = 511;
+    var o4 = str_oct(no);
+    assert(o4 == "777", "str_oct(511)=='777'");
+    total = total + (o4 == "777");  // +1
+    // total = 14
+
+    // ── Test 15-18: array_zip_with ───────────────────────────────────────────
+    var xs = [1, 2, 3, 4];
+    var ys = [10, 20, 30, 40];
+    var sums = array_zip_with(xs, ys, add);
+    assert(len(sums) == 4, "zip_with len==4");
+    assert(sums[0] == 11, "zip_with[0]==11");
+    assert(sums[1] == 22, "zip_with[1]==22");
+    assert(sums[2] == 33, "zip_with[2]==33");
+    assert(sums[3] == 44, "zip_with[3]==44");
+    total = total + (sums[0] == 11);  // +1
+    total = total + (sums[3] == 44);  // +1
+    // total = 16
+
+    // zip_with on different-length arrays (shorter wins)
+    var as2 = [2, 3, 4];
+    var bs2 = [5, 6];
+    var prods = array_zip_with(as2, bs2, mul);
+    assert(len(prods) == 2, "zip_with trunc len==2");
+    assert(prods[0] == 10, "zip_with trunc[0]==10");
+    assert(prods[1] == 18, "zip_with trunc[1]==18");
+    total = total + (len(prods) == 2);  // +1
+    total = total + (prods[1] == 18);  // +1
+    // total = 18
+
+    // ── Test 19-22: array_chunk ──────────────────────────────────────────────
+    var arr = [1, 2, 3, 4, 5, 6];
+    var chunks = array_chunk(arr, 2);
+    assert(len(chunks) == 3, "chunk len==3");
+    total = total + (len(chunks) == 3);  // +1
+    // total = 19
+
+    // Verify chunk contents by flattening back to original
+    var flat = array_flatten(chunks);
+    assert(len(flat) == 6, "chunk flatten len==6");
+    assert(flat[0] == 1 && flat[1] == 2, "chunk flat[0..1]==[1,2]");
+    assert(flat[4] == 5 && flat[5] == 6, "chunk flat[4..5]==[5,6]");
+    total = total + (flat[0] == 1);  // +1
+    total = total + (flat[5] == 6);  // +1
+    // total = 21
+
+    // chunk with remainder — [10,20,30,40,50] / 3 → [10,20,30], [40,50]
+    var arr2 = [10, 20, 30, 40, 50];
+    var ch3 = array_chunk(arr2, 3);
+    assert(len(ch3) == 2, "chunk5/3 len==2");
+    total = total + (len(ch3) == 2);  // +1
+    // total = 22
+
+    var flat2 = array_flatten(ch3);
+    assert(len(flat2) == 5, "chunk5/3 flatten len==5");
+    assert(flat2[3] == 40 && flat2[4] == 50, "chunk5/3 tail==[40,50]");
+    total = total + (flat2[4] == 50);  // +1
+    // total = 23
+
+    // ── Test 24-26: array_find_index ─────────────────────────────────────────
+    var data = [1, 3, 4, 7, 9];
+    var fi1 = array_find_index(data, is_even);
+    assert(fi1 == 2, "find_index even==2");
+    total = total + (fi1 == 2);  // +1
+    // total = 24
+
+    var fi2 = array_find_index(data, gt5);
+    assert(fi2 == 3, "find_index gt5==3");
+    total = total + (fi2 == 3);  // +1
+    // total = 25
+
+    // not found → -1
+    var allOdd = [1, 3, 5, 7];
+    var fi3 = array_find_index(allOdd, is_even);
+    assert(fi3 == -1, "find_index not found==-1");
+    total = total + (fi3 == -1);  // +1
+    // total = 26
+
+    // ── Test 27-28: @deprecated annotation ───────────────────────────────────
+    // These calls should compile (but emit warnings); we verify the functions work.
+    var dep1 = old_api(5);
+    assert(dep1 == 10, "@deprecated old_api(5)==10");
+    total = total + (dep1 == 10);  // +1
+    // total = 27
+
+    var dep2 = also_old(9);
+    assert(dep2 == 10, "@deprecated also_old(9)==10");
+    total = total + (dep2 == 10);  // +1
+    // total = 28
+
+    return total;
+}
