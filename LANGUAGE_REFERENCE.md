@@ -2268,10 +2268,10 @@ fn legacy(x: int) -> int { return x + 1; }
 
 #### Deprecated Flat Annotations
 
-The individual flat forms (`@hot`, `@cold`, `@inline`, `@pure`, `@noreturn`, etc.) are **deprecated**.  They still compile — the compiler emits a warning and applies the same effect — but all new code should use the compound forms above.
+The individual flat forms (`@hot`, `@cold`, `@inline`, `@pure`, `@noreturn`, etc.) are **deprecated**. They still compile — the compiler emits a warning and applies the same effect — but all new code should use the compound forms above.
 
 | Deprecated | Replacement |
-|------------|-------------|
+| --- | --- |
 | `@inline` | `@opt(inline)` |
 | `@noinline` | `@opt(noinline)` |
 | `@hot` | `@opt(hot)` |
