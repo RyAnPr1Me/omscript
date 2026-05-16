@@ -199,8 +199,10 @@ void Parser::registerStdNamespace() {
         // ── Threading ────────────────────────────────────────────────────────
         {"thread_create", "thread_create"},
         {"thread_join", "thread_join"},
+        {"thread_detach", "thread_detach"},
         {"mutex_new", "mutex_new"},
         {"mutex_lock", "mutex_lock"},
+        {"mutex_try_lock", "mutex_try_lock"},
         {"mutex_unlock", "mutex_unlock"},
         {"mutex_destroy", "mutex_destroy"},
         // ── Assertions / hints ────────────────────────────────────────────────

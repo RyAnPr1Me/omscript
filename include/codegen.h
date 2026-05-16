@@ -1309,8 +1309,10 @@ class CodeGenerator {
     llvm::Function* getOrDeclareAccess();
     llvm::Function* getOrDeclarePthreadCreate();
     llvm::Function* getOrDeclarePthreadJoin();
+    llvm::Function* getOrDeclarePthreadDetach();
     llvm::Function* getOrDeclarePthreadMutexInit();
     llvm::Function* getOrDeclarePthreadMutexLock();
+    llvm::Function* getOrDeclarePthreadMutexTryLock();
     llvm::Function* getOrDeclarePthreadMutexUnlock();
     llvm::Function* getOrDeclarePthreadMutexDestroy();
     llvm::Function* getOrDeclareGetenv();

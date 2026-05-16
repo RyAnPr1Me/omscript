@@ -141,8 +141,10 @@ enum class BuiltinId : uint8_t {
     STRING_TO_NUMBER,
     THREAD_CREATE,
     THREAD_JOIN,
+    THREAD_DETACH,
     MUTEX_NEW,
     MUTEX_LOCK,
+    MUTEX_TRY_LOCK,
     MUTEX_UNLOCK,
     MUTEX_DESTROY,
     SIN,
@@ -432,8 +434,10 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"string_to_number", BuiltinId::STRING_TO_NUMBER},
     {"thread_create", BuiltinId::THREAD_CREATE},
     {"thread_join", BuiltinId::THREAD_JOIN},
+    {"thread_detach", BuiltinId::THREAD_DETACH},
     {"mutex_new", BuiltinId::MUTEX_NEW},
     {"mutex_lock", BuiltinId::MUTEX_LOCK},
+    {"mutex_try_lock", BuiltinId::MUTEX_TRY_LOCK},
     {"mutex_unlock", BuiltinId::MUTEX_UNLOCK},
     {"mutex_destroy", BuiltinId::MUTEX_DESTROY},
     {"sin", BuiltinId::SIN},
@@ -8439,24 +8443,40 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     // -----------------------------------------------------------------------
 
     if (bid == BuiltinId::THREAD_CREATE) {
-        validateArgCount(expr, "thread_create", 1);
-        // thread_create("func_name") — look up the function by name and call pthread_create
-        auto* ptrTy = llvm::PointerType::getUnqual(*context);
-
-        // The argument should be a string containing a function name.
-        // We look up the function directly by checking if the argument is a literal.
-        auto* litArg = dynamic_cast<LiteralExpr*>(expr->arguments[0].get());
-        if (!litArg || litArg->literalType != LiteralExpr::LiteralType::STRING) {
-            codegenError("thread_create requires a string literal function name", expr);
+        if (expr->arguments.size() < 1 || expr->arguments.size() > 2) {
+            codegenError("Built-in function 'thread_create' expects 1 or 2 argument(s), but " +
+                             std::to_string(expr->arguments.size()) + " provided",
+                         expr);
         }
-        auto fnIt = functions.find(litArg->stringValue);
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        const std::string fnName = extractFnName(expr->arguments[0].get());
+        if (fnName.empty()) {
+            codegenError("thread_create requires a function name (identifier or string literal) as argument 1", expr);
+        }
+        auto fnIt = functions.find(fnName);
         if (fnIt == functions.end() || !fnIt->second) {
-            codegenError("thread_create: unknown function '" + litArg->stringValue + "'", expr);
+            codegenError("thread_create: unknown function '" + fnName + "'", expr);
         }
         llvm::Function* targetFunc = fnIt->second;
+        const unsigned arity = targetFunc->arg_size();
+        if (arity > 1) {
+            codegenError("thread_create target '" + fnName +
+                             "' must take 0 or 1 parameter(s); use shared state or a task queue for multi-arg workloads",
+                         expr);
+        }
+        if (arity == 0 && expr->arguments.size() == 2) {
+            codegenError("thread_create target '" + fnName + "' takes no parameters, but an argument was provided", expr);
+        }
+        if (arity == 1 && expr->arguments.size() == 1) {
+            codegenError("thread_create target '" + fnName + "' takes one parameter, but no argument was provided", expr);
+        }
 
-        // Generate a wrapper function: void* __thread_wrapper_<name>(void* arg) { target(); return NULL; }
-        std::string wrapperName = "__thread_wrapper_" + litArg->stringValue;
+        // Generate a wrapper:
+        //   void* __thread_wrapper_<name>_a{0|1}(void* p) {
+        //      int64_t r = target([arg]);
+        //      return (void*)r;
+        //   }
+        const std::string wrapperName = "__thread_wrapper_" + fnName + (arity == 1 ? "_a1" : "_a0");
         llvm::Function* wrapper = module->getFunction(wrapperName);
         if (!wrapper) {
             auto* wrapperType = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
@@ -8466,8 +8486,28 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 builder->GetInsertPoint() != builder->GetInsertBlock()->end() ? &*builder->GetInsertPoint() : nullptr;
             auto* entry = llvm::BasicBlock::Create(*context, "entry", wrapper);
             builder->SetInsertPoint(entry);
-            builder->CreateCall(targetFunc);
-            builder->CreateRet(llvm::ConstantPointerNull::get(ptrTy));
+
+            llvm::Value* callRes = nullptr;
+            if (arity == 1) {
+                llvm::Value* argPtr = wrapper->getArg(0);
+                argPtr->setName("thread.arg.payload");
+                llvm::Value* argI64 =
+                    builder->CreateAlignedLoad(getDefaultType(), argPtr, llvm::MaybeAlign(8), "thread.arg.i64");
+                builder->CreateCall(getOrDeclareFree(), {argPtr});
+                llvm::Type* expectedTy = targetFunc->getFunctionType()->getParamType(0);
+                llvm::Value* coercedArg = convertTo(argI64, expectedTy);
+                callRes = builder->CreateCall(targetFunc, {coercedArg});
+            } else {
+                callRes = builder->CreateCall(targetFunc);
+            }
+
+            if (targetFunc->getReturnType()->isVoidTy()) {
+                builder->CreateRet(llvm::ConstantPointerNull::get(ptrTy));
+            } else {
+                llvm::Value* retI64 = toDefaultType(callRes);
+                builder->CreateRet(builder->CreateIntToPtr(retI64, ptrTy, "thread.ret.ptr"));
+            }
+
             if (savedPoint) {
                 builder->SetInsertPoint(savedBB, llvm::BasicBlock::iterator(savedPoint));
             } else {
@@ -8475,15 +8515,34 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             }
         }
 
-        // Allocate pthread_t on the stack (8 bytes = i64)
+        // Prepare optional argument payload (for 1-arg thread functions).
+        llvm::Value* threadArg = llvm::ConstantPointerNull::get(ptrTy);
+        if (arity == 1) {
+            llvm::Value* argVal = generateExpression(expr->arguments[1].get());
+            argVal = toDefaultType(argVal);
+            threadArg = builder->CreateCall(getOrDeclareMalloc(), {llvm::ConstantInt::get(getDefaultType(), 8)},
+                                            "thread.arg.payload");
+            builder->CreateAlignedStore(argVal, threadArg, llvm::MaybeAlign(8));
+        }
+
+        // Allocate pthread_t on the stack and create thread.
         auto* parentFunc = builder->GetInsertBlock()->getParent();
         auto* tidAlloca = createEntryBlockAlloca(parentFunc, "tid");
         llvm::Value* nullAttr = llvm::ConstantPointerNull::get(ptrTy);
-        llvm::Value* nullArg = llvm::ConstantPointerNull::get(ptrTy);
+        llvm::Value* status = builder->CreateCall(getOrDeclarePthreadCreate(), {tidAlloca, nullAttr, wrapper, threadArg},
+                                                  "thread.create.status");
+        llvm::Value* ok = builder->CreateICmpEQ(status, llvm::ConstantInt::get(status->getType(), 0), "thread.create.ok");
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "thread.create.ok", parentFunc);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "thread.create.fail", parentFunc);
+        builder->CreateCondBr(ok, okBB, failBB);
 
-        builder->CreateCall(getOrDeclarePthreadCreate(), {tidAlloca, nullAttr, wrapper, nullArg});
+        builder->SetInsertPoint(failBB);
+        llvm::Value* fmt = builder->CreateGlobalStringPtr("Runtime error: thread_create failed (pthread errno=%d)\\n");
+        builder->CreateCall(getOrDeclarePrintf(), {fmt, status});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
 
-        // Return the thread id
+        builder->SetInsertPoint(okBB);
         return builder->CreateAlignedLoad(getDefaultType(), tidAlloca, llvm::MaybeAlign(8), "tid.val");
     }
 
@@ -8492,8 +8551,46 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* tid = generateExpression(expr->arguments[0].get());
         tid = toDefaultType(tid);
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
-        llvm::Value* nullRetval = llvm::ConstantPointerNull::get(ptrTy);
-        builder->CreateCall(getOrDeclarePthreadJoin(), {tid, nullRetval});
+        auto* parentFunc = builder->GetInsertBlock()->getParent();
+        llvm::AllocaInst* retPtrAlloca = createEntryBlockAlloca(parentFunc, "thread.join.retptr", ptrTy);
+        builder->CreateStore(llvm::ConstantPointerNull::get(ptrTy), retPtrAlloca);
+        llvm::Value* status = builder->CreateCall(getOrDeclarePthreadJoin(), {tid, retPtrAlloca}, "thread.join.status");
+
+        llvm::Value* ok = builder->CreateICmpEQ(status, llvm::ConstantInt::get(status->getType(), 0), "thread.join.ok");
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "thread.join.ok", parentFunc);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "thread.join.fail", parentFunc);
+        builder->CreateCondBr(ok, okBB, failBB);
+
+        builder->SetInsertPoint(failBB);
+        llvm::Value* fmt = builder->CreateGlobalStringPtr("Runtime error: thread_join failed (pthread errno=%d)\\n");
+        builder->CreateCall(getOrDeclarePrintf(), {fmt, status});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
+        llvm::Value* retPtr = builder->CreateAlignedLoad(ptrTy, retPtrAlloca, llvm::MaybeAlign(8), "thread.join.retptr");
+        return builder->CreatePtrToInt(retPtr, getDefaultType(), "thread.join.ret");
+    }
+
+    if (bid == BuiltinId::THREAD_DETACH) {
+        validateArgCount(expr, "thread_detach", 1);
+        llvm::Value* tid = generateExpression(expr->arguments[0].get());
+        tid = toDefaultType(tid);
+        auto* parentFunc = builder->GetInsertBlock()->getParent();
+        llvm::Value* status = builder->CreateCall(getOrDeclarePthreadDetach(), {tid}, "thread.detach.status");
+        llvm::Value* ok =
+            builder->CreateICmpEQ(status, llvm::ConstantInt::get(status->getType(), 0), "thread.detach.ok");
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "thread.detach.ok", parentFunc);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "thread.detach.fail", parentFunc);
+        builder->CreateCondBr(ok, okBB, failBB);
+
+        builder->SetInsertPoint(failBB);
+        llvm::Value* fmt = builder->CreateGlobalStringPtr("Runtime error: thread_detach failed (pthread errno=%d)\\n");
+        builder->CreateCall(getOrDeclarePrintf(), {fmt, status});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
         return llvm::ConstantInt::get(getDefaultType(), 0);
     }
 
@@ -8516,15 +8613,78 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "mutex_lock", 1);
         llvm::Value* mutexVal = generateExpression(expr->arguments[0].get());
         llvm::Value* mutexPtr = emitToArrayPtr(mutexVal, "mutex.ptr");
-        builder->CreateCall(getOrDeclarePthreadMutexLock(), {mutexPtr});
+        auto* parentFunc = builder->GetInsertBlock()->getParent();
+        llvm::Value* status = builder->CreateCall(getOrDeclarePthreadMutexLock(), {mutexPtr}, "mutex.lock.status");
+        llvm::Value* ok = builder->CreateICmpEQ(status, llvm::ConstantInt::get(status->getType(), 0), "mutex.lock.ok");
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "mutex.lock.ok", parentFunc);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "mutex.lock.fail", parentFunc);
+        builder->CreateCondBr(ok, okBB, failBB);
+
+        builder->SetInsertPoint(failBB);
+        llvm::Value* fmt = builder->CreateGlobalStringPtr("Runtime error: mutex_lock failed (pthread errno=%d)\\n");
+        builder->CreateCall(getOrDeclarePrintf(), {fmt, status});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
         return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::MUTEX_TRY_LOCK) {
+        validateArgCount(expr, "mutex_try_lock", 1);
+        llvm::Value* mutexVal = generateExpression(expr->arguments[0].get());
+        llvm::Value* mutexPtr = emitToArrayPtr(mutexVal, "mutex.ptr");
+        auto* parentFunc = builder->GetInsertBlock()->getParent();
+        llvm::Value* status = builder->CreateCall(getOrDeclarePthreadMutexTryLock(), {mutexPtr}, "mutex.try.status");
+        llvm::Value* c0 = llvm::ConstantInt::get(status->getType(), 0);
+        llvm::Value* cBusy = llvm::ConstantInt::get(status->getType(), 16); // POSIX EBUSY
+        llvm::Value* okAcquired = builder->CreateICmpEQ(status, c0, "mutex.try.is_acquired");
+        llvm::Value* okBusy = builder->CreateICmpEQ(status, cBusy, "mutex.try.is_busy");
+
+        llvm::BasicBlock* acquiredBB = llvm::BasicBlock::Create(*context, "mutex.try.acquired", parentFunc);
+        llvm::BasicBlock* busyBB = llvm::BasicBlock::Create(*context, "mutex.try.busy", parentFunc);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "mutex.try.fail", parentFunc);
+        builder->CreateCondBr(okAcquired, acquiredBB, busyBB);
+
+        builder->SetInsertPoint(busyBB);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "mutex.try.merge", parentFunc);
+        builder->CreateCondBr(okBusy, mergeBB, failBB);
+
+        builder->SetInsertPoint(acquiredBB);
+        builder->CreateBr(mergeBB);
+
+        builder->SetInsertPoint(failBB);
+        llvm::Value* fmt = builder->CreateGlobalStringPtr("Runtime error: mutex_try_lock failed (pthread errno=%d)\\n");
+        builder->CreateCall(getOrDeclarePrintf(), {fmt, status});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* out = builder->CreatePHI(getDefaultType(), 2, "mutex.try.result");
+        out->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), acquiredBB);
+        out->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), busyBB);
+        return out;
     }
 
     if (bid == BuiltinId::MUTEX_UNLOCK) {
         validateArgCount(expr, "mutex_unlock", 1);
         llvm::Value* mutexVal = generateExpression(expr->arguments[0].get());
         llvm::Value* mutexPtr = emitToArrayPtr(mutexVal, "mutex.ptr");
-        builder->CreateCall(getOrDeclarePthreadMutexUnlock(), {mutexPtr});
+        auto* parentFunc = builder->GetInsertBlock()->getParent();
+        llvm::Value* status = builder->CreateCall(getOrDeclarePthreadMutexUnlock(), {mutexPtr}, "mutex.unlock.status");
+        llvm::Value* ok =
+            builder->CreateICmpEQ(status, llvm::ConstantInt::get(status->getType(), 0), "mutex.unlock.ok");
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "mutex.unlock.ok", parentFunc);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "mutex.unlock.fail", parentFunc);
+        builder->CreateCondBr(ok, okBB, failBB);
+
+        builder->SetInsertPoint(failBB);
+        llvm::Value* fmt = builder->CreateGlobalStringPtr("Runtime error: mutex_unlock failed (pthread errno=%d)\\n");
+        builder->CreateCall(getOrDeclarePrintf(), {fmt, status});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
         return llvm::ConstantInt::get(getDefaultType(), 0);
     }
 
@@ -8532,7 +8692,22 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         validateArgCount(expr, "mutex_destroy", 1);
         llvm::Value* mutexVal = generateExpression(expr->arguments[0].get());
         llvm::Value* mutexPtr = emitToArrayPtr(mutexVal, "mutex.ptr");
-        builder->CreateCall(getOrDeclarePthreadMutexDestroy(), {mutexPtr});
+        auto* parentFunc = builder->GetInsertBlock()->getParent();
+        llvm::Value* status =
+            builder->CreateCall(getOrDeclarePthreadMutexDestroy(), {mutexPtr}, "mutex.destroy.status");
+        llvm::Value* ok =
+            builder->CreateICmpEQ(status, llvm::ConstantInt::get(status->getType(), 0), "mutex.destroy.ok");
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "mutex.destroy.ok", parentFunc);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "mutex.destroy.fail", parentFunc);
+        builder->CreateCondBr(ok, okBB, failBB);
+
+        builder->SetInsertPoint(failBB);
+        llvm::Value* fmt = builder->CreateGlobalStringPtr("Runtime error: mutex_destroy failed (pthread errno=%d)\\n");
+        builder->CreateCall(getOrDeclarePrintf(), {fmt, status});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+
+        builder->SetInsertPoint(okBB);
         builder->CreateCall(getOrDeclareFree(), {mutexPtr});
         return llvm::ConstantInt::get(getDefaultType(), 0);
     }

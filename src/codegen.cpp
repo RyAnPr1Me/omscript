@@ -97,7 +97,8 @@ using omscript::WhileStmt;
 
 /// Concurrency builtin names.  User functions that call any of these must NOT
 static const std::unordered_set<std::string> kConcurrencyBuiltins = {"thread_create", "thread_join",  "mutex_new",
-                                                                     "mutex_lock",    "mutex_unlock", "mutex_destroy"};
+                                                                     "thread_detach", "mutex_new",    "mutex_lock",
+                                                                     "mutex_try_lock","mutex_unlock", "mutex_destroy"};
 
 /// Recursively check if an expression tree contains a call to any name in @p names.
 static bool exprCallsAny(const Expression* e, const std::unordered_set<std::string>& names) {
@@ -302,8 +303,8 @@ static const std::unordered_set<std::string> stdlibFunctions = {
     "str_lower", "str_lstrip", "str_pad_left", "str_pad_right", "str_remove", "str_repeat", "str_replace",
     "str_reverse", "str_rstrip", "str_split", "str_starts_with", "str_substr", "str_to_float", "str_to_int", "str_trim",
     "str_upper", "string_to_number", "sudo_command", "env_get", "env_set", "sum", "swap", "tan", "time", "to_char",
-    "to_float", "to_int", "to_string", "thread_create", "thread_join", "mutex_new", "mutex_lock", "mutex_unlock",
-    "mutex_destroy", "typeof", "unreachable", "write",
+    "to_float", "to_int", "to_string", "thread_create", "thread_join", "thread_detach", "mutex_new", "mutex_lock",
+    "mutex_try_lock", "mutex_unlock", "mutex_destroy", "typeof", "unreachable", "write",
     // Numeric type-cast functions: i32(x), u8(x), etc.
     // These are parsed as CallExpr nodes and handled
     // as builtins; they must be whitelisted so that
@@ -2223,6 +2224,17 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadJoin() {
     return fn;
 }
 
+llvm::Function* CodeGenerator::getOrDeclarePthreadDetach() {
+    if (auto* fn = module->getFunction("pthread_detach"))
+        return fn;
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {getDefaultType()}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_detach", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    return fn;
+}
+
 llvm::Function* CodeGenerator::getOrDeclarePthreadMutexInit() {
     if (auto* fn = module->getFunction("pthread_mutex_init"))
         return fn;
@@ -2246,6 +2258,20 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadMutexLock() {
     auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
     llvm::Function* fn =
         llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_mutex_lock", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadMutexTryLock() {
+    if (auto* fn = module->getFunction("pthread_mutex_trylock"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_mutex_trylock", module.get());
     fn->addFnAttr(llvm::Attribute::NoUnwind);
     fn->addFnAttr(llvm::Attribute::NoFree);
     OMSC_ADD_NOCAPTURE(fn, 0);
