@@ -529,7 +529,7 @@ ptest_compile_fail "examples/write_to_shared_error_test.om"
 ptest_compile_fail "examples/invalidate_while_borrowed_error_test.om"
 ptest_compile_fail "examples/own_on_frozen_error_test.om"
 flush_ptests
-test_cli_output "error-line-info" "-->" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
+test_cli_output "error-location-arrow" "-->" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "error-includes-filename" "undefined_var.om" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "missing-semicolon-msg" "Expected ';'" 1 ./build/omsc examples/missing_semicolon.om -o /tmp/test_semicolon
 test_cli_output "int-overflow-msg" "Integer literal out of range" 1 ./build/omsc examples/int_overflow.om -o /tmp/test_overflow
@@ -555,11 +555,12 @@ test_cli_output "warning-no-werror" "warning" 0 ./build/omsc check examples/depr
 # --max-errors: multi-error file should stop after limit
 test_cli_output "max-errors-limit" "error limit reached" 1 ./build/omsc check examples/multi_error_test.om --max-errors=1 --no-color
 # --error-format=json: emits structured JSON
-test_cli_output "error-format-json" "severity" 1 ./build/omsc check examples/undefined_var.om --error-format=json
+test_cli_output "error-format-json" "\"severity\":\"error\"" 1 ./build/omsc check examples/missing_semicolon.om --error-format=json
 # --error-format=plain: no snippet
-test_cli_output "error-format-plain-has-colno" ":5:" 1 ./build/omsc check examples/missing_semicolon.om --error-format=plain --no-color
-# Multiple errors shown individually (each has -->)
-test_cli_output "multi-error-individual-snippets" "-->" 1 ./build/omsc check examples/multi_error_test.om --no-color
+test_cli_output "error-format-plain-has-colno" ":4:1: error:" 1 ./build/omsc check examples/missing_semicolon.om --error-format=plain --no-color
+# Multiple errors shown individually
+test_cli_output "multi-error-first-snippet" "examples/multi_error_test.om:8:5" 1 ./build/omsc check examples/multi_error_test.om --no-color
+test_cli_output "multi-error-second-snippet" "examples/multi_error_test.om:12:17" 1 ./build/omsc check examples/multi_error_test.om --no-color
 
 echo ""
 echo "============================================"

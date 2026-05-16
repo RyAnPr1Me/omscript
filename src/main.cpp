@@ -2727,7 +2727,6 @@ int main(int argc, char* argv[]) {
         return emitDiagnostics(cg.getWarnings());
     };
 
-
     for (int i = argIndex; i < argc; i++) {
         std::string arg = argv[i];
         if (command == Command::Run && arg == "--") {
