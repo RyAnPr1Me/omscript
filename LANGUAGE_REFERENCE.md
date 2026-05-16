@@ -613,7 +613,9 @@ These do not appear in the keyword table in §2.4 and you may shadow them, but d
 
 ---
 
-## 3. Preprocessor (Removed — Migrate to `comptime {}`)
+## 3. Preprocessor
+
+> **Status:** Removed. Migrate all legacy preprocessor usage to `comptime {}` blocks.
 
 The OmScript preprocessor has been **removed**. Preprocessor directives (`#define`, `#ifdef`, `#if`, `#include`, etc.) are no longer supported and will produce a compile-time error if present in source code.
 
@@ -1327,6 +1329,12 @@ fn main() {
 ---
 
 
+
+## 5. Variables, Constants, and Comptime
+
+This section defines declaration forms (`var`, `const`, qualifiers like `register`/`atomic`/`volatile`/`global`), compile-time evaluation via `comptime {}`, assignment semantics, destructuring, scope behavior, and predefined integer constants.
+
+The declaration rule from §4.2 applies throughout this section: a declaration MUST include either an explicit type annotation or an initializer expression.
 
 ### 5.1 `var` Declaration
 
