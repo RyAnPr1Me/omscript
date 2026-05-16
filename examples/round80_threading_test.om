@@ -1,0 +1,70 @@
+import std;
+// round80_threading_test.om — Round-80 production-grade threading upgrades
+// Tests:
+//   - thread_create(fn_ident) and thread_create("fn_name", arg)
+//   - thread_join returns worker return value
+//   - thread_detach
+//   - mutex_try_lock semantics (1=acquired, 0=busy)
+// Expected return value: 8
+
+fn worker_noarg() -> int {
+    return 42;
+}
+
+fn worker_add(v: int) -> int {
+    return v + 7;
+}
+
+fn worker_detached() -> int {
+    return 99;
+}
+
+fn main() {
+    var total = 0;
+
+    // ── mutex_try_lock tests ────────────────────────────────────────────────
+    var m = mutex_new();
+    var lock1 = mutex_try_lock(m); // should acquire
+    assert(lock1 == 1, "mutex_try_lock first acquire");
+    total = total + (lock1 == 1); // +1
+
+    var lock2 = mutex_try_lock(m); // already locked by current thread
+    assert(lock2 == 0, "mutex_try_lock busy returns 0");
+    total = total + (lock2 == 0); // +1
+
+    mutex_unlock(m);
+
+    // ── thread_create + thread_join: no-arg worker by identifier ───────────
+    var t1 = thread_create(worker_noarg);
+    var r1 = thread_join(t1);
+    assert(r1 == 42, "thread_join returns worker_noarg result");
+    total = total + (r1 == 42); // +1
+
+    // ── thread_create + thread_join: 1-arg worker by string literal name ───
+    var t2 = thread_create("worker_add", 5);
+    var r2 = thread_join(t2);
+    assert(r2 == 12, "thread_join returns worker_add(5)");
+    total = total + (r2 == 12); // +1
+
+    // ── thread_create + thread_join: 1-arg worker by identifier ────────────
+    var t3 = thread_create(worker_add, 9);
+    var r3 = thread_join(t3);
+    assert(r3 == 16, "thread_join returns worker_add(9)");
+    total = total + (r3 == 16); // +1
+
+    // ── thread_detach ───────────────────────────────────────────────────────
+    var t4 = thread_create(worker_detached);
+    var d4 = thread_detach(t4);
+    assert(d4 == 0, "thread_detach returns 0");
+    total = total + (d4 == 0); // +1
+
+    // Ensure mutex remains usable after previous operations.
+    mutex_lock(m);
+    mutex_unlock(m);
+    total = total + 1; // +1
+
+    mutex_destroy(m);
+    total = total + 1; // +1
+
+    return total;
+}

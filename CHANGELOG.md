@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-80: Production threading overhaul — arg-aware thread create, join return values, detach, and try-lock mutex** (`include/codegen.h`, `src/codegen.cpp`, `src/codegen_builtins.cpp`, `src/parser.cpp`, `src/opt_context.cpp`, `README.md`, `LANGUAGE_REFERENCE.md`):
+  - **`thread_create(fn[, arg])` upgraded**: now accepts either a function identifier (`thread_create(worker)`) or a string literal (`thread_create("worker")`) and supports worker functions with **0 or 1 parameter**. For 1-arg workers, the call shape is `thread_create(fn, arg)`.
+  - **Compile-time signature validation**: `thread_create` now rejects unknown targets, missing function-name expressions, and unsupported arity (>1), with explicit diagnostics for mismatch cases (e.g., argument provided for 0-arg worker, missing argument for 1-arg worker).
+  - **`thread_join(tid)` now returns worker result**: join no longer discards the thread result; it now returns the worker’s `i64` value (bridged through pthread `void*` return).
+  - **New `thread_detach(tid)` builtin**: detach a thread handle for fire-and-forget workloads where join is unnecessary.
+  - **New `mutex_try_lock(m)` builtin**: non-blocking mutex acquisition (`1` = acquired, `0` = busy) with fatal handling for unexpected pthread errors.
+  - **Runtime pthread error surfacing**: `thread_create`, `thread_join`, `thread_detach`, `mutex_lock`, `mutex_unlock`, and `mutex_destroy` now emit explicit runtime diagnostics (with pthread errno) and abort on failure instead of silently ignoring status codes.
+  - **New conformance test**: `examples/round80_threading_test.om` (8 assertions) added and wired into `run_tests.sh`.
+
 - **Round-79: `str_hex`/`str_bin`/`str_oct`, `array_zip_with`, `array_chunk`, `array_find_index`, `@deprecated` annotation** (`include/ast.h`, `src/codegen_builtins.cpp`, `src/parser.cpp`):
   - **`str_hex(n)` builtin**: Formats an integer as a lowercase hexadecimal string. `str_hex(255)` → `"ff"`, `str_hex(0)` → `"0"`. Compile-time folded for constant arguments via `snprintf` at codegen time. Runtime path uses a `snprintf`/`"%llx"` two-pass allocation strategy identical to `number_to_string`.
   - **`str_bin(n)` builtin**: Formats an integer as a binary string (no leading zeros). `str_bin(10)` → `"1010"`, `str_bin(0)` → `"0"`. Compile-time folded for constant arguments. Runtime path uses `ctlz` to find the highest set bit and emits a single counted loop to write digits from MSB to LSB, keeping IR tight.

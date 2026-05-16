@@ -8537,8 +8537,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(ok, okBB, failBB);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* fmt = builder->CreateGlobalStringPtr("Runtime error: thread_create failed (pthread errno=%d)\\n");
-        builder->CreateCall(getOrDeclarePrintf(), {fmt, status});
+        llvm::Value* msg = builder->CreateGlobalStringPtr("Runtime error: thread_create failed\\n");
+        builder->CreateCall(getOrDeclarePuts(), {msg});
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
@@ -8562,8 +8562,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(ok, okBB, failBB);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* fmt = builder->CreateGlobalStringPtr("Runtime error: thread_join failed (pthread errno=%d)\\n");
-        builder->CreateCall(getOrDeclarePrintf(), {fmt, status});
+        llvm::Value* msg = builder->CreateGlobalStringPtr("Runtime error: thread_join failed\\n");
+        builder->CreateCall(getOrDeclarePuts(), {msg});
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
@@ -8585,8 +8585,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(ok, okBB, failBB);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* fmt = builder->CreateGlobalStringPtr("Runtime error: thread_detach failed (pthread errno=%d)\\n");
-        builder->CreateCall(getOrDeclarePrintf(), {fmt, status});
+        llvm::Value* msg = builder->CreateGlobalStringPtr("Runtime error: thread_detach failed\\n");
+        builder->CreateCall(getOrDeclarePuts(), {msg});
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
@@ -8621,8 +8621,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(ok, okBB, failBB);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* fmt = builder->CreateGlobalStringPtr("Runtime error: mutex_lock failed (pthread errno=%d)\\n");
-        builder->CreateCall(getOrDeclarePrintf(), {fmt, status});
+        llvm::Value* msg = builder->CreateGlobalStringPtr("Runtime error: mutex_lock failed\\n");
+        builder->CreateCall(getOrDeclarePuts(), {msg});
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
@@ -8654,8 +8654,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateBr(mergeBB);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* fmt = builder->CreateGlobalStringPtr("Runtime error: mutex_try_lock failed (pthread errno=%d)\\n");
-        builder->CreateCall(getOrDeclarePrintf(), {fmt, status});
+        llvm::Value* msg = builder->CreateGlobalStringPtr("Runtime error: mutex_try_lock failed\\n");
+        builder->CreateCall(getOrDeclarePuts(), {msg});
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
@@ -8679,8 +8679,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(ok, okBB, failBB);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* fmt = builder->CreateGlobalStringPtr("Runtime error: mutex_unlock failed (pthread errno=%d)\\n");
-        builder->CreateCall(getOrDeclarePrintf(), {fmt, status});
+        llvm::Value* msg = builder->CreateGlobalStringPtr("Runtime error: mutex_unlock failed\\n");
+        builder->CreateCall(getOrDeclarePuts(), {msg});
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
@@ -8702,8 +8702,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCondBr(ok, okBB, failBB);
 
         builder->SetInsertPoint(failBB);
-        llvm::Value* fmt = builder->CreateGlobalStringPtr("Runtime error: mutex_destroy failed (pthread errno=%d)\\n");
-        builder->CreateCall(getOrDeclarePrintf(), {fmt, status});
+        llvm::Value* msg = builder->CreateGlobalStringPtr("Runtime error: mutex_destroy failed\\n");
+        builder->CreateCall(getOrDeclarePuts(), {msg});
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 

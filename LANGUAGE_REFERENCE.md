@@ -6009,7 +6009,7 @@ Errors are reported in two tiers:
 | --- | --- |
 | Lexical | Unterminated string, invalid character, malformed numeric literal |
 | Syntactic | Missing `;`, mismatched braces, unexpected token |
-| Semantic | Undefined variable / function, duplicate `catch` key, `thread_create` non-literal arg, OPTMAX violation (§18.2) |
+| Semantic | Undefined variable / function, duplicate `catch` key, invalid `thread_create` target/signature, OPTMAX violation (§18.2) |
 | Type | OPTMAX type-annotation requirement, integer-cast on incompatible type |
 | Resource | Source file > 100 MB, parser nesting depth > 256, IR > 1,000,000 instructions |
 
@@ -7964,37 +7964,51 @@ OmScript's concurrency model is a thin layer over the host's POSIX threading pri
 
 ### 20.1 Threads
 
-#### 20.1.1 `thread_create(fn_name: string) → i64`
+#### 20.1.1 `thread_create(fn_name: string|identifier [, arg: int]) → i64`
 
-**Description:** Spawn a new OS thread that calls the OmScript function named by `fn_name`. The argument **must be a string literal** containing the name of an existing top-level function — it is resolved at compile time, not at runtime, and a non-literal or unknown name is a compile-time error.
+**Description:** Spawn a new OS thread that calls a top-level OmScript function. `fn_name` can be either:
+- a string literal (`"worker"`)
+- a function identifier (`worker`)
 
-The spawned thread executes `fn_name()` with **no arguments**; the target function's return value is discarded. To pass data into the thread, use module-level (`global var`) state guarded by a mutex.
+The target function must accept **0 or 1 parameter(s)**:
+- 0-arg target: call as `thread_create(worker)`
+- 1-arg target: call as `thread_create(worker, arg)`
+
+`thread_create` checks the target signature at compile time and emits an error for unsupported arity.
 
 **Returns:** A thread handle (`pthread_t` reinterpreted as `i64`). Pass this value to `thread_join`.
 
 **Errors:**
-- *Compile-time:* `thread_create requires a string literal function name` if the argument is not a string literal.
-- *Compile-time:* `thread_create: unknown function 'foo'` if the named function does not exist in the current translation unit.
+- *Compile-time:* `thread_create requires a function name (identifier or string literal) as argument 1`
+- *Compile-time:* `thread_create: unknown function 'foo'` if the function does not exist in the current translation unit.
+- *Compile-time:* arity mismatch errors when target takes 0 or 1 arg but call shape does not match.
+- *Runtime:* fatal diagnostic + abort if `pthread_create` fails.
 
 **Example:**
 ```omscript
 global var counter: int = 0;
 global var lock: int = 0;  // initialized in main()
 
-fn worker() {
+fn worker() -> int {
     mutex_lock(lock);
     counter = counter + 1;
     mutex_unlock(lock);
+    return 1;
+}
+
+fn worker_add(v: int) -> int {
+    return v + 10;
 }
 
 fn main() {
     lock = mutex_new();
-    var t1 = thread_create("worker");
-    var t2 = thread_create("worker");
-    thread_join(t1);
-    thread_join(t2);
+    var t1 = thread_create(worker);
+    var t2 = thread_create("worker_add", 32);
+    var r1 = thread_join(t1);     // 1
+    var r2 = thread_join(t2);     // 42
     mutex_destroy(lock);
-    println(counter);   // 2
+    println(counter);   // 1
+    println(r1 + r2);   // 43
     return 0;
 }
 ```
@@ -8003,16 +8017,32 @@ fn main() {
 
 #### 20.1.2 `thread_join(tid: i64) → i64`
 
-**Description:** Block the calling thread until the thread identified by `tid` has terminated. Internally calls `pthread_join(tid, NULL)` — the joined thread's return value is **discarded**, not returned to OmScript.
+**Description:** Block the calling thread until the thread identified by `tid` has terminated.
 
-**Returns:** Always `0`. (The return value exists only so the call can be used as an expression.)
+**Returns:** The worker function's integer return value (`i64`).
 
-**Errors:** Passing an invalid or already-joined `tid` invokes platform-defined behaviour from `pthread_join` (typically returns `EINVAL` or `ESRCH`); OmScript does not surface this.
+**Errors:** Runtime fatal diagnostic + abort if `pthread_join` fails (invalid/already-joined handle, etc.).
 
 **Example:**
 ```omscript
 var t = thread_create("worker");
-thread_join(t);
+var result = thread_join(t);
+```
+
+---
+
+#### 20.1.3 `thread_detach(tid: i64) → i64`
+
+**Description:** Mark a thread as detached. Detached threads release their resources automatically on completion and must not be joined.
+
+**Returns:** `0` on success.
+
+**Errors:** Runtime fatal diagnostic + abort if `pthread_detach` fails.
+
+**Example:**
+```omscript
+var t = thread_create(worker);
+thread_detach(t);
 ```
 
 ---
@@ -8021,7 +8051,7 @@ thread_join(t);
 
 Mutexes are heap-allocated `pthread_mutex_t` structures, returned as opaque `i64` handles. The allocation is sized at **64 bytes** — enough to cover `pthread_mutex_t` on every supported platform (40 bytes on Linux x86_64, 64 bytes on macOS) — and initialized via `pthread_mutex_init` with default attributes. Default-attribute mutexes are **non-recursive**: a thread that locks the same mutex twice without unlocking deadlocks.
 
-> **Note:** OmScript currently exposes only the four operations below. There is **no `mutex_try_lock`**, no read/write lock, and no condition variables.
+> **Note:** OmScript now exposes `mutex_try_lock` in addition to lock/unlock/destroy. There are still no read/write locks or condition variables in the core builtins.
 
 #### 20.2.1 `mutex_new() → i64`
 
@@ -8063,7 +8093,19 @@ mutex_unlock(m);
 
 ---
 
-#### 20.2.4 `mutex_destroy(m: i64) → i64`
+#### 20.2.4 `mutex_try_lock(m: i64) → i64`
+
+**Description:** Attempt to acquire `m` without blocking.
+
+**Returns:**
+- `1` if the mutex was acquired
+- `0` if the mutex is currently busy
+
+**Errors:** Runtime fatal diagnostic + abort for non-busy pthread errors.
+
+---
+
+#### 20.2.5 `mutex_destroy(m: i64) → i64`
 
 **Description:** Destroy the mutex via `pthread_mutex_destroy` and free its backing allocation. After this call the handle `m` is invalid and **must not be used**.
 
