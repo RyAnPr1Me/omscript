@@ -45,19 +45,35 @@
 
 ## 1. Overview
 
-OmScript is a **statically typed**, compiled programming language designed for high-performance computing with an emphasis on optimization, control, and clarity. All variable declarations require explicit type annotations. Arrays, maps, strings, and structs are represented as typed pointers in LLVM IR — there are no runtime type tags and no boxing. It compiles to native code via LLVM, offering manual control over optimization strategies while maintaining modern language ergonomics.
+OmScript is a **statically typed**, compiled programming language built for native performance, predictable behavior, and practical systems programming ergonomics. It compiles through LLVM and exposes both low-level control surfaces and high-level productivity features (collections, lambdas, structured diagnostics, and keyword sugar).
+
+Type annotations are supported across declarations and signatures, and local variable declarations may also use initializer-driven typing (for example `var score = 0;`). Composite runtime values such as arrays, maps, and strings are represented by runtime-managed heap structures accessed through typed pointers in generated IR.
+
+### 1.1 Document Scope and Conformance
+
+This document is the **language and tooling reference** for OmScript. It mixes:
+
+- **Normative language rules** (syntax/semantics the compiler enforces)
+- **Operational/tooling behavior** (CLI flags, diagnostics modes, optimization controls)
+- **Implementation notes** (internal pipeline and optimizer architecture)
+
+When this document uses RFC-style terms:
+
+- **MUST / MUST NOT** = mandatory compiler/runtime behavior
+- **SHOULD / SHOULD NOT** = recommended behavior or best practice
+- **MAY** = optional behavior/usage pattern
 
 ### Design Goals
 
-- **Performance**: Native compilation through LLVM with a multi-layer optimizer (AST pre-passes → E-graph → superoptimizer → HGOE)
-- **Control**: Fine-grained control over optimization strategies, vectorization, memory layout, and per-function annotations
-- **Explicit memory**: Arrays, maps, and strings are heap-allocated (`malloc`/`free`); the compiler promotes safe allocations to stack or read-only globals automatically; typed values are represented as LLVM pointer types throughout — no `ptrtoint` round-trips for typed array/struct/map variables
-- **Ergonomics**: Modern syntax with mandatory type annotations, functional programming builtins, lambdas, and pipe operator
-- **Compiler transparency**: Optimization feedback (`-v`), LLVM IR emission (`emit-ir`), and direct access to compiler hints via `@opt`, `@semantics`, `@memory`
+- **Performance**: Native LLVM-backed compilation with optimization controls for real workloads
+- **Control**: Fine-grained control over optimization strategy, memory behavior, and function-level hints
+- **Safety-oriented explicitness**: Ownership/memory rules are exposed as language features instead of hidden runtime magic
+- **Ergonomics**: Modern syntax with strong built-in collection/string APIs, lambdas, and concise keyword sugar
+- **Compiler transparency**: Diagnostics, optimization feedback, and IR emission are first-class toolchain features
 
 ### Source of Truth
 
-This reference is derived exclusively from the OmScript compiler implementation (lexer, parser, preprocessor, semantic analyzer, and code generator). Every feature, keyword, operator, and semantic rule documented here is verified against the source code in `src/` and `include/` directories. All code examples are working programs drawn from or validated against the `examples/` test suite.
+This reference is grounded in the OmScript implementation (`src/`, `include/`) and validated examples (`examples/`). If an inconsistency is discovered, **compiler behavior is authoritative** and this document should be updated accordingly.
 
 ### Compilation Pipeline
 
@@ -65,7 +81,7 @@ OmScript source code undergoes the following compilation stages:
 
 1. **Lexer** — Tokenizes source text into a stream of lexical tokens (keywords, identifiers, literals, operators, punctuation)
 2. **Parser** — Constructs an Abstract Syntax Tree (AST) from the token stream, enforcing syntactic rules; evaluates `comptime {}` blocks for conditional compilation and constant injection
-3. **Semantic Analysis** — Validates type consistency, resolves identifiers, enforces mandatory type annotations, and checks control-flow constraints
+3. **Semantic Analysis** — Validates type consistency, resolves identifiers, enforces declaration typing rules, and checks control-flow constraints
 4. **Code Generation** — Traverses the AST to emit LLVM IR, applying function annotations and optimization hints
 5. **Optimization Passes** — LLVM's optimization pipeline transforms the IR (inlining, vectorization, constant folding, dead-code elimination, loop transformations)
 6. **Object Code Emission** — LLVM backend generates native machine code for the target architecture
@@ -75,7 +91,7 @@ OmScript source code undergoes the following compilation stages:
 
 - **Lexical structure**: Keywords, identifiers, literals (integer, float, string, bytes, interpolated), operators, comments (§2)
 - **Conditional compilation**: `comptime {}` blocks, `comptime if COND {}` shorthand, built-in constants `OS`/`ARCH`/`VERSION`/`FILE`, `-D NAME[=VALUE]` CLI flags, `defined(NAME)` predicate (§3, §5.9)
-- **Type system**: Scalar types (signed/unsigned integers, floats, bool, string), composite types (arrays, dicts, structs, enums, pointers, SIMD vectors, bigint), mandatory type annotations (§4)
+- **Type system**: Scalar types (signed/unsigned integers, floats, bool, string), composite types (arrays, dicts, structs, enums, pointers, SIMD vectors, bigint), declaration typing rules (§4)
 - **Variables and constants**: `var`, `const`, `register var`, `atomic var`, `volatile var`, `global`, `comptime`, compound assignment, destructuring (§5)
 - **Functions**: Declaration syntax, parameters, return types, default parameters, expression-body functions, generics, annotations (`@opt(hot)`, `@semantics(pure)`, `@memory(allocator)`, etc.), tail calls, lambdas (§6)
 - **Control flow**: `if`/`elif`/`else`, `unless`, `guard`, `switch`, `when`, `defer`, `with`, branch hints (§7)
@@ -602,7 +618,7 @@ For a full migration guide and examples, see **§5.9.1** (`comptime {}` blocks).
 
 ## 4. Type System Overview
 
-OmScript is **statically typed** with **mandatory type annotations** on variable declarations (with limited inference). The type system includes scalar types (integers, floats, booleans, strings), composite types (arrays, dictionaries, structs, enums), pointer types, SIMD vectors, and arbitrary-precision integers (bigint).
+OmScript is **statically typed**. Variable declarations may be typed explicitly (`var x: int = 1;`) or inferred from an initializer (`var x = 1;`). The type system includes scalar types (integers, floats, booleans, strings), composite types (arrays, dictionaries, structs, enums), pointer types, SIMD vectors, and arbitrary-precision integers (bigint).
 
 ### 4.1 Type Annotation Syntax
 
@@ -623,27 +639,29 @@ fn add(a: int, b: int) -> int {
 
 **Return types**: Arrow `->` precedes the return type.
 
-### 4.2 Mandatory Type Annotations on Declarations
+### 4.2 Declaration Typing Rules
 
-**User-written variable declarations require explicit type annotations**. The compiler enforces this rule to ensure clarity and prevent accidental type mismatches.
+Variable declarations follow this rule:
 
-**Valid**:
+- A declaration MUST include either an explicit type annotation or an initializer expression.
+- A bare declaration with neither type nor initializer is invalid.
+
+**Valid examples**:
 ```omscript
 var x: int = 10;
 const pi: float = 3.14;
+var y = 20;
+const name = "Alice";
 ```
 
-**Invalid** (causes a parse error):
+**Invalid example** (causes a parse error):
 ```omscript
-var y = 20;       // Error: missing type annotation
-const name = "Alice";  // Error: missing type annotation
+var y;  // Error: requires type annotation or initializer
 ```
 
-**Exceptions**:
-- Compiler-generated variables (e.g., for-loop iterators, destructuring temporaries) are exempt
-- Variables with inherited type from multi-declaration (see §5.3)
-
-**Recent enforcement**: The mandatory type annotation rule was recently added; older code examples in the test suite may omit annotations, but current compiler versions require them.
+**Additional notes**:
+- In multi-variable declarations, later entries may inherit type from the first declaration.
+- Inside OPTMAX-restricted contexts, explicit annotations are required by parser rules.
 
 ### 4.3 Scalar Types
 
@@ -7979,6 +7997,12 @@ OmScript provides direct keyword sugar for common thread and mutex operations:
 | `trylock m` | `mutex_try_lock(m)` |
 
 `target` follows the same validation rules as `thread_create`: identifier or string literal naming an existing top-level function with arity 0 or 1.
+
+`spawn` intentionally requires **call-shaped syntax** for compact target forms:
+
+- ✅ `spawn worker()`
+- ✅ `spawn worker(arg)`
+- ❌ `spawn worker`
 
 **Example:**
 ```omscript
