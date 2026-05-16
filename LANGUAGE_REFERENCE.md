@@ -2247,6 +2247,25 @@ fn hot_kernel(n: int) -> int {
 
 ---
 
+#### `@deprecated` / `@deprecated("message")` — Call-Site Deprecation Warning
+
+Marks a function as deprecated. Calls still compile, but each call site emits a warning.
+
+```omscript
+@deprecated
+fn old_api(x: int) -> int { return x * 2; }
+
+@deprecated("use new_api() instead")
+fn legacy(x: int) -> int { return x + 1; }
+```
+
+**Semantics:**
+- Warning is emitted at call sites, not only at declaration.
+- `@deprecated("message")` appends the custom message to the warning text.
+- Works with regular calls and desugared call forms.
+
+---
+
 #### Deprecated Flat Annotations
 
 The individual flat forms (`@hot`, `@cold`, `@inline`, `@pure`, `@noreturn`, etc.) are **deprecated**.  They still compile — the compiler emits a warning and applies the same effect — but all new code should use the compound forms above.
@@ -4603,6 +4622,23 @@ var c = array_zip(a, b);  // [1, 10, 2, 20, 3, 30]
 
 ---
 
+#### `array_zip_with(array, array, fn) → array`
+
+**Signature:** `array_zip_with(array, array, function) → array`  
+**Semantics:** Return a NEW array where `result[i] = fn(a[i], b[i])`. Length is `min(len(a), len(b))`.  
+**Time:** O(min(len(a), len(b)) * cost(fn))
+
+**Example:**
+```omscript
+fn add(a: int, b: int) -> int { return a + b; }
+
+var xs = [1, 2, 3];
+var ys = [10, 20];
+var sums = array_zip_with(xs, ys, add);  // [11, 22]
+```
+
+---
+
 ### 11.7 Higher-order array operations and lambda interaction
 
 #### `array_map(array, fn) → array`
@@ -4774,6 +4810,25 @@ var flat: int[] = array_flatten(nested);
 println(flat[0]);  // 1
 println(flat[5]);  // 6
 ```
+
+---
+
+#### `array_chunk(array, i64) → array`
+
+**Signature:** `array_chunk(array, chunk_size) → array`  
+**Semantics:** Split an array into chunks of `chunk_size`. Returns an outer `int[]` where each element stores a sub-array pointer encoded as an integer; the final chunk may be shorter. `chunk_size` must be `>= 1`.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+var a = [1, 2, 3, 4, 5];
+var chunks = array_chunk(a, 2);
+var flat = array_flatten(chunks);   // [1, 2, 3, 4, 5]
+```
+
+**Notes:**
+- Use `array_flatten(chunks)` (or pass `chunks` into other array built-ins) when you need element-level access across all chunks.
+- This representation is low-level by design: each outer element is an encoded pointer to a sub-array.
 
 ---
 
@@ -5425,6 +5480,51 @@ var bad: int = str_to_int("abc");   // 0
 ```omscript
 var f: float = str_to_float("3.14");   // 3.14
 var g: float = str_to_float("1e5");    // 100000.0
+```
+
+---
+
+#### `str_hex(i64) → string`
+
+**Signature:** `str_hex(number) → string`  
+**Semantics:** Format the integer as a lowercase hexadecimal string (no `0x` prefix). Value is formatted using 64-bit integer bits.  
+**Time:** O(1)
+
+**Example:**
+```omscript
+println(str_hex(255));   // "ff"
+println(str_hex(16));    // "10"
+println(str_hex(0));     // "0"
+```
+
+---
+
+#### `str_bin(i64) → string`
+
+**Signature:** `str_bin(number) → string`  
+**Semantics:** Format the integer as a binary string with no leading zeros (except `0` itself).  
+**Time:** O(64)
+
+**Example:**
+```omscript
+println(str_bin(10));    // "1010"
+println(str_bin(255));   // "11111111"
+println(str_bin(0));     // "0"
+```
+
+---
+
+#### `str_oct(i64) → string`
+
+**Signature:** `str_oct(number) → string`  
+**Semantics:** Format the integer as an octal string with no leading zeros (except `0` itself).  
+**Time:** O(1)
+
+**Example:**
+```omscript
+println(str_oct(8));     // "10"
+println(str_oct(511));   // "777"
+println(str_oct(0));     // "0"
 ```
 
 ---
@@ -8556,6 +8656,7 @@ The following built-ins accept a lambda or a named function reference. See §11.
 | `array_count(arr, fn)` | `|x| → bool` |
 | `array_find(arr, value)` | plain value (not a function) — returns index of first equal element, or `-1` |
 | `array_find_index(arr, fn)` | `|x| → bool`, returns index of first matching element, or `-1` |
+| `array_zip_with(a, b, fn)` | `|x, y| → value`, returns element-wise map over `min(len(a), len(b))` |
 | `array_min_by(arr, fn)` | `|x| → key`, returns element with minimum key |
 | `array_max_by(arr, fn)` | `|x| → key`, returns element with maximum key |
 
