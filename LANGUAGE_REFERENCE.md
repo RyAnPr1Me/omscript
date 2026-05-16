@@ -359,6 +359,7 @@ var U: int = '\U00000041'; // 65 (long Unicode scalar form)
 **Rules:**
 - Exactly one character (or one escape sequence) between the single quotes
 - Supported escapes: `\n`, `\t`, `\r`, `\b`, `\f`, `\v`, `\\`, `\'`, `\0`, `\xHH` (two hex digits), `\uHHHH` (four hex digits), `\UHHHHHHHH` (eight hex digits)
+- This escape list applies to **character literals**; string literals use their own table below and reject null-byte escapes.
 - Yields a compile-time integer constant of type `i32` (the Unicode code point)
 - Character literals may be compared with integers directly: `c == 65` or `c == 'A'`
 
@@ -4867,6 +4868,9 @@ var s3 = "tab\tseparated";
 - `\n` — newline (0x0A)
 - `\t` — tab (0x09)
 - `\r` — carriage return (0x0D)
+- `\b` — backspace (0x08)
+- `\f` — form feed (0x0C)
+- `\v` — vertical tab (0x0B)
 - `\\` — backslash
 - `\"` — double quote
 - `\xHH` — hex escape (two hex digits)
