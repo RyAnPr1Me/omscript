@@ -4870,7 +4870,10 @@ var s3 = "tab\tseparated";
 - `\\` — backslash
 - `\"` — double quote
 - `\xHH` — hex escape (two hex digits)
-- `\0` — null (0x00)
+
+**Not supported in string literals**:
+- `\0` (null byte) is rejected
+- `\x00` (null byte via hex escape) is rejected
 
 **Storage:** String literals are stored as LLVM global constants (`.rodata` section) and referenced via `GlobalString`.
 
@@ -4878,16 +4881,17 @@ var s3 = "tab\tseparated";
 
 ### 12.3 String interpolation full rules
 
-**Syntax:** Embedded expressions within string literals using `${...}`:
+**Syntax:** Interpolation is supported with `$"..."` and `f"..."` forms. Expressions are embedded as `{...}`:
 ```omscript
 var x = 42;
-var s = "The answer is ${x}";  // "The answer is 42"
+var s1 = $"The answer is {x}";
+var s2 = f"The answer is {x}";  // alias form
 ```
 
 **Implementation:**
-1. Parser rewrites `"...${expr}..."` into `str_concat("...", to_string(expr), ...)`.
-2. Multiple interpolations are chained: `str_concat(str_concat(a, b), c)`.
-3. Nested expressions are evaluated left-to-right.
+1. The lexer/parser rewrites `$"..."` / `f"..."` into concatenation + conversion steps.
+2. Multiple interpolations are chained left-to-right.
+3. Nested expressions inside `{...}` are evaluated left-to-right.
 
 **Supported expression types:**
 - Integers → converted via `snprintf("%lld", ...)`
@@ -4899,7 +4903,7 @@ var s = "The answer is ${x}";  // "The answer is 42"
 ```omscript
 var x = 10;
 var y = 20;
-println("x=${x}, y=${y}, sum=${x+y}");  // "x=10, y=20, sum=30"
+println($"x={x}, y={y}, sum={x+y}");  // "x=10, y=20, sum=30"
 ```
 
 ---
@@ -11385,14 +11389,14 @@ fn multiply_add(a: int, b: int, c: int) -> int {
 
 ### Version
 
-**OmScript Compiler Version**: `4.4.0`
+**OmScript Compiler Version**: `4.9.0`
 
 Defined in `include/version.h`:
 ```cpp
 #define OMSCRIPT_VERSION_MAJOR 4
-#define OMSCRIPT_VERSION_MINOR 4
+#define OMSCRIPT_VERSION_MINOR 9
 #define OMSCRIPT_VERSION_PATCH 0
-#define OMSC_VERSION "4.4.0"
+#define OMSC_VERSION "4.9.0"
 ```
 
 ### Stability Statement
