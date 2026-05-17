@@ -2,8 +2,6 @@
 
 ## Table of Contents
 
-This reference is organized into three parts: language core, runtime/library semantics, and toolchain/internals.
-
 ### Part 1 — Language Core
 
 - [1. Overview](#1-overview) — scope, authority, usage guide, notation, design goals
@@ -1134,7 +1132,7 @@ Placed immediately before `struct`, `@repr(...)` controls the memory layout of t
 | `@repr(packed)` | Minimal memory — no padding bytes inserted between fields. |
 | `@repr(align(N))` | Force the struct's alloca to be at least `N`-byte aligned (N must be a power of two). |
 | `@repr(auto)` | Compiler optimizes layout freely (default). |
-| `@repr(soa)` | Structure-of-arrays layout hint — **Reserved**: recorded in AST but not yet applied by any layout pass. Has no effect on the current compiler output. Track future activation in `CHANGELOG.md` under `Unreleased`. |
+| `@repr(soa)` | Structure-of-arrays layout hint — **Partially supported**: syntax is parsed and recorded in the AST, but no layout transformation is applied yet. Has no effect on the current compiler output. |
 
 ```omscript
 @repr(C)
@@ -11440,7 +11438,7 @@ fn greet(name: string) {  // no return type
 ```
 
 ### Control Flow
-> Parentheses around `if` / `for` / `while` conditions are optional in OmScript; both styles are accepted.
+> Parentheses around `if` / `for` / `while` conditions are optional. Both `if x > 0 {` and `if (x > 0) {` are accepted.
 
 ```omscript
 if x > 0 {
@@ -11671,7 +11669,7 @@ Defined in `include/version.h`:
 **Deprecated features** (to be removed in v5.0):
 1. **Legacy direct mode**: `omsc file.om` (use `omsc compile file.om`).
 2. **Implicit parameter/return types**: Functions without explicit `-> type` or parameter type annotations will require them.
-3. **Global mutable variables**: Will require an explicit qualifier (planned — exact keyword is **Reserved** for v5.0; not yet enforced).
+3. **Global mutable variables**: Will require an explicit qualifier in v5.0. The exact keyword has not yet been chosen and is not currently enforced.
 
 **Migration guide**:
 ```omscript
