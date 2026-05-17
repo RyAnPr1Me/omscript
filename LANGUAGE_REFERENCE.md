@@ -2903,7 +2903,7 @@ fn sum_to_four() -> int {
 | Skip optional block | `if (!condition) { ... }` |
 | Retry / retry loop | `while (condition) { ... }` |
 | Counted loop | `for i in start..end { ... }` |
-| Early exit from nested loops | Labeled `break` / `continue` (`outer: while (cond) { ... continue outer; ... break outer; }`) |
+| Early exit from nested loops | Labeled `break` / `continue` (see §8.15; e.g. `outer: while (cond) { ... continue outer; ... break outer; }`) |
 
 ---
 
