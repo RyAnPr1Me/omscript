@@ -87,7 +87,7 @@ This reference is written as a **production-facing specification for the compile
 
 ### 1.4 Editorial and Notation Conventions
 
-- Inline code font (for example `fn`, `var`, `thread_join`) names exact source syntax.
+- Inline code font (e.g. `fn`, `var`, `thread_join`) names exact source syntax.
 - Angle-bracket metavariables such as `<Type>` or `<Expr>` describe grammar placeholders, not literal tokens.
 - Square brackets in syntax descriptions mean **optional** elements unless the brackets are shown inside a code block.
 - Examples are informative unless a rule explicitly says **MUST**, **MUST NOT**, **SHOULD**, or **MAY**.
@@ -2903,7 +2903,7 @@ fn sum_to_four() -> int {
 | Skip optional block | `if (!condition) { ... }` |
 | Retry / retry loop | `while (condition) { ... }` |
 | Counted loop | `for i in start..end { ... }` |
-| Early exit from nested loops | Labeled `break` / `continue` (`outer: loop { ... break outer; }`) |
+| Early exit from nested loops | Labeled `break` / `continue` (`outer: while (cond) { ... break outer; }`) |
 
 ---
 
