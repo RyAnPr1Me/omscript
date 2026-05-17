@@ -505,7 +505,35 @@ var s2: string = f"value is {n}";   // f"..." alias — identical result
 
 **Nested interpolations**: Not supported directly; use intermediate variables.
 
-#### 2.5.8 Null Literal
+#### 2.5.8 Raw String Literals
+
+A **raw string literal** is prefixed with `r` and disables all escape-sequence processing — backslashes are taken verbatim.
+
+**Single-line form**: `r"..."` — backslashes are literal, no escape sequences are recognised.
+
+```omscript
+var pat: string = r"\d+\.\d+";   // two-character sequences \d, \., etc. preserved
+var path: string = r"C:\Users\Alice\Documents";
+println(r"\n");  // prints the two characters \ and n, not a newline
+```
+
+**Multi-line form**: `r"""..."""` — spans multiple lines with no escape interpretation.
+
+```omscript
+var query: string = r"""
+SELECT *
+FROM users
+WHERE path LIKE 'C:\Users\%'
+""";
+```
+
+**Rules**:
+- The `r` prefix is part of the lexeme, not the string value.
+- Mixing with `$"..."` / `f"..."` is not supported — raw strings cannot be interpolated.
+- The null-byte restriction applies as in regular strings (raw strings cannot contain a literal NUL byte).
+- Otherwise, all characters including `\` and `"` (except the closing `"` / `"""`) are passed through unchanged.
+
+#### 2.5.9 Null Literal
 
 The **null literal** is the keyword `null`.
 
@@ -1829,6 +1857,39 @@ const [first, _, third] = [100, 200, 300];
 - Array length must match the number of variables (no partial destructuring or rest syntax)
 - Only single-level destructuring supported (no nested destructuring of nested arrays)
 
+### 5.11.2 Tuple Destructuring
+
+**Syntax**: `var (a, b [, c ...]) = expr;` or `const (a, b) = expr;`
+
+**Semantics**:
+- Declares multiple variables by unpacking a struct-like tuple value returned from a function
+- The parenthesized form targets **tuple values** (struct fields `.0`, `.1`, `.2`, …), while the bracket form (`var [a, b]`) targets arrays
+- Underscore `_` as a placeholder skips an element
+- Works with both `var` and `const`
+
+**Desugaring**:
+```omscript
+var (x, y) = get_coords();
+// ↓ desugars to:
+var __tdestr_0 = get_coords();
+var x = __tdestr_0.0;
+var y = __tdestr_0.1;
+```
+
+**Example**:
+```omscript
+fn get_point() -> Point {
+    return Point { x: 3, y: 4 };
+}
+
+var (px, py) = get_point();
+println(px);  // 3
+println(py);  // 4
+
+// Skip an element with _:
+var (first, _, third) = get_triple();
+```
+
 ### 5.12 Scope Rules
 
 **Block scope**: Variables declared in a block `{ ... }` are visible only within that block and nested blocks.
@@ -2037,7 +2098,35 @@ fn main() {
 
 **Limitations**:
 - All parameters with defaults must appear after non-default parameters
-- No named argument syntax (call with positional arguments only)
+
+### 6.3.1 Named Call Arguments
+
+**Syntax**: `function(name: value, name2: value2, ...)`
+
+**Semantics**:
+- Individual arguments may be named using `name: value` syntax at the call site.
+- Named arguments are reordered to match the function's **declaration parameter order** at compile time.
+- Positional and named arguments may be mixed: positional arguments must appear **before** named arguments.
+- Unknown argument names in functions with known declarations fall through with the argument in the given position order.
+
+**Example**:
+```omscript
+fn create_rect(width: int, height: int, filled: int) -> int {
+    return width * height + filled;
+}
+
+// Named arguments — any order:
+var r1 = create_rect(height: 5, width: 4, filled: 0);   // → create_rect(4, 5, 0)
+var r2 = create_rect(width: 4, height: 5, filled: 1);   // → create_rect(4, 5, 1)
+
+// Mixed positional + named (positional first):
+var r3 = create_rect(4, height: 5, filled: 0);  // width=4 positional, rest named
+```
+
+**Restrictions**:
+- Named arguments are resolved using the parameter names from the **declaration** (`fn` definition) in the current translation unit.
+- Calling built-in functions or functions from other modules with named arguments is supported on a best-effort basis.
+- Duplicate argument names cause a compile-time error.
 
 ### 6.4 Expression-Body Functions
 
@@ -3512,7 +3601,29 @@ var has_char: bool = "e" in s;  // true (substring search)
 
 **Result type**: `bool`
 
-### 9.7 Range `..` and `...`
+### 9.6.1 `not in` Operator (Negated Membership)
+
+**Syntax**: `element not in collection`
+
+**Semantics**: `x not in collection` is sugar for `!array_contains(collection, x)`. Works for integer and string arrays. Combines naturally with `if`, `while`, `unless`, and other control flow.
+
+**Example (array)**:
+```omscript
+var arr: int[] = [1, 2, 3];
+if 5 not in arr {
+    println("5 is absent");  // prints
+}
+```
+
+**Example (string check)**:
+```omscript
+var banned: string[] = ["foo", "bar"];
+if "baz" not in banned {
+    println("safe");  // prints
+}
+```
+
+**Result type**: `bool` (`1` = not present, `0` = present)
 
 **Exclusive range `..`**: `start..end` creates a half-open range `[start, end)`.
 
@@ -4596,6 +4707,20 @@ println(array_last(a));  // 30
 
 ---
 
+#### `array_first(array) → i64`
+
+**Signature:** `array_first(array) → i64`  
+**Semantics:** Return the first element. Runtime error (with message) if array is empty. Counterpart to `array_last`.  
+**Time:** O(1)
+
+**Example:**
+```omscript
+var a = [10, 20, 30];
+println(array_first(a));  // 10
+```
+
+---
+
 #### `array_take(array, n) → array`
 
 **Signature:** `array_take(array, i64) → array`  
@@ -5097,6 +5222,19 @@ println(str_len("hello"));  // 5
 
 ---
 
+#### `str_is_empty(string) → i64`
+
+**Semantics:** Return `1` if the string has zero characters, `0` otherwise. Compile-time folded for literal arguments. Equivalent to `str_len(s) == 0` but more readable.  
+**Time:** O(n) (single length-load + compare)
+
+**Example:**
+```omscript
+println(str_is_empty(""));       // 1
+println(str_is_empty("hello"));  // 0
+```
+
+---
+
 #### `char_at(string, i64) → i64`
 
 **Semantics:** Return the ASCII value of the character at index `i`. Runtime error if out-of-bounds.  
@@ -5247,6 +5385,20 @@ println(str_upper("hello"));  // "HELLO"
 **Example:**
 ```omscript
 println(str_lower("HELLO"));  // "hello"
+```
+
+---
+
+#### `str_capitalize(string) → string`
+
+**Semantics:** Return a NEW string with the **first character** converted to uppercase and all remaining characters converted to lowercase. Compile-time folded for literal arguments. Empty string returns empty string.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+println(str_capitalize("hello world"));  // "Hello world"
+println(str_capitalize("HELLO"));        // "Hello"
+println(str_capitalize(""));             // ""
 ```
 
 ---
@@ -5778,6 +5930,38 @@ map_set(m, 10, 50);
 map_set(m, 20, 200);
 var m2 = map_filter(m, keep_large_vals);
 println(map_size(m2));  // 1
+```
+
+---
+
+#### `map_copy(dict) → dict`
+
+**Semantics:** Return a fully independent shallow copy of `dict`. All live key-value pairs are re-inserted into a newly allocated map. Modifications to the original after copying do not affect the copy and vice versa.  
+**Time:** O(n)
+
+**Example:**
+```omscript
+var m = map_new();
+map_set(m, 1, 100);
+var c = map_copy(m);
+map_set(m, 2, 200);      // modifying original...
+println(map_has(c, 2));  // 0  (copy is independent)
+println(map_get(c, 1));  // 100
+```
+
+---
+
+#### `map_clear(dict) → dict`
+
+**Semantics:** Return a fresh empty map, effectively resetting the dictionary. The argument is evaluated for side effects but its allocation is no longer referenced. Semantically equivalent to `map_new()` but more expressive at a call site where the intent is "reset this map".  
+**Time:** O(1)
+
+**Example:**
+```omscript
+var m = map_new();
+map_set(m, 1, 100);
+m = map_clear(m);
+println(map_size(m));  // 0
 ```
 
 ---
