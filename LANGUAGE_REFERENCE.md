@@ -509,7 +509,7 @@ var s2: string = f"value is {n}";   // f"..." alias — identical result
 
 A **raw string literal** is prefixed with `r` and disables all escape-sequence processing — backslashes are taken verbatim.
 
-**Single-line form**: `r"..."` — backslashes are literal, no escape sequences are recognised.
+**Single-line form**: `r"..."` — backslashes are literal, no escape sequences are recognized.
 
 ```omscript
 var pat: string = r"\d+\.\d+";   // two-character sequences \d, \., etc. preserved
@@ -532,6 +532,7 @@ WHERE path LIKE 'C:\Users\%'
 - Mixing with `$"..."` / `f"..."` is not supported — raw strings cannot be interpolated.
 - The null-byte restriction applies as in regular strings (raw strings cannot contain a literal NUL byte).
 - Otherwise, all characters including `\` and `"` (except the closing `"` / `"""`) are passed through unchanged.
+- If you need unescaped double quotes inside a raw string, use the triple-quoted raw form.
 
 #### 2.5.9 Null Literal
 
@@ -1488,7 +1489,7 @@ fn tight_loop(n: int) -> int {
 - Every **load** of `name` compiles to an LLVM `load atomic … seq_cst` instruction.
 - Every **store** to `name` (including the initializer) compiles to an LLVM `store atomic … seq_cst` instruction.
 - `++` / `--` compile to a single `atomicrmw add/sub … seq_cst` (indivisible read-modify-write).
-- Compound assignments `+=`, `-=`, `&=`, `|=`, `^=` compile to `atomicrmw add/sub/and/or/xor … seq_cst` when the pattern `x = x OP rhs` is recognised; otherwise a seq-cst load → compute → seq-cst store sequence is emitted.
+- Compound assignments `+=`, `-=`, `&=`, `|=`, `^=` compile to `atomicrmw add/sub/and/or/xor … seq_cst` when the pattern `x = x OP rhs` is recognized; otherwise a seq-cst load → compute → seq-cst store sequence is emitted.
 - The variable's `alloca` is given natural ABI alignment so the hardware can perform the atomic operation without a fallback lock.
 - The AST-level **CopyProp** and **CSE** passes treat atomic variables as *opaque* — their values are never forwarded or hoisted, because any read may return a value written by another thread.
 - `!invariant.load` and `!noundef` metadata are suppressed on atomic loads.
@@ -1765,7 +1766,7 @@ fn main() -> int {
 
 #### 5.9.2 Expression-context `comptime { ... }` — Compile-Time Value Computation
 
-Used as an **expression** (inside a function or initialiser), a `comptime { ... }` block is evaluated at compile time by the CF-CTRE engine and replaced with the resulting constant value.
+Used as an **expression** (inside a function or initializer), a `comptime { ... }` block is evaluated at compile time by the CF-CTRE engine and replaced with the resulting constant value.
 
 **Syntax**: `comptime { statements; return expr; }`
 
@@ -1863,9 +1864,10 @@ const [first, _, third] = [100, 200, 300];
 
 **Semantics**:
 - Declares multiple variables by unpacking a value returned from an expression
-- The parenthesized form accesses fields `.0`, `.1`, `.2`, … — these are the **integer field indices** of the OmScript tuple/struct representation. The compiler synthesises these indexed-field accesses; the struct does not need to declare fields literally named `0`, `1`, etc.
+- The parenthesized form accesses fields `.0`, `.1`, `.2`, … — these are the **integer field indices** of the OmScript tuple/struct representation. The compiler synthesizes these indexed-field accesses; the struct does not need to declare fields literally named `0`, `1`, etc.
 - Underscore `_` as a placeholder skips an element
 - Works with both `var` and `const`
+- Arity must match: attempting to destructure more fields than exist is a compile-time error.
 
 **Desugaring**:
 ```omscript
@@ -2110,22 +2112,23 @@ fn main() {
 
 **Example**:
 ```omscript
-fn create_rect(width: int, height: int, filled: int) -> int {
-    return width * height + filled;
+fn create_rect(width: int, height: int, is_filled: int) -> int {
+    return width * height + is_filled;
 }
 
 // Named arguments — any order:
-var r1 = create_rect(height: 5, width: 4, filled: 0);   // → create_rect(4, 5, 0)
-var r2 = create_rect(width: 4, height: 5, filled: 1);   // → create_rect(4, 5, 1)
+var r1 = create_rect(height: 5, width: 4, is_filled: 0);   // → create_rect(4, 5, 0)
+var r2 = create_rect(width: 4, height: 5, is_filled: 1);   // → create_rect(4, 5, 1)
 
 // Mixed positional + named (positional first):
-var r3 = create_rect(4, height: 5, filled: 0);  // width=4 positional, rest named
+var r3 = create_rect(4, height: 5, is_filled: 0);  // width=4 positional, rest named
 ```
 
 **Restrictions**:
-- Named arguments are resolved using the parameter names from the **declaration** (`fn` definition) in the current translation unit. When the function declaration is known, unrecognised argument names produce a compile-time error.
+- Named arguments are resolved using the parameter names from the **declaration** (`fn` definition) in the current translation unit. When the function declaration is known, unrecognized argument names produce a compile-time error.
 - When calling a function whose declaration is not visible (e.g., a built-in or a function resolved by string-literal forwarding), named-argument labels are silently ignored and arguments are passed in the order they appear at the call site — i.e., the call degrades to positional.
 - Duplicate argument names at the same call site cause a compile-time error.
+- In mixed calls, all positional arguments must come first; positional arguments after a named argument are a compile-time error.
 
 ### 6.4 Expression-Body Functions
 
@@ -2816,7 +2819,7 @@ Asserts to the optimizer that `expression` evaluates to an integer within the in
 - **Compile-time check**: if `expression` folds to a known integer constant outside `[lo, hi]`, the compiler emits a hard error and produces no IR.
 - **Runtime hint**: otherwise, codegen emits `@llvm.assume(val >= lo && val <= hi)` and attaches `!range !{lo, hi+1}` metadata to load/call results so LLVM's LVI / CorrelatedValuePropagation / SCEV / InstCombine can propagate the bound.
 - **Non-negativity**: when `lo >= 0` the value is also recorded in the codegen's non-negative set, so OmScript-level passes (foreach-range fusion, array-length CSE, sign-bit elision) can skip their own non-negativity guards.
-- **Pure hint**: never affects observable behaviour — only optimization. Works on any expression that produces an integer (loads, calls, arithmetic, etc.).
+- **Pure hint**: never affects observable behavior — only optimization. Works on any expression that produces an integer (loads, calls, arithmetic, etc.).
 
 **Example**:
 ```omscript
@@ -2867,7 +2870,7 @@ These three constructs feed information to the optimizer. They emit **no runtime
 assume(b != 0);                     // statement
 var q: int = a / assume(b != 0);    // expression position also accepted
 ```
-Tells the optimizer to treat `cond` as true — implemented by lowering to `llvm.assume(cond)`. **No runtime check is emitted.** If `cond` is actually false at runtime, the program has undefined behaviour (the optimizer may have deleted code, mis-folded values, etc.). Use only for invariants you can prove.
+Tells the optimizer to treat `cond` as true — implemented by lowering to `llvm.assume(cond)`. **No runtime check is emitted.** If `cond` is actually false at runtime, the program has undefined behavior (the optimizer may have deleted code, mis-folded values, etc.). Use only for invariants you can prove.
 
 **`else deopt` form — statement only:**
 ```omscript
@@ -2884,7 +2887,7 @@ This form **does** emit a runtime check. If the condition is true the body is sk
 ```omscript
 unreachable();
 ```
-Marks a code path as never executed. Lowers to LLVM's `unreachable` instruction — reaching it at runtime is **undefined behaviour** (the compiler is free to delete preceding code that would lead here). Use at the bottom of `switch` defaults that should be impossible, or after `exit`/`abort` calls the optimizer doesn't recognize.
+Marks a code path as never executed. Lowers to LLVM's `unreachable` instruction — reaching it at runtime is **undefined behavior** (the compiler is free to delete preceding code that would lead here). Use at the bottom of `switch` defaults that should be impossible, or after `exit`/`abort` calls the optimizer doesn't recognize.
 
 #### `expect(value, expected)`
 
@@ -5487,7 +5490,7 @@ println(words[0]);    // "a"
 #### `str_to_lines(string) → string[]`
 
 **Signature:** `str_to_lines(string) → string[]`  
-**Semantics:** Split `string` at newline characters and return the resulting lines as an array of strings. Both Unix (`\n`) and Windows (`\r\n`) line endings are handled — any trailing `\r` is stripped from each line before it is stored. A trailing newline at the end of the input does **not** produce an empty final element (matches Python's `str.splitlines()` behaviour). Compile-time folded for string literals.  
+**Semantics:** Split `string` at newline characters and return the resulting lines as an array of strings. Both Unix (`\n`) and Windows (`\r\n`) line endings are handled — any trailing `\r` is stripped from each line before it is stored. A trailing newline at the end of the input does **not** produce an empty final element (matches Python's `str.splitlines()` behavior). Compile-time folded for string literals.  
 **Time:** O(n)
 
 **Example:**
@@ -5954,7 +5957,7 @@ println(map_get(c, 1));  // 100
 
 #### `map_clear(dict) → dict`
 
-**Semantics:** Returns a fresh, independently allocated empty dictionary. Does **not** modify the input — the input dict and its memory are unaffected. The intended usage pattern is `m = map_clear(m);`, which rebinds `m` to the new empty map (the old map becomes unreachable). Semantically equivalent to `map_new()` but makes the "reset this variable" intent explicit at the call site.  
+**Semantics:** Returns a fresh, independently allocated empty dictionary. Does **not** modify the input dictionary in place. The intended usage pattern is `m = map_clear(m);`, which rebinds `m` to the new empty map. OmScript dictionaries are manually managed; if the original map is no longer referenced after rebinding, it becomes unreachable. Semantically equivalent to `map_new()` but makes the "reset this variable" intent explicit at the call site.  
 **Time:** O(1)
 
 **Example:**
@@ -6366,10 +6369,10 @@ assert_call ::= 'assert' '(' expression ')'
 
 **`assert(cond)` vs `assume(cond)`:**
 
-| Built-in | Failure behaviour | Compiler treatment |
+| Built-in | Failure behavior | Compiler treatment |
 | --- | --- | --- |
 | `assert(cond)` | Aborts the program at runtime | Emits a real check |
-| `assume(cond)` | **Undefined behaviour** if violated | Lowers to `llvm.assume` — no runtime check, used as an optimization hint (§7.10) |
+| `assume(cond)` | **Undefined behavior** if violated | Lowers to `llvm.assume` — no runtime check, used as an optimization hint (§7.10) |
 
 Use `assert` for safety-critical invariants you want enforced. Use `assume` only when you can prove the predicate holds and want the optimizer to exploit it.
 
@@ -6750,17 +6753,17 @@ println(r2);  // 42
 | Address-of | `&x` | Take address of `x`; produces `ptr<T>` |
 | Allocate | `alloc<T>(n)` / `new T(n)` | Allocate `n` elements of type `T` |
 | Allocate 1 | `alloc<T>()` / `new T` | Allocate exactly 1 element (Ω spec §4.1) |
-| Allocate + init | `new T { field: val, ... }` | Allocate one `T` and initialise its fields |
+| Allocate + init | `new T { field: val, ... }` | Allocate one `T` and initialize its fields |
 | Dereference read | `*p` | Load value through pointer |
 | Dereference write | `*p = v` | Store value through pointer (Ω spec §4.2) |
 | Arithmetic | `p + n`, `p - n` | Advance by `n * sizeof(T)` (Ω spec §4.4) |
 | Null | `null`, `nullptr` | Zero-address pointer (Ω spec §2.2) |
 | Free | `invalidate p` | Deferred `free()` at CFG exit |
-| In-place init | `construct p { field: val, ... };` | Initialise fields of already-allocated `ptr<T>` |
+| In-place init | `construct p { field: val, ... };` | Initialize fields of already-allocated `ptr<T>` |
 
 #### 17.9.2 `alloc<T>` — Raw Compile-Time Smart Allocator
 
-`alloc<T>(n)` decides allocation strategy entirely at **compile time** — no runtime branching is emitted. Returns **raw (uninitialised)** memory. Three tiers:
+`alloc<T>(n)` decides allocation strategy entirely at **compile time** — no runtime branching is emitted. Returns **raw (uninitialized)** memory. Three tiers:
 
 | Tier | Condition | Strategy | Notes |
 | --- | --- | --- | --- |
@@ -6776,16 +6779,16 @@ println(r2);  // 42
 - `llvm.assume(ptr != null)` and `llvm.assume(ptr % alignof(T) == 0)` are emitted — vectorizer and IndVars can exploit alignment without runtime checks.
 
 ```omscript
-var arr: ptr<i64> = alloc<i64>(4);   // T1: stack alloca, raw (uninitialised)
+var arr: ptr<i64> = alloc<i64>(4);   // T1: stack alloca, raw (uninitialized)
 var big: ptr<i64> = alloc<i64>(2048); // T2: arena GEP, raw
 var one: ptr<i64> = alloc<i64>();    // 1 element, raw
 ```
 
 ---
 
-#### 17.9.2a `new T(n)` — Zero-Initialised Allocation
+#### 17.9.2a `new T(n)` — Zero-Initialized Allocation
 
-`new T(n)` is semantically distinct from `alloc<T>(n)`. It uses the same three-tier compile-time allocation strategy but **guarantees zero-initialised memory** — all bytes are set to zero before the pointer is returned.
+`new T(n)` is semantically distinct from `alloc<T>(n)`. It uses the same three-tier compile-time allocation strategy but **guarantees zero-initialized memory** — all bytes are set to zero before the pointer is returned.
 
 For **struct element types**, `new T(n)` goes one step further than a flat `memset`: it emits explicit per-field typed stores (with per-field TBAA metadata) so the optimizer can see each field write individually and apply SROA, copy propagation, and alias analysis more aggressively.
 
@@ -6795,17 +6798,17 @@ For **struct element types**, `new T(n)` goes one step further than a flat `mems
 | **T2 Arena** | arena GEP + same field-by-field zero stores for structs; `memset` for scalars |
 | **T3 Heap** | `calloc(n, sizeof(T))` — OS-level zeroing, no extra call |
 
-`new T` (no parens) zero-initialises exactly 1 element.
+`new T` (no parens) zero-initializes exactly 1 element.
 
 ```omscript
-var arr: ptr<i64> = new i64(4);    // T1: zero-initialised (all 0)
+var arr: ptr<i64> = new i64(4);    // T1: zero-initialized (all 0)
 fn dyn(n: int) -> ptr<i64> {
     return new i64(n);             // T3: calloc (n is dynamic)
 }
-var one: ptr<i64> = new i64;       // 1 element, zero-initialised
+var one: ptr<i64> = new i64;       // 1 element, zero-initialized
 
 struct Point { x, y }
-var p: ptr<Point> = new Point;     // T1: both fields zero-initialised via typed stores
+var p: ptr<Point> = new Point;     // T1: both fields zero-initialized via typed stores
 var pts: ptr<Point> = new Point(3);// T1: all 3 elements, all fields zero
 ```
 
@@ -6817,21 +6820,21 @@ var pts: ptr<Point> = new Point(3);// T1: all 3 elements, all fields zero
 | --- | --- |
 | Raw speed, you will write every field before reading | `alloc<T>(n)` |
 | Safety by default — zero is a valid sentinel / default | `new T(n)` |
-| Allocate + initialise specific fields immediately | `new T { field: val, ... }` |
-| Allocate many + initialise one at a time | `alloc<T>(n)` + `construct p { ... };` |
+| Allocate + initialize specific fields immediately | `new T { field: val, ... }` |
+| Allocate many + initialize one at a time | `alloc<T>(n)` + `construct p { ... };` |
 
 ---
 
 #### 17.9.2b `construct` Statement — In-Place Field Initialisation
 
-`construct ptr { field: val, ... };` initialises the fields of an already-allocated struct pointer in place. It lowers with **zero abstraction cost** to a sequence of typed `GEP` + `store` pairs — exactly what writing `ptr->x = val; ptr->y = val;` by hand would produce, but with automatic per-field TBAA metadata and correct alignment from the struct definition.
+`construct ptr { field: val, ... };` initializes the fields of an already-allocated struct pointer in place. It lowers with **zero abstraction cost** to a sequence of typed `GEP` + `store` pairs — exactly what writing `ptr->x = val; ptr->y = val;` by hand would produce, but with automatic per-field TBAA metadata and correct alignment from the struct definition.
 
 **Syntax:**
 ```
 construct TARGET { FIELD: EXPR [, FIELD: EXPR]* [,] };
 ```
 
-Where `TARGET` is any expression returning a `ptr<T>` and `FIELD: EXPR` pairs provide field initialisers.  Trailing commas are allowed.  Fields not listed are **left as-is** (uninitialised if from `alloc<T>`, zero if from `new T`).
+Where `TARGET` is any expression returning a `ptr<T>` and `FIELD: EXPR` pairs provide field initializers.  Trailing commas are allowed.  Fields not listed are **left as-is** (uninitialized if from `alloc<T>`, zero if from `new T`).
 
 **Example:**
 ```omscript
@@ -6865,13 +6868,13 @@ construct (arr + i) { x: 5, y: 10 };
 
 #### 17.9.2c `new T { ... }` Expression — Allocation + Field Construction
 
-`new T { field: val, ... }` is an **expression** that combines `alloc<T>(1)` (raw allocation) with an immediate `construct` statement.  It returns a `ptr<T>` with exactly the listed fields initialised and unlisted fields **uninitialised**.
+`new T { field: val, ... }` is an **expression** that combines `alloc<T>(1)` (raw allocation) with an immediate `construct` statement.  It returns a `ptr<T>` with exactly the listed fields initialized and unlisted fields **uninitialized**.
 
-Use `new T { ... }` when you want to initialise exactly the fields you need and skip the rest for maximum performance. Use `new T(1)` + `construct` if you prefer separate alloc and init steps.
+Use `new T { ... }` when you want to initialize exactly the fields you need and skip the rest for maximum performance. Use `new T(1)` + `construct` if you prefer separate alloc and init steps.
 
 **Allocation + field comparison:**
 
-| Form | Allocates | Zero-fills all | Initialises specific fields | Count |
+| Form | Allocates | Zero-fills all | Initializes specific fields | Count |
 | --- | --- | --- | --- | --- |
 | `alloc<T>(n)` | ✓ | ✗ | ✗ | `n` |
 | `new T(n)` | ✓ | ✓ | ✗ | `n` |
@@ -7347,7 +7350,7 @@ Natural log.
 
 #### `log2(numeric) → i64 | f64`
 
-Base-2 logarithm. Behaviour depends on the **argument type**:
+Base-2 logarithm. Behavior depends on the **argument type**:
 
 - **Integer argument** → returns `i64` (the floor of `log2(n)`). Implemented as `63 - clz(n)` via the `llvm.ctlz.i64` intrinsic, so it lowers to a single `BSR`/`LZCNT` on x86. Returns `-1` if `n ≤ 0`.
 - **Float argument** → returns `f64` from `llvm.log2.f64` (only used when the argument is statically a float in a comptime-folding context; the runtime path is integer-only).
@@ -8287,7 +8290,7 @@ OmScript ships a minimal row-major dense-matrix API on top of arrays. Matrices a
 
 #### `mat_new(rows: i64, cols: i64) → array`
 
-Allocate a new `rows × cols` matrix, zero-initialised. Returns an opaque array handle.
+Allocate a new `rows × cols` matrix, zero-initialized. Returns an opaque array handle.
 
 #### `mat_fill(rows: i64, cols: i64, value: i64) → array`
 
@@ -8527,7 +8530,7 @@ mutex_unlock(m);
 
 #### 20.2.3 `mutex_unlock(m: i64) → i64`
 
-**Description:** Release the mutex `m`. Wraps `pthread_mutex_unlock`. The current thread must own the mutex; unlocking a mutex held by another thread is undefined behaviour at the pthread level.
+**Description:** Release the mutex `m`. Wraps `pthread_mutex_unlock`. The current thread must own the mutex; unlocking a mutex held by another thread is undefined behavior at the pthread level.
 
 **Returns:** Always `0`.
 
@@ -8551,7 +8554,7 @@ mutex_unlock(m);
 
 **Returns:** Always `0`.
 
-**Errors:** Destroying a locked mutex is undefined behaviour at the pthread level.
+**Errors:** Destroying a locked mutex is undefined behavior at the pthread level.
 
 ---
 
@@ -8634,7 +8637,7 @@ OmScript offers three tiers of shared-memory semantics:
 | `mutex_lock` / `mutex_unlock` | Acquire / release barrier | Acquire-release — publishes all prior writes to the next lock holder | Critical sections protecting complex invariants (structs, arrays, etc.) |
 
 **Plain variables and data races**:
-Plain loads and stores compile to LLVM unordered memory operations. The compiler is permitted to reorder, cache, or eliminate them. Accessing a plain variable from multiple threads without synchronization is a **data race** and is undefined behaviour. Protect plain shared state with a mutex.
+Plain loads and stores compile to LLVM unordered memory operations. The compiler is permitted to reorder, cache, or eliminate them. Accessing a plain variable from multiple threads without synchronization is a **data race** and is undefined behavior. Protect plain shared state with a mutex.
 
 **`atomic var` and seq-cst ordering**:
 `atomic var` operations use `seq_cst` (sequentially consistent) ordering — the strongest LLVM memory ordering. All seq-cst operations across all threads occur in a single total order visible to every thread. This is sufficient for most lock-free patterns. It is **not** necessary to use a mutex to protect a plain integer if it is declared `atomic`.
@@ -10379,7 +10382,7 @@ Implemented in `src/polyopt.cpp` (~1,800 lines). The polyhedral optimizer:
 | `l1CacheBytes` | `0` (auto-detect via TTI) | L1 data-cache size used to choose tile sizes |
 | `l2CacheBytes` | `0` (auto-detect) | L2 data-cache size for outer-tile sizing |
 | `cacheLineBytes` | `64` | Cache line size in bytes (x86-64 default) |
-| `maxLoopDepth` | `6` | Maximum loop-nest depth analysed (deeper nests have exponential analysis cost) |
+| `maxLoopDepth` | `6` | Maximum loop-nest depth analyzed (deeper nests have exponential analysis cost) |
 | `maxScopStatements` | `32` | Maximum statements per SCoP — larger SCoPs are bypassed |
 
 **Legality**: A transform is legal iff the transformed dependence distance vectors are lexicographically non-negative.
@@ -11585,12 +11588,12 @@ var sub: string = str_substr(s, 0, 3);   // "hel"
 ```omscript
 struct Node { value: int; next: ptr<Node>; }
 
-// alloc<T>(n) — raw uninitialised allocation (T1: stack, T2: arena, T3: heap)
+// alloc<T>(n) — raw uninitialized allocation (T1: stack, T2: arena, T3: heap)
 var p: ptr<Node> = alloc<Node>(1);
 construct p { value: 42, next: nullptr };
 
-// new T(n) — zero-initialised allocation
-var arr: ptr<int> = new int(8);   // 8 zero-initialised i64 slots
+// new T(n) — zero-initialized allocation
+var arr: ptr<int> = new int(8);   // 8 zero-initialized i64 slots
 
 // invalidate — explicit free (compiler enforces ownership rules)
 invalidate p;
@@ -11601,7 +11604,7 @@ invalidate arr;
 ```omscript
 struct Point { x: int; y: int; }
 
-// Raw allocation — uninitialised memory (fastest when you write every field)
+// Raw allocation — uninitialized memory (fastest when you write every field)
 var p: ptr<Point> = alloc<Point>(1);
 
 // In-place field initialisation on already-allocated memory (zero-cost GEP+store)
@@ -11610,11 +11613,11 @@ construct p {
     y: 20,
 };
 
-// Zero-initialised allocation — all bytes zeroed before use
+// Zero-initialized allocation — all bytes zeroed before use
 var zp: ptr<Point> = new Point;       // calloc(1, sizeof(Point))
 var zi: ptr<i64>   = new i64(8);      // calloc(8, sizeof(i64))
 
-// Allocate + initialise specific fields in one expression (alloc + field stores)
+// Allocate + initialize specific fields in one expression (alloc + field stores)
 var q: ptr<Point> = new Point { x: 3, y: 4 };
 println(q->x);  // 3
 
@@ -11782,6 +11785,6 @@ fn compute(x: int) -> int {
 - **LLVM 19**: supported — `llvm::Intrinsic::getOrInsertDeclaration` replaces `getDeclaration` (`#if LLVM_VERSION_MAJOR >= 19`).
 - **LLVM 20–21**: supported — `VirtualFileSystem.h` include path changed in 22 (`#if LLVM_VERSION_MAJOR < 22`); `Attribute::NoCapture` replaced by `captures(none)` in 21 (`#if LLVM_VERSION_MAJOR >= 21`).
 - **LLVM 22+**: `llvm/Passes/PassPlugin.h` moved to `llvm/Plugins/PassPlugin.h` — handled via `#if LLVM_VERSION_MAJOR >= 22`; `VirtualFileSystem.h` removed; Polly plugin path updated. All known breaking API changes are guarded.
-- **macOS ARM64 (Apple Silicon)**: fully supported. The data layout and target triple are initialised at the start of `generate()` (via `InitializeNativeTarget` + `createTargetMachine` + `setDataLayout`) before any IR is emitted, ensuring correct ABI alignment for all types including `i64` (align 8, not 4).
+- **macOS ARM64 (Apple Silicon)**: fully supported. The data layout and target triple are initialized at the start of `generate()` (via `InitializeNativeTarget` + `createTargetMachine` + `setDataLayout`) before any IR is emitted, ensuring correct ABI alignment for all types including `i64` (align 8, not 4).
 
 **End of Part 3**
