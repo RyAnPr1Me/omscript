@@ -93,7 +93,7 @@ This reference is written as a **production-facing specification for the compile
 - Examples are informative unless a rule explicitly says **MUST**, **MUST NOT**, **SHOULD**, or **MAY**.
 - Status markers are used consistently:
   - **Fully implemented** — supported in current compiler behavior.
-  - **Partially supported** — accepted only in the documented subset.
+  - **Partially supported** — accepted only in the documented subset; read the feature's section for the exact supported forms and limits.
   - **Deprecated** — still accepted, but emits warnings or is scheduled for removal.
   - **Removed** — no longer accepted by the compiler.
   - **Reserved** — token/word is set aside for future syntax and cannot be used normally.
