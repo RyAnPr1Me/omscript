@@ -1675,6 +1675,10 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                     if (structNames_.count(qualName)) {
                         structNames_.insert(shortName);
                     }
+                    // If the qualified name is also an enum name, expose bare enum alias too.
+                    if (enumNames_.count(qualName)) {
+                        bareEnumNames_[shortName] = qualName;
+                    }
                 }
             }
         }
@@ -1779,6 +1783,10 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     for (const auto& name : importParser.enumNames_) {
         enumNames_.insert(name);
     }
+    // Import bare enum name aliases
+    for (const auto& [shortName, qualName] : importParser.bareEnumNames_) {
+        bareEnumNames_[shortName] = qualName;
+    }
 
     // Import global variables: derive the alias stem if none was given.
     std::string globalAlias = alias;
@@ -1839,6 +1847,12 @@ void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& function
             const std::string qualName = nsName + "::" + shortName;
             en->name = qualName;
             nsMap[shortName] = qualName;
+            // Register the qualified name in enumNames_ so that 3-segment access
+            // (e.g. Status::Code::OK) can identify the prefix as an enum.
+            enumNames_.insert(qualName);
+            // Also map the short name → qualified name so that bare enum access
+            // (e.g. Code::OK inside namespace functions) resolves correctly.
+            bareEnumNames_[shortName] = qualName;
             enums.push_back(std::move(en));
         } else if (match(TokenType::NAMESPACE)) {
             // Nested namespace: namespace Outer { namespace Inner { ... } }
@@ -6629,11 +6643,19 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                         }
                     }
                 }
-                // Fallback: classic enum member access
-                auto e = std::make_unique<ScopeResolutionExpr>(segments[0], segments[1]);
-                e->line = token.line;
-                e->column = token.column;
-                return e;
+                // Fallback: classic enum member access — also handle bare enum names that
+                // were declared inside a namespace (e.g. `Code::OK` inside namespace Status
+                // should emit ScopeResolutionExpr("Status::Code", "OK")).
+                {
+                    std::string scopeName = segments[0];
+                    auto bev = bareEnumNames_.find(scopeName);
+                    if (bev != bareEnumNames_.end())
+                        scopeName = bev->second;
+                    auto e = std::make_unique<ScopeResolutionExpr>(scopeName, segments[1]);
+                    e->line = token.line;
+                    e->column = token.column;
+                    return e;
+                }
             }
             // Multi-level value reference without '()': attempt global lookup,
             // then check for struct literal, then try function reference, then error.
@@ -6661,6 +6683,29 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                 // Try namespace function reference for multi-level paths:
                 // e.g. array_map(arr, Ops::Math::square) — resolve to IdentifierExpr("Ops::Math::square").
                 // Also check for struct literals: e.g. Geom::Shape::Circle { cx: 0, cy: 0, r: 3 }.
+                // Also check for enum access: Ns::EnumType::VARIANT → ScopeResolutionExpr(qualEnum, member).
+                // Build prefix path (all segments except last) and check if it's a known enum.
+                {
+                    std::string enumPrefix;
+                    for (size_t i = 0; i + 1 < segments.size(); ++i) {
+                        if (i > 0) enumPrefix += "::";
+                        enumPrefix += segments[i];
+                    }
+                    const std::string& memberName = segments.back();
+                    // Also try resolving via bareEnumNames_ (e.g. Ns::BareCode::OK where BareCode is short)
+                    std::string resolvedEnum = enumPrefix;
+                    {
+                        auto bev = bareEnumNames_.find(enumPrefix);
+                        if (bev != bareEnumNames_.end())
+                            resolvedEnum = bev->second;
+                    }
+                    if (enumNames_.count(resolvedEnum)) {
+                        auto e = std::make_unique<ScopeResolutionExpr>(resolvedEnum, memberName);
+                        e->line = token.line;
+                        e->column = token.column;
+                        return e;
+                    }
+                }
                 for (int cut = (int)segments.size() - 1; cut >= 1; --cut) {
                     std::string ns;
                     for (int i = 0; i < cut; ++i) {

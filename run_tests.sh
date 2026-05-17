@@ -951,6 +951,7 @@ ptest_program "examples/round81_thread_keywords_test.om" 6
 ptest_program "examples/round82_nested_namespace_test.om" 12
 ptest_program "examples/round83_ns_fnref_test.om" 5
 ptest_program "examples/round84_ns_struct_test.om" 6
+ptest_program "examples/round85_ns_enum_test.om" 7
 flush_ptests
 
 echo ""

@@ -233,6 +233,12 @@ class Parser {
     /// Known enum names for scope resolution validation.
     std::unordered_set<std::string> enumNames_;
 
+    /// Maps bare enum short-names to their qualified names when enums are declared
+    /// inside a namespace block.  e.g.  "Code" → "Status::Code" after:
+    ///   namespace Status { enum Code { OK, ERR } }
+    /// Used to resolve `Code::OK` as `ScopeResolutionExpr("Status::Code", "OK")`.
+    std::unordered_map<std::string, std::string> bareEnumNames_;
+
     /// Parameter names for user-defined functions, populated during the
     /// forward-declaration pre-scan pass.  Used to resolve named call
     /// arguments: foo(height: 3, width: 4) → reorder to match decl order.

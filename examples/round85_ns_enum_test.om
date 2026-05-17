@@ -1,0 +1,71 @@
+// round85_ns_enum_test.om
+// Verifies namespace enum access improvements:
+//   - Ns::EnumType::VARIANT (3-segment enum access)
+//   - Bare EnumType::VARIANT inside namespace function bodies
+//   - when/match with namespace enum variants
+//   - Nested namespace enum access
+// Expected exit code: 7
+
+namespace Status {
+    enum Code { OK, ERR, PENDING }
+
+    // Uses bare enum name 'Code' inside namespace functions
+    fn is_ok(c: int) -> int {
+        when c {
+            Code::OK => { return 1; }
+            _ => { return 0; }
+        }
+    }
+
+    fn describe(c: int) -> int {
+        when c {
+            Code::OK      => { return 10; }
+            Code::ERR     => { return 20; }
+            Code::PENDING => { return 30; }
+            _ => { return 99; }
+        }
+    }
+
+    namespace Net {
+        enum Method { GET, POST, PUT }
+
+        fn is_safe(m: int) -> int {
+            // bare 'Method' in nested namespace
+            when m {
+                Method::GET => { return 1; }
+                _ => { return 0; }
+            }
+        }
+    }
+}
+
+fn main() {
+    var pass = 0;
+
+    // 3-segment enum access: Ns::EnumType::VARIANT
+    var c = Status::Code::OK;
+    if c == Status::Code::OK { pass = pass + 1; }
+    if c != Status::Code::ERR { pass = pass + 1; }
+
+    // Namespace function using bare enum in when
+    var r = Status::is_ok(Status::Code::OK);
+    if r == 1 { pass = pass + 1; }
+
+    var r2 = Status::is_ok(Status::Code::ERR);
+    if r2 == 0 { pass = pass + 1; }
+
+    // More enum variants
+    var d = Status::describe(Status::Code::PENDING);
+    if d == 30 { pass = pass + 1; }
+
+    // Nested namespace enum (3-segment from top + member)
+    var m = Status::Net::Method::GET;
+    var safe = Status::Net::is_safe(m);
+    if safe == 1 { pass = pass + 1; }
+
+    var m2 = Status::Net::Method::POST;
+    var safe2 = Status::Net::is_safe(m2);
+    if safe2 == 0 { pass = pass + 1; }
+
+    return pass;
+}
