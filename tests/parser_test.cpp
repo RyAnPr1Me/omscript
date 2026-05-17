@@ -13,7 +13,7 @@ static std::unique_ptr<Program> parse(const std::string& src) {
     return parser.parse();
 }
 
-static std::vector<std::string> parseWarnings(const std::string& src) {
+static std::vector<std::string> extractParserWarnings(const std::string& src) {
     Lexer lexer(src);
     auto tokens = lexer.tokenize();
     Parser parser(tokens);
@@ -205,13 +205,13 @@ TEST(ParserTest, FunctionCall) {
 }
 
 TEST(ParserTest, NamedArgsWarnWhenCalleeUnresolved) {
-    const auto warnings = parseWarnings("fn main() { foo(a: 1, b: 2); }");
+    const auto warnings = extractParserWarnings("fn main() { foo(a: 1, b: 2); }");
     ASSERT_EQ(warnings.size(), 1u);
     EXPECT_NE(warnings[0].find("named arguments ignored for unresolved call 'foo'"), std::string::npos);
 }
 
 TEST(ParserTest, NamedArgsDoNotWarnWhenCalleeKnown) {
-    const auto warnings = parseWarnings("fn foo(a: int, b: int) {} fn main() { foo(b: 2, a: 1); }");
+    const auto warnings = extractParserWarnings("fn foo(a: int, b: int) {} fn main() { foo(b: 2, a: 1); }");
     EXPECT_TRUE(warnings.empty());
 }
 

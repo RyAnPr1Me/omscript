@@ -5648,9 +5648,9 @@ std::unique_ptr<Expression> Parser::parseCall() {
                     // Unknown function — append named args in the order given
                     if (!namedArgs.empty()) {
                         const NamedArg& firstNamed = namedArgs.front();
-                        warnings_.push_back("warning: named arguments ignored for unresolved call '" + calleeName +
-                                            "' (line " + std::to_string(firstNamed.line) + ":" +
-                                            std::to_string(firstNamed.column) + ")");
+                        warnings_.push_back("line " + std::to_string(firstNamed.line) + ":" +
+                                            std::to_string(firstNamed.column) +
+                                            ": named arguments ignored for unresolved call '" + calleeName + "'");
                     }
                     arguments = std::move(positionalArgs);
                     for (auto& na : namedArgs)
