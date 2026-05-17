@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-87: Namespace type aliases + qualified type annotations** (`src/parser.cpp`, `examples/round87_ns_type_qualtype_test.om`, `run_tests.sh`):
+  - Added `type` alias declarations inside `namespace` blocks.
+  - Added namespace-qualified type annotation support (`A::B::Type`) in variable, parameter, and return type positions, including array forms like `A::B::Type[]`.
+  - Added `examples/round87_ns_type_qualtype_test.om` and wired it into `run_tests.sh`.
+
+- **Round-86: Namespace global declarations** (`src/parser.cpp`, `examples/round86_ns_global_test.om`, `run_tests.sh`):
+  - Added `global var` and `global const` support inside namespace blocks.
+  - Added qualified namespace-global access resolution for flat and nested paths (`Ns::name`, `A::B::name`).
+  - Added `examples/round86_ns_global_test.om` and wired it into `run_tests.sh`.
+
+- **Round-85: Namespace enum path resolution improvements** (`src/parser.cpp`, `examples/round85_ns_enum_test.om`, `run_tests.sh`):
+  - Added robust enum variant path resolution for `Ns::Enum::VARIANT` and deeper nested namespace forms.
+  - Improved enum usability in `when` patterns within namespace scopes.
+  - Added `examples/round85_ns_enum_test.om` and wired it into `run_tests.sh`.
+
+- **Round-84: Namespace struct resolution improvements** (`src/parser.cpp`, `examples/round84_ns_struct_test.om`, `run_tests.sh`):
+  - Added multi-level namespace struct literal resolution (`Ns::Sub::Struct { ... }`).
+  - Improved namespace-local struct name usability in type annotations and method bodies.
+  - Added `examples/round84_ns_struct_test.om` and wired it into `run_tests.sh`.
+
+- **Round-83: Namespace function references in non-call positions** (`src/parser.cpp`, `examples/round83_ns_fnref_test.om`, `run_tests.sh`):
+  - Added namespace-qualified function symbol resolution in value positions (for example callback arguments), not only direct calls.
+  - Added `examples/round83_ns_fnref_test.om` and wired it into `run_tests.sh`.
+
+- **Round-82: Nested user-defined namespaces** (`src/parser.cpp`, `examples/round82_nested_namespace_test.om`, `run_tests.sh`):
+  - Added nested namespace declaration/lookup support for arbitrarily deep `A::B::C` paths.
+  - Added `examples/round82_nested_namespace_test.om` and wired it into `run_tests.sh`.
+
 - **Round-81: Threading keyword syntax sugar (`spawn`/`join`/`detach`/`lock`/`unlock`/`trylock`)** (`include/lexer.h`, `src/lexer.cpp`, `src/parser.cpp`, `src/main.cpp`, `README.md`, `LANGUAGE_REFERENCE.md`):
   - Added new reserved keywords for concurrency ergonomics: `spawn`, `join`, `detach`, `lock`, `unlock`, and `trylock`.
   - Parser now desugars keyword forms directly into existing builtins:

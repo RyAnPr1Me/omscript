@@ -8984,7 +8984,7 @@ Both forms are equivalent in semantics; the choice is stylistic.
 
 ### 23.8 User-defined namespaces
 
-OmScript supports user-defined namespace blocks that group functions, structs, and enums under a named scope. Namespaces may be nested to arbitrary depth.
+OmScript supports user-defined namespace blocks that group declarations under a named scope. Namespaces may be nested to arbitrary depth.
 
 **Syntax — flat namespace:**
 ```omscript
@@ -9013,7 +9013,7 @@ namespace Geo {
 }
 ```
 
-Declarations inside a `namespace` block are registered with their fully qualified names (`Math::add`, `Math::Vec2`, `Geo::Point::make`) and must be called that way unless the namespace is imported.
+Declarations inside a `namespace` block are registered with their fully qualified names (`Math::add`, `Math::Vec2`, `Geo::Point::make`) and must be accessed that way unless the namespace is imported.
 
 **Qualified access — flat:**
 ```omscript
@@ -9025,6 +9025,32 @@ var v = Math::Vec2 { x: 1, y: 2 }; // qualified struct literal
 ```omscript
 var p  = Geo::Point::make(5, 7);         // two-level
 var dp = Geo::Vector::dot(1, 2, 3, 4);  // sibling inner namespace
+```
+
+**Qualified function names in value position (callbacks):**
+```omscript
+import std;
+
+namespace Ops {
+    fn double_val(x: int) -> int { return x * 2; }
+    namespace Inner {
+        fn triple(x: int) -> int { return x * 3; }
+    }
+}
+
+var a = [1, 2, 3];
+var b = array_map(a, Ops::double_val);   // non-call symbol position
+var c = array_map(a, Ops::Inner::triple);
+```
+
+**Namespace-qualified type annotations:**
+```omscript
+namespace Math {
+    type Scalar = int;
+}
+
+var x: Math::Scalar = 42;
+var xs: Math::Scalar[] = [1, 2, 3];
 ```
 
 Nesting can go to three or more levels:
@@ -9052,7 +9078,20 @@ var v = Vec2 { x: 1, y: 2 }; // equivalent to Math::Vec2 { x: 1, y: 2 }
 - `fn` — function definitions
 - `struct` — struct type definitions
 - `enum` — enum definitions
+- `global var` / `global const` — namespace-scoped globals (**Fully implemented**)
+- `type` — type aliases (**Fully implemented**)
 - `namespace` — nested namespace blocks (**Fully implemented**)
+
+**Namespace globals:**
+```omscript
+namespace Config {
+    global var VERSION: int = 42;
+    global const PORT: int = 8080;
+}
+
+var v = Config::VERSION;
+var p = Config::PORT;
+```
 
 Multiple `namespace Math { ... }` blocks in the same file are additive (they extend the same namespace registry entry).
 
