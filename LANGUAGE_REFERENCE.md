@@ -2,44 +2,57 @@
 
 ## Table of Contents
 
-**Part 1 — Language Core**
-1. [Overview](#1-overview) — §1.1 Scope & Conformance, §1.2 Release Alignment, §1.3 How to Use, §1.4 Notation Conventions, §1.5 Design Goals, §1.6 Source of Truth, §1.7 Compilation Pipeline, §1.8 High-Level Feature Map
-2. [Lexical Structure](#2-lexical-structure)
-3. [Preprocessor](#3-preprocessor)
-4. [Type System Overview](#4-type-system-overview) — scalar types, composite types, `ptr<T>`, `pslice<T>`, `funcptr`, `bigint`, SIMD
-5. [Variables, Constants, and Comptime](#5-variables-constants-and-comptime) — `var`, `const`, `register var`, `atomic var`, `volatile var`, `global`, `comptime`, predefined constants (`INT_MAX`, `I8_MIN`, `U32_MAX`, …)
-6. [Functions](#6-functions)
-7. [Control Flow](#7-control-flow)
-8. [Loops](#8-loops)
-9. [Operators and Expressions](#9-operators-and-expressions) — arithmetic, comparison, logical, bitwise, `as` cast, `??`, `in`, range, spread, pipe `|>`, precedence table
-10. [Collection Literals and Indexing](#10-collection-literals-and-indexing)
+This reference is organized in three parts: language core, runtime/library semantics, and toolchain/internals. Use the quick navigation guide at the end of this section if you are jumping in for a specific task.
 
-**Part 2 — Standard Library and Semantics**
-11. [Arrays — Complete API](#11-arrays--complete-api)
-12. [Strings — Complete API](#12-strings--complete-api)
-13. [Dictionaries / Maps — Complete API](#13-dictionaries--maps--complete-api)
-14. [Structs](#14-structs)
-15. [Enums](#15-enums)
-16. [Error Handling](#16-error-handling)
-17. [Memory and Ownership System](#17-memory-and-ownership-system) — Ω Ownership spec v1.0: `move`, `borrow`, `shared`, `own`, `freeze`, `invalidate`, `ptr<T>`, `alloc<T>`, `nullptr`, `*p = v`, E015–E022, constraint matrix, `--no-ownership-checks`, `--mem-sanitize`
-18. [OPTMAX](#18-optmax)
-19. [Built-in Functions](#19-built-in-functions) — I/O, math, type conversions, `random`, character predicates, HTTP, `range`/`range_step`, matrix, bigint, optimizer hints
-20. [Concurrency](#20-concurrency)
-21. [File I/O](#21-file-io)
-22. [Lambda Expressions](#22-lambda-expressions)
-23. [Import / Module System](#23-import--module-system)
+### Part 1 — Language Core
 
-**Part 3 — Toolchain and Internals**
-24. [Compiler CLI Reference](#24-compiler-cli-reference)
-25. [Compilation Pipeline (Internal)](#25-compilation-pipeline-internal)
-26. [Advanced Optimization Features](#26-advanced-optimization-features)
-27. [Integer Type-Cast Reference](#27-integer-type-cast-reference)
-28. [CF-CTRE — Cross-Function Compile-Time Reasoning Engine](#28-cf-ctre--cross-function-compile-time-reasoning-engine)
-29. [std::synthesize — Compile-Time Program Synthesis](#29-stdsynthesize--compile-time-program-synthesis)
-30. [Build System and Project Layout](#30-build-system-and-project-layout)
-31. [Quick-Start Cheat Sheet](#31-quick-start-cheat-sheet)
-32. [Glossary](#32-glossary)
-33. [Version & Compatibility](#33-version--compatibility)
+- [1. Overview](#1-overview) — scope, authority, reading guide, notation, design goals, pipeline, feature map
+- [2. Lexical Structure](#2-lexical-structure) — encoding, comments, identifiers, keywords, literals, operators
+- [3. Preprocessor](#3-preprocessor) — compile-time directives, `-D`, conditional inclusion, predefined macros
+- [4. Type System Overview](#4-type-system-overview) — scalar/composite types, `ptr<T>`, `pslice<T>`, `funcptr`, `bigint`, SIMD
+- [5. Variables, Constants, and Comptime](#5-variables-constants-and-comptime) — `var`, `const`, qualifiers, `global`, `comptime`, predefined integer constants
+- [6. Functions](#6-functions) — declarations, parameters, defaults, annotations, lambdas, tail calls
+- [7. Control Flow](#7-control-flow) — `if`, `unless`, `guard`, `switch`, `when`, `defer`, `with`, branch hints
+- [8. Loops](#8-loops) — `while`, `for`, `foreach`, `repeat`, `parallel`, loop annotations
+- [9. Operators and Expressions](#9-operators-and-expressions) — casts, `??`, `in`, `not in`, ranges, spread, pipe, precedence
+- [10. Collection Literals and Indexing](#10-collection-literals-and-indexing) — arrays, slices, dicts, structs, enums, indexing rules
+
+### Part 2 — Runtime, Standard Library, and Semantics
+
+- [11. Arrays — Complete API](#11-arrays--complete-api) — creation, transforms, search helpers, utilities
+- [12. Strings — Complete API](#12-strings--complete-api) — construction, slicing, predicates, conversions, formatting helpers
+- [13. Dictionaries / Maps — Complete API](#13-dictionaries--maps--complete-api) — lifecycle, mutation, lookup, iteration, copying
+- [14. Structs](#14-structs) — declarations, layout control, field access, methods
+- [15. Enums](#15-enums) — declarations, values, matching, usage patterns
+- [16. Error Handling](#16-error-handling) — `throw`, `catch`, assertion semantics, diagnostics
+- [17. Memory and Ownership System](#17-memory-and-ownership-system) — Ω Ownership spec v1.0, `move`, `borrow`, `shared`, `own`, `freeze`, `invalidate`, allocation forms, diagnostics
+- [18. OPTMAX](#18-optmax) — optimization regions, intent, controls, limits
+- [19. Built-in Functions](#19-built-in-functions) — I/O, math, conversions, `random`, character predicates, HTTP, range, matrix, bigint, optimizer hints
+- [20. Concurrency](#20-concurrency) — threading keywords, thread built-ins, mutexes, memory model
+- [21. File I/O](#21-file-io) — file handles, reads/writes, lifecycle
+- [22. Lambda Expressions](#22-lambda-expressions) — syntax, captures, call behavior
+- [23. Import / Module System](#23-import--module-system) — imports, resolution model, module boundaries
+
+### Part 3 — Toolchain and Internals
+
+- [24. Compiler CLI Reference](#24-compiler-cli-reference) — build/run flags, diagnostics, warnings, output modes
+- [25. Compilation Pipeline (Internal)](#25-compilation-pipeline-internal) — passes, orchestration, dependency tracking
+- [26. Advanced Optimization Features](#26-advanced-optimization-features) — polyhedral optimizer, e-graph, vectorization, scheduling
+- [27. Integer Type-Cast Reference](#27-integer-type-cast-reference) — cast matrix and truncation/extension rules
+- [28. CF-CTRE — Cross-Function Compile-Time Reasoning Engine](#28-cf-ctre--cross-function-compile-time-reasoning-engine) — compile-time propagation and reasoning
+- [29. std::synthesize — Compile-Time Program Synthesis](#29-stdsynthesize--compile-time-program-synthesis) — synthesis model, constraints, examples
+- [30. Build System and Project Layout](#30-build-system-and-project-layout) — source tree, build entry points, major directories
+- [31. Quick-Start Cheat Sheet](#31-quick-start-cheat-sheet) — high-signal examples and common forms
+- [32. Glossary](#32-glossary) — terminology used throughout the reference
+- [33. Version & Compatibility](#33-version--compatibility) — supported platforms, LLVM versions, compatibility notes
+
+### Quick Navigation by Task
+
+- **Learning the language:** [Overview](#1-overview) → [Type System Overview](#4-type-system-overview) → [Functions](#6-functions) → [Control Flow](#7-control-flow) → [Loops](#8-loops)
+- **Working with collections:** [Collection Literals and Indexing](#10-collection-literals-and-indexing) → [Arrays](#11-arrays--complete-api) → [Strings](#12-strings--complete-api) → [Dictionaries / Maps](#13-dictionaries--maps--complete-api)
+- **Systems programming:** [Memory and Ownership System](#17-memory-and-ownership-system) → [Built-in Functions](#19-built-in-functions) → [Concurrency](#20-concurrency) → [File I/O](#21-file-io)
+- **Compiler/tooling usage:** [Compiler CLI Reference](#24-compiler-cli-reference) → [Quick-Start Cheat Sheet](#31-quick-start-cheat-sheet) → [Version & Compatibility](#33-version--compatibility)
+- **Optimization and internals:** [OPTMAX](#18-optmax) → [Compilation Pipeline (Internal)](#25-compilation-pipeline-internal) → [Advanced Optimization Features](#26-advanced-optimization-features) → [CF-CTRE](#28-cf-ctre--cross-function-compile-time-reasoning-engine)
 
 ---
 
@@ -79,11 +92,19 @@ This reference is written as a **production-facing specification for the compile
 
 ### 1.3 How to Use This Reference
 
-- Read **§1–§10** for the core language surface.
-- Read **§11–§23** for runtime semantics, the standard library, memory, concurrency, and modules.
-- Read **§24–§33** for compiler operation, CLI usage, optimization controls, and implementation-facing details.
+Use the table below as the recommended reading order:
+
+| Goal | Start here | Then read |
+| --- | --- | --- |
+| Learn the surface language | §1 Overview | §2–§10 |
+| Work with built-in collections/runtime APIs | §10 Collection Literals | §11–§13, §19 |
+| Understand ownership, allocation, and systems behavior | §17 Memory and Ownership System | §19–§23 |
+| Use the compiler effectively | §24 Compiler CLI Reference | §31 Quick-Start Cheat Sheet, §33 Version & Compatibility |
+| Investigate optimizer/internals behavior | §18 OPTMAX | §25–§29 |
+
 - Treat explicitly marked **Deprecated**, **Removed**, **Reserved**, and **Partially supported** notes as normative status markers, not commentary.
-- When onboarding new users, prefer linking to the exact section that defines the behavior instead of duplicating the rule elsewhere.
+- For authoritative answers, prefer the most specific feature section over overview prose.
+- When onboarding new users, link to the defining section instead of duplicating the rule elsewhere.
 
 ### 1.4 Editorial and Notation Conventions
 
