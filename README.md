@@ -2,7 +2,7 @@
 
 A low-level, C-like systems programming language with **static typing**, **explicit memory management** (no garbage collector, no reference counting), and a **heavily optimized AOT compiler** built on LLVM. OmScript pairs a safe, ownership-aware surface syntax with a multi-layer optimization engine — AST pre-passes, equality-saturation E-graph, superoptimizer, and a hardware-graph-driven instruction scheduler — that produces near-optimal native machine code for each target CPU.
 
-**Current version: 4.4.0** | [Language Reference](LANGUAGE_REFERENCE.md) | [Changelog](CHANGELOG.md)
+**Current version: 4.9.0** | [Language Reference](LANGUAGE_REFERENCE.md) | [Changelog](CHANGELOG.md)
 
 ---
 

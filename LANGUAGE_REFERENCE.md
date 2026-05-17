@@ -3,7 +3,7 @@
 ## Table of Contents
 
 **Part 1 — Language Core**
-1. [Overview](#1-overview)
+1. [Overview](#1-overview) — §1.1 Scope & Conformance, §1.2 Release Alignment, §1.3 How to Use, §1.4 Notation Conventions, §1.5 Design Goals, §1.6 Source of Truth, §1.7 Compilation Pipeline, §1.8 High-Level Feature Map
 2. [Lexical Structure](#2-lexical-structure)
 3. [Preprocessor](#3-preprocessor)
 4. [Type System Overview](#4-type-system-overview) — scalar types, composite types, `ptr<T>`, `pslice<T>`, `funcptr`, `bigint`, SIMD
@@ -98,7 +98,7 @@ This reference is written as a **production-facing specification for the compile
   - **Removed** — no longer accepted by the compiler.
   - **Reserved** — token/word is set aside for future syntax and cannot be used normally.
 
-### Design Goals
+### 1.5 Design Goals
 
 - **Performance**: Native LLVM-backed compilation with optimization controls for real workloads
 - **Control**: Fine-grained control over optimization strategy, memory behavior, and function-level hints
@@ -106,11 +106,11 @@ This reference is written as a **production-facing specification for the compile
 - **Ergonomics**: Modern syntax with strong built-in collection/string APIs, lambdas, and concise keyword sugar
 - **Compiler transparency**: Diagnostics, optimization feedback, and IR emission are first-class toolchain features
 
-### Source of Truth
+### 1.6 Source of Truth
 
 This reference is grounded in the OmScript implementation (`src/`, `include/`) and validated examples (`examples/`). If an inconsistency is discovered, **compiler behavior is authoritative** and this document should be updated accordingly.
 
-### Compilation Pipeline
+### 1.7 Compilation Pipeline
 
 OmScript source code undergoes the following compilation stages:
 
@@ -122,13 +122,13 @@ OmScript source code undergoes the following compilation stages:
 6. **Object Code Emission** — LLVM backend generates native machine code for the target architecture
 7. **Linking** — Links object files with the OmScript runtime library to produce the final executable
 
-### High-Level Feature Map
+### 1.8 High-Level Feature Map
 
 - **Lexical structure**: Keywords, identifiers, literals (integer, float, string, bytes, interpolated), operators, comments (§2)
 - **Conditional compilation**: `comptime {}` blocks, `comptime if COND {}` shorthand, built-in constants `OS`/`ARCH`/`VERSION`/`FILE`, `-D NAME[=VALUE]` CLI flags, `defined(NAME)` predicate (§3, §5.9)
 - **Type system**: Scalar types (signed/unsigned integers, floats, bool, string), composite types (arrays, dicts, structs, enums, pointers, SIMD vectors, bigint), declaration typing rules (§4)
 - **Variables and constants**: `var`, `const`, `register var`, `atomic var`, `volatile var`, `global`, `comptime`, compound assignment, destructuring (§5)
-- **Functions**: Declaration syntax, parameters, return types, default parameters, expression-body functions, generics, annotations (`@opt(hot)`, `@semantics(pure)`, `@memory(allocator)`, etc.), tail calls, lambdas (§6)
+- **Functions**: Declaration syntax, parameters, return types, default parameters, expression-body functions, annotations (`@opt(hot)`, `@semantics(pure)`, `@memory(allocator)`, etc.), tail calls, lambdas; generic type parameters are reserved for a future version (§6)
 - **Control flow**: `if`/`elif`/`else`, `unless`, `guard`, `switch`, `when`, `defer`, `with`, branch hints (§7)
 - **Loops**: `while`, `do`/`while`, `until`, `for` (ranges, downto, step), `foreach`, `loop`, `repeat`, `forever`, `times`, `parallel`, `pipeline`, loop annotations (`@loop(unroll=N)`, `@loop(vectorize)`) (§8)
 - **Operators**: Arithmetic, comparison, logical, bitwise, null-coalescing, range, spread, pipe-forward, address-of, precedence table (§9)
@@ -1107,7 +1107,7 @@ Placed immediately before `struct`, `@repr(...)` controls the memory layout of t
 | `@repr(packed)` | Minimal memory — no padding bytes inserted between fields. |
 | `@repr(align(N))` | Force the struct's alloca to be at least `N`-byte aligned (N must be a power of two). |
 | `@repr(auto)` | Compiler optimizes layout freely (default). |
-| `@repr(soa)` | Structure-of-arrays layout hint — recorded for future layout passes. |
+| `@repr(soa)` | Structure-of-arrays layout hint — **Reserved**: recorded in AST but not yet applied by any layout pass. Has no effect on the current compiler output. |
 
 ```omscript
 @repr(C)
@@ -1146,7 +1146,7 @@ struct Particle {
 - `@repr(C)` → fields in declaration order; `alloca` aligned to the target ABI alignment of the struct type
 - `@repr(align(N))` → `alloca` alignment set to `N` bytes
 - `@repr(auto)` → same as the default (compiler may reorder cold fields for locality at O2+)
-- `@repr(soa)` → hint recorded; actual SoA transformation is applied by future layout passes
+- `@repr(soa)` → hint recorded in AST; no current effect — SoA layout transformation is not yet implemented
 
 #### 4.4.7 Enum Type
 
@@ -2058,9 +2058,11 @@ fn main() {
 
 ### 6.5 Generic / Type-Parameterized Functions
 
-**Status**: Generic functions (parameterized by type) are **not currently implemented** in the parser or type system. This is a future feature.
+**Status**: **Reserved** — Generic functions (type parameters on function declarations) are not implemented in the current parser or type system. The `<T>` syntax for generic parameter lists is not yet a parser token sequence. This is a planned future language feature.
 
-**Anticipated syntax**: `fn name<T>(param: T) -> T { ... }`
+**Anticipated syntax** (not yet accepted): `fn name<T>(param: T) -> T { ... }`
+
+**Workaround today**: Use explicit typed overloads (e.g. `fn process_int(x: int)` + `fn process_float(x: float)`), or pass values through `ptr<T>` with manual casting for type-erased algorithms.
 
 ### 6.6 Function Annotations
 
@@ -11396,10 +11398,18 @@ var sub: string = str_substr(s, 0, 3);   // "hel"
 
 ### Ownership
 ```omscript
-var r: int = newRegion();       // create region
-var data: ptr = alloc(r, 1024); // allocate in region
-// ... use data ...
-invalidate(r);                  // free region
+struct Node { value: int; next: ptr<Node>; }
+
+// alloc<T>(n) — raw uninitialised allocation (T1: stack, T2: arena, T3: heap)
+var p: ptr<Node> = alloc<Node>(1);
+construct p { value: 42, next: nullptr };
+
+// new T(n) — zero-initialised allocation
+var arr: ptr<int> = new int(8);   // 8 zero-initialised i64 slots
+
+// invalidate — explicit free (compiler enforces ownership rules)
+invalidate p;
+invalidate arr;
 ```
 
 ### Pointers and Construction
