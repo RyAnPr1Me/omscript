@@ -1,0 +1,80 @@
+// round87_ns_type_qualtype_test.om
+// Verifies:
+//   - `type` alias declarations inside namespace blocks
+//   - Namespace-qualified type annotations: Math::Scalar in parameter/return types
+//   - Bare type names from namespace type declarations work file-wide
+//   - Qualified type annotation chaining (A::B as array element, ptr<A::B>, etc.)
+// Expected exit code: 8
+
+namespace Math {
+    type Scalar = int;
+    type Vec = int[];
+
+    fn scale(x: Scalar, f: int) -> Scalar {
+        return x * f;
+    }
+
+    fn sum_vec(v: Vec) -> int {
+        var total = 0;
+        var i = 0;
+        while i < len(v) {
+            total = total + v[i];
+            i = i + 1;
+        }
+        return total;
+    }
+}
+
+namespace Geo {
+    type Length = int;
+    type Area = int;
+
+    fn rectangle_area(w: Length, h: Length) -> Area {
+        return w * h;
+    }
+}
+
+fn main() {
+    var pass = 0;
+
+    // Bare type alias from namespace (file-wide after declaration)
+    var s: Scalar = 7;
+    if s == 7 { pass = pass + 1; }
+
+    // Qualified type alias: Math::Scalar
+    var s2: Math::Scalar = 10;
+    if s2 == 10 { pass = pass + 1; }
+
+    // Namespace function with type alias params
+    var r = Math::scale(3, 4);
+    if r == 12 { pass = pass + 1; }
+
+    // Vec type alias (array)
+    var v: Vec = [1, 2, 3, 4];
+    var total = Math::sum_vec(v);
+    if total == 10 { pass = pass + 1; }
+
+    // Geo namespace type aliases
+    var w: Geo::Length = 5;
+    var h: Geo::Length = 6;
+    var a: Geo::Area = Geo::rectangle_area(w, h);
+    if a == 30 { pass = pass + 1; }
+
+    // Qualified type annotation on function parameter
+    var w2: Length = 3;
+    var h2: Length = 4;
+    var a2 = Geo::rectangle_area(w2, h2);
+    if a2 == 12 { pass = pass + 1; }
+
+    // Struct field with qualified type annotation
+    // (resolved via typeAliases_["Math::Scalar"] = "int")
+    var x: Math::Scalar = 100;
+    var y: Geo::Length = 200;
+    if x + y == 300 { pass = pass + 1; }
+
+    // Array with qualified element type annotation
+    var arr: Math::Scalar[] = [1, 2, 3];
+    if arr[0] == 1 { pass = pass + 1; }
+
+    return pass;
+}

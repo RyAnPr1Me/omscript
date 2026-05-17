@@ -1869,12 +1869,37 @@ void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& function
             // Also register in the namespace member map (enables nsMap lookups).
             nsMap[shortName] = qualName;
             globals.push_back(std::move(gv));
+        } else if (check(TokenType::TYPE)) {
+            // Type alias inside a namespace block.
+            // e.g.  namespace Math { type Scalar = int; }
+            // Registers both qualified (Math::Scalar → int) and bare (Scalar → int)
+            // aliases so that both `Math::Scalar` and bare `Scalar` work as type names
+            // within the same file after the namespace is declared.
+            advance(); // consume 'type'
+            const Token aliasName = consume(TokenType::IDENTIFIER, "Expected alias name after 'type'");
+            consume(TokenType::ASSIGN, "Expected '=' after type alias name");
+            if (!check(TokenType::IDENTIFIER) && !check(TokenType::STAR) &&
+                !check(TokenType::STAR_STAR) && !check(TokenType::LPAREN) &&
+                !check(TokenType::AMPERSAND) && !check(TokenType::FN)) {
+                error("Expected type name after '=' in type alias");
+            }
+            const std::string resolvedType = parseTypeAnnotation();
+            consume(TokenType::SEMICOLON, "Expected ';' after type alias");
+            const std::string qualAliasName = nsName + "::" + aliasName.lexeme;
+            // Qualified alias: Math::Scalar → int
+            typeAliases_[qualAliasName] = resolvedType;
+            // Bare alias (file-scope): Scalar → int
+            // Only register if the bare name isn't already taken to avoid shadowing.
+            if (!typeAliases_.count(aliasName.lexeme))
+                typeAliases_[aliasName.lexeme] = resolvedType;
+            // Register in namespace member map for consistency.
+            nsMap[aliasName.lexeme] = qualAliasName;
         } else if (match(TokenType::NAMESPACE)) {
             // Nested namespace: namespace Outer { namespace Inner { ... } }
             // The inner namespace's fully-qualified key becomes "Outer::Inner".
             parseNamespace(functions, enums, structs, globals, nsName);
         } else {
-            error("Only 'fn', 'struct', 'enum', 'namespace', and 'global var' declarations are allowed inside a namespace block");
+            error("Only 'fn', 'struct', 'enum', 'namespace', 'global var', and 'type' declarations are allowed inside a namespace block");
         }
     }
     consume(TokenType::RBRACE, "Expected '}' to close namespace block");
@@ -1990,6 +2015,13 @@ std::string Parser::parseTypeAnnotation() {
         typeName = advance().lexeme;
     } else {
         typeName = consume(TokenType::IDENTIFIER, "Expected type name").lexeme;
+    }
+    // Support namespace-qualified type names: Math::Scalar, A::B::Type, etc.
+    // Consume '::' + IDENTIFIER suffix segments until the pattern breaks.
+    while (check(TokenType::SCOPE) && (current + 1 < tokens.size()) &&
+           tokens[current + 1].type == TokenType::IDENTIFIER) {
+        advance(); // consume '::'
+        typeName += "::" + advance().lexeme;
     }
     // Handle parameterised SIMD types: u64x{N}, u32x{N}, i32x{N}, f32x{N}, etc.
     // u64x{LANES} where LANES is a comptime constant resolves to u64x2/4/8, etc.
