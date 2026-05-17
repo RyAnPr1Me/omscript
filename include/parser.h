@@ -261,9 +261,10 @@ class Parser {
     std::unordered_set<std::string> globallyImportedNamespaces_;
 
     /// Bare-import map: populated when `import NSName;` is processed for user-defined
-    /// namespaces.  Maps unqualified name → fully-qualified name so that `add(x)` after
-    /// `import Math;` resolves to the LLVM function `Math::add`.
-    std::unordered_map<std::string, std::string> bareImportedFunctions_;
+    /// namespaces. Maps unqualified name → fully-qualified name for namespace members
+    /// (for example functions and structs), so `add(x)` or `Vec2 { ... }` after
+    /// `import Math;` resolve to `Math::add` and `Math::Vec2`.
+    std::unordered_map<std::string, std::string> bareImportedNames_;
 
     /// Resolve a scope chain (segments separated by ::) to an actual function
     /// name using the importNamespaces_ registry.

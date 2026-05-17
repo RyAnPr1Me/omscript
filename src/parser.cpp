@@ -1670,7 +1670,7 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
             // For stdlib ("std"), builtins are already accessible bare; skip.
             if (nsTok.lexeme != "std") {
                 for (const auto& [shortName, qualName] : nsIt->second) {
-                    bareImportedFunctions_[shortName] = qualName;
+                    bareImportedNames_[shortName] = qualName;
                     // If the qualified name is also a struct name, expose bare name too.
                     if (structNames_.count(qualName)) {
                         structNames_.insert(shortName);
@@ -1838,7 +1838,7 @@ void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& function
             // Expose the bare short name → qualified name mapping so that struct literals
             // inside this namespace block (and later in the same file) can use the short
             // name without full qualification, consistent with `import NamespaceName;`.
-            bareImportedFunctions_[shortName] = qualName;
+            bareImportedNames_[shortName] = qualName;
             st->name = qualName;
             nsMap[shortName] = qualName;
             structs.push_back(std::move(st));
@@ -2099,11 +2099,11 @@ std::string Parser::parseTypeAnnotation() {
     // `Geom::Point` when the struct was declared inside `namespace Geom` in this
     // file, or when `import Geom;` brought Point into the bare namespace).
     // Only apply to struct types — primitive / builtin type names are never in
-    // the bareImportedFunctions_ map.
+    // the bareImportedNames_ map.
     {
-        auto bif = bareImportedFunctions_.find(typeName);
-        if (bif != bareImportedFunctions_.end() && structNames_.count(bif->second))
-            typeName = bif->second;
+        auto importedNameIt = bareImportedNames_.find(typeName);
+        if (importedNameIt != bareImportedNames_.end() && structNames_.count(importedNameIt->second))
+            typeName = importedNameIt->second;
     }
     return prefix + typeName;
 }
@@ -5705,9 +5705,9 @@ std::unique_ptr<Expression> Parser::parseCall() {
             // Resolve bare function calls from globally-imported user namespaces.
             std::string calleeName = idExpr->name;
             {
-                auto bif = bareImportedFunctions_.find(calleeName);
-                if (bif != bareImportedFunctions_.end())
-                    calleeName = bif->second;
+                auto importedNameIt = bareImportedNames_.find(calleeName);
+                if (importedNameIt != bareImportedNames_.end())
+                    calleeName = importedNameIt->second;
             }
 
             if (!seenNamed) {
@@ -6796,9 +6796,9 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             // Resolve bare name through bare-import map (e.g. Vec2 → Math::Vec2 after import Math;)
             std::string structName = token.lexeme;
             {
-                auto bif = bareImportedFunctions_.find(structName);
-                if (bif != bareImportedFunctions_.end())
-                    structName = bif->second;
+                auto importedNameIt = bareImportedNames_.find(structName);
+                if (importedNameIt != bareImportedNames_.end())
+                    structName = importedNameIt->second;
             }
             return parseStructLiteral(structName, token.line, token.column);
         }
