@@ -1826,6 +1826,10 @@ void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& function
             const std::string qualName = nsName + "::" + shortName;
             // structNames_ already has shortName from parseStructDecl; add qualified name.
             structNames_.insert(qualName);
+            // Expose the bare short name → qualified name mapping so that struct literals
+            // inside this namespace block (and later in the same file) can use the short
+            // name without full qualification, consistent with `import NamespaceName;`.
+            bareImportedFunctions_[shortName] = qualName;
             st->name = qualName;
             nsMap[shortName] = qualName;
             structs.push_back(std::move(st));
@@ -2029,6 +2033,16 @@ std::string Parser::parseTypeAnnotation() {
         if (it == typeAliases_.end()) break;
         if (it->second == typeName) break; // self-cycle guard
         typeName = it->second;
+    }
+    // Resolve namespace-qualified struct type aliases (e.g. bare `Point` →
+    // `Geom::Point` when the struct was declared inside `namespace Geom` in this
+    // file, or when `import Geom;` brought Point into the bare namespace).
+    // Only apply to struct types — primitive / builtin type names are never in
+    // the bareImportedFunctions_ map.
+    {
+        auto bif = bareImportedFunctions_.find(typeName);
+        if (bif != bareImportedFunctions_.end() && structNames_.count(bif->second))
+            typeName = bif->second;
     }
     return prefix + typeName;
 }
@@ -6622,7 +6636,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                 return e;
             }
             // Multi-level value reference without '()': attempt global lookup,
-            // then try namespace function reference, then error.
+            // then check for struct literal, then try function reference, then error.
             {
                 // Try longest-prefix global lookup: e.g. a::b::c
                 // where "a::b" is a namespace and "c" is a global variable.
@@ -6646,6 +6660,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                 }
                 // Try namespace function reference for multi-level paths:
                 // e.g. array_map(arr, Ops::Math::square) — resolve to IdentifierExpr("Ops::Math::square").
+                // Also check for struct literals: e.g. Geom::Shape::Circle { cx: 0, cy: 0, r: 3 }.
                 for (int cut = (int)segments.size() - 1; cut >= 1; --cut) {
                     std::string ns;
                     for (int i = 0; i < cut; ++i) {
@@ -6661,7 +6676,14 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                     }
                     auto fnIt = nsIt->second.find(fn);
                     if (fnIt != nsIt->second.end()) {
-                        auto e = std::make_unique<IdentifierExpr>(fnIt->second);
+                        const std::string qualName = fnIt->second;
+                        // Multi-level namespace struct literal: Ns::Sub::Struct { ... }
+                        if (structNames_.count(qualName) && check(TokenType::LBRACE)) {
+                            advance(); // consume '{'
+                            return parseStructLiteral(qualName, token.line, token.column);
+                        }
+                        // Function / variable reference in non-call position
+                        auto e = std::make_unique<IdentifierExpr>(qualName);
                         e->line = token.line;
                         e->column = token.column;
                         return e;
