@@ -63,6 +63,41 @@ When this document uses RFC-style terms:
 - **SHOULD / SHOULD NOT** = recommended behavior or best practice
 - **MAY** = optional behavior/usage pattern
 
+### 1.2 Release Alignment and Authority
+
+This reference is written as a **production-facing specification for the compiler snapshot in this repository**.
+
+| Item | Value |
+| --- | --- |
+| Primary target | OmScript compiler version `4.9.0` |
+| Authoritative implementation source | `include/version.h`, `src/`, `include/`, `examples/` |
+| Intended audience | Language users, library authors, compiler contributors, and tooling integrators |
+| Coverage | Surface syntax, type rules, built-ins, CLI behavior, diagnostics, optimizer controls, and selected internals |
+| Authority order when docs disagree with code | Compiler behavior → validated examples/tests → this document |
+
+**Production-readiness goal**: every user-visible language feature SHOULD be documented here with its syntax, semantics, constraints, and at least one representative example when the feature is non-trivial.
+
+### 1.3 How to Use This Reference
+
+- Read **§1–§10** for the core language surface.
+- Read **§11–§23** for runtime semantics, the standard library, memory, concurrency, and modules.
+- Read **§24–§33** for compiler operation, CLI usage, optimization controls, and implementation-facing details.
+- Treat explicitly marked **Deprecated**, **Removed**, **Reserved**, and **Partially supported** notes as normative status markers, not commentary.
+- When onboarding new users, prefer linking to the exact section that defines the behavior instead of duplicating the rule elsewhere.
+
+### 1.4 Editorial and Notation Conventions
+
+- Inline code font (for example `fn`, `var`, `thread_join`) names exact source syntax.
+- Angle-bracket metavariables such as `<Type>` or `<Expr>` describe grammar placeholders, not literal tokens.
+- Square brackets in syntax descriptions mean **optional** elements unless the brackets are shown inside a code block.
+- Examples are informative unless a rule explicitly says **MUST**, **MUST NOT**, **SHOULD**, or **MAY**.
+- Status markers are used consistently:
+  - **Fully implemented** — supported in current compiler behavior.
+  - **Partially supported** — accepted only in the documented subset.
+  - **Deprecated** — still accepted, but emits warnings or is scheduled for removal.
+  - **Removed** — no longer accepted by the compiler.
+  - **Reserved** — token/word is set aside for future syntax and cannot be used normally.
+
 ### Design Goals
 
 - **Performance**: Native LLVM-backed compilation with optimization controls for real workloads
@@ -2868,7 +2903,7 @@ fn sum_to_four() -> int {
 | Skip optional block | `if (!condition) { ... }` |
 | Retry / retry loop | `while (condition) { ... }` |
 | Counted loop | `for i in start..end { ... }` |
-| Early exit from nested loops | `break` with labelled loops (planned) |
+| Early exit from nested loops | Labeled `break` / `continue` (`outer: loop { ... break outer; }`) |
 
 ---
 
@@ -11542,7 +11577,8 @@ fn compute(x: int) -> int {
 ```
 
 **Compatibility**:
-- Source files written for v4.x will compile with warnings in v4.4.
+- This reference targets the `4.9.0` compiler snapshot described above.
+- Source files written for older v4.x releases generally remain close to valid, but should be revalidated against current diagnostics and deprecation warnings on `4.9.0`.
 - v5.0 will require explicit migration (automated tool planned).
 
 **LLVM compatibility**:
