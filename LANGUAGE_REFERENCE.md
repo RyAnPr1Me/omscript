@@ -11706,7 +11706,17 @@ Defined in `include/version.h`:
 **Deprecated features** (to be removed in v5.0):
 1. **Legacy direct mode**: `omsc file.om` (use `omsc compile file.om`).
 2. **Implicit parameter/return types**: Functions without explicit `-> type` or parameter type annotations will require them.
-3. **Global mutable variables**: Will require an explicit qualifier in v5.0. The exact keyword has not yet been chosen and is not currently enforced.
+3. **Global mutable variables**: In v5.0 mutable globals will require an explicit `mut` qualifier. The chosen keyword is `mut`, inserted between `global` and `var`:
+
+   ```omscript
+   // Recommended (forward-compatible now and required in v5.0):
+   global mut var counter: int = 0;
+
+   // Legacy (still accepted; will generate a deprecation warning in v5.0):
+   global var counter: int = 0;
+   ```
+
+   `global const` globals are unaffected — they are already immutable by definition.
 
 **Migration guide**:
 ```omscript

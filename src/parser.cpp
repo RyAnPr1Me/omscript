@@ -2688,9 +2688,12 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         return decl;
     }
     // global var/const — declare a program-wide variable inside a function body.
-    // Syntax: global var name[:type] [= expr];
+    // Syntax: global [mut] var name[:type] [= expr];
     if (match(TokenType::GLOBAL)) {
         const Token kw = tokens[current - 1];
+        // Accept optional `mut` qualifier: `global mut var name` — the explicit
+        // mutable form chosen for v5.0 compatibility.
+        match(TokenType::MUT); // consume `mut` if present; semantically a no-op currently
         const bool isConst = check(TokenType::CONST);
         if (!match(TokenType::VAR) && !match(TokenType::CONST)) {
             error("Expected 'var' or 'const' after 'global'");
@@ -3232,6 +3235,11 @@ std::unique_ptr<Statement> Parser::parseVarDeclWithInheritedType(bool isConst, c
 
 std::unique_ptr<VarDecl> Parser::parseGlobalDecl() {
     const Token kw = advance(); // consume 'global'
+    // Accept optional `mut` qualifier: `global mut var name` — the explicit
+    // mutable form chosen for v5.0 compatibility.  Semantically identical to
+    // `global var` in the current release.
+    const bool hasMut = match(TokenType::MUT);
+    (void)hasMut; // semantic enforcement reserved for v5.0
     const bool isConst = check(TokenType::CONST);
     if (!match(TokenType::VAR) && !match(TokenType::CONST)) {
         error("Expected 'var' or 'const' after 'global'");

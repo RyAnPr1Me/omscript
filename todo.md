@@ -43,10 +43,10 @@ This file tracks high-value language features that are desirable but not fully i
   - Reference: `LANGUAGE_REFERENCE.md` §6.3.1.
   - Follow-up: consider promoting this to an error under stricter language modes.
 
-- [ ] **Finalize v5 global mutable qualifier design**
-  - Current state: qualifier is planned but exact keyword is not selected.
+- [x] **Finalize v5 global mutable qualifier design**
+  - Current state: keyword `mut` chosen and accepted (`global mut var`). Old `global var` still compiles without warning in v4.x. Deprecation warning for bare `global var` will be enforced in v5.0.
   - Reference: `LANGUAGE_REFERENCE.md` §33.
-  - Goal: choose keyword, enforce behavior, and provide migration tooling.
+  - Follow-up: add deprecation warning under a `--Werror=mutable-global` flag or v5.0 major bump.
 
 ## Long-Term
 
