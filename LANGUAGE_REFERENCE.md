@@ -4995,7 +4995,7 @@ var joined = str_join(words, "-");          // "hello-world"
 
 **Length-prefixed:** NOT stored explicitly in a header (unlike arrays). String lengths are computed via `strlen()` on demand unless cached (see string-length cache optimization in `str_concat`).
 
-**Immutability:** Strings are logically immutable from the user's perspective. Modifying operations (`str_upper`, `str_replace`, etc.) return NEW strings. However, `string_index_assign` (if implemented) may allow in-place mutation.
+**Immutability:** Strings are logically immutable from the user's perspective. Modifying operations (`str_upper`, `str_replace`, etc.) return NEW strings. No stable in-place string-mutation surface is currently documented as supported.
 
 **Representation:**
 - **Local/literal:** Direct pointer (LLVM `i8*`).
@@ -8012,7 +8012,7 @@ Overflow-safe absolute difference: |a - b| using 128-bit intermediate.
 
 ---
 
-### 19.12 Arbitrary-precision integers (bigint) — full API
+### 19.9 Arbitrary-precision integers (bigint) — full API
 
 #### `bigint(string) → bigint`
 
@@ -8157,7 +8157,7 @@ Right shift (divide by 2^n, floor).
 
 ---
 
-### 19.13 The `std::` namespace
+### 19.10 The `std::` namespace
 
 **Built-in namespace:** Every standard library function is accessible as `std::name`. Standard library functions are also accessible by their **bare names without any import statement** — `import std;` is optional and stylistic.
 
@@ -8178,7 +8178,7 @@ Right shift (divide by 2^n, floor).
 
 ---
 
-### 19.14 Generic collection operations
+### 19.11 Generic collection operations
 
 #### `filter(collection, predicate_fn) → same`
 
@@ -8202,7 +8202,7 @@ This is the only generic dispatcher in the collection-builtin family — `map`, 
 
 ---
 
-### 19.15 Matrix operations
+### 19.12 Matrix operations
 
 OmScript ships a minimal row-major dense-matrix API on top of arrays. Matrices are returned as opaque array-typed values (the codegen tracks them via `arrayReturningFunctions_`), and elements are stored as `i64`. There is no separate `Matrix` type — interoperate with the array API where helpful, but treat the layout as opaque.
 
@@ -8244,7 +8244,7 @@ println(mat_get(c, 0, 0));      // 6
 
 ---
 
-### 19.16 Region allocation and raw memory
+### 19.13 Region allocation and raw memory
 
 Low-level escape hatches for hand-managing memory. Use these when the ownership system (§17) and built-in arrays / strings / dicts cannot express a needed allocation pattern. They are unsafe by design — there are no bounds checks on raw pointers and no use-after-free detection across regions.
 
@@ -9016,8 +9016,6 @@ var v = Vec2 { x: 1, y: 2 }; // equivalent to Math::Vec2 { x: 1, y: 2 }
 Namespaces cannot be nested. Each namespace block contributes to a flat per-name registry; multiple `namespace Math { ... }` blocks in the same file are additive.
 
 ---
-
-**End of Part 2**
 
 ## 24. Compiler CLI Reference
 
