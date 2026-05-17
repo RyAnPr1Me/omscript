@@ -123,10 +123,13 @@ class Parser {
                      std::vector<std::unique_ptr<EnumDecl>>& enums, std::vector<std::unique_ptr<StructDecl>>& structs,
                      std::vector<std::unique_ptr<VarDecl>>& globals);
 
-    /// Parse a user-defined namespace block: namespace Name { fn/struct/enum ... }
+    /// Parse a user-defined namespace block: namespace Name { fn/struct/enum/namespace ... }
+    /// @param nsPrefix  Fully-qualified name of the enclosing namespace, or empty string at
+    ///                  the top level.  Used to form qualified names for nested namespaces.
     void parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                         std::vector<std::unique_ptr<EnumDecl>>& enums,
-                        std::vector<std::unique_ptr<StructDecl>>& structs);
+                        std::vector<std::unique_ptr<StructDecl>>& structs,
+                        const std::string& nsPrefix = "");
 
     const Token& peek(int offset = 0) const noexcept;
     Token advance() noexcept;

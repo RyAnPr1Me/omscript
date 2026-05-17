@@ -8980,9 +8980,9 @@ Both forms are equivalent in semantics; the choice is stylistic.
 
 ### 23.8 User-defined namespaces
 
-OmScript supports user-defined namespace blocks that group functions, structs, and enums under a named scope.
+OmScript supports user-defined namespace blocks that group functions, structs, and enums under a named scope. Namespaces may be nested to arbitrary depth.
 
-**Syntax:**
+**Syntax — flat namespace:**
 ```omscript
 namespace Math {
     fn add(a, b) { return a + b; }
@@ -8992,12 +8992,48 @@ namespace Math {
 }
 ```
 
-Declarations inside a `namespace` block are registered with their fully qualified names (`Math::add`, `Math::Vec2`) and must be called that way unless the namespace is imported.
+**Syntax — nested namespaces:**
+```omscript
+namespace Geo {
+    fn scale(x: int, factor: int) -> int { return x * factor; }
 
-**Qualified access (no import required):**
+    namespace Point {
+        fn make(x: int, y: int) -> int { return x + y; }
+    }
+
+    namespace Vector {
+        fn dot(ax: int, ay: int, bx: int, by: int) -> int {
+            return ax * bx + ay * by;
+        }
+    }
+}
+```
+
+Declarations inside a `namespace` block are registered with their fully qualified names (`Math::add`, `Math::Vec2`, `Geo::Point::make`) and must be called that way unless the namespace is imported.
+
+**Qualified access — flat:**
 ```omscript
 var r = Math::add(3, 4);           // qualified function call
 var v = Math::Vec2 { x: 1, y: 2 }; // qualified struct literal
+```
+
+**Qualified access — nested (multi-level `::` path):**
+```omscript
+var p  = Geo::Point::make(5, 7);         // two-level
+var dp = Geo::Vector::dot(1, 2, 3, 4);  // sibling inner namespace
+```
+
+Nesting can go to three or more levels:
+```omscript
+namespace A {
+    namespace B {
+        namespace C {
+            fn leaf() -> int { return 42; }
+        }
+    }
+}
+
+var v = A::B::C::leaf();   // 42
 ```
 
 **Bare access after `import NSName;`:**
@@ -9012,8 +9048,11 @@ var v = Vec2 { x: 1, y: 2 }; // equivalent to Math::Vec2 { x: 1, y: 2 }
 - `fn` — function definitions
 - `struct` — struct type definitions
 - `enum` — enum definitions
+- `namespace` — nested namespace blocks (**Fully implemented**)
 
-Namespaces cannot be nested. Each namespace block contributes to a flat per-name registry; multiple `namespace Math { ... }` blocks in the same file are additive.
+Multiple `namespace Math { ... }` blocks in the same file are additive (they extend the same namespace registry entry).
+
+**Status:** Fully implemented. Arbitrary nesting depth is supported.
 
 ---
 

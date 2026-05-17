@@ -1801,9 +1801,11 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
 
 void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                             std::vector<std::unique_ptr<EnumDecl>>& enums,
-                            std::vector<std::unique_ptr<StructDecl>>& structs) {
+                            std::vector<std::unique_ptr<StructDecl>>& structs,
+                            const std::string& nsPrefix) {
     const Token nsNameTok = consume(TokenType::IDENTIFIER, "Expected namespace name");
-    const std::string nsName = nsNameTok.lexeme;
+    const std::string nsName = nsPrefix.empty() ? nsNameTok.lexeme
+                                                 : nsPrefix + "::" + nsNameTok.lexeme;
     consume(TokenType::LBRACE, "Expected '{' after namespace name");
 
     auto& nsMap = importNamespaces_[nsName];
@@ -1834,8 +1836,12 @@ void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& function
             en->name = qualName;
             nsMap[shortName] = qualName;
             enums.push_back(std::move(en));
+        } else if (match(TokenType::NAMESPACE)) {
+            // Nested namespace: namespace Outer { namespace Inner { ... } }
+            // The inner namespace's fully-qualified key becomes "Outer::Inner".
+            parseNamespace(functions, enums, structs, nsName);
         } else {
-            error("Only 'fn', 'struct', and 'enum' declarations are allowed inside a namespace block");
+            error("Only 'fn', 'struct', 'enum', and 'namespace' declarations are allowed inside a namespace block");
         }
     }
     consume(TokenType::RBRACE, "Expected '}' to close namespace block");

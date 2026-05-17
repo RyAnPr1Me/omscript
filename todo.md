@@ -31,9 +31,9 @@ This file tracks high-value language features that are desirable but not fully i
   - Reference: `LANGUAGE_REFERENCE.md` §6.11.
   - Goal: lexical captures with clear ownership/borrow rules.
 
-- [ ] **Nested namespaces**
-  - Current state: namespaces are flat; nesting is disallowed.
-  - Reference: `LANGUAGE_REFERENCE.md` §23.
+- [x] **Nested namespaces**
+  - Current state: ~~namespaces are flat; nesting is disallowed~~ **Fully implemented**: `namespace A { namespace B { ... } }` nesting to arbitrary depth now supported.
+  - Reference: `LANGUAGE_REFERENCE.md` §23.8.
   - Goal: hierarchical namespacing with predictable resolution/import rules.
 
 ## Ergonomics / Diagnostics
