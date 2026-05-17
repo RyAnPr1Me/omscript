@@ -1136,7 +1136,7 @@ Placed immediately before `struct`, `@repr(...)` controls the memory layout of t
 | `@repr(packed)` | Minimal memory — no padding bytes inserted between fields. |
 | `@repr(align(N))` | Force the struct's alloca to be at least `N`-byte aligned (N must be a power of two). |
 | `@repr(auto)` | Compiler optimizes layout freely (default). |
-| `@repr(soa)` | Structure-of-arrays layout hint — **Reserved**: recorded in AST but not yet applied by any layout pass. Has no effect on the current compiler output. |
+| `@repr(soa)` | Structure-of-arrays layout hint — **Reserved**: recorded in AST but not yet applied by any layout pass. Has no effect on the current compiler output. Track future activation in `CHANGELOG.md` under `Unreleased`. |
 
 ```omscript
 @repr(C)
@@ -2126,7 +2126,7 @@ var r3 = create_rect(4, height: 5, is_filled: 0);  // width=4 positional, rest n
 
 **Restrictions**:
 - Named arguments are resolved using the parameter names from the **declaration** (`fn` definition) in the current translation unit. When the function declaration is known, unrecognized argument names produce a compile-time error.
-- When calling a function whose declaration is not visible (e.g., a built-in or a function resolved by string-literal forwarding), named-argument labels are silently ignored and arguments are passed in the order they appear at the call site — i.e., the call degrades to positional.
+- When calling a function whose declaration is not visible (e.g., a built-in or a function resolved by string-literal forwarding), named-argument labels are silently ignored and arguments are passed in the order they appear at the call site — i.e., the call degrades to positional. No warning is currently emitted for this fallback path.
 - Duplicate argument names at the same call site cause a compile-time error.
 - In mixed calls, all positional arguments must come first; positional arguments after a named argument are a compile-time error.
 
