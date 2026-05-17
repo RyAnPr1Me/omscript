@@ -97,22 +97,20 @@ This reference is written as a **production-facing specification for the compile
 - Read **§24–§33** for compiler operation, optimization internals, and compatibility notes.
 - Use **Quick Navigation by Task** in the table of contents when you need a task-oriented reading path.
 
-- Treat explicitly marked **Deprecated**, **Removed**, **Reserved**, and **Partially supported** notes as normative status markers, not commentary.
-- For authoritative answers, prefer the most specific feature section over overview prose.
-- When onboarding new users, link to the defining section instead of duplicating the rule elsewhere.
-
 ### 1.4 Editorial and Notation Conventions
 
 - Inline code font (e.g. `fn`, `var`, `thread_join`) names exact source syntax.
 - Angle-bracket metavariables such as `<Type>` or `<Expr>` describe grammar placeholders, not literal tokens.
 - Square brackets in syntax descriptions mean **optional** elements unless the brackets are shown inside a code block.
 - Examples are informative unless a rule explicitly says **MUST**, **MUST NOT**, **SHOULD**, or **MAY**.
-- Status markers are used consistently:
+- Treat explicitly marked status notes as normative, not commentary. Status markers are used consistently:
   - **Fully implemented** — supported in current compiler behavior.
   - **Partially supported** — accepted only in the documented subset; read the feature's section for the exact supported forms and limits.
   - **Deprecated** — still accepted, but emits warnings or is scheduled for removal.
   - **Removed** — no longer accepted by the compiler.
   - **Reserved** — token/word is set aside for future syntax and cannot be used normally.
+- For authoritative answers, prefer the most specific feature section over overview prose.
+- When onboarding new users, link to the defining section instead of duplicating the rule elsewhere.
 
 ### 1.5 Design Goals
 
@@ -122,11 +120,7 @@ This reference is written as a **production-facing specification for the compile
 - **Ergonomics**: Modern syntax with strong built-in collection/string APIs, lambdas, and concise keyword sugar
 - **Compiler transparency**: Diagnostics, optimization feedback, and IR emission are first-class toolchain features
 
-### 1.6 Source of Truth
-
-This reference is grounded in the OmScript implementation (`src/`, `include/`) and validated examples (`examples/`). If an inconsistency is discovered, **compiler behavior is authoritative** and this document should be updated accordingly (see §1.2 for authority order).
-
-### 1.7 Compilation Pipeline at a Glance
+### 1.6 Compilation Pipeline at a Glance
 
 OmScript source code undergoes the following compilation stages:
 
@@ -137,18 +131,6 @@ OmScript source code undergoes the following compilation stages:
 5. **Optimization Passes** — LLVM's optimization pipeline transforms the IR (inlining, vectorization, constant folding, dead-code elimination, loop transformations)
 6. **Object Code Emission** — LLVM backend generates native machine code for the target architecture
 7. **Linking** — Links object files with the OmScript runtime library to produce the final executable
-
-### 1.8 High-Level Feature Map
-
-- **Lexical structure**: Keywords, identifiers, literals (integer, float, string, bytes, interpolated), operators, comments (§2)
-- **Conditional compilation**: `comptime {}` blocks, `comptime if COND {}` shorthand, built-in constants `OS`/`ARCH`/`VERSION`/`FILE`, `-D NAME[=VALUE]` CLI flags, `defined(NAME)` predicate (§3, §5.9)
-- **Type system**: Scalar types (signed/unsigned integers, floats, bool, string), composite types (arrays, dicts, structs, enums, pointers, SIMD vectors, bigint), declaration typing rules (§4)
-- **Variables and constants**: `var`, `const`, `register var`, `atomic var`, `volatile var`, `global`, `comptime`, compound assignment, destructuring (§5)
-- **Functions**: Declaration syntax, parameters, return types, default parameters, expression-body functions, annotations (`@opt(hot)`, `@semantics(pure)`, `@memory(allocator)`, etc.), tail calls, lambdas; generic type parameters are reserved for a future version (§6)
-- **Control flow**: `if`/`elif`/`else`, `unless`, `guard`, `switch`, `when`, `defer`, `with`, branch hints (§7)
-- **Loops**: `while`, `do`/`while`, `until`, `for` (ranges, downto, step), `foreach`, `loop`, `repeat`, `forever`, `times`, `parallel`, `pipeline`, loop annotations (`@loop(unroll=N)`, `@loop(vectorize)`) (§8)
-- **Operators**: Arithmetic, comparison, logical, bitwise, null-coalescing, range, spread, pipe-forward, address-of, precedence table (§9)
-- **Collections**: Array literals, indexing, slicing, dict literals, struct literals, enum access (§10)
 
 ---
 
@@ -274,8 +256,8 @@ The following identifiers are reserved as keywords. They are grouped by category
 | `shared` | Transition variable to shared (read-only aliasable) ownership (Ω spec §3.1) |
 | `own` | Restore unique ownership from shared state (Ω spec §3.1) |
 | `construct` | In-place field initialisation of a `ptr<T>` (see §17.9.2a) |
-| `jmp` | ⚠ **Deprecated** — unconditional jump to a named label (see §7.11) |
-| `label` | Named jump target declaration for `jmp` (see §7.11) |
+| `jmp` | ⚠ **Deprecated** — unconditional jump to a named label (see §7.12) |
+| `label` | Named jump target declaration for `jmp` (see §7.12) |
 
 **Literals:**
 | Keyword | Purpose |
@@ -685,7 +667,7 @@ OPTMAX!:
 | --- | --- | --- |
 | `downto` | Second token of a `for (i in HI downto LO ...)` range loop (§8.5) | Plain identifier |
 | `step` | Optional trailing modifier of a `for (i in A...B step N)` loop (§8.5) | Plain identifier |
-| `deopt` | Optional marker in `assume(c) else deopt { ... }` (§7.10) | Plain identifier |
+| `deopt` | Optional marker in `assume(c) else deopt { ... }` (§7.11) | Plain identifier |
 | `as` | Import alias (`import "x.om" as foo`) and explicit casts | Plain identifier |
 | `from` | Inside specific destructuring forms | Plain identifier |
 
@@ -2043,13 +2025,6 @@ fn name(param1: type1, param2: type2, ...) -> return_type {
 }
 ```
 
-**Components**:
-- `fn` keyword
-- Function name (identifier)
-- Parameter list (comma-separated, each with type annotation)
-- Return type (optional; defaults to `void` if omitted)
-- Body (block statement)
-
 **Example**:
 ```omscript
 fn add(a: int, b: int) -> int {
@@ -2735,11 +2710,6 @@ fn day_name(day: int) -> string {
 }
 ```
 
-**Difference from `switch`**:
-- `when` does not require `break` statements (arms are mutually exclusive)
-- `when` uses `=>` instead of `:` for case labels
-- Wildcard `_` instead of `default`
-
 ### 7.6 `defer`
 
 **Syntax**: `defer statement;`
@@ -2825,7 +2795,7 @@ unlikely if (error_occurred) {
 
 **Effect**: Emits LLVM branch weight metadata (`!prof`). No semantic difference, only optimization hints.
 
-### 7.8b `@range[lo, hi] expr` — Internal Range-Bound Hint
+### 7.9 `@range[lo, hi] expr` — Internal Range-Bound Hint
 
 **Syntax**: `@range[lo, hi] expression`
 
@@ -2857,7 +2827,7 @@ fn main() {
 
 **Effect**: Emits `llvm.assume` calls + `!range` metadata on the inner value. No new instructions on hot paths once LLVM has propagated the bound.
 
-### 7.9 Ternary Operator
+### 7.10 Ternary Operator
 
 **Syntax**: `condition ? true_expr : false_expr`
 
@@ -2873,7 +2843,7 @@ var sign: string = (x >= 0) ? "positive" : "negative";
 
 **Type constraint**: Both branches must have the same type (or compatible types).
 
-### 7.10 `assume` / `unreachable` / `expect` Statements
+### 7.11 `assume` / `unreachable` / `expect` Statements
 
 These three constructs feed information to the optimizer. They emit **no runtime code** in the success path — they are purely advisory.
 
@@ -2940,7 +2910,7 @@ fn handle_case(x: int) {
 
 ---
 
-### 7.11 `jmp` / `label` — Deprecated Unconditional Jump
+### 7.12 `jmp` / `label` — Deprecated Unconditional Jump
 
 > **⚠ Deprecated.** `jmp` emits a compile-time deprecation warning every time it is used. It will be removed in a future version. Always prefer structured control flow (`if`, `while`, `for`, `break`, `continue`).
 
@@ -3167,28 +3137,13 @@ for (c in s) {
 }
 ```
 
-### 8.7 `foreach`
+> **`foreach`** is an alias for `for (var in collection)` and behaves identically.
 
-**Syntax**: `foreach (var in collection) { body }`
-
-**Semantics**:
-- Alias for `for (var in collection)` (identical behavior)
-
-**Example**:
-```omscript
-var nums: int[] = [1, 2, 3];
-foreach (n in nums) {
-    println(n);
-}
-```
-
-### 8.8 `loop { }`
+### 8.7 `loop { }` and `forever { }`
 
 **Syntax**:
-- Infinite loop: `loop { body }`
-- Counted loop: `loop N { body }` or `loop (N) { body }`
-
-**Infinite loop semantics**: Equivalent to `while (true) { body }`
+- Infinite loop: `loop { body }` / `forever { body }` (aliases — both desugar to `while (true) { body }`)
+- Counted loop: `loop N { body }` or `times N { body }` (aliases — both desugar to `for (__i in 0...N) { body }`)
 
 **Example**:
 ```omscript
@@ -3213,14 +3168,13 @@ loop 10 {
 // sum = 10
 ```
 
-### 8.9 `repeat { } until (...)`
+### 8.8 `repeat { } until (...)`
 
 **Syntax**: `repeat { body } until (condition);`
 
-**Semantics**:
-- Post-test loop: executes `body`, then evaluates `condition`
-- Repeats **while condition is false** (until condition becomes true)
-- Equivalent to `do { body } until (condition);`
+**Semantics**: Post-test loop — executes `body`, then evaluates `condition`. Repeats while condition is false.
+
+> **`repeat { } until`** is an alias for `do { } until (condition);` (see §8.2). Both forms are accepted.
 
 **Example**:
 ```omscript
@@ -3231,48 +3185,7 @@ repeat {
 } until (i == 10);
 ```
 
-### 8.10 `forever { }`
-
-**Syntax**: `forever { body }`
-
-**Semantics**:
-- Infinite loop (alias for `loop { body }`)
-
-**Example**:
-```omscript
-forever {
-    println("Looping...");
-    // Must use break to exit
-}
-```
-
-### 8.11 `times N { }`
-
-**Syntax**: `times N { body }` or `times (N) { body }`
-
-**Semantics**:
-- Executes `body` exactly `N` times
-- `N` is evaluated once at loop entry
-- Desugars to: `for (__times_i in 0...N) { body }`
-
-**Example**:
-```omscript
-var counter: int = 0;
-times 5 {
-    counter = counter + 1;
-}
-// counter = 5
-```
-
-**With variable**:
-```omscript
-var n: int = 3;
-times n {
-    println("Repeat");
-}
-```
-
-### 8.12 `parallel for (...)`
+### 8.9 `parallel for (...)`
 
 **Syntax**: `parallel for (var in range) { body }`
 
@@ -3295,7 +3208,7 @@ parallel for (i: int in 0...10) {
 
 **Implementation**: Code generator may emit OpenMP pragmas or thread pool calls. Exact parallelization strategy is implementation-defined.
 
-### 8.13 `pipeline { stage s { } stage t { } }`
+### 8.10 `pipeline { stage s { } stage t { } }`
 
 **Syntax**:
 - Counted form: `pipeline N { stage name { body } ... }`
@@ -3353,7 +3266,7 @@ pipeline {
 
 **Implementation**: May emit software prefetching, pipelined execution, or other stage-based optimizations. Exact semantics are implementation-defined (sequential execution is a valid interpretation).
 
-### 8.14 `swap a, b;`
+### 8.11 `swap a, b;`
 
 **Syntax**: `swap a, b;`
 
@@ -3369,7 +3282,7 @@ swap x, y;
 // x = 20, y = 10
 ```
 
-### 8.15 `break` / `continue`
+### 8.12 `break` / `continue`
 
 **`break` statement**: Exits the innermost enclosing loop or `switch`.
 
@@ -3437,7 +3350,7 @@ outer: for i in 0..4 {
 - `break label;` and `continue label;` are parse errors if no enclosing loop has that label.
 - Unlabeled `break;` and `continue;` still target the nearest enclosing loop.
 
-### 8.16 Loop Annotations
+### 8.13 Loop Annotations
 
 **Syntax**: `for (...) @loop(annotation) { body }`
 
@@ -4126,10 +4039,6 @@ var g: int = Color::GREEN;  // 10 (scope resolution syntax)
 **Enum values are global integer constants**; no distinct enum type (values are plain integers).
 
 ---
-
-**End of Part 1 of the OmScript Language Reference.**
-
-*This document is derived exclusively from the OmScript compiler source code and validated test programs. All claims are verified against the implementation.*
 
 ## 11. Arrays — Complete API
 
@@ -6011,11 +5920,12 @@ map_set(map_set(m, 10, 100), 20, 200);
 struct Name { field1, field2, field3 }
 ```
 
-**Fields:** Comma-separated identifiers (no type annotations in the current syntax).
+**Fields:** Comma-separated identifiers. Type annotations are **optional** — use `: type` to annotate a field. Unannotated fields default to `i64` at the IR level.
 
 **Example:**
 ```omscript
-struct Point { x, y }
+struct Point { x, y }           // untyped fields (default i64)
+struct Vec2 { x: int, y: int }  // typed fields (same representation)
 struct Person { name, age }
 ```
 
@@ -6145,9 +6055,21 @@ Both call styles are accepted:
 
 ---
 
-### 14.6 Operator overloading
+### 14.6 Operator Overloading
 
-**Not supported** in the current implementation. Future feature.
+**Fully implemented.** Custom operators are defined inside the struct body using `fn operator<op>(param: Type) -> RetType { ... }` syntax. The operator name may be any standard symbol, a multi-character token sequence, a quoted string, or a backtick-quoted identifier.
+
+**Syntax:**
+```omscript
+struct Vec2 {
+    x, y,
+    fn operator+(other: Vec2) -> Vec2 {
+        return Vec2 { x: self.x + other.x, y: self.y + other.y };
+    }
+}
+```
+
+The synthesized function is named `__op_StructName_opstr` internally and is called when the operator expression `v1 + v2` is evaluated with both operands of the struct type. Operator overloads are automatically marked `@inline`.
 
 ---
 
@@ -6240,13 +6162,13 @@ enum Color { RED, GREEN, BLUE }
 
 var c = Color_GREEN;
 switch (c) {
-    case 0: println("red"); break;
-    case 1: println("green"); break;
-    case 2: println("blue"); break;
+    case Color_RED:   println("red");   break;
+    case Color_GREEN: println("green"); break;
+    case Color_BLUE:  println("blue");  break;
 }
 ```
 
-**When expressions:** (if implemented)
+**When expressions:** **Partially supported** — `when` arms that match enum variant constants work; union-like variant payloads are reserved.
 ```omscript
 when (c) {
     Color_RED => println("red"),
@@ -6388,7 +6310,7 @@ assert_call ::= 'assert' '(' expression ')'
 | Built-in | Failure behavior | Compiler treatment |
 | --- | --- | --- |
 | `assert(cond)` | Aborts the program at runtime | Emits a real check |
-| `assume(cond)` | **Undefined behavior** if violated | Lowers to `llvm.assume` — no runtime check, used as an optimization hint (§7.10) |
+| `assume(cond)` | **Undefined behavior** if violated | Lowers to `llvm.assume` — no runtime check, used as an optimization hint (§7.11) |
 
 Use `assert` for safety-critical invariants you want enforced. Use `assume` only when you can prove the predicate holds and want the optimizer to exploit it.
 
@@ -7651,7 +7573,7 @@ var x = 257;
 var y = u8(x);  // 1 (257 % 256)
 ```
 
-**Deep-dive table:** Deferred to Part 3.
+**See also:** §27 (Integer Type-Cast Reference) for the complete cast table with truncation/extension rules.
 
 ---
 
@@ -8067,25 +7989,7 @@ if (expect(x == 0, 1)) {  // Expect x == 0 to be true
 
 ---
 
-### 19.8 String formatting
-
-See section 12.8.
-
----
-
-### 19.9 Environment
-
-See section 19.6.1.
-
----
-
-### 19.10 Array interleave
-
-See `array_zip` in section 11.6.
-
----
-
-### 19.11 High-precision integer arithmetic
+### 19.8 High-precision integer arithmetic
 
 #### `mulhi(i64, i64) → i64`
 
@@ -11536,6 +11440,8 @@ fn greet(name: string) {  // no return type
 ```
 
 ### Control Flow
+> Parentheses around `if` / `for` / `while` conditions are optional in OmScript; both styles are accepted.
+
 ```omscript
 if x > 0 {
     print("positive");
@@ -11602,7 +11508,7 @@ var sub: string = str_substr(s, 0, 3);   // "hel"
 
 ### Ownership
 ```omscript
-struct Node { value: int; next: ptr<Node>; }
+struct Node { value: int, next: ptr<Node> }  // typed fields (commas as delimiter)
 
 // alloc<T>(n) — raw uninitialized allocation (T1: stack, T2: arena, T3: heap)
 var p: ptr<Node> = alloc<Node>(1);
@@ -11669,14 +11575,6 @@ omsc build --release -o myapp        # release build
 omsc build -O3 -flto -march=native   # max optimization
 ```
 
-### std::synthesize
-```omscript
-fn multiply_add(a: int, b: int, c: int) -> int {
-    return std::synthesize([[1,2,3,5], [2,3,4,10], [0,5,1,1]]);
-}
-// Compiler synthesizes: return a * b + c;
-```
-
 ---
 
 ## 32. Glossary
@@ -11696,16 +11594,14 @@ fn multiply_add(a: int, b: int, c: int) -> int {
 | **Fuel**              | Instruction budget for CF-CTRE evaluation. Default: 10,000,000 instructions at O2. |
 | **Comptime**          | Compile-time evaluation. Code inside `comptime { ... }` blocks is executed by CF-CTRE. |
 | **Ptr-elem-type**     | Pointer element type. The type of data pointed to by a pointer (used internally by LLVM IR). |
-| **Ownership state**   | Per-variable state tracked by the borrow checker. One of: `Owned`, `Borrowed`, `MutBorrowed`, `Shared`, `Frozen`, `Moved`, `Invalidated`. See §17.1. |
+| **Ownership state**   | Per-variable state tracked by the borrow checker. See §17.1 for the full description of all states. |
 | **Owned**             | Initial ownership state: variable has unique, exclusive read-write access. |
 | **Borrowed**          | Variable has ≥1 active immutable borrows (`borrow var r = x`). Source is readable but not writable or moveable until all borrows end. |
 | **MutBorrowed**       | Variable has exactly one active mutable borrow (`borrow mut var r = x`). Source is completely locked (no reads or writes) until the borrow ends. |
 | **Shared**            | Variable transitioned via `shared x;`. Multiple reads allowed; writes and mutable borrows are compile-time errors (E020). Reversible via `own x;`. |
-| **Frozen**            | Variable permanently immutable via `freeze x;`. LLVM `!invariant` metadata emitted on all loads. Irreversible — `own` is a compile-time error (E021). |
-| **Moved**             | Ownership transferred via `move var y = x`. Reading/writing `x` afterwards is a compile-time error (E015). |
-| **Invalidated**       | Variable killed via `invalidate x;`. Memory scheduled for deferred `free()`. Any subsequent use is E015. Double-invalidate is E019. |
-| **Freeze**            | `freeze x;` — mark variable permanently read-only. LLVM `!invariant.load` emitted. `own` on frozen variable → E021. |
-| **Invalidate**        | `invalidate x;` — deferred deallocation. Logical death is immediate; physical `free()` is batched at function exit. Cannot invalidate while borrowed (E022). |
+| **Moved**             | Ownership transferred via `move var y = x`. Reading or writing `x` afterwards is a compile-time error (E015). |
+| **Freeze / Frozen**   | `freeze x;` marks a variable permanently read-only. LLVM `!invariant.load` is emitted on all loads. The transition is irreversible — `own` on a frozen variable is a compile-time error (E021). |
+| **Invalidate / Invalidated** | `invalidate x;` schedules a deferred `free()` at function exit. The variable's logical lifetime ends immediately; any subsequent use is E015. Double-invalidate is E019. Cannot invalidate while borrowed (E022). |
 | **Reborrow**          | `reborrow var ref = src;` — create a new non-owning immutable alias from an existing borrow. Increments the source's `reborrows` count. |
 | **No-alias**          | Guarantee that two pointers do not refer to overlapping memory. Emitted as LLVM `noalias` on `Owned` and `MutBorrowed` variables. Enables aggressive optimization. |
 | **Saturation**        | Termination condition for e-graph: no new e-nodes added in an iteration. |
@@ -11774,8 +11670,8 @@ Defined in `include/version.h`:
 
 **Deprecated features** (to be removed in v5.0):
 1. **Legacy direct mode**: `omsc file.om` (use `omsc compile file.om`).
-2. **Implicit `int` return type**: Functions without `-> type` will require explicit return type.
-3. **Global mutable variables**: Will require `unsafe` keyword.
+2. **Implicit parameter/return types**: Functions without explicit `-> type` or parameter type annotations will require them.
+3. **Global mutable variables**: Will require an explicit qualifier (planned — exact keyword is **Reserved** for v5.0; not yet enforced).
 
 **Migration guide**:
 ```omscript
@@ -11791,7 +11687,7 @@ fn compute(x: int) -> int {
 ```
 
 **Compatibility**:
-- This reference targets the `4.9.0` compiler snapshot described above.
+- This reference targets OmScript `4.9.0`.
 - Source files written for older v4.x releases generally remain close to valid, but should be revalidated against current diagnostics and deprecation warnings on `4.9.0`.
 - v5.0 will require explicit migration (automated tool planned).
 
@@ -11802,5 +11698,3 @@ fn compute(x: int) -> int {
 - **LLVM 20–21**: supported — `VirtualFileSystem.h` include path changed in 22 (`#if LLVM_VERSION_MAJOR < 22`); `Attribute::NoCapture` replaced by `captures(none)` in 21 (`#if LLVM_VERSION_MAJOR >= 21`).
 - **LLVM 22+**: `llvm/Passes/PassPlugin.h` moved to `llvm/Plugins/PassPlugin.h` — handled via `#if LLVM_VERSION_MAJOR >= 22`; `VirtualFileSystem.h` removed; Polly plugin path updated. All known breaking API changes are guarded.
 - **macOS ARM64 (Apple Silicon)**: fully supported. The data layout and target triple are initialized at the start of `generate()` (via `InitializeNativeTarget` + `createTargetMachine` + `setDataLayout`) before any IR is emitted, ensuring correct ABI alignment for all types including `i64` (align 8, not 4).
-
-**End of Part 3**
