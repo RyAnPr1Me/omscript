@@ -1862,8 +1862,8 @@ const [first, _, third] = [100, 200, 300];
 **Syntax**: `var (a, b [, c ...]) = expr;` or `const (a, b) = expr;`
 
 **Semantics**:
-- Declares multiple variables by unpacking a struct-like tuple value returned from a function
-- The parenthesized form targets **tuple values** (struct fields `.0`, `.1`, `.2`, …), while the bracket form (`var [a, b]`) targets arrays
+- Declares multiple variables by unpacking a value returned from an expression
+- The parenthesized form accesses fields `.0`, `.1`, `.2`, … — these are the **integer field indices** of the OmScript tuple/struct representation. The compiler synthesises these indexed-field accesses; the struct does not need to declare fields literally named `0`, `1`, etc.
 - Underscore `_` as a placeholder skips an element
 - Works with both `var` and `const`
 
@@ -2107,7 +2107,6 @@ fn main() {
 - Individual arguments may be named using `name: value` syntax at the call site.
 - Named arguments are reordered to match the function's **declaration parameter order** at compile time.
 - Positional and named arguments may be mixed: positional arguments must appear **before** named arguments.
-- Unknown argument names in functions with known declarations fall through with the argument in the given position order.
 
 **Example**:
 ```omscript
@@ -2124,9 +2123,9 @@ var r3 = create_rect(4, height: 5, filled: 0);  // width=4 positional, rest name
 ```
 
 **Restrictions**:
-- Named arguments are resolved using the parameter names from the **declaration** (`fn` definition) in the current translation unit.
-- Calling built-in functions or functions from other modules with named arguments is supported on a best-effort basis.
-- Duplicate argument names cause a compile-time error.
+- Named arguments are resolved using the parameter names from the **declaration** (`fn` definition) in the current translation unit. When the function declaration is known, unrecognised argument names produce a compile-time error.
+- When calling a function whose declaration is not visible (e.g., a built-in or a function resolved by string-literal forwarding), named-argument labels are silently ignored and arguments are passed in the order they appear at the call site — i.e., the call degrades to positional.
+- Duplicate argument names at the same call site cause a compile-time error.
 
 ### 6.4 Expression-Body Functions
 
@@ -3624,6 +3623,8 @@ if "baz" not in banned {
 ```
 
 **Result type**: `bool` (`1` = not present, `0` = present)
+
+### 9.7 Range `..` and `...`
 
 **Exclusive range `..`**: `start..end` creates a half-open range `[start, end)`.
 
@@ -5225,7 +5226,7 @@ println(str_len("hello"));  // 5
 #### `str_is_empty(string) → i64`
 
 **Semantics:** Return `1` if the string has zero characters, `0` otherwise. Compile-time folded for literal arguments. Equivalent to `str_len(s) == 0` but more readable.  
-**Time:** O(n) (single length-load + compare)
+**Time:** O(n) — delegates to `strlen()` to determine the length; no cached length header exists for strings.
 
 **Example:**
 ```omscript
@@ -5953,7 +5954,7 @@ println(map_get(c, 1));  // 100
 
 #### `map_clear(dict) → dict`
 
-**Semantics:** Return a fresh empty map, effectively resetting the dictionary. The argument is evaluated for side effects but its allocation is no longer referenced. Semantically equivalent to `map_new()` but more expressive at a call site where the intent is "reset this map".  
+**Semantics:** Returns a fresh, independently allocated empty dictionary. Does **not** modify the input — the input dict and its memory are unaffected. The intended usage pattern is `m = map_clear(m);`, which rebinds `m` to the new empty map (the old map becomes unreachable). Semantically equivalent to `map_new()` but makes the "reset this variable" intent explicit at the call site.  
 **Time:** O(1)
 
 **Example:**
