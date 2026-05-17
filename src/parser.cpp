@@ -6586,6 +6586,21 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                         }
                     }
                 }
+                // Namespace function reference in non-call position (e.g. as a callback argument).
+                // e.g.  array_map(arr, Ops::double_val)  — resolve to IdentifierExpr("Ops::double_val")
+                // so that extractFnName() and codegen can locate the function by its qualified name.
+                {
+                    auto nsIt = importNamespaces_.find(segments[0]);
+                    if (nsIt != importNamespaces_.end()) {
+                        auto fnIt = nsIt->second.find(segments[1]);
+                        if (fnIt != nsIt->second.end()) {
+                            auto e = std::make_unique<IdentifierExpr>(fnIt->second);
+                            e->line = token.line;
+                            e->column = token.column;
+                            return e;
+                        }
+                    }
+                }
                 // Fallback: classic enum member access
                 auto e = std::make_unique<ScopeResolutionExpr>(segments[0], segments[1]);
                 e->line = token.line;
@@ -6593,7 +6608,7 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                 return e;
             }
             // Multi-level value reference without '()': attempt global lookup,
-            // then error — name mangling is not performed.
+            // then try namespace function reference, then error.
             {
                 // Try longest-prefix global lookup: e.g. a::b::c
                 // where "a::b" is a namespace and "c" is a global variable.
@@ -6613,6 +6628,29 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                             e->column = token.column;
                             return e;
                         }
+                    }
+                }
+                // Try namespace function reference for multi-level paths:
+                // e.g. array_map(arr, Ops::Math::square) — resolve to IdentifierExpr("Ops::Math::square").
+                for (int cut = (int)segments.size() - 1; cut >= 1; --cut) {
+                    std::string ns;
+                    for (int i = 0; i < cut; ++i) {
+                        if (i > 0) ns += "::";
+                        ns += segments[i];
+                    }
+                    auto nsIt = importNamespaces_.find(ns);
+                    if (nsIt == importNamespaces_.end()) continue;
+                    std::string fn;
+                    for (int i = cut; i < (int)segments.size(); ++i) {
+                        if (i > cut) fn += "::";
+                        fn += segments[i];
+                    }
+                    auto fnIt = nsIt->second.find(fn);
+                    if (fnIt != nsIt->second.end()) {
+                        auto e = std::make_unique<IdentifierExpr>(fnIt->second);
+                        e->line = token.line;
+                        e->column = token.column;
+                        return e;
                     }
                 }
                 // No namespace resolved — emit a clear error.

@@ -1,0 +1,45 @@
+import std;
+// round83_ns_fnref_test.om
+// Verifies that namespace-qualified function names can be used in
+// non-call position (e.g., as callbacks to array_map/filter/reduce).
+//   - Flat namespace fn as HOF callback
+//   - Two-level nested namespace fn as HOF callback
+// Expected exit code: 5
+
+namespace Ops {
+    fn double_val(x: int) -> int { return x * 2; }
+    fn is_even(x: int) -> int { return (x % 2 == 0); }
+    fn add(acc: int, x: int) -> int { return acc + x; }
+
+    namespace Inner {
+        fn triple(x: int) -> int { return x * 3; }
+        fn is_pos(x: int) -> int { return (x > 0); }
+    }
+}
+
+fn main() {
+    var arr = [1, 2, 3, 4, 5];
+    var pass = 0;
+
+    // Flat namespace fn as array_map callback
+    var doubled = array_map(arr, Ops::double_val);
+    if doubled[0] == 2 && doubled[4] == 10 { pass = pass + 1; }
+
+    // Nested namespace fn as array_map callback
+    var tripled = array_map(arr, Ops::Inner::triple);
+    if tripled[0] == 3 && tripled[4] == 15 { pass = pass + 1; }
+
+    // Flat ns fn as array_filter callback
+    var evens = array_filter(arr, Ops::is_even);
+    if len(evens) == 2 { pass = pass + 1; }
+
+    // Flat ns fn as array_reduce callback (signature: array_reduce(arr, fn, init))
+    var total = array_reduce(arr, Ops::add, 0);
+    if total == 15 { pass = pass + 1; }
+
+    // Nested ns fn as array_filter callback
+    var positives = array_filter([-1, 2, -3, 4, 5], Ops::Inner::is_pos);
+    if len(positives) == 3 { pass = pass + 1; }
+
+    return pass;
+}
