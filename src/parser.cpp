@@ -5553,7 +5553,12 @@ std::unique_ptr<Expression> Parser::parseCall() {
             // Detect if any argument uses the `name: expr` form.
             // Named and positional args may be mixed: positional args come first,
             // named args can appear in any order after positional args.
-            struct NamedArg { std::string name; std::unique_ptr<Expression> value; };
+            struct NamedArg {
+                std::string name;
+                std::unique_ptr<Expression> value;
+                int line = 0;
+                int column = 0;
+            };
             std::vector<std::unique_ptr<Expression>> positionalArgs;
             std::vector<NamedArg> namedArgs;
             bool seenNamed = false;
@@ -5578,10 +5583,10 @@ std::unique_ptr<Expression> Parser::parseCall() {
                                         tokens[current + 1].type == TokenType::COLON);
                         if (isNamed) {
                             seenNamed = true;
-                            const std::string argName = advance().lexeme; // consume name
+                            const Token argNameTok = advance(); // consume name
                             advance(); // consume ':'
                             auto val = parseExpression();
-                            namedArgs.push_back({argName, std::move(val)});
+                            namedArgs.push_back({argNameTok.lexeme, std::move(val), argNameTok.line, argNameTok.column});
                         } else {
                             if (seenNamed) {
                                 error("Positional arguments cannot follow named arguments");
@@ -5641,6 +5646,12 @@ std::unique_ptr<Expression> Parser::parseCall() {
                     }
                 } else {
                     // Unknown function — append named args in the order given
+                    if (!namedArgs.empty()) {
+                        const NamedArg& firstNamed = namedArgs.front();
+                        warnings_.push_back("warning: named arguments ignored for unresolved call '" + calleeName +
+                                            "' (line " + std::to_string(firstNamed.line) + ":" +
+                                            std::to_string(firstNamed.column) + ")");
+                    }
                     arguments = std::move(positionalArgs);
                     for (auto& na : namedArgs)
                         arguments.push_back(std::move(na.value));

@@ -38,10 +38,10 @@ This file tracks high-value language features that are desirable but not fully i
 
 ## Ergonomics / Diagnostics
 
-- [ ] **Named-argument fallback warning for unresolved declarations**
-  - Current state: when declaration metadata is unavailable, labels are ignored and call degrades to positional without warning.
+- [x] **Named-argument fallback warning for unresolved declarations**
+  - Current state: parser now emits a warning when named arguments are used and declaration metadata is unavailable; call still degrades to positional order.
   - Reference: `LANGUAGE_REFERENCE.md` §6.3.1.
-  - Goal: emit warning or error to prevent subtle call-site bugs.
+  - Follow-up: consider promoting this to an error under stricter language modes.
 
 - [ ] **Finalize v5 global mutable qualifier design**
   - Current state: qualifier is planned but exact keyword is not selected.
