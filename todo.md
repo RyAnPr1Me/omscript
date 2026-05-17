@@ -5,7 +5,7 @@ This file tracks high-value language features that are desirable but not fully i
 ## High Priority
 
 - [ ] **Generic functions (true type parameters)**
-  - Current state: reserved only.
+  - Current state: `fn name<T>(...)` declaration syntax is parsed and a warning is emitted; type parameters are not checked or used in codegen.
   - Reference: `LANGUAGE_REFERENCE.md` §6.5.
   - Goal: accept `fn name<T>(...) -> T` and perform real type-checked specialization/inference.
 

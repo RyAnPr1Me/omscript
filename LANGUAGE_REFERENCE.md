@@ -2138,9 +2138,13 @@ fn main() {
 
 ### 6.5 Generic / Type-Parameterized Functions
 
-**Status**: **Reserved** — Generic functions (type parameters on function declarations) are not implemented in the current parser or type system. The `<T>` syntax for generic parameter lists is not yet a parser token sequence. This is a planned future language feature.
+**Status**: **Partially supported** — The `fn name<T, R>(...)` declaration syntax is parsed and the type-parameter list is stored in the AST. However, type parameters have no effect on code generation: the compiler does not perform template specialization, type inference, or type checking on them. Using a type parameter name (e.g., `T`) as a type annotation inside the function body will produce unhelpful "unknown type" errors. A **parser warning** is emitted whenever a function declaration carries type parameters.
 
-**Anticipated syntax** (not yet accepted): `fn name<T>(param: T) -> T { ... }`
+**Example** (accepted at parse time, but no generic behavior):
+```omscript
+// warning: Generic type parameters <T> are not yet implemented
+fn identity<T>(x: int) -> int { return x; }
+```
 
 **Workaround today**: Use explicit typed overloads (e.g. `fn process_int(x: int)` + `fn process_float(x: float)`), or pass values through `ptr<T>` with manual casting for type-erased algorithms.
 

@@ -2063,6 +2063,20 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
         } while (match(TokenType::COMMA));
         consume(TokenType::GT, "Expected '>' after type parameters");
     }
+    // Type parameters are parsed for syntax compatibility but not yet implemented.
+    // Any type parameter names used inside the body will be treated as unknown
+    // type annotations and may produce unhelpful errors.
+    if (!typeParams.empty()) {
+        std::string paramList = typeParams[0];
+        for (size_t tpi = 1; tpi < typeParams.size(); ++tpi)
+            paramList += ", " + typeParams[tpi];
+        warnings_.push_back("warning: line " + std::to_string(name.line) + ":" +
+                            std::to_string(name.column) +
+                            ": Generic type parameters <" + paramList +
+                            "> on function '" + qualifiedName +
+                            "' are not yet implemented; they are parsed but have no effect. "
+                            "Use explicit typed overloads as a workaround.");
+    }
 
     consume(TokenType::LPAREN, "Expected '(' after function name");
 
