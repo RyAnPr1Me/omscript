@@ -469,7 +469,7 @@ std::unique_ptr<Program> Parser::parse() {
         }
         if (match(TokenType::NAMESPACE)) {
             try {
-                parseNamespace(functions, enums, structs);
+                parseNamespace(functions, enums, structs, globals);
             } catch (const std::exception& e) {
                 recordException(errors_, diagnostics_, e);
                 synchronize();
@@ -1810,6 +1810,7 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
 void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                             std::vector<std::unique_ptr<EnumDecl>>& enums,
                             std::vector<std::unique_ptr<StructDecl>>& structs,
+                            std::vector<std::unique_ptr<VarDecl>>& globals,
                             const std::string& nsPrefix) {
     const Token nsNameTok = consume(TokenType::IDENTIFIER, "Expected namespace name");
     const std::string nsName = nsPrefix.empty() ? nsNameTok.lexeme
@@ -1854,12 +1855,26 @@ void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& function
             // (e.g. Code::OK inside namespace functions) resolves correctly.
             bareEnumNames_[shortName] = qualName;
             enums.push_back(std::move(en));
+        } else if (check(TokenType::GLOBAL)) {
+            // Global variable declaration inside a namespace block.
+            // e.g.  namespace Config { global var VERSION: int = 42; }
+            // The variable is renamed to the qualified name (Config::VERSION) and
+            // registered in importedGlobalVars_ so that Config::VERSION resolves.
+            auto gv = parseGlobalDecl();
+            const std::string shortName = gv->name;
+            const std::string qualName = nsName + "::" + shortName;
+            gv->name = qualName;
+            // Register for Ns::varName access from outside the namespace.
+            importedGlobalVars_[nsName][shortName] = qualName;
+            // Also register in the namespace member map (enables nsMap lookups).
+            nsMap[shortName] = qualName;
+            globals.push_back(std::move(gv));
         } else if (match(TokenType::NAMESPACE)) {
             // Nested namespace: namespace Outer { namespace Inner { ... } }
             // The inner namespace's fully-qualified key becomes "Outer::Inner".
-            parseNamespace(functions, enums, structs, nsName);
+            parseNamespace(functions, enums, structs, globals, nsName);
         } else {
-            error("Only 'fn', 'struct', 'enum', and 'namespace' declarations are allowed inside a namespace block");
+            error("Only 'fn', 'struct', 'enum', 'namespace', and 'global var' declarations are allowed inside a namespace block");
         }
     }
     consume(TokenType::RBRACE, "Expected '}' to close namespace block");

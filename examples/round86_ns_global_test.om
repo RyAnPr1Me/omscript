@@ -1,0 +1,58 @@
+// round86_ns_global_test.om
+// Verifies global variable declarations inside namespace blocks:
+//   - global var inside namespace
+//   - global const inside namespace
+//   - Qualified access: Ns::varname
+//   - Namespace function reading own namespace global (qualified)
+//   - Nested namespace globals
+// Expected exit code: 7
+
+namespace Config {
+    global var VERSION: int = 42;
+    global const MAX_RETRY: int = 3;
+    global var SCORE: int = 0;
+
+    fn get_version() -> int {
+        return Config::VERSION;
+    }
+
+    fn get_max_retry() -> int {
+        return Config::MAX_RETRY;
+    }
+
+    namespace Net {
+        global var TIMEOUT: int = 30;
+        global const PORT: int = 8080;
+
+        fn get_timeout() -> int {
+            return Config::Net::TIMEOUT;
+        }
+    }
+}
+
+fn main() {
+    var pass = 0;
+
+    // Namespace global var access
+    if Config::VERSION == 42 { pass = pass + 1; }
+
+    // Namespace global const access
+    if Config::MAX_RETRY == 3 { pass = pass + 1; }
+
+    // Read via namespace function
+    var v = Config::get_version();
+    if v == 42 { pass = pass + 1; }
+
+    var r = Config::get_max_retry();
+    if r == 3 { pass = pass + 1; }
+
+    // Nested namespace globals
+    if Config::Net::TIMEOUT == 30 { pass = pass + 1; }
+    if Config::Net::PORT == 8080 { pass = pass + 1; }
+
+    // Nested namespace function reading own global
+    var t = Config::Net::get_timeout();
+    if t == 30 { pass = pass + 1; }
+
+    return pass;
+}

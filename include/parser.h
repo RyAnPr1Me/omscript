@@ -129,6 +129,7 @@ class Parser {
     void parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                         std::vector<std::unique_ptr<EnumDecl>>& enums,
                         std::vector<std::unique_ptr<StructDecl>>& structs,
+                        std::vector<std::unique_ptr<VarDecl>>& globals,
                         const std::string& nsPrefix = "");
 
     const Token& peek(int offset = 0) const noexcept;
