@@ -528,6 +528,7 @@ ptest_compile_fail "examples/double_invalidate_error_test.om"
 ptest_compile_fail "examples/write_to_shared_error_test.om"
 ptest_compile_fail "examples/invalidate_while_borrowed_error_test.om"
 ptest_compile_fail "examples/own_on_frozen_error_test.om"
+ptest_program "examples/round90_test.om" 17
 flush_ptests
 test_cli_output "error-location-arrow" "-->" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "error-includes-filename" "undefined_var.om" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err

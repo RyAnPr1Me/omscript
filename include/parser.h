@@ -160,6 +160,7 @@ class Parser {
     std::unique_ptr<Statement> parseSwitchStmt();
     std::unique_ptr<Statement> parseCatchStmt();
     std::unique_ptr<Statement> parseThrowStmt();
+    std::unique_ptr<Statement> parseEnsureStmt();
     std::unique_ptr<Statement> parseUnlessStmt();
     std::unique_ptr<Statement> parseUntilStmt();
     std::unique_ptr<Statement> parseLoopStmt();
@@ -167,6 +168,7 @@ class Parser {
     std::unique_ptr<Statement> parseDeferStmt();
     std::unique_ptr<Statement> parseGuardStmt();
     std::unique_ptr<Statement> parseWhenStmt();
+    std::unique_ptr<Expression> parseWhenExpr();
     std::unique_ptr<Statement> parseForeverStmt();
     std::unique_ptr<Statement> parseForEachStmt();
     std::unique_ptr<Statement> parseAssumeStmt();

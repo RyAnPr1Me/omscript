@@ -3,6 +3,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdint>
+#include <unordered_set>
 
 // Apply maximum compiler optimizations to this hot path.
 #ifdef __GNUC__
@@ -6969,6 +6970,23 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
     // Fetch the field annotation list (if any) so we know each field's
     // declared type for value conversion.
     auto declIt = structFieldDecls_.find(expr->structName);
+
+    // Apply default values for unspecified fields
+    if (declIt != structFieldDecls_.end()) {
+        std::unordered_set<std::string> specifiedFields;
+        for (auto& [fn, _] : expr->fieldValues)
+            specifiedFields.insert(fn);
+        for (size_t i = 0; i < declIt->second.size(); ++i) {
+            const auto& fd = declIt->second[i];
+            if (fd.defaultVal && specifiedFields.find(fd.name) == specifiedFields.end()) {
+                llvm::Value* defVal = generateExpression(fd.defaultVal.get());
+                llvm::Type* elemTy = sty->getElementType(static_cast<unsigned>(i));
+                defVal = convertTo(defVal, elemTy);
+                llvm::Value* fieldPtr = builder->CreateStructGEP(sty, structAlloca, static_cast<unsigned>(i), "struct.default.ptr");
+                builder->CreateStore(defVal, fieldPtr);
+            }
+        }
+    }
 
     // Apply each provided field initializer.
     for (auto& [fieldName, valueExpr] : expr->fieldValues) {

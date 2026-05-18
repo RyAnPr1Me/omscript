@@ -94,6 +94,7 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"lock",      TokenType::LOCK},       // mutex_lock sugar
     {"unlock",    TokenType::UNLOCK},     // mutex_unlock sugar
     {"trylock",   TokenType::TRYLOCK},    // mutex_try_lock sugar
+    {"ensure",    TokenType::ENSURE},     // ensure — always-on runtime guard
 };
 
 /// Throw a DiagnosticError with the given message and source location.

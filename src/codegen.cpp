@@ -4321,21 +4321,21 @@ void CodeGenerator::generate(Program* program) {
                 reorderedDecls.reserve(structDecl->fieldDecls.size());
                 for (size_t i : hotIdx) {
                     reorderedFields.push_back(structDecl->fields[i]);
-                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
+                    reorderedDecls.push_back(std::move(structDecl->fieldDecls[i]));
                 }
                 for (size_t i : normalIdx) {
                     reorderedFields.push_back(structDecl->fields[i]);
-                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
+                    reorderedDecls.push_back(std::move(structDecl->fieldDecls[i]));
                 }
                 for (size_t i : coldIdx) {
                     reorderedFields.push_back(structDecl->fields[i]);
-                    reorderedDecls.push_back(structDecl->fieldDecls[i]);
+                    reorderedDecls.push_back(std::move(structDecl->fieldDecls[i]));
                 }
                 structDefs_[structDecl->name] = reorderedFields;
-                structFieldDecls_[structDecl->name] = reorderedDecls;
+                structFieldDecls_[structDecl->name] = std::move(reorderedDecls);
             } else {
                 structDefs_[structDecl->name] = structDecl->fields;
-                structFieldDecls_[structDecl->name] = structDecl->fieldDecls;
+                structFieldDecls_[structDecl->name] = std::move(structDecl->fieldDecls);
             }
         } else {
             structDefs_[structDecl->name] = structDecl->fields;

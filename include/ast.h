@@ -536,8 +536,17 @@ struct StructField {
     std::string name;
     std::string typeName; ///< Optional type annotation
     FieldAttrs attrs;
+    std::unique_ptr<Expression> defaultVal; ///< Optional default value (nullptr if none)
 
-    StructField(const std::string& n, const std::string& t = "", FieldAttrs a = {}) : name(n), typeName(t), attrs(a) {}
+    StructField(const std::string& n, const std::string& t = "", FieldAttrs a = {},
+                std::unique_ptr<Expression> def = nullptr)
+        : name(n), typeName(t), attrs(a), defaultVal(std::move(def)) {}
+
+    // Move-only due to unique_ptr member
+    StructField(StructField&&) = default;
+    StructField& operator=(StructField&&) = default;
+    StructField(const StructField&) = delete;
+    StructField& operator=(const StructField&) = delete;
 };
 
 // Forward declaration for OperatorOverload.

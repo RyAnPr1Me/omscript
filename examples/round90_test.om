@@ -1,0 +1,79 @@
+import std;
+
+struct Point {
+    x: int = 10;
+    y: int = 20;
+}
+
+struct Named {
+    name: string = "default";
+    score: int = 0;
+}
+
+fn main() {
+    var score = 0;
+
+    // is operator
+    var i = 42;
+    var f = 3.14;
+    var s = "hello";
+    score = score + (i is int);
+    score = score + !(i is float);
+    score = score + (f is float);
+    score = score + !(f is int);
+    score = score + (s is string);
+
+    // for ... where (range)
+    var big = 0;
+    for i2 in 0...10 where i2 > 5 {
+        big = big + 1;
+    }
+    score = score + (big == 4);
+
+    // for ... where (array)
+    var arr = [1, 2, 3, 4, 5, 6];
+    var evens = 0;
+    for item in arr where item % 2 == 0 {
+        evens = evens + 1;
+    }
+    score = score + (evens == 3);
+
+    // foreach ... where
+    var arr2 = [10, 20, 30, 40, 50];
+    var above30 = 0;
+    foreach v in arr2 where v > 30 {
+        above30 = above30 + 1;
+    }
+    score = score + (above30 == 2);
+
+    // ensure
+    var x = 5;
+    ensure x > 0;
+    score = score + 1;
+    ensure x == 5, "x must be 5";
+    score = score + 1;
+
+    // struct default field values
+    var p = Point { };
+    score = score + (p.x == 10);
+    score = score + (p.y == 20);
+
+    var p2 = Point { x: 99 };
+    score = score + (p2.x == 99);
+    score = score + (p2.y == 20);
+
+    // when as expression
+    var val = 2;
+    var lbl = when val { 1 => 10, 2 => 20, 3 => 30, _ => 0 };
+    score = score + (lbl == 20);
+
+    var val2 = 5;
+    var res = when val2 { 1 => 100, 5 => 500, _ => 0 };
+    score = score + (res == 500);
+
+    var val3 = 99;
+    var fallback = when val3 { 1 => 1, 2 => 2, _ => 999 };
+    score = score + (fallback == 999);
+
+    return score;
+}

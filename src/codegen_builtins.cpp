@@ -4,6 +4,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdlib>
+#include <cerrno>
 #include <iostream>
 #include <limits>
 #include <unordered_set>
@@ -357,6 +358,8 @@ enum class BuiltinId : uint16_t {
     COND_DESTROY,       ///< cond_destroy(cv)      → destroys + frees; returns 0
     THREAD_SELF,        ///< thread_self()         → current thread id as i64
     THREAD_EQUAL,       ///< thread_equal(t1, t2)  → 1 if same thread, else 0
+    IS_TYPE,            ///< is_type(val, "typename") → 1 if val matches type
+    ENSURE_BUILTIN,     ///< ensure(cond[, msg]) → always-on runtime guard
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -663,6 +666,8 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"cond_destroy",     BuiltinId::COND_DESTROY},
     {"thread_self",      BuiltinId::THREAD_SELF},
     {"thread_equal",     BuiltinId::THREAD_EQUAL},
+    {"is_type",          BuiltinId::IS_TYPE},
+    {"ensure",           BuiltinId::ENSURE_BUILTIN},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -3789,6 +3794,78 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateCall(getOrDeclareAbort());
         builder->CreateUnreachable();
 
+        builder->SetInsertPoint(okBB);
+        return llvm::ConstantInt::get(getDefaultType(), 1);
+    }
+
+    if (bid == BuiltinId::IS_TYPE) {
+        if (expr->arguments.size() != 2)
+            codegenError("is_type: requires 2 arguments", expr);
+        auto* arg1 = expr->arguments[1].get();
+        std::string typeName;
+        if (arg1->type == ASTNodeType::LITERAL_EXPR) {
+            typeName = static_cast<LiteralExpr*>(arg1)->stringValue;
+        } else {
+            codegenError("is_type: second argument must be a type name string literal", expr);
+        }
+        llvm::Value* val = generateExpression(expr->arguments[0].get());
+        llvm::Type* t = val->getType();
+        bool matches = false;
+        auto getVarName = [](Expression* e) -> std::string {
+            if (e->type == ASTNodeType::IDENTIFIER_EXPR)
+                return static_cast<IdentifierExpr*>(e)->name;
+            return "";
+        };
+        std::string vname = getVarName(expr->arguments[0].get());
+        if (typeName == "int" || typeName == "integer") {
+            matches = t->isIntegerTy() && !t->isIntegerTy(1);
+        } else if (typeName == "float") {
+            matches = t->isDoubleTy() || t->isFloatTy();
+        } else if (typeName == "bool") {
+            matches = t->isIntegerTy(1);
+        } else if (typeName == "string") {
+            matches = isStringExpr(expr->arguments[0].get());
+        } else if (typeName == "array") {
+            matches = !vname.empty() && arrayVars_.count(vname) > 0;
+        } else if (typeName == "dict") {
+            matches = !vname.empty() && dictVarNames_.count(vname) > 0;
+        } else if (typeName == "ptr") {
+            matches = !vname.empty() && ptrVarNames_.count(vname) > 0;
+        }
+        (void)val;
+        return llvm::ConstantInt::get(getDefaultType(), matches ? 1 : 0);
+    }
+
+    if (bid == BuiltinId::ENSURE_BUILTIN) {
+        if (expr->arguments.size() < 1 || expr->arguments.size() > 2)
+            codegenError("ensure() requires 1 or 2 arguments (condition[, message])", expr);
+        llvm::Value* condVal = generateExpression(expr->arguments[0].get());
+        condVal = toBool(condVal);
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "ensure.fail", function);
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "ensure.ok", function);
+        llvm::MDNode* w = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(condVal, okBB, failBB, w);
+        builder->SetInsertPoint(failBB);
+        {
+            if (expr->arguments.size() == 2) {
+                llvm::Value* msgVal = generateExpression(expr->arguments[1].get());
+                llvm::Value* msgPtr = msgVal->getType()->isPointerTy() ? msgVal
+                    : builder->CreateIntToPtr(msgVal, llvm::PointerType::getUnqual(*context), "ensure.msg.ptr");
+                llvm::Value* msgData = emitStringData(msgPtr, "ensure.msg.data");
+                std::string prefix = expr->line > 0
+                    ? "Runtime error: ensure failed at line " + std::to_string(expr->line) + ": %s\n"
+                    : "Runtime error: ensure failed: %s\n";
+                builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(prefix, "ensure_fail_fmt"), msgData});
+            } else {
+                std::string msg = expr->line > 0
+                    ? "Runtime error: ensure failed at line " + std::to_string(expr->line) + "\n"
+                    : "Runtime error: ensure failed\n";
+                builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(msg, "ensure_fail_msg")});
+            }
+        }
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
         builder->SetInsertPoint(okBB);
         return llvm::ConstantInt::get(getDefaultType(), 1);
     }
@@ -8910,7 +8987,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* parentFunc = builder->GetInsertBlock()->getParent();
         llvm::Value* status = builder->CreateCall(getOrDeclarePthreadMutexTryLock(), {mutexPtr}, "mutex.try.status");
         llvm::Value* c0 = llvm::ConstantInt::get(status->getType(), 0);
-        llvm::Value* cBusy = llvm::ConstantInt::get(status->getType(), 16); // POSIX EBUSY
+        llvm::Value* cBusy = llvm::ConstantInt::get(status->getType(), EBUSY);
         llvm::Value* okAcquired = builder->CreateICmpEQ(status, c0, "mutex.try.is_acquired");
         llvm::Value* okBusy = builder->CreateICmpEQ(status, cBusy, "mutex.try.is_busy");
 
