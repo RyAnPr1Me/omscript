@@ -620,7 +620,7 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
         }
     }
     // -----------------------------------------------------------------------
-    if (ann == "string")
+    if (ann == "string" || ann == "str")
         return llvm::PointerType::getUnqual(*context);
     // bigint: heap-allocated arbitrary-precision integer — opaque pointer
     if (ann == "bigint")

@@ -182,7 +182,7 @@ class Parser {
     std::vector<std::unique_ptr<Statement>> parseDestructuringDecl(bool isConst);
     std::vector<std::unique_ptr<Statement>> parseTupleDestructuringDecl(bool isConst);
     std::unique_ptr<EnumDecl> parseEnumDecl();
-    std::unique_ptr<StructDecl> parseStructDecl(StructRepr repr = StructRepr::Auto, int reprAlignN = 0);
+    std::unique_ptr<StructDecl> parseStructDecl(StructRepr repr = StructRepr::Auto, int reprAlignN = 0, const std::string& forcedName = "");
     std::unique_ptr<Expression> parseStructLiteral(const std::string& name, int line, int col);
     std::unique_ptr<Statement> parseExprStmt();
     std::unique_ptr<VarDecl> parseGlobalDecl();

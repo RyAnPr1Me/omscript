@@ -1,0 +1,124 @@
+import std;
+// round93_language_test.om — Round-93: language consistency & expressiveness
+// Tests: paren-free guard/unless/until, fn() anonymous expressions,
+//        when expr with arbitrary discriminant, str type annotation,
+//        type X = struct { ... } inline struct type alias.
+// Expected return value: 20
+
+// ── 1. guard paren-free ───────────────────────────────────────────────────────
+fn safe_div(a: int, b: int) -> int {
+    guard b != 0 else { return -1; }
+    return a / b;
+}
+
+fn first_positive(a: int, b: int) -> int {
+    guard a > 0 else { return b; }
+    return a;
+}
+
+// ── 2. unless paren-free ─────────────────────────────────────────────────────
+fn test_unless(n: int) -> int {
+    var r = 0;
+    unless n == 0 { r = 1; }
+    return r;
+}
+
+// ── 3. until paren-free ──────────────────────────────────────────────────────
+fn count_to(n: int) -> int {
+    var i = 0;
+    until i >= n { i++; }
+    return i;
+}
+
+fn sum_until(limit: int) -> int {
+    var i = 0;
+    var total = 0;
+    until i >= limit {
+        total = total + i;
+        i++;
+    }
+    return total;
+}
+
+// ── 4. Anonymous fn() expressions ────────────────────────────────────────────
+fn apply(f: fn(int) -> int, x: int) -> int { return f(x); }
+fn apply2(f: fn(int, int) -> int, x: int, y: int) -> int { return f(x, y); }
+
+// ── 5. when expression with arbitrary discriminant ────────────────────────────
+fn classify_sum(a: int, b: int) -> int {
+    // discriminant is an expression (a + b), not just a bare variable
+    return when a + b { 0 => 10, 5 => 50, 10 => 100, _ => -1 };
+}
+
+fn index_based(n: int) -> int {
+    // discriminant is a function call result
+    return when abs(n) { 0 => 0, 1 => 1, 2 => 4, _ => 9 };
+}
+
+// ── 6. str type annotation (no warning, identical to 'string') ────────────────
+fn greet(name: str) -> str {
+    return f"hello {name}";
+}
+
+fn str_len(s: str) -> int {
+    return len(s);
+}
+
+// ── 7. type X = struct { ... } inline struct type alias ───────────────────────
+type Point = struct { x: int, y: int };
+type Rect  = struct { w: int, h: int };
+
+fn point_dist_sq(a: Point, b: Point) -> int {
+    var dx = a.x - b.x;
+    var dy = a.y - b.y;
+    return dx * dx + dy * dy;
+}
+
+fn rect_area(r: Rect) -> int { return r.w * r.h; }
+
+fn main() {
+    var pass = 0;
+
+    // ── guard paren-free ──────────────────────────────────────────────────────
+    pass = pass + (safe_div(10, 2) == 5);      // normal division
+    pass = pass + (safe_div(10, 0) == -1);     // guard triggers
+    pass = pass + (first_positive(3, 9) == 3); // a > 0, return a
+    pass = pass + (first_positive(-1, 9) == 9);// a <= 0, guard triggers, return b
+
+    // ── unless paren-free ─────────────────────────────────────────────────────
+    pass = pass + (test_unless(5) == 1);
+    pass = pass + (test_unless(0) == 0);
+
+    // ── until paren-free ──────────────────────────────────────────────────────
+    pass = pass + (count_to(4) == 4);
+    pass = pass + (count_to(0) == 0);
+    pass = pass + (sum_until(5) == 10); // 0+1+2+3+4 = 10
+
+    // ── anonymous fn() expressions ────────────────────────────────────────────
+    var triple = fn(x: int) -> int { return x * 3; };
+    pass = pass + (apply(triple, 4) == 12);
+    // inline anonymous fn
+    pass = pass + (apply(fn(x: int) -> int { return x * x; }, 5) == 25);
+    // two-arg inline fn
+    pass = pass + (apply2(fn(a: int, b: int) -> int { return a + b; }, 3, 7) == 10);
+
+    // ── when expression with arbitrary discriminant ────────────────────────────
+    pass = pass + (classify_sum(3, 2) == 50);   // 3+2=5 => 50
+    pass = pass + (classify_sum(6, 4) == 100);  // 6+4=10 => 100
+    pass = pass + (classify_sum(1, 1) == -1);   // 1+1=2 => default -1
+    pass = pass + (index_based(-2) == 4);        // abs(-2)=2 => 4
+    pass = pass + (index_based(0) == 0);         // abs(0)=0 => 0
+
+    // ── str type annotation ────────────────────────────────────────────────────
+    var g = greet("OmScript");
+    pass = pass + (str_len(g) > 0);
+
+    // ── type X = struct { ... } ───────────────────────────────────────────────
+    var p1 = Point { x: 0, y: 0 };
+    var p2 = Point { x: 3, y: 4 };
+    pass = pass + (point_dist_sq(p1, p2) == 25);
+    var r = Rect { w: 6, h: 7 };
+    pass = pass + (rect_area(r) == 42);
+
+    return pass;
+}
