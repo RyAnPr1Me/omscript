@@ -6269,55 +6269,52 @@ llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
 
 llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
     // --- Compile-time dict literal constant propagation ---
-    if (expr->array->type == ASTNodeType::DICT_EXPR && expr->index->type == ASTNodeType::LITERAL_EXPR) {
+    if (expr->array->type == ASTNodeType::DICT_EXPR) {
         auto* dict = static_cast<DictExpr*>(expr->array.get());
-        auto* keyLit = static_cast<LiteralExpr*>(expr->index.get());
-        bool canFold = false;
-        Expression* matchedValue = nullptr;
+        auto idxConst = tryFoldExprToConst(expr->index.get());
+        if (idxConst && (idxConst->kind == ConstValue::Kind::String || idxConst->kind == ConstValue::Kind::Integer)) {
+            bool canFold = true;
+            std::optional<ConstValue> matchedValueConst;
+            auto emitConstValue = [&](const ConstValue& cv) -> llvm::Value* {
+                switch (cv.kind) {
+                case ConstValue::Kind::Integer:
+                    return llvm::ConstantInt::get(getDefaultType(), cv.intVal, /*isSigned=*/true);
+                case ConstValue::Kind::Float:
+                    return llvm::ConstantFP::get(getFloatType(), cv.floatVal);
+                case ConstValue::Kind::String: {
+                    llvm::GlobalVariable* gv = internString(cv.strVal);
+                    return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                        gv->getValueType(), gv,
+                        llvm::ArrayRef<llvm::Constant*>{llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                                                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+                }
+                case ConstValue::Kind::Array:
+                    return emitComptimeArray(cv.arrVal);
+                }
+                return llvm::ConstantInt::get(getDefaultType(), 0);
+            };
 
-        if (keyLit->literalType == LiteralExpr::LiteralType::STRING) {
-            canFold = true;
-            // Last matching key wins (matches runtime SET-overwrites semantics).
+            // Last matching key wins (matches runtime set-overwrite semantics).
             for (auto& [k, v] : dict->pairs) {
-                if (k->type == ASTNodeType::LITERAL_EXPR) {
-                    auto* kl = static_cast<LiteralExpr*>(k.get());
-                    if (kl->literalType == LiteralExpr::LiteralType::STRING && kl->stringValue == keyLit->stringValue) {
-                        matchedValue = v.get();
-                    }
-                } else {
-                    // Non-literal key → can't fold (side effects possible)
+                auto keyConst = tryFoldExprToConst(k.get());
+                auto valConst = tryFoldExprToConst(v.get());
+                if (!keyConst || !valConst) {
                     canFold = false;
                     break;
                 }
-            }
-        } else if (keyLit->literalType == LiteralExpr::LiteralType::INTEGER) {
-            canFold = true;
-            for (auto& [k, v] : dict->pairs) {
-                if (k->type == ASTNodeType::LITERAL_EXPR) {
-                    auto* kl = static_cast<LiteralExpr*>(k.get());
-                    if (kl->literalType == LiteralExpr::LiteralType::INTEGER && kl->intValue == keyLit->intValue) {
-                        matchedValue = v.get();
-                    }
-                } else {
-                    canFold = false;
-                    break;
-                }
-            }
-        }
 
-        if (canFold) {
-            // Also need to check that all VALUE expressions in the dict are
-            bool allValuesAreLiterals = true;
-            for (auto& [k, v] : dict->pairs) {
-                if (v->type != ASTNodeType::LITERAL_EXPR) {
-                    allValuesAreLiterals = false;
-                    break;
-                }
+                bool keyMatch = false;
+                if (idxConst->kind == ConstValue::Kind::String && keyConst->kind == ConstValue::Kind::String)
+                    keyMatch = (keyConst->strVal == idxConst->strVal);
+                else if (idxConst->kind == ConstValue::Kind::Integer && keyConst->kind == ConstValue::Kind::Integer)
+                    keyMatch = (keyConst->intVal == idxConst->intVal);
+                if (keyMatch)
+                    matchedValueConst = *valConst;
             }
-            if (allValuesAreLiterals) {
-                if (matchedValue) {
-                    return generateExpression(matchedValue);
-                }
+
+            if (canFold) {
+                if (matchedValueConst)
+                    return toDefaultType(emitConstValue(*matchedValueConst));
                 // Key not found → return 0 (matches runtime map_get default)
                 return llvm::ConstantInt::get(getDefaultType(), 0);
             }
