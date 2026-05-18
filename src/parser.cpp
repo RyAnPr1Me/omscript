@@ -469,7 +469,7 @@ std::unique_ptr<Program> Parser::parse() {
         }
         if (match(TokenType::NAMESPACE)) {
             try {
-                parseNamespace(functions, enums, structs);
+                parseNamespace(functions, enums, structs, globals);
             } catch (const std::exception& e) {
                 recordException(errors_, diagnostics_, e);
                 synchronize();
@@ -1670,10 +1670,14 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
             // For stdlib ("std"), builtins are already accessible bare; skip.
             if (nsTok.lexeme != "std") {
                 for (const auto& [shortName, qualName] : nsIt->second) {
-                    bareImportedFunctions_[shortName] = qualName;
+                    bareImportedNames_[shortName] = qualName;
                     // If the qualified name is also a struct name, expose bare name too.
                     if (structNames_.count(qualName)) {
                         structNames_.insert(shortName);
+                    }
+                    // If the qualified name is also an enum name, expose bare enum alias too.
+                    if (enumNames_.count(qualName)) {
+                        bareEnumNames_[shortName] = qualName;
                     }
                 }
             }
@@ -1779,6 +1783,10 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
     for (const auto& name : importParser.enumNames_) {
         enumNames_.insert(name);
     }
+    // Import bare enum name aliases
+    for (const auto& [shortName, qualName] : importParser.bareEnumNames_) {
+        bareEnumNames_[shortName] = qualName;
+    }
 
     // Import global variables: derive the alias stem if none was given.
     std::string globalAlias = alias;
@@ -1801,9 +1809,12 @@ void Parser::parseImport(std::vector<std::unique_ptr<FunctionDecl>>& functions,
 
 void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                             std::vector<std::unique_ptr<EnumDecl>>& enums,
-                            std::vector<std::unique_ptr<StructDecl>>& structs) {
+                            std::vector<std::unique_ptr<StructDecl>>& structs,
+                            std::vector<std::unique_ptr<VarDecl>>& globals,
+                            const std::string& nsPrefix) {
     const Token nsNameTok = consume(TokenType::IDENTIFIER, "Expected namespace name");
-    const std::string nsName = nsNameTok.lexeme;
+    const std::string nsName = nsPrefix.empty() ? nsNameTok.lexeme
+                                                 : nsPrefix + "::" + nsNameTok.lexeme;
     consume(TokenType::LBRACE, "Expected '{' after namespace name");
 
     auto& nsMap = importNamespaces_[nsName];
@@ -1824,6 +1835,10 @@ void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& function
             const std::string qualName = nsName + "::" + shortName;
             // structNames_ already has shortName from parseStructDecl; add qualified name.
             structNames_.insert(qualName);
+            // Expose the bare short name → qualified name mapping so that struct literals
+            // inside this namespace block (and later in the same file) can use the short
+            // name without full qualification, consistent with `import NamespaceName;`.
+            bareImportedNames_[shortName] = qualName;
             st->name = qualName;
             nsMap[shortName] = qualName;
             structs.push_back(std::move(st));
@@ -1833,9 +1848,58 @@ void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& function
             const std::string qualName = nsName + "::" + shortName;
             en->name = qualName;
             nsMap[shortName] = qualName;
+            // Register the qualified name in enumNames_ so that 3-segment access
+            // (e.g. Status::Code::OK) can identify the prefix as an enum.
+            enumNames_.insert(qualName);
+            // Also map the short name → qualified name so that bare enum access
+            // (e.g. Code::OK inside namespace functions) resolves correctly.
+            bareEnumNames_[shortName] = qualName;
             enums.push_back(std::move(en));
+        } else if (check(TokenType::GLOBAL)) {
+            // Global variable declaration inside a namespace block.
+            // e.g.  namespace Config { global var VERSION: int = 42; }
+            // The variable is renamed to the qualified name (Config::VERSION) and
+            // registered in importedGlobalVars_ so that Config::VERSION resolves.
+            auto gv = parseGlobalDecl();
+            const std::string shortName = gv->name;
+            const std::string qualName = nsName + "::" + shortName;
+            gv->name = qualName;
+            // Register for Ns::varName access from outside the namespace.
+            importedGlobalVars_[nsName][shortName] = qualName;
+            // Also register in the namespace member map (enables nsMap lookups).
+            nsMap[shortName] = qualName;
+            globals.push_back(std::move(gv));
+        } else if (check(TokenType::TYPE)) {
+            // Type alias inside a namespace block.
+            // e.g.  namespace Math { type Scalar = int; }
+            // Registers both qualified (Math::Scalar → int) and bare (Scalar → int)
+            // aliases so that both `Math::Scalar` and bare `Scalar` work as type names
+            // within the same file after the namespace is declared.
+            advance(); // consume 'type'
+            const Token aliasName = consume(TokenType::IDENTIFIER, "Expected alias name after 'type'");
+            consume(TokenType::ASSIGN, "Expected '=' after type alias name");
+            if (!check(TokenType::IDENTIFIER) && !check(TokenType::STAR) &&
+                !check(TokenType::STAR_STAR) && !check(TokenType::LPAREN) &&
+                !check(TokenType::AMPERSAND) && !check(TokenType::FN)) {
+                error("Expected type name after '=' in type alias");
+            }
+            const std::string resolvedType = parseTypeAnnotation();
+            consume(TokenType::SEMICOLON, "Expected ';' after type alias");
+            const std::string qualAliasName = nsName + "::" + aliasName.lexeme;
+            // Qualified alias: Math::Scalar → int
+            typeAliases_[qualAliasName] = resolvedType;
+            // Bare alias (file-scope): Scalar → int
+            // Only register if the bare name isn't already taken to avoid shadowing.
+            if (!typeAliases_.count(aliasName.lexeme))
+                typeAliases_[aliasName.lexeme] = resolvedType;
+            // Register in namespace member map for consistency.
+            nsMap[aliasName.lexeme] = qualAliasName;
+        } else if (match(TokenType::NAMESPACE)) {
+            // Nested namespace: namespace Outer { namespace Inner { ... } }
+            // The inner namespace's fully-qualified key becomes "Outer::Inner".
+            parseNamespace(functions, enums, structs, globals, nsName);
         } else {
-            error("Only 'fn', 'struct', and 'enum' declarations are allowed inside a namespace block");
+            error("Only 'fn', 'struct', 'enum', 'namespace', 'global var', and 'type' declarations are allowed inside a namespace block");
         }
     }
     consume(TokenType::RBRACE, "Expected '}' to close namespace block");
@@ -1952,6 +2016,13 @@ std::string Parser::parseTypeAnnotation() {
     } else {
         typeName = consume(TokenType::IDENTIFIER, "Expected type name").lexeme;
     }
+    // Support namespace-qualified type names: Math::Scalar, A::B::Type, etc.
+    // Consume '::' + IDENTIFIER suffix segments until the pattern breaks.
+    while (check(TokenType::SCOPE) && (current + 1 < tokens.size()) &&
+           tokens[current + 1].type == TokenType::IDENTIFIER) {
+        advance(); // consume '::'
+        typeName += "::" + advance().lexeme;
+    }
     // Handle parameterised SIMD types: u64x{N}, u32x{N}, i32x{N}, f32x{N}, etc.
     // u64x{LANES} where LANES is a comptime constant resolves to u64x2/4/8, etc.
     if (check(TokenType::LBRACE) && typeName.size() >= 3 &&
@@ -2024,6 +2095,16 @@ std::string Parser::parseTypeAnnotation() {
         if (it->second == typeName) break; // self-cycle guard
         typeName = it->second;
     }
+    // Resolve namespace-qualified struct type aliases (e.g. bare `Point` →
+    // `Geom::Point` when the struct was declared inside `namespace Geom` in this
+    // file, or when `import Geom;` brought Point into the bare namespace).
+    // Only apply to struct types — primitive / builtin type names are never in
+    // the bareImportedNames_ map.
+    {
+        auto importedNameIt = bareImportedNames_.find(typeName);
+        if (importedNameIt != bareImportedNames_.end() && structNames_.count(importedNameIt->second))
+            typeName = importedNameIt->second;
+    }
     return prefix + typeName;
 }
 
@@ -2056,6 +2137,20 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
             typeParams.push_back(tp.lexeme);
         } while (match(TokenType::COMMA));
         consume(TokenType::GT, "Expected '>' after type parameters");
+    }
+    // Type parameters are parsed for syntax compatibility but not yet implemented.
+    // Any type parameter names used inside the body will be treated as unknown
+    // type annotations and may produce unhelpful errors.
+    if (!typeParams.empty()) {
+        std::string paramList = typeParams[0];
+        for (size_t tpi = 1; tpi < typeParams.size(); ++tpi)
+            paramList += ", " + typeParams[tpi];
+        warnings_.push_back("warning: line " + std::to_string(name.line) + ":" +
+                            std::to_string(name.column) +
+                            ": Generic type parameters <" + paramList +
+                            "> on function '" + qualifiedName +
+                            "' are not yet implemented; they are parsed but have no effect. "
+                            "Use explicit typed overloads as a workaround.");
     }
 
     consume(TokenType::LPAREN, "Expected '(' after function name");
@@ -2682,9 +2777,14 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         return decl;
     }
     // global var/const — declare a program-wide variable inside a function body.
-    // Syntax: global var name[:type] [= expr];
+    // Syntax: global [mut] var name[:type] [= expr];
     if (match(TokenType::GLOBAL)) {
         const Token kw = tokens[current - 1];
+        // Accept optional `mut` qualifier: `global mut var name` — the explicit
+        // mutable form chosen for v5.0 compatibility. In v4.x this only records
+        // the spelling choice; enforcement and deprecation of bare `global var`
+        // are planned for the v5.0 transition.
+        match(TokenType::MUT); // consume `mut` if present
         const bool isConst = check(TokenType::CONST);
         if (!match(TokenType::VAR) && !match(TokenType::CONST)) {
             error("Expected 'var' or 'const' after 'global'");
@@ -3226,6 +3326,11 @@ std::unique_ptr<Statement> Parser::parseVarDeclWithInheritedType(bool isConst, c
 
 std::unique_ptr<VarDecl> Parser::parseGlobalDecl() {
     const Token kw = advance(); // consume 'global'
+    // Accept optional `mut` qualifier: `global mut var name` — the explicit
+    // mutable form chosen for v5.0 compatibility. Semantically identical to
+    // `global var` in the current release.
+    const bool hasMut = match(TokenType::MUT);
+    (void)hasMut; // semantic enforcement reserved for v5.0
     const bool isConst = check(TokenType::CONST);
     if (!match(TokenType::VAR) && !match(TokenType::CONST)) {
         error("Expected 'var' or 'const' after 'global'");
@@ -5553,7 +5658,12 @@ std::unique_ptr<Expression> Parser::parseCall() {
             // Detect if any argument uses the `name: expr` form.
             // Named and positional args may be mixed: positional args come first,
             // named args can appear in any order after positional args.
-            struct NamedArg { std::string name; std::unique_ptr<Expression> value; };
+            struct NamedArg {
+                std::string name;
+                std::unique_ptr<Expression> value;
+                int line = 0;
+                int column = 0;
+            };
             std::vector<std::unique_ptr<Expression>> positionalArgs;
             std::vector<NamedArg> namedArgs;
             bool seenNamed = false;
@@ -5578,10 +5688,10 @@ std::unique_ptr<Expression> Parser::parseCall() {
                                         tokens[current + 1].type == TokenType::COLON);
                         if (isNamed) {
                             seenNamed = true;
-                            const std::string argName = advance().lexeme; // consume name
+                            const Token argNameTok = advance(); // consume name
                             advance(); // consume ':'
                             auto val = parseExpression();
-                            namedArgs.push_back({argName, std::move(val)});
+                            namedArgs.push_back({argNameTok.lexeme, std::move(val), argNameTok.line, argNameTok.column});
                         } else {
                             if (seenNamed) {
                                 error("Positional arguments cannot follow named arguments");
@@ -5597,9 +5707,9 @@ std::unique_ptr<Expression> Parser::parseCall() {
             // Resolve bare function calls from globally-imported user namespaces.
             std::string calleeName = idExpr->name;
             {
-                auto bif = bareImportedFunctions_.find(calleeName);
-                if (bif != bareImportedFunctions_.end())
-                    calleeName = bif->second;
+                auto importedNameIt = bareImportedNames_.find(calleeName);
+                if (importedNameIt != bareImportedNames_.end())
+                    calleeName = importedNameIt->second;
             }
 
             if (!seenNamed) {
@@ -5641,6 +5751,13 @@ std::unique_ptr<Expression> Parser::parseCall() {
                     }
                 } else {
                     // Unknown function — append named args in the order given
+                    if (!namedArgs.empty()) {
+                        const NamedArg& firstNamed = namedArgs.front();
+                        warnings_.push_back("warning: line " + std::to_string(firstNamed.line) + ":" +
+                                            std::to_string(firstNamed.column) +
+                                            ": named arguments are ignored for unresolved call '" +
+                                            calleeName + "'");
+                    }
                     arguments = std::move(positionalArgs);
                     for (auto& na : namedArgs)
                         arguments.push_back(std::move(na.value));
@@ -6561,14 +6678,37 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                         }
                     }
                 }
-                // Fallback: classic enum member access
-                auto e = std::make_unique<ScopeResolutionExpr>(segments[0], segments[1]);
-                e->line = token.line;
-                e->column = token.column;
-                return e;
+                // Namespace function reference in non-call position (e.g. as a callback argument).
+                // e.g.  array_map(arr, Ops::double_val)  — resolve to IdentifierExpr("Ops::double_val")
+                // so that extractFnName() and codegen can locate the function by its qualified name.
+                {
+                    auto nsIt = importNamespaces_.find(segments[0]);
+                    if (nsIt != importNamespaces_.end()) {
+                        auto fnIt = nsIt->second.find(segments[1]);
+                        if (fnIt != nsIt->second.end()) {
+                            auto e = std::make_unique<IdentifierExpr>(fnIt->second);
+                            e->line = token.line;
+                            e->column = token.column;
+                            return e;
+                        }
+                    }
+                }
+                // Fallback: classic enum member access — also handle bare enum names that
+                // were declared inside a namespace (e.g. `Code::OK` inside namespace Status
+                // should emit ScopeResolutionExpr("Status::Code", "OK")).
+                {
+                    std::string scopeName = segments[0];
+                    auto bev = bareEnumNames_.find(scopeName);
+                    if (bev != bareEnumNames_.end())
+                        scopeName = bev->second;
+                    auto e = std::make_unique<ScopeResolutionExpr>(scopeName, segments[1]);
+                    e->line = token.line;
+                    e->column = token.column;
+                    return e;
+                }
             }
             // Multi-level value reference without '()': attempt global lookup,
-            // then error — name mangling is not performed.
+            // then check for struct literal, then try function reference, then error.
             {
                 // Try longest-prefix global lookup: e.g. a::b::c
                 // where "a::b" is a namespace and "c" is a global variable.
@@ -6590,6 +6730,60 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                         }
                     }
                 }
+                // Try namespace function reference for multi-level paths:
+                // e.g. array_map(arr, Ops::Math::square) — resolve to IdentifierExpr("Ops::Math::square").
+                // Also check for struct literals: e.g. Geom::Shape::Circle { cx: 0, cy: 0, r: 3 }.
+                // Also check for enum access: Ns::EnumType::VARIANT → ScopeResolutionExpr(qualEnum, member).
+                // Build prefix path (all segments except last) and check if it's a known enum.
+                {
+                    std::string enumPrefix;
+                    for (size_t i = 0; i + 1 < segments.size(); ++i) {
+                        if (i > 0) enumPrefix += "::";
+                        enumPrefix += segments[i];
+                    }
+                    const std::string& memberName = segments.back();
+                    // Also try resolving via bareEnumNames_ (e.g. Ns::BareCode::OK where BareCode is short)
+                    std::string resolvedEnum = enumPrefix;
+                    {
+                        auto bev = bareEnumNames_.find(enumPrefix);
+                        if (bev != bareEnumNames_.end())
+                            resolvedEnum = bev->second;
+                    }
+                    if (enumNames_.count(resolvedEnum)) {
+                        auto e = std::make_unique<ScopeResolutionExpr>(resolvedEnum, memberName);
+                        e->line = token.line;
+                        e->column = token.column;
+                        return e;
+                    }
+                }
+                for (int cut = (int)segments.size() - 1; cut >= 1; --cut) {
+                    std::string ns;
+                    for (int i = 0; i < cut; ++i) {
+                        if (i > 0) ns += "::";
+                        ns += segments[i];
+                    }
+                    auto nsIt = importNamespaces_.find(ns);
+                    if (nsIt == importNamespaces_.end()) continue;
+                    std::string fn;
+                    for (int i = cut; i < (int)segments.size(); ++i) {
+                        if (i > cut) fn += "::";
+                        fn += segments[i];
+                    }
+                    auto fnIt = nsIt->second.find(fn);
+                    if (fnIt != nsIt->second.end()) {
+                        const std::string qualName = fnIt->second;
+                        // Multi-level namespace struct literal: Ns::Sub::Struct { ... }
+                        if (structNames_.count(qualName) && check(TokenType::LBRACE)) {
+                            advance(); // consume '{'
+                            return parseStructLiteral(qualName, token.line, token.column);
+                        }
+                        // Function / variable reference in non-call position
+                        auto e = std::make_unique<IdentifierExpr>(qualName);
+                        e->line = token.line;
+                        e->column = token.column;
+                        return e;
+                    }
+                }
                 // No namespace resolved — emit a clear error.
                 std::string path = segments[0];
                 for (size_t i = 1; i < segments.size(); ++i)
@@ -6605,9 +6799,9 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
             // Resolve bare name through bare-import map (e.g. Vec2 → Math::Vec2 after import Math;)
             std::string structName = token.lexeme;
             {
-                auto bif = bareImportedFunctions_.find(structName);
-                if (bif != bareImportedFunctions_.end())
-                    structName = bif->second;
+                auto importedNameIt = bareImportedNames_.find(structName);
+                if (importedNameIt != bareImportedNames_.end())
+                    structName = importedNameIt->second;
             }
             return parseStructLiteral(structName, token.line, token.column);
         }

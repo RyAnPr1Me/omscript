@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-87: Namespace type aliases + qualified type annotations** (`src/parser.cpp`, `examples/round87_ns_type_qualtype_test.om`, `run_tests.sh`):
+  - Added `type` alias declarations inside `namespace` blocks.
+  - Added namespace-qualified type annotation support (`A::B::Type`) in variable, parameter, and return type positions, including array forms like `A::B::Type[]`.
+  - Added `examples/round87_ns_type_qualtype_test.om` and wired it into `run_tests.sh`.
+
+- **Round-86: Namespace global declarations** (`src/parser.cpp`, `examples/round86_ns_global_test.om`, `run_tests.sh`):
+  - Added `global var` and `global const` support inside namespace blocks.
+  - Added qualified namespace-global access resolution for flat and nested paths (`Ns::name`, `A::B::name`).
+  - Added `examples/round86_ns_global_test.om` and wired it into `run_tests.sh`.
+
+- **Round-85: Namespace enum path resolution improvements** (`src/parser.cpp`, `examples/round85_ns_enum_test.om`, `run_tests.sh`):
+  - Added robust enum variant path resolution for `Ns::Enum::VARIANT` and deeper nested namespace forms.
+  - Improved enum usability in `when` patterns within namespace scopes.
+  - Added `examples/round85_ns_enum_test.om` and wired it into `run_tests.sh`.
+
+- **Round-84: Namespace struct resolution improvements** (`src/parser.cpp`, `examples/round84_ns_struct_test.om`, `run_tests.sh`):
+  - Added multi-level namespace struct literal resolution (`Ns::Sub::Struct { ... }`).
+  - Improved namespace-local struct name usability in type annotations and method bodies.
+  - Added `examples/round84_ns_struct_test.om` and wired it into `run_tests.sh`.
+
+- **Round-83: Namespace function references in non-call positions** (`src/parser.cpp`, `examples/round83_ns_fnref_test.om`, `run_tests.sh`):
+  - Added namespace-qualified function symbol resolution in value positions (for example callback arguments), not only direct calls.
+  - Added `examples/round83_ns_fnref_test.om` and wired it into `run_tests.sh`.
+
+- **Round-82: Nested user-defined namespaces** (`src/parser.cpp`, `examples/round82_nested_namespace_test.om`, `run_tests.sh`):
+  - Added nested namespace declaration/lookup support for arbitrarily deep `A::B::C` paths.
+  - Added `examples/round82_nested_namespace_test.om` and wired it into `run_tests.sh`.
+
 - **Round-81: Threading keyword syntax sugar (`spawn`/`join`/`detach`/`lock`/`unlock`/`trylock`)** (`include/lexer.h`, `src/lexer.cpp`, `src/parser.cpp`, `src/main.cpp`, `README.md`, `LANGUAGE_REFERENCE.md`):
   - Added new reserved keywords for concurrency ergonomics: `spawn`, `join`, `detach`, `lock`, `unlock`, and `trylock`.
   - Parser now desugars keyword forms directly into existing builtins:
@@ -242,7 +270,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
   - **`namespace Name { ... }` blocks** (`src/parser.cpp`, `include/parser.h`, `include/lexer.h`, `src/lexer.cpp`): Added `namespace` keyword (`TokenType::NAMESPACE`) and `parseNamespace()`. Inside a namespace block, `fn`, `struct`, and `enum` declarations are accepted. Each declaration's name is prefixed with `"NSName::"` and registered in `importNamespaces_["NSName"]` so that `NSName::func(args)` resolves to the LLVM function `"NSName::func"`. Struct names are registered in `structNames_` under both the short and qualified forms. Scope-resolution syntax (`Math::Vec2 { x: 1, y: 2 }`) is handled by a new check in the non-`(` path of `parsePrimary` that calls `parseStructLiteral` when the resolved name is a known struct and the next token is `{`.
-  - **`import NSName;`** (identifier form, `src/parser.cpp`): When a user-defined namespace is globally imported, `bareImportedFunctions_` is populated with short-name → qualified-name entries so that bare calls (`add(x)`) and bare struct literals (`Vec2 { ... }`) resolve to their qualified counterparts (`Math::add`, `Math::Vec2`) after `import Math;`.
+  - **`import NSName;`** (identifier form, `src/parser.cpp`): When a user-defined namespace is globally imported, `bareImportedNames_` is populated with short-name → qualified-name entries so that bare calls (`add(x)`) and bare struct literals (`Vec2 { ... }`) resolve to their qualified counterparts (`Math::add`, `Math::Vec2`) after `import Math;`.
   - **Mandatory `std::` namespace enforcement** (`src/codegen_builtins.cpp`, `src/codegen.cpp`, `include/codegen.h`): `stdImported_` flag (true when `import std;` is seen) gates enforcement in `generateCall()`. The sentinel `BuiltinId::UNKNOWN` was renamed to `BuiltinId::NONE` (fix) — `bid != BuiltinId::NONE` means the callee is a known stdlib builtin; if it is, and `stdImported_` is false, and no user-defined override exists, a compile error is emitted.
   - **New test**: `examples/namespace_test.om` (exit 0) — covers qualified calls (`Math::add`), qualified struct literals (`Math::Vec2 { ... }`), and bare access after `import Math;`. All 437 tests pass.
 

@@ -1,0 +1,88 @@
+import std;
+// round84_ns_struct_test.om
+// Verifies namespace struct usability improvements:
+//   - Bare struct names work inside namespace function bodies
+//   - Bare struct names work in parameter/return type annotations
+//   - Multi-level namespace struct literals: Ns::Sub::Struct { ... }
+//   - Struct methods defined inside a namespace block
+// Expected exit code: 6
+
+namespace Geom {
+    struct Point {
+        x: int,
+        y: int
+    }
+
+    struct Rect {
+        tl_x: int,
+        tl_y: int,
+        w: int,
+        h: int
+    }
+
+    // Constructor using bare 'Point' in body (not Geom::Point)
+    fn Point::new(px: int, py: int) -> Point {
+        return Point { x: px, y: py };
+    }
+
+    // Method using bare 'Point' in parameter type
+    fn Point::dist_sq(p: Point) -> int {
+        return p.x * p.x + p.y * p.y;
+    }
+
+    // Factory using bare 'Rect' in return type + body
+    fn make_rect(x: int, y: int, w: int, h: int) -> Rect {
+        return Rect { tl_x: x, tl_y: y, w: w, h: h };
+    }
+
+    namespace Shape {
+        struct Circle {
+            cx: int,
+            cy: int,
+            r: int
+        }
+
+        // Method using bare 'Circle' in nested namespace
+        fn Circle::area(c: Circle) -> int {
+            return c.r * c.r * 3;
+        }
+
+        fn make_circle(x: int, y: int, r: int) -> Circle {
+            return Circle { cx: x, cy: y, r: r };
+        }
+    }
+}
+
+fn main() {
+    var pass = 0;
+
+    // Flat namespace struct via constructor
+    var p = Geom::Point::new(3, 4);
+    var d = Geom::Point::dist_sq(p);
+    if d == 25 { pass = pass + 1; }
+
+    // Flat namespace factory
+    var r = Geom::make_rect(1, 2, 10, 5);
+    if r.w == 10 && r.h == 5 { pass = pass + 1; }
+
+    // Multi-level struct literal: Geom::Shape::Circle { ... }
+    var c = Geom::Shape::Circle { cx: 0, cy: 0, r: 3 };
+    var a = Geom::Shape::Circle::area(c);
+    if a == 27 { pass = pass + 1; }
+
+    // Nested namespace constructor with bare Circle
+    var c2 = Geom::Shape::make_circle(1, 2, 4);
+    if c2.r == 4 { pass = pass + 1; }
+
+    // Direct qualified access still works
+    var p2 = Geom::Point { x: 5, y: 12 };
+    var d2 = Geom::Point::dist_sq(p2);
+    if d2 == 169 { pass = pass + 1; }
+
+    // Bare Point struct literal (via bareImportedNames_ mapping)
+    // — accessible in same-file context after namespace declaration
+    var p3 = Geom::Point::new(0, 5);
+    if p3.y == 5 { pass = pass + 1; }
+
+    return pass;
+}

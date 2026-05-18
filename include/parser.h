@@ -123,10 +123,14 @@ class Parser {
                      std::vector<std::unique_ptr<EnumDecl>>& enums, std::vector<std::unique_ptr<StructDecl>>& structs,
                      std::vector<std::unique_ptr<VarDecl>>& globals);
 
-    /// Parse a user-defined namespace block: namespace Name { fn/struct/enum ... }
+    /// Parse a user-defined namespace block: namespace Name { fn/struct/enum/namespace ... }
+    /// @param nsPrefix  Fully-qualified name of the enclosing namespace, or empty string at
+    ///                  the top level.  Used to form qualified names for nested namespaces.
     void parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& functions,
                         std::vector<std::unique_ptr<EnumDecl>>& enums,
-                        std::vector<std::unique_ptr<StructDecl>>& structs);
+                        std::vector<std::unique_ptr<StructDecl>>& structs,
+                        std::vector<std::unique_ptr<VarDecl>>& globals,
+                        const std::string& nsPrefix = "");
 
     const Token& peek(int offset = 0) const noexcept;
     Token advance() noexcept;
@@ -230,6 +234,12 @@ class Parser {
     /// Known enum names for scope resolution validation.
     std::unordered_set<std::string> enumNames_;
 
+    /// Maps bare enum short-names to their qualified names when enums are declared
+    /// inside a namespace block.  e.g.  "Code" → "Status::Code" after:
+    ///   namespace Status { enum Code { OK, ERR } }
+    /// Used to resolve `Code::OK` as `ScopeResolutionExpr("Status::Code", "OK")`.
+    std::unordered_map<std::string, std::string> bareEnumNames_;
+
     /// Parameter names for user-defined functions, populated during the
     /// forward-declaration pre-scan pass.  Used to resolve named call
     /// arguments: foo(height: 3, width: 4) → reorder to match decl order.
@@ -251,9 +261,10 @@ class Parser {
     std::unordered_set<std::string> globallyImportedNamespaces_;
 
     /// Bare-import map: populated when `import NSName;` is processed for user-defined
-    /// namespaces.  Maps unqualified name → fully-qualified name so that `add(x)` after
-    /// `import Math;` resolves to the LLVM function `Math::add`.
-    std::unordered_map<std::string, std::string> bareImportedFunctions_;
+    /// namespaces. Maps unqualified name → fully-qualified name for namespace members
+    /// (for example functions and structs), so `add(x)` or `Vec2 { ... }` after
+    /// `import Math;` resolve to `Math::add` and `Math::Vec2`.
+    std::unordered_map<std::string, std::string> bareImportedNames_;
 
     /// Resolve a scope chain (segments separated by ::) to an actual function
     /// name using the importNamespaces_ registry.

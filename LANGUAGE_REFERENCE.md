@@ -2138,9 +2138,13 @@ fn main() {
 
 ### 6.5 Generic / Type-Parameterized Functions
 
-**Status**: **Reserved** — Generic functions (type parameters on function declarations) are not implemented in the current parser or type system. The `<T>` syntax for generic parameter lists is not yet a parser token sequence. This is a planned future language feature.
+**Status**: **Partially supported** — The `fn name<T, R>(...)` declaration syntax is parsed and the type-parameter list is stored in the AST. However, type parameters have no effect on code generation: the compiler does not perform template specialization, type inference, or type checking on them. Using a type parameter name (e.g., `T`) as a type annotation inside the function body will produce unhelpful "unknown type" errors. A **parser warning** is emitted whenever a function declaration carries type parameters.
 
-**Anticipated syntax** (not yet accepted): `fn name<T>(param: T) -> T { ... }`
+**Example** (accepted at parse time, but no generic behavior):
+```omscript
+// warning: Generic type parameters <T> are not yet implemented
+fn identity<T>(x: int) -> int { return x; }
+```
 
 **Workaround today**: Use explicit typed overloads (e.g. `fn process_int(x: int)` + `fn process_float(x: float)`), or pass values through `ptr<T>` with manual casting for type-erased algorithms.
 
@@ -8980,9 +8984,9 @@ Both forms are equivalent in semantics; the choice is stylistic.
 
 ### 23.8 User-defined namespaces
 
-OmScript supports user-defined namespace blocks that group functions, structs, and enums under a named scope.
+OmScript supports user-defined namespace blocks that group declarations under a named scope. Namespaces may be nested to arbitrary depth.
 
-**Syntax:**
+**Syntax — flat namespace:**
 ```omscript
 namespace Math {
     fn add(a, b) { return a + b; }
@@ -8992,12 +8996,74 @@ namespace Math {
 }
 ```
 
-Declarations inside a `namespace` block are registered with their fully qualified names (`Math::add`, `Math::Vec2`) and must be called that way unless the namespace is imported.
+**Syntax — nested namespaces:**
+```omscript
+namespace Geo {
+    fn scale(x: int, factor: int) -> int { return x * factor; }
 
-**Qualified access (no import required):**
+    namespace Point {
+        fn make(x: int, y: int) -> int { return x + y; }
+    }
+
+    namespace Vector {
+        fn dot(ax: int, ay: int, bx: int, by: int) -> int {
+            return ax * bx + ay * by;
+        }
+    }
+}
+```
+
+Declarations inside a `namespace` block are registered with their fully qualified names (`Math::add`, `Math::Vec2`, `Geo::Point::make`) and must be accessed that way unless the namespace is imported.
+
+**Qualified access — flat:**
 ```omscript
 var r = Math::add(3, 4);           // qualified function call
 var v = Math::Vec2 { x: 1, y: 2 }; // qualified struct literal
+```
+
+**Qualified access — nested (multi-level `::` path):**
+```omscript
+var p  = Geo::Point::make(5, 7);         // two-level
+var dp = Geo::Vector::dot(1, 2, 3, 4);  // sibling inner namespace
+```
+
+**Qualified function names in value position (callbacks):**
+```omscript
+import std;
+
+namespace Ops {
+    fn double_val(x: int) -> int { return x * 2; }
+    namespace Inner {
+        fn triple(x: int) -> int { return x * 3; }
+    }
+}
+
+var a = [1, 2, 3];
+var b = array_map(a, Ops::double_val);   // non-call symbol position
+var c = array_map(a, Ops::Inner::triple);
+```
+
+**Namespace-qualified type annotations:**
+```omscript
+namespace Math {
+    type Scalar = int;
+}
+
+var x: Math::Scalar = 42;
+var xs: Math::Scalar[] = [1, 2, 3];
+```
+
+Nesting can go to three or more levels:
+```omscript
+namespace A {
+    namespace B {
+        namespace C {
+            fn leaf() -> int { return 42; }
+        }
+    }
+}
+
+var v = A::B::C::leaf();   // 42
 ```
 
 **Bare access after `import NSName;`:**
@@ -9012,8 +9078,24 @@ var v = Vec2 { x: 1, y: 2 }; // equivalent to Math::Vec2 { x: 1, y: 2 }
 - `fn` — function definitions
 - `struct` — struct type definitions
 - `enum` — enum definitions
+- `global var` / `global const` — namespace-scoped globals (**Fully implemented**)
+- `type` — type aliases (**Fully implemented**)
+- `namespace` — nested namespace blocks (**Fully implemented**)
 
-Namespaces cannot be nested. Each namespace block contributes to a flat per-name registry; multiple `namespace Math { ... }` blocks in the same file are additive.
+**Namespace globals:**
+```omscript
+namespace Config {
+    global var VERSION: int = 42;
+    global const PORT: int = 8080;
+}
+
+var v = Config::VERSION;
+var p = Config::PORT;
+```
+
+Multiple `namespace Math { ... }` blocks in the same file are additive (they extend the same namespace registry entry).
+
+**Status:** Fully implemented. Arbitrary nesting depth is supported.
 
 ---
 
@@ -11667,7 +11749,17 @@ Defined in `include/version.h`:
 **Deprecated features** (to be removed in v5.0):
 1. **Legacy direct mode**: `omsc file.om` (use `omsc compile file.om`).
 2. **Implicit parameter/return types**: Functions without explicit `-> type` or parameter type annotations will require them.
-3. **Global mutable variables**: Will require an explicit qualifier in v5.0. The exact keyword has not yet been chosen and is not currently enforced.
+3. **Global mutable variables**: In v5.0 mutable globals will require an explicit `mut` qualifier. The chosen keyword is `mut`, inserted between `global` and `var`:
+
+   ```omscript
+   // Recommended (forward-compatible now and required in v5.0):
+   global mut var counter: int = 0;
+
+   // Legacy (still accepted; will generate a deprecation warning in v5.0):
+   global var counter: int = 0;
+   ```
+
+   `global const` globals are unaffected — they are already immutable by definition.
 
 **Migration guide**:
 ```omscript

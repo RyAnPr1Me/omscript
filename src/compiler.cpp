@@ -126,7 +126,12 @@ void Compiler::compile(const std::string& sourceFile, const std::string& outputF
     // Emit parser warnings — via callback if set, else raw stderr.
     for (const auto& w : parser.warnings()) {
         if (warnCallback_) {
-            warnCallback_(Diagnostic{DiagnosticSeverity::Warning, SourceLocation{}, w});
+            // Strip the "warning: " prefix that parser warning strings carry, because
+            // Diagnostic::format() will prepend the severity label itself.
+            std::string msg = w;
+            if (msg.rfind("warning: ", 0) == 0)
+                msg = msg.substr(9);
+            warnCallback_(Diagnostic{DiagnosticSeverity::Warning, SourceLocation{}, msg});
         } else {
             std::cerr << w << "\n";
         }

@@ -1,0 +1,92 @@
+// round82_nested_namespace_test.om
+// Verifies nested namespace support:
+//   - Two-level nesting: Outer::Inner::fn
+//   - Three-level nesting: A::B::C::fn
+//   - Outer and inner members coexist
+//   - Sibling inner namespaces in the same outer namespace
+// Expected exit code: 12
+
+namespace Geo {
+    fn scale(x: int, factor: int) -> int {
+        return x * factor;
+    }
+
+    namespace Point {
+        fn make(x: int, y: int) -> int {
+            return x + y;
+        }
+
+        fn dist(x: int, y: int) -> int {
+            return x * x + y * y;
+        }
+    }
+
+    namespace Vector {
+        fn dot(ax: int, ay: int, bx: int, by: int) -> int {
+            return ax * bx + ay * by;
+        }
+    }
+}
+
+namespace Math {
+    fn negate(x: int) -> int { return -x; }
+
+    namespace Util {
+        fn double_val(x: int) -> int { return x * 2; }
+
+        namespace Extra {
+            fn triple_val(x: int) -> int { return x * 3; }
+        }
+    }
+}
+
+fn main() {
+    var pass = 0;
+
+    // Outer::fn still works
+    var s = Geo::scale(3, 4);          // 12
+    if s == 12 { pass = pass + 1; }
+
+    // Outer::Inner::fn (two-level)
+    var p = Geo::Point::make(5, 7);    // 12
+    if p == 12 { pass = pass + 1; }
+
+    var d = Geo::Point::dist(3, 4);    // 25
+    if d == 25 { pass = pass + 1; }
+
+    // Sibling inner namespace
+    var dot = Geo::Vector::dot(1, 2, 3, 4);  // 11
+    if dot == 11 { pass = pass + 1; }
+
+    // Different outer namespace
+    var n = Math::negate(5);           // -5
+    if n == -5 { pass = pass + 1; }
+
+    // Two-level in Math
+    var dv = Math::Util::double_val(6); // 12
+    if dv == 12 { pass = pass + 1; }
+
+    // Three-level nesting
+    var tv = Math::Util::Extra::triple_val(4); // 12
+    if tv == 12 { pass = pass + 1; }
+
+    // Total: 7 passing checks + 5 bonus from arithmetic correctness checks below
+
+    // Additional verifications
+    var p2 = Geo::Point::make(0, 0);   // 0
+    if p2 == 0 { pass = pass + 1; }
+
+    var d2 = Geo::Point::dist(0, 5);   // 25
+    if d2 == 25 { pass = pass + 1; }
+
+    var dot2 = Geo::Vector::dot(2, 0, 0, 3);  // 0
+    if dot2 == 0 { pass = pass + 1; }
+
+    var tv2 = Math::Util::Extra::triple_val(2); // 6
+    if tv2 == 6 { pass = pass + 1; }
+
+    var dv2 = Math::Util::double_val(3); // 6
+    if dv2 == 6 { pass = pass + 1; }
+
+    return pass;
+}
