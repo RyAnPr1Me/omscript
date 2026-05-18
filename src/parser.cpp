@@ -1104,6 +1104,15 @@ std::unique_ptr<Program> Parser::parse() {
             }
             continue;
         }
+        if (match(TokenType::IMPL)) {
+            try {
+                parseImplBlock(functions);
+            } catch (const std::exception& e) {
+                recordException(errors_, diagnostics_, e);
+                synchronize();
+            }
+            continue;
+        }
         // @repr(...) struct annotation — must appear immediately before 'struct'
         if (check(TokenType::AT) && current + 1 < tokens.size() && tokens[current + 1].type == TokenType::IDENTIFIER &&
             tokens[current + 1].lexeme == "repr") {
@@ -1884,6 +1893,8 @@ void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& function
             st->name = qualName;
             nsMap[shortName] = qualName;
             structs.push_back(std::move(st));
+        } else if (match(TokenType::IMPL)) {
+            parseImplBlock(functions);
         } else if (match(TokenType::ENUM)) {
             auto en = parseEnumDecl();
             const std::string shortName = en->name;
@@ -2716,6 +2727,12 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         auto stmt = parsePipelineStmt();
         stmt->line = kw.line;
         stmt->column = kw.column;
+        return stmt;
+    }
+    // Tuple destructuring assignment: (a, b) = expr;
+    if (isTupleDestrAssign()) {
+        auto stmt = parseTupleDestrAssign();
+        consume(TokenType::SEMICOLON, "Expected ';' after tuple destructuring assignment");
         return stmt;
     }
     if (match(TokenType::VAR)) {
@@ -4568,6 +4585,143 @@ std::vector<std::unique_ptr<Statement>> Parser::parseTupleDestructuringDecl(bool
     }
 
     return stmts;
+}
+
+// ── parseTupleDestrAssign ────────────────────────────────────────────────────
+// Desugar `(a, b, c) = rhs` into:
+//   var __tda_N_0 = rhs.0;
+//   var __tda_N_1 = rhs.1;
+//   ...
+//   a = __tda_N_0;  b = __tda_N_1; ...
+// (Temporaries prevent aliasing issues like `(a,b)=(b,a)`)
+std::unique_ptr<Statement> Parser::parseTupleDestrAssign() {
+    static int tdaCounter = 0;
+    const int id = tdaCounter++;
+
+    const Token lparen = consume(TokenType::LPAREN, "Expected '(' for tuple destructuring assignment");
+
+    std::vector<std::string> names;
+    if (!check(TokenType::RPAREN)) {
+        auto parseName = [&]() {
+            if (check(TokenType::IDENTIFIER)) {
+                names.push_back(peek().lexeme);
+                advance();
+            } else {
+                error("Expected variable name in tuple destructuring assignment");
+            }
+        };
+        parseName();
+        while (match(TokenType::COMMA)) {
+            if (check(TokenType::RPAREN)) break;
+            parseName();
+        }
+    }
+    consume(TokenType::RPAREN, "Expected ')' after variable names");
+    consume(TokenType::ASSIGN, "Expected '=' in tuple destructuring assignment");
+
+    auto rhs = parseExpression();
+
+    if (names.empty())
+        error("Tuple destructuring assignment needs at least one variable");
+
+    // Store the RHS into a temporary.
+    const std::string tmpRhs = "__tda_" + std::to_string(id) + "_rhs";
+    auto tmpDecl = std::make_unique<VarDecl>(tmpRhs, std::move(rhs), /*isConst=*/false);
+    tmpDecl->isCompilerGenerated = true;
+    tmpDecl->line = lparen.line;
+    tmpDecl->column = lparen.column;
+
+    // For each lhs[i], create a temp: var __tda_N_i = tmpRhs.i
+    std::vector<std::unique_ptr<Statement>> stmts;
+    stmts.push_back(std::move(tmpDecl));
+
+    std::vector<std::string> tmpNames;
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (names[i] == "_") {
+            tmpNames.push_back("");
+            continue;
+        }
+        const std::string tmpName = "__tda_" + std::to_string(id) + "_" + std::to_string(i);
+        tmpNames.push_back(tmpName);
+
+        auto refRhs = std::make_unique<IdentifierExpr>(tmpRhs);
+        auto fieldExpr = std::make_unique<FieldAccessExpr>(std::move(refRhs), std::to_string(i));
+        fieldExpr->line = lparen.line;
+        fieldExpr->column = lparen.column;
+
+        auto tmpVarDecl = std::make_unique<VarDecl>(tmpName, std::move(fieldExpr), /*isConst=*/false);
+        tmpVarDecl->isCompilerGenerated = true;
+        tmpVarDecl->line = lparen.line;
+        tmpVarDecl->column = lparen.column;
+        stmts.push_back(std::move(tmpVarDecl));
+    }
+
+    // Now assign each temp back to the LHS variable.
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (names[i] == "_" || tmpNames[i].empty()) continue;
+
+        auto assignExpr = std::make_unique<AssignExpr>(names[i],
+                                                       std::make_unique<IdentifierExpr>(tmpNames[i]));
+        assignExpr->line = lparen.line;
+        assignExpr->column = lparen.column;
+        auto exprStmt = std::make_unique<ExprStmt>(std::move(assignExpr));
+        exprStmt->line = lparen.line;
+        exprStmt->column = lparen.column;
+        stmts.push_back(std::move(exprStmt));
+    }
+
+    auto blk = std::make_unique<BlockStmt>(std::move(stmts));
+    blk->line = lparen.line;
+    blk->column = lparen.column;
+    return blk;
+}
+
+// ── parseImplBlock ──────────────────────────────────────────────────────────
+// Parses `impl StructName { fn method(self, ...) { ... } ... }` and desugars
+// each method to `fn StructName::method(self: StructName, ...)`.
+//
+// Rules:
+//   - First parameter named `self` without a type annotation is given type
+//     StructName automatically.
+//   - Methods without `self` as first param are treated as static methods
+//     (equivalent to `fn StructName::method(...)`).
+//   - The generated FunctionDecl is pushed onto lambdaFunctions_ so it is
+//     appended to the module alongside lambda functions.
+void Parser::parseImplBlock(std::vector<std::unique_ptr<FunctionDecl>>& functions) {
+    const Token structNameTok = consume(TokenType::IDENTIFIER, "Expected struct name after 'impl'");
+    const std::string structName = structNameTok.lexeme;
+
+    consume(TokenType::LBRACE, "Expected '{' after struct name in impl block");
+
+    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        // Skip optional semicolons between methods.
+        if (match(TokenType::SEMICOLON))
+            continue;
+        // Parse one method: `fn methodName(params) -> RetType { body }`
+        // (with optional annotations that parseFunction handles, but here we
+        //  do a lightweight parse to keep it simple and consistent).
+        auto fnDecl = parseFunction(/*isOptMax=*/false);
+        if (!fnDecl)
+            continue;
+
+        // Build the qualified name: StructName::methodName.
+        // The parsed name is the bare method name; prepend the struct name.
+        const std::string bareName = fnDecl->name;
+        // Avoid double-qualifying if the user wrote `fn Struct::method` inside impl.
+        const std::string qualifiedName =
+            (bareName.find("::") != std::string::npos) ? bareName : (structName + "::" + bareName);
+        fnDecl->name = qualifiedName;
+
+        // Fill in `self` parameter type if missing.
+        if (!fnDecl->parameters.empty() && fnDecl->parameters[0].name == "self" &&
+            fnDecl->parameters[0].typeName.empty()) {
+            fnDecl->parameters[0].typeName = structName;
+        }
+
+        lambdaFunctions_.push_back(std::move(fnDecl));
+    }
+
+    consume(TokenType::RBRACE, "Expected '}' to close impl block");
 }
 
 std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
@@ -7861,6 +8015,40 @@ std::unique_ptr<Expression> Parser::parseLambda() {
     nameId->line = pipeToken.line;
     nameId->column = pipeToken.column;
     return nameId;
+}
+
+// ── isTupleDestrAssign ───────────────────────────────────────────────────────
+// Look-ahead predicate: returns true when the token stream matches
+//   ( IDENTIFIER { , IDENTIFIER } ) =
+// indicating a tuple destructuring assignment (not a declaration).
+// Used in parseStatement to detect `(a, b) = expr;`.
+bool Parser::isTupleDestrAssign() const {
+    if (current >= tokens.size() || tokens[current].type != TokenType::LPAREN)
+        return false;
+    size_t pos = current + 1;
+    // At least one identifier
+    if (pos >= tokens.size() || tokens[pos].type != TokenType::IDENTIFIER)
+        return false;
+    ++pos;
+    // Optional: _
+    // Accept `_` as a wildcard too
+    while (pos < tokens.size() && tokens[pos].type == TokenType::COMMA) {
+        ++pos;
+        if (pos >= tokens.size())
+            return false;
+        if (tokens[pos].type != TokenType::IDENTIFIER &&
+            tokens[pos].type != TokenType::IDENTIFIER) // _ is a valid identifier
+            return false;
+        ++pos;
+    }
+    // Closing paren
+    if (pos >= tokens.size() || tokens[pos].type != TokenType::RPAREN)
+        return false;
+    ++pos;
+    // Followed by '=' (not '==' or '=>')
+    if (pos >= tokens.size() || tokens[pos].type != TokenType::ASSIGN)
+        return false;
+    return true;
 }
 
 // ── isArrowLambdaParens ──────────────────────────────────────────────────────

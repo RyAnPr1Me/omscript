@@ -497,6 +497,31 @@ void CodeGenerator::generateVarDecl(VarDecl* stmt) {
         }
     }
 
+    // Track variables whose initializer is a lambda or named-function identifier
+    // so that they can be called directly as `f(args...)`.
+    {
+        bool isCallableInit = false;
+        if (stmt->initializer) {
+            if (stmt->initializer->type == ASTNodeType::IDENTIFIER_EXPR) {
+                const auto* id = static_cast<const IdentifierExpr*>(stmt->initializer.get());
+                // Lambda desugaring produces IdentifierExprs like "__lambda_N".
+                if (id->name.rfind("__lambda_", 0) == 0 ||
+                    functionDecls_.count(id->name) || functions.count(id->name)) {
+                    isCallableInit = true;
+                }
+                // Also a lambda-var copying another lambda-var.
+                if (lambdaVarNames_.count(id->name))
+                    isCallableInit = true;
+            }
+            if (stmt->typeName == "funcptr")
+                isCallableInit = true;
+        }
+        if (isCallableInit)
+            lambdaVarNames_.insert(stmt->name);
+        else
+            lambdaVarNames_.erase(stmt->name);
+    }
+
     // Track `pslice<T>` variables: fat pointers (raw pointer + length) with
     // compile-time or runtime bounds checks on element access.
     {

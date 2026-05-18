@@ -234,6 +234,7 @@ The following identifiers are reserved as keywords. They are grouped by category
 | `global` | Global variable scope |
 | `struct` | Structure type |
 | `enum` | Enumeration type |
+| `impl` | Method block for a struct type (see §14.5.1) |
 
 **Exception handling:**
 | Keyword | Purpose |
@@ -1914,7 +1915,43 @@ println(py);  // 4
 var (first, _, third) = get_triple();
 ```
 
-### 5.12 Scope Rules
+### 5.11.3 Tuple Destructuring Assignment
+
+**Syntax**: `(a, b [, c ...]) = expr;`
+
+Assigns to *existing* variables by unpacking a tuple or struct value. All right-hand side values are evaluated before any assignment, preventing aliasing bugs during multi-variable swaps and rotations.
+
+**Semantics**:
+- LHS variables must already be declared; this is an assignment, not a declaration.
+- RHS fields are accessed via integer field indices `.0`, `.1`, … exactly as in §5.11.2.
+- Underscore `_` skips an element.
+- Evaluates all RHS components into temporaries first, then assigns, so `(a, b) = (b, a)` correctly swaps `a` and `b`.
+
+**Desugaring**:
+```omscript
+(a, b) = (b, a);
+// ↓ desugars to:
+var __tda_0_rhs = (b, a);
+var __tda_0_0 = __tda_0_rhs.0;
+var __tda_0_1 = __tda_0_rhs.1;
+a = __tda_0_0;
+b = __tda_0_1;
+```
+
+**Examples**:
+```omscript
+// Swap two variables (classic idiom):
+var x = 5;
+var y = 10;
+(x, y) = (y, x);   // x==10, y==5
+
+// Three-variable left-rotation:
+var a = 1; var b = 2; var c = 3;
+(a, b, c) = (b, c, a);  // a==2, b==3, c==1
+
+// With arbitrary expressions on the right:
+(x, y) = (x + y, x - y);
+```
 
 **Block scope**: Variables declared in a block `{ ... }` are visible only within that block and nested blocks.
 
@@ -2588,6 +2625,32 @@ enclosing scope. All data must be passed explicitly as parameters.
 
 **Internal representation**: Each lambda / `fn` expression is desugared to a top-level
 named function with a compiler-generated name (e.g., `__lambda_0`, `__lambda_1`).
+
+### 6.10.1 Calling Lambda Variables Directly
+
+Variables initialized from a lambda expression or a named function are **directly callable** using standard call syntax `f(args...)`.
+
+```omscript
+var double = |x| x * 2;
+var result = double(5);   // 10   — direct lambda variable call
+
+var inc = |x| x + 1;
+println(double(inc(3)));  // 8
+```
+
+Named functions may also be stored in variables and called through them:
+
+```omscript
+fn square(x: int) -> int { return x * x; }
+
+var sq = square;
+println(sq(7));   // 49
+```
+
+**Rules:**
+- The variable must be initialized from a lambda expression or a function name at the point of declaration. Untracked sources (e.g., a variable reassigned to a different function after declaration) may not be callable through this mechanism.
+- The call emits an indirect function-pointer call at the LLVM IR level; the optimizer typically inlines it.
+- Argument and return types follow the lambda signature (all parameters are `i64`-width; return value is `i64`-width).
 
 ---
 
@@ -6361,6 +6424,76 @@ println(c.get()); // desugars to Counter::get(c) → 6
 Both call styles are accepted:
 - `obj.method(args)` — dot-call syntax (recommended)
 - `StructName::method(obj, args)` — explicit qualified call
+
+---
+
+### 14.5.1 `impl` Blocks
+
+**Syntax:**
+```omscript
+impl StructName {
+    fn method_name(self, param1: Type1, ...) -> RetType { ... }
+    fn static_method(param: Type) -> RetType { ... }
+    ...
+}
+```
+
+`impl` blocks are syntactic sugar for declaring multiple methods on a struct in one grouped block, avoiding the need to repeat the `fn StructName::` prefix for each method.
+
+**Rules:**
+- The first parameter named `self` **without** a type annotation is automatically typed as `StructName`.
+- Methods with `self` as the first parameter are instance methods; methods without `self` are static (constructor-style) methods.
+- Any number of `fn` declarations may appear inside an `impl` block.
+- `impl` blocks are permitted at the top level and inside `namespace` blocks.
+
+**Equivalence:** The following two declarations are identical:
+```omscript
+// Explicit form
+fn Vec2::len_sq(self: Vec2) -> int {
+    return self.x * self.x + self.y * self.y;
+}
+
+// impl block form
+impl Vec2 {
+    fn len_sq(self) -> int {
+        return self.x * self.x + self.y * self.y;
+    }
+}
+```
+
+**Full example:**
+```omscript
+struct Vec2 {
+    x: int,
+    y: int,
+}
+
+impl Vec2 {
+    // Static factory method (no self)
+    fn new(x: int, y: int) -> Vec2 {
+        return Vec2 { x: x, y: y };
+    }
+
+    // Instance methods (self typed as Vec2 automatically)
+    fn len_sq(self) -> int {
+        return self.x * self.x + self.y * self.y;
+    }
+    fn scale(self, k: int) -> Vec2 {
+        return Vec2 { x: self.x * k, y: self.y * k };
+    }
+    fn add(self, other: Vec2) -> Vec2 {
+        return Vec2 { x: self.x + other.x, y: self.y + other.y };
+    }
+}
+
+fn main() {
+    var v = Vec2::new(3, 4);   // static call
+    println(v.len_sq());       // 25
+    var v2 = v.scale(2);
+    println(v2.x);             // 6
+    return 0;
+}
+```
 
 ---
 

@@ -181,8 +181,10 @@ class Parser {
     std::unique_ptr<Statement> parsePipelineStmt();
     std::vector<std::unique_ptr<Statement>> parseDestructuringDecl(bool isConst);
     std::vector<std::unique_ptr<Statement>> parseTupleDestructuringDecl(bool isConst);
+    std::unique_ptr<Statement> parseTupleDestrAssign();
     std::unique_ptr<EnumDecl> parseEnumDecl();
     std::unique_ptr<StructDecl> parseStructDecl(StructRepr repr = StructRepr::Auto, int reprAlignN = 0, const std::string& forcedName = "");
+    void parseImplBlock(std::vector<std::unique_ptr<FunctionDecl>>& functions);
     std::unique_ptr<Expression> parseStructLiteral(const std::string& name, int line, int col);
     std::unique_ptr<Statement> parseExprStmt();
     std::unique_ptr<VarDecl> parseGlobalDecl();
@@ -313,6 +315,7 @@ class Parser {
     /// Returns true when the current token is '(' and the matching ')'
     /// is immediately followed by '=>' (FAT_ARROW) — indicating an arrow lambda.
     bool isArrowLambdaParens() const;
+    bool isTupleDestrAssign() const;
 
     /// Parse a type annotation (e.g. "int", "int[]", "string[][]", "Point").
     std::string parseTypeAnnotation();

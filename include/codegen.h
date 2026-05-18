@@ -749,6 +749,10 @@ class CodeGenerator {
     /// Dereferencing a funcptr (`*f`) calls the code at the stored address.
     llvm::StringSet<> funcptrVarNames_;
 
+    /// Variables whose initializer was a lambda or named-function identifier,
+    /// making them directly callable as `f(args...)` at the call site.
+    llvm::StringSet<> lambdaVarNames_;
+
     /// Variables with type `ptr`/`ptr<T>` (excluded from isStringExpr).
     llvm::StringSet<> ptrVarNames_;
 

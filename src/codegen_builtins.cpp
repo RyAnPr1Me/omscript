@@ -13664,6 +13664,45 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
     }
     if (calleeIt == functions.end() || !calleeIt->second) {
+        // ── Lambda/funcptr variable call ──────────────────────────────────
+        // If the callee names a local variable that holds a callable function
+        // pointer (lambda var or funcptr var), emit an indirect call through it.
+        if (lambdaVarNames_.count(expr->callee) || funcptrVarNames_.count(expr->callee)) {
+            auto varIt = namedValues.find(expr->callee);
+            if (varIt != namedValues.end()) {
+                llvm::Value* varAlloca = varIt->second;
+                auto* ptrTy = llvm::PointerType::getUnqual(*context);
+                llvm::Value* fnPtr = nullptr;
+                if (auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(varAlloca)) {
+                    llvm::Type* allocTy = allocaInst->getAllocatedType();
+                    if (allocTy->isPointerTy()) {
+                        fnPtr = builder->CreateAlignedLoad(ptrTy, varAlloca, llvm::Align(8),
+                                                           expr->callee + ".fnload");
+                    } else if (allocTy->isIntegerTy()) {
+                        llvm::Value* raw = builder->CreateAlignedLoad(getDefaultType(), varAlloca, llvm::Align(8),
+                                                                      expr->callee + ".fnload");
+                        fnPtr = builder->CreateIntToPtr(raw, ptrTy, expr->callee + ".fnptr");
+                    }
+                } else if (varAlloca->getType()->isPointerTy()) {
+                    // Already a pointer value (e.g. global function alias).
+                    fnPtr = varAlloca;
+                }
+                if (fnPtr) {
+                    std::vector<llvm::Type*> paramTys(expr->arguments.size(), getDefaultType());
+                    llvm::FunctionType* fnTy =
+                        llvm::FunctionType::get(getDefaultType(), paramTys, /*isVarArg=*/false);
+                    std::vector<llvm::Value*> callArgs;
+                    callArgs.reserve(expr->arguments.size());
+                    for (auto& arg : expr->arguments) {
+                        llvm::Value* v = generateExpression(arg.get());
+                        callArgs.push_back(toDefaultType(v));
+                    }
+                    auto* ci = builder->CreateCall(fnTy, fnPtr, callArgs, expr->callee + ".icall");
+                    ci->addFnAttr(llvm::Attribute::NoUnwind);
+                    return ci;
+                }
+            }
+        }
         // Build "did you mean?" suggestion from both user-defined functions
         // AND all built-in names so that typos like "abss" → "abs" work.
         std::string msg = "Unknown function: " + expr->callee;
