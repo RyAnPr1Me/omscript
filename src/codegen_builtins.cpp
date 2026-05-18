@@ -3964,7 +3964,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Fill each slot with the corresponding byte value
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         auto* i64Ty = getDefaultType();
-        llvm::Value* one = llvm::ConstantInt::get(i64Ty, 1);
         for (size_t i = 0; i < numBytes; ++i) {
             llvm::Value* idx = llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(i + 1)); // slot 0 = length
             llvm::Value* slot = builder->CreateInBoundsGEP(i64Ty, buf, idx, "compile.slot");
@@ -3974,7 +3973,6 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
                 llvm::ConstantInt::get(i64Ty, byteVal),
                 slot, llvm::MaybeAlign(8));
         }
-        (void)one;
 
         arrayReturningFunctions_.insert("compile");
         return builder->CreatePtrToInt(buf, i64Ty, "compile.arr.val");
