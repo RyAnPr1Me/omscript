@@ -1,0 +1,26 @@
+import std;
+// round90_compile_test.om — Round-90: compile() builtin
+// Compiles OmScript source at compile time and returns object file bytes.
+// Expected return value: 3
+
+fn main() {
+    var score = 0;
+
+    // Test 1: compile() returns a non-empty array
+    var bytes = compile("import std; fn main() -> int { return 42; }");
+    score = score + (len(bytes) > 0);
+
+    // Test 2: result is a proper array (len > 100 — ELF/MACH-O headers alone are larger)
+    score = score + (len(bytes) > 100);
+
+    // Test 3: each element is a valid byte (0–255)
+    var ok = 1;
+    for i in 0...10 {
+        if bytes[i] < 0 || bytes[i] > 255 {
+            ok = 0;
+        }
+    }
+    score = score + ok;
+
+    return score;
+}

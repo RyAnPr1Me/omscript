@@ -1,6 +1,8 @@
 #include "codegen.h"
 #include "diagnostic.h"
 #include "hardware_graph.h"
+#include "lexer.h"
+#include "parser.h"
 #include <climits>
 #include <cmath>
 #include <cstdlib>
@@ -8,6 +10,8 @@
 #include <iostream>
 #include <limits>
 #include <unordered_set>
+#include <llvm/ADT/SmallVector.h>
+#include <llvm/Object/ObjectFile.h>
 
 // Apply maximum compiler optimizations to this hot path.
 #ifdef __GNUC__
@@ -360,6 +364,8 @@ enum class BuiltinId : uint16_t {
     THREAD_EQUAL,       ///< thread_equal(t1, t2)  → 1 if same thread, else 0
     IS_TYPE,            ///< is_type(val, "typename") → 1 if val matches type
     ENSURE_BUILTIN,     ///< ensure(cond[, msg]) → always-on runtime guard
+    // ── Round-90: compile() builtin ──────────────────────────────────────────
+    COMPILE_BUILTIN,    ///< compile("src") → array of object file bytes (compile-time)
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -668,6 +674,7 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"thread_equal",     BuiltinId::THREAD_EQUAL},
     {"is_type",          BuiltinId::IS_TYPE},
     {"ensure",           BuiltinId::ENSURE_BUILTIN},
+    {"compile",          BuiltinId::COMPILE_BUILTIN},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -3870,7 +3877,81 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return llvm::ConstantInt::get(getDefaultType(), 1);
     }
 
-    // ── Round-76 builtins ────────────────────────────────────────────────────
+    // ── Round-90: compile("source") ──────────────────────────────────────────
+    // Compiles an OmScript source string at compile time and returns an array of
+    // object-file bytes (i64 elements, one per byte).  The result is a constant
+    // array embedded in the program's data section.
+    //
+    // Usage:  var bytes = compile("fn add(a: int, b: int) -> int { return a + b; }");
+    //         // bytes is [i64] with len = object file size
+    //
+    // Constraints:
+    //   - Argument must be a compile-time string literal.
+    //   - Errors in the nested source are reported as compile-time errors.
+    //   - The returned array is a standard OmScript array of i64 values (0–255).
+    if (bid == BuiltinId::COMPILE_BUILTIN) {
+        validateArgCount(expr, "compile", 1);
+
+        // ── 1. Extract the source string (must be a compile-time literal) ──
+        auto* arg0 = expr->arguments[0].get();
+        if (arg0->type != ASTNodeType::LITERAL_EXPR) {
+            codegenError("compile(): argument must be a string literal "
+                         "(compile-time constant OmScript source code)", expr);
+        }
+        auto* lit = static_cast<LiteralExpr*>(arg0);
+        if (lit->literalType != LiteralExpr::LiteralType::STRING) {
+            codegenError("compile(): argument must be a string literal", expr);
+        }
+        const std::string source = lit->stringValue;
+
+        // ── 2. Lex + parse the nested source ──────────────────────────────
+        std::unique_ptr<Program> innerProg;
+        try {
+            Lexer innerLexer(source);
+            std::vector<Token> innerToks = innerLexer.tokenize();
+            Parser innerParser(std::move(innerToks));
+            innerProg = innerParser.parse();
+        } catch (const std::exception& e) {
+            codegenError(std::string("compile(): parse error in nested source — ") + e.what(), expr);
+        }
+
+        // ── 3. Codegen the inner program into a fresh module ──────────────
+        llvm::SmallVector<char, 0> objBytes;
+        try {
+            CodeGenerator innerCg(OptimizationLevel::O1);
+            innerCg.generate(innerProg.get());
+            innerCg.writeObjectToBuffer(objBytes);
+        } catch (const std::exception& e) {
+            codegenError(std::string("compile(): codegen/emission error — ") + e.what(), expr);
+        }
+
+        // ── 4. Build an OmScript array of i64 bytes ───────────────────────
+        // Layout: [len_slot (i64), elem0 (i64), elem1 (i64), …]
+        // We allocate at runtime and fill with compile-time constants.
+        const size_t numBytes = static_cast<size_t>(objBytes.size());
+        llvm::Value* lenVal = llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(numBytes));
+
+        // Allocate the array buffer: (numBytes + 1) × 8 bytes
+        llvm::Value* buf = emitAllocArray(lenVal, "compile.arr");
+
+        // Fill each slot with the corresponding byte value
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        auto* i64Ty = getDefaultType();
+        llvm::Value* one = llvm::ConstantInt::get(i64Ty, 1);
+        for (size_t i = 0; i < numBytes; ++i) {
+            llvm::Value* idx = llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(i + 1)); // slot 0 = length
+            llvm::Value* slot = builder->CreateInBoundsGEP(i64Ty, buf, idx, "compile.slot");
+            slot = builder->CreateIntToPtr(slot, ptrTy, "compile.slotptr");
+            uint8_t byteVal = static_cast<uint8_t>(objBytes[i]);
+            builder->CreateAlignedStore(
+                llvm::ConstantInt::get(i64Ty, byteVal),
+                slot, llvm::MaybeAlign(8));
+        }
+        (void)one;
+
+        arrayReturningFunctions_.insert("compile");
+        return builder->CreatePtrToInt(buf, i64Ty, "compile.arr.val");
+    }
 
     // array_flat_map(arr, fn) → apply fn to each element, treat each result as an inner array,
     // then flatten all inner arrays into one output array.  Equivalent to

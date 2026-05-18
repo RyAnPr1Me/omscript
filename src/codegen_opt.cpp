@@ -5742,6 +5742,44 @@ void CodeGenerator::writeObjectFile(const std::string& filename) {
     }
 }
 
+void CodeGenerator::writeObjectToBuffer(llvm::SmallVectorImpl<char>& buf) {
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
+    llvm::InitializeNativeTargetAsmParser();
+
+    const std::string targetTripleStr = llvm::sys::getDefaultTargetTriple();
+#if LLVM_VERSION_MAJOR >= 19
+    llvm::Triple targetTriple(targetTripleStr);
+    module->setTargetTriple(targetTriple);
+#else
+    module->setTargetTriple(targetTripleStr);
+#endif
+
+    auto targetMachine = createTargetMachine();
+    if (!targetMachine) {
+        throw DiagnosticError(
+            Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, "compile(): failed to create target machine"});
+    }
+
+    module->setDataLayout(targetMachine->createDataLayout());
+
+    llvm::raw_svector_ostream dest(buf);
+    llvm::legacy::PassManager pass;
+#if LLVM_VERSION_MAJOR >= 18
+    auto fileType = llvm::CodeGenFileType::ObjectFile;
+#else
+    auto fileType = llvm::CGFT_ObjectFile;
+#endif
+
+    if (targetMachine->addPassesToEmitFile(pass, dest, nullptr, fileType)) {
+        throw DiagnosticError(
+            Diagnostic{DiagnosticSeverity::Error, {"", 0, 0}, "compile(): target machine can't emit object file"});
+    }
+
+    pass.run(*module);
+    // Note: raw_svector_ostream auto-flushes on destruction; no explicit flush needed.
+}
+
 void CodeGenerator::writeBitcodeFile(const std::string& filename) {
     // Initialize native target so the data layout can be set correctly.
     llvm::InitializeNativeTarget();

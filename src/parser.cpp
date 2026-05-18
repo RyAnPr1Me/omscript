@@ -210,6 +210,8 @@ void Parser::registerStdNamespace() {
         {"expect", "expect"},
         {"assume", "assume"},
         {"unreachable", "unreachable"},
+        // ── Compile-time compilation ──────────────────────────────────────────
+        {"compile", "compile"},
         // ── BigInt ───────────────────────────────────────────────────────────
         {"bigint", "bigint"},
         {"bigint_add", "bigint_add"},

@@ -189,6 +189,8 @@ class CodeGenerator {
 
     void generate(Program* program);
     void writeObjectFile(const std::string& filename);
+    /// Emit object code into an in-memory buffer (used by the compile() builtin).
+    void writeObjectToBuffer(llvm::SmallVectorImpl<char>& buf);
     /// Write the module as LLVM bitcode for full link-time optimization (FLTO).
     void writeBitcodeFile(const std::string& filename);
     [[nodiscard]] llvm::Module* getModule() noexcept {
