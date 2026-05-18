@@ -2533,7 +2533,105 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadEqual() {
     return fn;
 }
 
+llvm::Function* CodeGenerator::getOrDeclarePthreadAttrInit() {
+    if (auto* fn = module->getFunction("pthread_attr_init"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_attr_init", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
 
+llvm::Function* CodeGenerator::getOrDeclarePthreadAttrDestroy() {
+    if (auto* fn = module->getFunction("pthread_attr_destroy"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_attr_destroy", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadAttrSetdetachstate() {
+    if (auto* fn = module->getFunction("pthread_attr_setdetachstate"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i32Ty = llvm::Type::getInt32Ty(*context);
+    auto* ty = llvm::FunctionType::get(i32Ty, {ptrTy, i32Ty}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_attr_setdetachstate", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadAttrSetstacksize() {
+    if (auto* fn = module->getFunction("pthread_attr_setstacksize"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = getDefaultType();
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy, i64Ty}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_attr_setstacksize", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadAttrSetschedparam() {
+    if (auto* fn = module->getFunction("pthread_attr_setschedparam"))
+        return fn;
+    // struct sched_param { int sched_priority; ... } — we pass i32* pointing to a stack struct
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy, ptrTy}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_attr_setschedparam", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    OMSC_ADD_NOCAPTURE(fn, 1);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(1, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadAttrSetinheritsched() {
+    if (auto* fn = module->getFunction("pthread_attr_setinheritsched"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i32Ty = llvm::Type::getInt32Ty(*context);
+    auto* ty = llvm::FunctionType::get(i32Ty, {ptrTy, i32Ty}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_attr_setinheritsched", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadAttrSetschedpolicy() {
+    if (auto* fn = module->getFunction("pthread_attr_setschedpolicy"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i32Ty = llvm::Type::getInt32Ty(*context);
+    auto* ty = llvm::FunctionType::get(i32Ty, {ptrTy, i32Ty}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_attr_setschedpolicy", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareGetenv() {
     if (auto* fn = module->getFunction("getenv"))
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
@@ -2546,13 +2644,11 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadEqual() {
     fn->addParamAttr(0, llvm::Attribute::NonNull);
     fn->addParamAttr(0, llvm::Attribute::ReadOnly);
     OMSC_ADD_NOCAPTURE(fn, 0);
-    // memory(argmem: read, inaccessiblemem: read): getenv reads the name string
-    // via param 0 (argmem) and searches the process environment table, which is
-    // inaccessible memory from the optimizer's perspective.
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
         *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly(llvm::ModRefInfo::Ref)));
     return fn;
 }
+
 
 llvm::Function* CodeGenerator::getOrDeclareSetenv() {
     if (auto* fn = module->getFunction("setenv"))

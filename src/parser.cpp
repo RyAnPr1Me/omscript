@@ -198,13 +198,28 @@ void Parser::registerStdNamespace() {
         {"random", "random"},
         // ── Threading ────────────────────────────────────────────────────────
         {"thread_create", "thread_create"},
+        {"thread_create_ex", "thread_create_ex"},
         {"thread_join", "thread_join"},
         {"thread_detach", "thread_detach"},
+        {"thread_self", "thread_self"},
+        {"thread_equal", "thread_equal"},
         {"mutex_new", "mutex_new"},
         {"mutex_lock", "mutex_lock"},
         {"mutex_try_lock", "mutex_try_lock"},
         {"mutex_unlock", "mutex_unlock"},
         {"mutex_destroy", "mutex_destroy"},
+        {"rwlock_new", "rwlock_new"},
+        {"rwlock_rdlock", "rwlock_rdlock"},
+        {"rwlock_try_rdlock", "rwlock_try_rdlock"},
+        {"rwlock_wrlock", "rwlock_wrlock"},
+        {"rwlock_try_wrlock", "rwlock_try_wrlock"},
+        {"rwlock_unlock", "rwlock_unlock"},
+        {"rwlock_destroy", "rwlock_destroy"},
+        {"cond_new", "cond_new"},
+        {"cond_wait", "cond_wait"},
+        {"cond_signal", "cond_signal"},
+        {"cond_broadcast", "cond_broadcast"},
+        {"cond_destroy", "cond_destroy"},
         // ── Assertions / hints ────────────────────────────────────────────────
         {"assert", "assert"},
         {"expect", "expect"},
@@ -5546,32 +5561,143 @@ std::unique_ptr<Expression> Parser::parseUnary() {
     //   trylock m        => mutex_try_lock(m)
     if (match(TokenType::SPAWN)) {
         const Token kw = tokens[current - 1];
-        std::vector<std::unique_ptr<Expression>> args;
 
-        if (match(TokenType::LPAREN)) {
+        // ── Enhanced spawn: collect modifiers before the target function ──
+        // Syntax: spawn [modifier...] fn(arg)
+        // Modifiers (in any order, each consumed once):
+        //   detached | joinable | move | shared | pinned | cold | hot
+        //   stack(N)  | priority(N) | affinity(N)
+        //
+        // Desugars to:
+        //   thread_create_ex(fn, arg, flags, stack_sz, priority, affinity)
+        // where flags = bit0:detached, bit2:cold, bit3:hot
+        //
+        // If no modifiers are present, falls back to thread_create(fn[, arg]).
+
+        struct SpawnOpts {
+            bool detached  = false;
+            bool cold      = false;
+            bool hot       = false;
+            int64_t stackSz    = 0;  // 0 = default
+            int64_t priority   = 0;  // 0 = default
+            int64_t affinity   = -1; // -1 = no pin
+            bool hasModifiers  = false;
+        } opts;
+
+        // Helper: peek at current token as an identifier
+        auto peekIdent = [this](const std::string& name) -> bool {
+            return check(TokenType::IDENTIFIER) && tokens[current].lexeme == name;
+        };
+        auto consumeIdent = [this](const std::string& name) {
+            if (check(TokenType::IDENTIFIER) && tokens[current].lexeme == name) advance();
+        };
+        auto parseIntArg = [this](const char* mod) -> int64_t {
+            consume(TokenType::LPAREN, std::string("Expected '(' after '") + mod + "'");
+            bool neg = false;
+            if (match(TokenType::MINUS)) neg = true;
+            if (!check(TokenType::INTEGER) && !check(TokenType::FLOAT))
+                error(std::string("Expected integer value in '") + mod + "(...)'");
+            const Token vt = advance();
+            int64_t v = vt.type == TokenType::INTEGER
+                            ? static_cast<int64_t>(vt.intValue)
+                            : static_cast<int64_t>(vt.floatValue);
+            if (neg) v = -v;
+            consume(TokenType::RPAREN, std::string("Expected ')' after '") + mod + "(...)'");
+            return v;
+        };
+
+        // Consume modifiers in any order (up to 10 passes to handle any ordering)
+        for (int pass = 0; pass < 10; ++pass) {
+            if (peekIdent("detached"))  { consumeIdent("detached");  opts.detached = true;  opts.hasModifiers = true; continue; }
+            if (peekIdent("joinable"))  { consumeIdent("joinable");  /* joinable is default */ opts.hasModifiers = true; continue; }
+            if (peekIdent("move"))      { consumeIdent("move");      /* already default ownership */ opts.hasModifiers = true; continue; }
+            if (peekIdent("shared"))    { consumeIdent("shared");    opts.hasModifiers = true; continue; }
+            if (peekIdent("pinned"))    { consumeIdent("pinned");    if (opts.affinity < 0) opts.affinity = 0; opts.hasModifiers = true; continue; }
+            if (peekIdent("cold"))      { consumeIdent("cold");      opts.cold = true;  opts.hasModifiers = true; continue; }
+            if (peekIdent("hot"))       { consumeIdent("hot");       opts.hot  = true;  opts.hasModifiers = true; continue; }
+            if (peekIdent("stack")) {
+                advance(); // consume "stack"
+                int64_t sz = parseIntArg("stack");
+                // Accept unit suffixes written as identifiers after the number:
+                // already consumed the ')' above, but handle e.g. stack(1MB) as a
+                // numeric literal — users write stack(1048576).
+                opts.stackSz = sz;
+                opts.hasModifiers = true;
+                continue;
+            }
+            if (peekIdent("priority")) {
+                advance();
+                opts.priority = parseIntArg("priority");
+                opts.hasModifiers = true;
+                continue;
+            }
+            if (peekIdent("affinity")) {
+                advance();
+                opts.affinity = parseIntArg("affinity");
+                opts.hasModifiers = true;
+                continue;
+            }
+            break; // no more recognized modifiers
+        }
+
+        // ── Now parse the target: fn(arg?) ──────────────────────────────
+        // Two sub-forms:
+        //   spawn (...) — legacy positional form kept for back-compat
+        //   spawn [mods] fnname(arg?)
+        if (!opts.hasModifiers && check(TokenType::LPAREN)) {
+            // Legacy: spawn(fn) or spawn(fn, arg)
+            advance(); // consume '('
+            std::vector<std::unique_ptr<Expression>> args;
             args.push_back(parseExpression());
-            if (match(TokenType::COMMA)) {
-                args.push_back(parseExpression());
-            }
+            if (match(TokenType::COMMA)) args.push_back(parseExpression());
             consume(TokenType::RPAREN, "Expected ')' after spawn(...)");
-        } else {
-            args.push_back(parseSpawnTargetCompact());
-            if (!match(TokenType::LPAREN)) {
-                error("Expected '(' after spawn target; use spawn worker() or spawn worker(arg)");
-            }
-            if (!check(TokenType::RPAREN)) {
-                args.push_back(parseExpression());
-                if (check(TokenType::COMMA)) {
-                    error("spawn target(arg) accepts at most one argument");
-                }
-            }
-            consume(TokenType::RPAREN, "Expected ')' after spawn target argument");
+            if (args.empty() || args.size() > 2)
+                error("spawn expects one target and optional one argument");
+            return makeThreadKeywordCall("thread_create", kw, std::move(args));
         }
 
-        if (args.empty() || args.size() > 2) {
-            error("spawn expects one target and optional one argument");
+        // Parse fn target
+        auto targetExpr = parseSpawnTargetCompact();
+        if (!match(TokenType::LPAREN))
+            error("Expected '(' after spawn target; use: spawn [mods] fn() or spawn [mods] fn(arg)");
+        std::unique_ptr<Expression> argExpr;
+        if (!check(TokenType::RPAREN)) {
+            argExpr = parseExpression();
+            if (check(TokenType::COMMA))
+                error("spawn target(arg) accepts at most one argument");
         }
-        return makeThreadKeywordCall("thread_create", kw, std::move(args));
+        consume(TokenType::RPAREN, "Expected ')' after spawn target argument");
+
+        if (!opts.hasModifiers) {
+            // No modifiers: use simple thread_create for zero overhead
+            std::vector<std::unique_ptr<Expression>> args;
+            args.push_back(std::move(targetExpr));
+            if (argExpr) args.push_back(std::move(argExpr));
+            return makeThreadKeywordCall("thread_create", kw, std::move(args));
+        }
+
+        // ── Build thread_create_ex(fn, arg, flags, stack_sz, priority, affinity) ──
+        int64_t flags = 0;
+        if (opts.detached) flags |= 1;
+        if (opts.cold)     flags |= 4;
+        if (opts.hot)      flags |= 8;
+
+        auto makeI64Lit = [&](int64_t v) -> std::unique_ptr<Expression> {
+            auto lit = std::make_unique<LiteralExpr>(static_cast<long long>(v));
+            lit->line = kw.line;
+            lit->column = kw.column;
+            return lit;
+        };
+
+        std::vector<std::unique_ptr<Expression>> exArgs;
+        exArgs.push_back(std::move(targetExpr));                // arg0: fn
+        if (argExpr) exArgs.push_back(std::move(argExpr));      // arg1: thread arg
+        else         exArgs.push_back(makeI64Lit(0));            // arg1: 0 (no arg)
+        exArgs.push_back(makeI64Lit(flags));                     // arg2: flags
+        exArgs.push_back(makeI64Lit(opts.stackSz));              // arg3: stack size
+        exArgs.push_back(makeI64Lit(opts.priority));             // arg4: priority
+        exArgs.push_back(makeI64Lit(opts.affinity));             // arg5: affinity core
+        return makeThreadKeywordCall("thread_create_ex", kw, std::move(exArgs));
     }
 
     if (match(TokenType::JOIN)) {

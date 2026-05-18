@@ -1333,6 +1333,14 @@ class CodeGenerator {
     llvm::Function* getOrDeclarePthreadCondDestroy();
     llvm::Function* getOrDeclarePthreadSelf();
     llvm::Function* getOrDeclarePthreadEqual();
+    // ── pthread_attr_t helpers ────────────────────────────────────────────────
+    llvm::Function* getOrDeclarePthreadAttrInit();
+    llvm::Function* getOrDeclarePthreadAttrDestroy();
+    llvm::Function* getOrDeclarePthreadAttrSetdetachstate();
+    llvm::Function* getOrDeclarePthreadAttrSetstacksize();
+    llvm::Function* getOrDeclarePthreadAttrSetschedparam();
+    llvm::Function* getOrDeclarePthreadAttrSetinheritsched();
+    llvm::Function* getOrDeclarePthreadAttrSetschedpolicy();
     llvm::Function* getOrDeclareGetenv();
     llvm::Function* getOrDeclareSetenv();
 

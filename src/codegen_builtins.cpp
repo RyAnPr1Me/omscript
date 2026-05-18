@@ -145,6 +145,7 @@ enum class BuiltinId : uint16_t {
     NUMBER_TO_STRING,
     STRING_TO_NUMBER,
     THREAD_CREATE,
+    THREAD_CREATE_EX,  ///< thread_create_ex(fn, arg, flags, stack_sz, priority, affinity)
     THREAD_JOIN,
     THREAD_DETACH,
     MUTEX_NEW,
@@ -471,6 +472,7 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"number_to_string", BuiltinId::NUMBER_TO_STRING},
     {"string_to_number", BuiltinId::STRING_TO_NUMBER},
     {"thread_create", BuiltinId::THREAD_CREATE},
+    {"thread_create_ex", BuiltinId::THREAD_CREATE_EX},
     {"thread_join", BuiltinId::THREAD_JOIN},
     {"thread_detach", BuiltinId::THREAD_DETACH},
     {"mutex_new", BuiltinId::MUTEX_NEW},
@@ -8977,6 +8979,165 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return builder->CreateAlignedLoad(getDefaultType(), tidAlloca, llvm::MaybeAlign(8), "tid.val");
     }
 
+    // ── thread_create_ex: spawn with attributes ───────────────────────────────
+    // Signature: thread_create_ex(fn_name_literal, arg_or_0, flags, stack_sz, priority, affinity)
+    // flags bits: 0=detached, 2=cold(SCHED_IDLE), 3=hot(SCHED_FIFO/RR)
+    // stack_sz: 0 = default
+    // priority: 0 = default (inherit), > 0 = explicit sched_priority
+    // affinity: -1 = no pin, >= 0 = pin to that CPU core (Linux-only via pthread_setaffinity_np)
+    if (bid == BuiltinId::THREAD_CREATE_EX) {
+        if (expr->arguments.size() != 6)
+            codegenError("thread_create_ex: internal error — requires exactly 6 arguments", expr);
+
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        auto* i32Ty = llvm::Type::getInt32Ty(*context);
+        auto* i64Ty = getDefaultType();
+
+        // Arg 0: function name
+        const std::string fnName = extractFnName(expr->arguments[0].get());
+        if (fnName.empty())
+            codegenError("thread_create_ex: argument 0 must be a function name", expr);
+        auto fnIt = functions.find(fnName);
+        if (fnIt == functions.end() || !fnIt->second)
+            codegenError("thread_create_ex: unknown function '" + fnName + "'", expr);
+        llvm::Function* targetFunc = fnIt->second;
+        const unsigned arity = targetFunc->arg_size();
+        if (arity > 1)
+            codegenError("thread_create_ex target '" + fnName +
+                         "' must take 0 or 1 parameter(s)", expr);
+
+        // Arg 1: thread argument (0 if none)
+        llvm::Value* threadArg = llvm::ConstantPointerNull::get(ptrTy);
+        if (arity == 1) {
+            llvm::Value* argVal = toDefaultType(generateExpression(expr->arguments[1].get()));
+            threadArg = builder->CreateCall(getOrDeclareMalloc(),
+                                            {llvm::ConstantInt::get(i64Ty, 8)}, "tcex.arg");
+            builder->CreateAlignedStore(argVal, threadArg, llvm::MaybeAlign(8));
+        }
+
+        // Arg 2: flags (compile-time constant expected)
+        int64_t flags = 0;
+        if (auto fv = tryFoldInt(expr->arguments[2].get())) flags = *fv;
+
+        // Arg 3: stack size (0 = default)
+        int64_t stackSz = 0;
+        if (auto sv = tryFoldInt(expr->arguments[3].get())) stackSz = *sv;
+
+        // Arg 4: priority (0 = default)
+        int64_t priority = 0;
+        if (auto pv = tryFoldInt(expr->arguments[4].get())) priority = *pv;
+
+        // Arg 5: affinity core (-1 = no pin)
+        int64_t affinityCore = -1;
+        if (auto av = tryFoldInt(expr->arguments[5].get())) affinityCore = *av;
+
+        // Build the wrapper function (same pattern as THREAD_CREATE)
+        const std::string wrapperName = "__thread_wrapper_" + fnName + (arity == 1 ? "_a1" : "_a0");
+        llvm::Function* wrapper = module->getFunction(wrapperName);
+        if (!wrapper) {
+            auto* wrapperType = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
+            wrapper = llvm::Function::Create(wrapperType, llvm::Function::InternalLinkage, wrapperName, module.get());
+            auto* savedBB = builder->GetInsertBlock();
+            auto* savedPt = builder->GetInsertPoint() != builder->GetInsertBlock()->end()
+                                ? &*builder->GetInsertPoint() : nullptr;
+            auto* entry = llvm::BasicBlock::Create(*context, "entry", wrapper);
+            builder->SetInsertPoint(entry);
+            llvm::Value* callRes = nullptr;
+            if (arity == 1) {
+                llvm::Value* argPtr = wrapper->getArg(0);
+                llvm::Value* argI64 = builder->CreateAlignedLoad(i64Ty, argPtr, llvm::MaybeAlign(8), "tcex.thread.arg");
+                builder->CreateCall(getOrDeclareFree(), {argPtr});
+                llvm::Value* coerced = convertTo(argI64, targetFunc->getFunctionType()->getParamType(0));
+                callRes = builder->CreateCall(targetFunc, {coerced});
+            } else {
+                callRes = builder->CreateCall(targetFunc);
+            }
+            if (targetFunc->getReturnType()->isVoidTy())
+                builder->CreateRet(llvm::ConstantPointerNull::get(ptrTy));
+            else
+                builder->CreateRet(builder->CreateIntToPtr(toDefaultType(callRes), ptrTy));
+            if (savedPt) builder->SetInsertPoint(savedBB, llvm::BasicBlock::iterator(savedPt));
+            else         builder->SetInsertPoint(savedBB);
+        }
+
+        // Allocate pthread_attr_t on stack (sizeof ≤ 64 bytes on Linux/macOS)
+        auto* parentFunc = builder->GetInsertBlock()->getParent();
+        auto* attrTy = llvm::ArrayType::get(i64Ty, 8); // 64 bytes
+        llvm::AllocaInst* attrAlloca = nullptr;
+        {
+            llvm::IRBuilder<> tmpB(&parentFunc->getEntryBlock(), parentFunc->getEntryBlock().begin());
+            attrAlloca = tmpB.CreateAlloca(attrTy, nullptr, "tcex.attr");
+            attrAlloca->setAlignment(llvm::MaybeAlign(8).valueOrOne());
+        }
+        llvm::Value* attrPtr = builder->CreateBitOrPointerCast(attrAlloca, ptrTy, "tcex.attr.ptr");
+        builder->CreateCall(getOrDeclarePthreadAttrInit(), {attrPtr});
+
+        // ── detached flag (bit 0) ──────────────────────────────────────────
+        const bool isDetached = (flags & 1) != 0;
+        if (isDetached) {
+            // PTHREAD_CREATE_DETACHED = 1 on Linux; use the constant directly
+            builder->CreateCall(getOrDeclarePthreadAttrSetdetachstate(),
+                                {attrPtr, llvm::ConstantInt::get(i32Ty, 1)});
+        }
+
+        // ── stack size ─────────────────────────────────────────────────────
+        if (stackSz > 0) {
+            // POSIX minimum is 16384; enforce a sane floor
+            const int64_t minStack = 16384;
+            stackSz = (stackSz < minStack) ? minStack : stackSz;
+            builder->CreateCall(getOrDeclarePthreadAttrSetstacksize(),
+                                {attrPtr, llvm::ConstantInt::get(i64Ty, stackSz)});
+        }
+
+        // ── scheduling policy / priority ───────────────────────────────────
+        const bool isCold = (flags & 4) != 0;
+        const bool isHot  = (flags & 8) != 0;
+        if (isCold || isHot || priority > 0) {
+            // PTHREAD_EXPLICIT_SCHED = 1 (use attr policy, not inherit)
+            builder->CreateCall(getOrDeclarePthreadAttrSetinheritsched(),
+                                {attrPtr, llvm::ConstantInt::get(i32Ty, 1)});
+            // SCHED_OTHER=0, SCHED_FIFO=1, SCHED_RR=2, SCHED_IDLE=5(Linux)
+            int schedPolicy = 0; // SCHED_OTHER
+            if (isHot)  schedPolicy = 1; // SCHED_FIFO
+            if (isCold) schedPolicy = 5; // SCHED_IDLE (Linux)
+            builder->CreateCall(getOrDeclarePthreadAttrSetschedpolicy(),
+                                {attrPtr, llvm::ConstantInt::get(i32Ty, schedPolicy)});
+            // Build a sched_param struct on the stack: { int sched_priority }
+            llvm::AllocaInst* spAlloca = nullptr;
+            {
+                llvm::IRBuilder<> tmpB(&parentFunc->getEntryBlock(), parentFunc->getEntryBlock().begin());
+                spAlloca = tmpB.CreateAlloca(i32Ty, nullptr, "tcex.schedparam");
+                spAlloca->setAlignment(llvm::MaybeAlign(4).valueOrOne());
+            }
+            int effPrio = (priority > 0) ? static_cast<int>(priority) : (isHot ? 50 : 0);
+            builder->CreateStore(llvm::ConstantInt::get(i32Ty, effPrio), spAlloca);
+            llvm::Value* spPtr = builder->CreateBitOrPointerCast(spAlloca, ptrTy, "tcex.sp.ptr");
+            builder->CreateCall(getOrDeclarePthreadAttrSetschedparam(), {attrPtr, spPtr});
+        }
+
+        // ── create the thread ─────────────────────────────────────────────
+        auto* tidAlloca = createEntryBlockAlloca(parentFunc, "tcex.tid");
+        llvm::Value* status = builder->CreateCall(
+            getOrDeclarePthreadCreate(), {tidAlloca, attrPtr, wrapper, threadArg}, "tcex.status");
+        builder->CreateCall(getOrDeclarePthreadAttrDestroy(), {attrPtr});
+
+        llvm::BasicBlock* okBB2   = llvm::BasicBlock::Create(*context, "tcex.ok",   parentFunc);
+        llvm::BasicBlock* failBB2 = llvm::BasicBlock::Create(*context, "tcex.fail", parentFunc);
+        builder->CreateCondBr(
+            builder->CreateICmpEQ(status, llvm::ConstantInt::get(status->getType(), 0)), okBB2, failBB2);
+        builder->SetInsertPoint(failBB2);
+        builder->CreateCall(getPrintfFunction(),
+            {builder->CreateGlobalString("Runtime error: spawn failed\n", "tcex_fail_msg")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB2);
+
+        // For detached threads return 0 (no meaningful handle); otherwise return tid
+        if (isDetached)
+            return llvm::ConstantInt::get(i64Ty, 0);
+        return builder->CreateAlignedLoad(i64Ty, tidAlloca, llvm::MaybeAlign(8), "tcex.tid.val");
+    }
+
     if (bid == BuiltinId::THREAD_JOIN) {
         validateArgCount(expr, "thread_join", 1);
         llvm::Value* tid = generateExpression(expr->arguments[0].get());
@@ -9036,8 +9197,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* nullAttr = llvm::ConstantPointerNull::get(ptrTy);
         builder->CreateCall(getOrDeclarePthreadMutexInit(), {mutex, nullAttr});
-        // Return as i64
-        return mutex;
+        // Return as i64 (ptrtoint) so the handle is opaque and comparable with !=0
+        return builder->CreatePtrToInt(mutex, getDefaultType(), "mutex.handle");
     }
 
     if (bid == BuiltinId::MUTEX_LOCK) {
@@ -9154,7 +9315,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::Attribute::getWithDereferenceableBytes(*context, kRwlockAllocSize));
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         builder->CreateCall(getOrDeclarePthreadRwlockInit(), {rw, llvm::ConstantPointerNull::get(ptrTy)});
-        return rw;
+        return builder->CreatePtrToInt(rw, getDefaultType(), "rwlock.handle");
     }
 
     if (bid == BuiltinId::RWLOCK_RDLOCK) {
@@ -9287,7 +9448,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
             llvm::Attribute::getWithDereferenceableBytes(*context, kCondAllocSize));
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         builder->CreateCall(getOrDeclarePthreadCondInit(), {cv, llvm::ConstantPointerNull::get(ptrTy)});
-        return cv;
+        return builder->CreatePtrToInt(cv, getDefaultType(), "cond.handle");
     }
 
     if (bid == BuiltinId::COND_WAIT) {
