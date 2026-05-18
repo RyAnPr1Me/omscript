@@ -9143,7 +9143,244 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return llvm::ConstantInt::get(getDefaultType(), 0);
     }
 
-    // ── Bitwise intrinsic builtins ─────────────────────────────────────
+    // ── rwlock builtins ──────────────────────────────────────────────────────
+
+    if (bid == BuiltinId::RWLOCK_NEW) {
+        validateArgCount(expr, "rwlock_new", 0);
+        static constexpr int64_t kRwlockAllocSize = 64;
+        llvm::Value* size = llvm::ConstantInt::get(getDefaultType(), kRwlockAllocSize);
+        llvm::Value* rw = builder->CreateCall(getOrDeclareMalloc(), {size}, "rwlock.ptr");
+        llvm::cast<llvm::CallInst>(rw)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, kRwlockAllocSize));
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        builder->CreateCall(getOrDeclarePthreadRwlockInit(), {rw, llvm::ConstantPointerNull::get(ptrTy)});
+        return rw;
+    }
+
+    if (bid == BuiltinId::RWLOCK_RDLOCK) {
+        validateArgCount(expr, "rwlock_rdlock", 1);
+        llvm::Value* rw = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "rwlock.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadRwlockRdlock(), {rw}, "rwlock.rd.status");
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "rwlock.rd.ok",   fn);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "rwlock.rd.fail", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, llvm::ConstantInt::get(st->getType(), 0)), okBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: rwlock_rdlock failed\n", "rwlock_rd_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::RWLOCK_TRY_RDLOCK) {
+        validateArgCount(expr, "rwlock_try_rdlock", 1);
+        llvm::Value* rw = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "rwlock.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadRwlockTryRdlock(), {rw}, "rwlock.tryrd.status");
+        llvm::Value* c0    = llvm::ConstantInt::get(st->getType(), 0);
+        llvm::Value* cBusy = llvm::ConstantInt::get(st->getType(), EBUSY);
+        llvm::BasicBlock* acqBB   = llvm::BasicBlock::Create(*context, "rwlock.tryrd.acq",   fn);
+        llvm::BasicBlock* busyBB  = llvm::BasicBlock::Create(*context, "rwlock.tryrd.busy",  fn);
+        llvm::BasicBlock* failBB  = llvm::BasicBlock::Create(*context, "rwlock.tryrd.fail",  fn);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "rwlock.tryrd.merge", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, c0), acqBB, busyBB);
+        builder->SetInsertPoint(busyBB);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, cBusy), mergeBB, failBB);
+        builder->SetInsertPoint(acqBB);
+        builder->CreateBr(mergeBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: rwlock_try_rdlock failed\n", "rwlock_tryrd_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "rwlock.tryrd.result");
+        phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), acqBB);
+        phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), busyBB);
+        return phi;
+    }
+
+    if (bid == BuiltinId::RWLOCK_WRLOCK) {
+        validateArgCount(expr, "rwlock_wrlock", 1);
+        llvm::Value* rw = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "rwlock.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadRwlockWrlock(), {rw}, "rwlock.wr.status");
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "rwlock.wr.ok",   fn);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "rwlock.wr.fail", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, llvm::ConstantInt::get(st->getType(), 0)), okBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: rwlock_wrlock failed\n", "rwlock_wr_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::RWLOCK_TRY_WRLOCK) {
+        validateArgCount(expr, "rwlock_try_wrlock", 1);
+        llvm::Value* rw = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "rwlock.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadRwlockTryWrlock(), {rw}, "rwlock.trywr.status");
+        llvm::Value* c0    = llvm::ConstantInt::get(st->getType(), 0);
+        llvm::Value* cBusy = llvm::ConstantInt::get(st->getType(), EBUSY);
+        llvm::BasicBlock* acqBB   = llvm::BasicBlock::Create(*context, "rwlock.trywr.acq",   fn);
+        llvm::BasicBlock* busyBB  = llvm::BasicBlock::Create(*context, "rwlock.trywr.busy",  fn);
+        llvm::BasicBlock* failBB  = llvm::BasicBlock::Create(*context, "rwlock.trywr.fail",  fn);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "rwlock.trywr.merge", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, c0), acqBB, busyBB);
+        builder->SetInsertPoint(busyBB);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, cBusy), mergeBB, failBB);
+        builder->SetInsertPoint(acqBB);
+        builder->CreateBr(mergeBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: rwlock_try_wrlock failed\n", "rwlock_trywr_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "rwlock.trywr.result");
+        phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), acqBB);
+        phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), busyBB);
+        return phi;
+    }
+
+    if (bid == BuiltinId::RWLOCK_UNLOCK) {
+        validateArgCount(expr, "rwlock_unlock", 1);
+        llvm::Value* rw = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "rwlock.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadRwlockUnlock(), {rw}, "rwlock.unlock.status");
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "rwlock.unlock.ok",   fn);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "rwlock.unlock.fail", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, llvm::ConstantInt::get(st->getType(), 0)), okBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: rwlock_unlock failed\n", "rwlock_unlock_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::RWLOCK_DESTROY) {
+        validateArgCount(expr, "rwlock_destroy", 1);
+        llvm::Value* rw = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "rwlock.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadRwlockDestroy(), {rw}, "rwlock.destroy.status");
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "rwlock.destroy.ok",   fn);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "rwlock.destroy.fail", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, llvm::ConstantInt::get(st->getType(), 0)), okBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: rwlock_destroy failed\n", "rwlock_destroy_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        builder->CreateCall(getOrDeclareFree(), {rw});
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    // ── condvar builtins ─────────────────────────────────────────────────────
+
+    if (bid == BuiltinId::COND_NEW) {
+        validateArgCount(expr, "cond_new", 0);
+        static constexpr int64_t kCondAllocSize = 64;
+        llvm::Value* size = llvm::ConstantInt::get(getDefaultType(), kCondAllocSize);
+        llvm::Value* cv = builder->CreateCall(getOrDeclareMalloc(), {size}, "cond.ptr");
+        llvm::cast<llvm::CallInst>(cv)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, kCondAllocSize));
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        builder->CreateCall(getOrDeclarePthreadCondInit(), {cv, llvm::ConstantPointerNull::get(ptrTy)});
+        return cv;
+    }
+
+    if (bid == BuiltinId::COND_WAIT) {
+        // cond_wait(cv, mutex) — atomically releases mutex and waits on cv
+        validateArgCount(expr, "cond_wait", 2);
+        llvm::Value* cv = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "cond.ptr");
+        llvm::Value* mx = emitToArrayPtr(generateExpression(expr->arguments[1].get()), "mutex.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadCondWait(), {cv, mx}, "cond.wait.status");
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "cond.wait.ok",   fn);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "cond.wait.fail", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, llvm::ConstantInt::get(st->getType(), 0)), okBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: cond_wait failed\n", "cond_wait_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::COND_SIGNAL) {
+        validateArgCount(expr, "cond_signal", 1);
+        llvm::Value* cv = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "cond.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadCondSignal(), {cv}, "cond.signal.status");
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "cond.signal.ok",   fn);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "cond.signal.fail", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, llvm::ConstantInt::get(st->getType(), 0)), okBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: cond_signal failed\n", "cond_signal_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::COND_BROADCAST) {
+        validateArgCount(expr, "cond_broadcast", 1);
+        llvm::Value* cv = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "cond.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadCondBroadcast(), {cv}, "cond.bc.status");
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "cond.bc.ok",   fn);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "cond.bc.fail", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, llvm::ConstantInt::get(st->getType(), 0)), okBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: cond_broadcast failed\n", "cond_bc_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::COND_DESTROY) {
+        validateArgCount(expr, "cond_destroy", 1);
+        llvm::Value* cv = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "cond.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadCondDestroy(), {cv}, "cond.destroy.status");
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "cond.destroy.ok",   fn);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "cond.destroy.fail", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, llvm::ConstantInt::get(st->getType(), 0)), okBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: cond_destroy failed\n", "cond_destroy_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        builder->CreateCall(getOrDeclareFree(), {cv});
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    // ── thread_self / thread_equal ───────────────────────────────────────────
+
+    if (bid == BuiltinId::THREAD_SELF) {
+        validateArgCount(expr, "thread_self", 0);
+        // pthread_t is modeled as i64; cast the return through ptrtoint if needed.
+        llvm::Value* tid = builder->CreateCall(getOrDeclarePthreadSelf(), {}, "thread.self");
+        // Ensure result is i64 (on some platforms pthread_t may be a pointer type)
+        if (!tid->getType()->isIntegerTy(64))
+            tid = builder->CreatePtrToInt(tid, getDefaultType(), "thread.self.i64");
+        nonNegValues_.insert(tid);
+        return tid;
+    }
+
+    if (bid == BuiltinId::THREAD_EQUAL) {
+        validateArgCount(expr, "thread_equal", 2);
+        llvm::Value* t1 = toDefaultType(generateExpression(expr->arguments[0].get()));
+        llvm::Value* t2 = toDefaultType(generateExpression(expr->arguments[1].get()));
+        llvm::Value* eq = builder->CreateCall(getOrDeclarePthreadEqual(), {t1, t2}, "thread.equal.result");
+        // pthread_equal returns nonzero if equal; convert to OmScript bool (0/1).
+        llvm::Value* isEq = builder->CreateICmpNE(eq, llvm::ConstantInt::get(eq->getType(), 0), "thread.equal.bool");
+        return emitBoolZExt(isEq);
+    }
+
+
     if (bid == BuiltinId::POPCOUNT) {
         validateArgCount(expr, "popcount", 1);
         // Constant-fold popcount(any const expr).

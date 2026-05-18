@@ -2325,7 +2325,215 @@ llvm::Function* CodeGenerator::getOrDeclarePthreadMutexDestroy() {
     return fn;
 }
 
-llvm::Function* CodeGenerator::getOrDeclareGetenv() {
+// ── pthread_rwlock_t helpers ─────────────────────────────────────────────────
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadRwlockInit() {
+    if (auto* fn = module->getFunction("pthread_rwlock_init"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i32Ty = llvm::Type::getInt32Ty(*context);
+    auto* ty = llvm::FunctionType::get(i32Ty, {ptrTy, ptrTy}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_rwlock_init", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    OMSC_ADD_NOCAPTURE(fn, 1);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadRwlockRdlock() {
+    if (auto* fn = module->getFunction("pthread_rwlock_rdlock"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_rwlock_rdlock", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadRwlockTryRdlock() {
+    if (auto* fn = module->getFunction("pthread_rwlock_tryrdlock"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_rwlock_tryrdlock", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadRwlockWrlock() {
+    if (auto* fn = module->getFunction("pthread_rwlock_wrlock"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_rwlock_wrlock", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadRwlockTryWrlock() {
+    if (auto* fn = module->getFunction("pthread_rwlock_trywrlock"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_rwlock_trywrlock", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadRwlockUnlock() {
+    if (auto* fn = module->getFunction("pthread_rwlock_unlock"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_rwlock_unlock", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadRwlockDestroy() {
+    if (auto* fn = module->getFunction("pthread_rwlock_destroy"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_rwlock_destroy", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+// ── pthread_cond_t helpers ───────────────────────────────────────────────────
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadCondInit() {
+    if (auto* fn = module->getFunction("pthread_cond_init"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy, ptrTy}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_cond_init", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    OMSC_ADD_NOCAPTURE(fn, 1);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadCondWait() {
+    if (auto* fn = module->getFunction("pthread_cond_wait"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    // int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex)
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy, ptrTy}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_cond_wait", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    OMSC_ADD_NOCAPTURE(fn, 1);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    fn->addParamAttr(1, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadCondSignal() {
+    if (auto* fn = module->getFunction("pthread_cond_signal"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_cond_signal", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadCondBroadcast() {
+    if (auto* fn = module->getFunction("pthread_cond_broadcast"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_cond_broadcast", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadCondDestroy() {
+    if (auto* fn = module->getFunction("pthread_cond_destroy"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_cond_destroy", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    return fn;
+}
+
+// ── pthread_self / pthread_equal ─────────────────────────────────────────────
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadSelf() {
+    if (auto* fn = module->getFunction("pthread_self"))
+        return fn;
+    // pthread_t pthread_self(void)  — pthread_t is an opaque integer/pointer type.
+    // We model it as i64 for simplicity (works on LP64 Linux/macOS where pthread_t ≤ 8 bytes).
+    auto* ty = llvm::FunctionType::get(getDefaultType(), {}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_self", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclarePthreadEqual() {
+    if (auto* fn = module->getFunction("pthread_equal"))
+        return fn;
+    auto* i64Ty = getDefaultType();
+    // int pthread_equal(pthread_t t1, pthread_t t2)
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {i64Ty, i64Ty}, false);
+    llvm::Function* fn =
+        llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "pthread_equal", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    return fn;
+}
+
+
     if (auto* fn = module->getFunction("getenv"))
         return fn;
     auto* ptrTy = llvm::PointerType::getUnqual(*context);
