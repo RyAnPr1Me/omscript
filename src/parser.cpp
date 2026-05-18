@@ -3250,7 +3250,7 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
     }
 
     // `File` variables must be initialized immediately with file_open(...).
-    // A bare `var f: File` without an initializer would hold an uninitialised
+    // A bare `var f: File` without an initializer would hold an uninitialized
     // file handle, which is always a bug.
     if (typeName == "File" && !initializer) {
         error("Variable '" + name.lexeme +
