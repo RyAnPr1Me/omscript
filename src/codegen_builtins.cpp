@@ -145,7 +145,6 @@ enum class BuiltinId : uint16_t {
     NUMBER_TO_STRING,
     STRING_TO_NUMBER,
     THREAD_CREATE,
-    THREAD_CREATE_EX,  ///< thread_create_ex(fn, arg, flags, stack_sz, priority, affinity)
     THREAD_JOIN,
     THREAD_DETACH,
     MUTEX_NEW,
@@ -367,6 +366,18 @@ enum class BuiltinId : uint16_t {
     ENSURE_BUILTIN,     ///< ensure(cond[, msg]) → always-on runtime guard
     // ── Round-90: compile() builtin ──────────────────────────────────────────
     COMPILE_BUILTIN,    ///< compile("src") → array of object file bytes (compile-time)
+    // ── Round-92: zero-cost builtins ─────────────────────────────────────────
+    LERP,               ///< lerp(a, b, t)       → a + (b-a)*t via FMA (single instruction)
+    TRUNC_BUILTIN,      ///< trunc(x)            → float truncation towards zero (llvm.trunc)
+    RINT,               ///< rint(x)             → round to nearest even (banker's rounding)
+    SATURATING_MUL,     ///< saturating_mul(a,b) → signed saturating multiply (llvm.smul.fix.sat)
+    WRAP_ADD,           ///< wrap_add(a, b)      → wrapping add (no nsw, explicit overflow)
+    WRAP_SUB,           ///< wrap_sub(a, b)      → wrapping subtract
+    WRAP_MUL,           ///< wrap_mul(a, b)      → wrapping multiply
+    BIT_FLOOR,          ///< bit_floor(n)        → highest power-of-2 ≤ n (0 if n≤0)
+    BIT_CEIL,           ///< bit_ceil(n)         → smallest power-of-2 ≥ n (1 if n≤1)
+    BIT_WIDTH,          ///< bit_width(n)        → bits needed to represent n (0 if n==0)
+    THREAD_CREATE_EX,   ///< thread_create_ex(fn, arg, flags, stack_sz, priority, affinity)
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -677,6 +688,20 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"is_type",          BuiltinId::IS_TYPE},
     {"ensure",           BuiltinId::ENSURE_BUILTIN},
     {"compile",          BuiltinId::COMPILE_BUILTIN},
+    // ── Round-92: zero-cost builtins ─────────────────────────────────────────
+    {"lerp",             BuiltinId::LERP},
+    {"trunc",            BuiltinId::TRUNC_BUILTIN},
+    {"rint",             BuiltinId::RINT},
+    {"saturating_mul",   BuiltinId::SATURATING_MUL},
+    {"sat_add",          BuiltinId::SATURATING_ADD},
+    {"sat_sub",          BuiltinId::SATURATING_SUB},
+    {"sat_mul",          BuiltinId::SATURATING_MUL},
+    {"wrap_add",         BuiltinId::WRAP_ADD},
+    {"wrap_sub",         BuiltinId::WRAP_SUB},
+    {"wrap_mul",         BuiltinId::WRAP_MUL},
+    {"bit_floor",        BuiltinId::BIT_FLOOR},
+    {"bit_ceil",         BuiltinId::BIT_CEIL},
+    {"bit_width",        BuiltinId::BIT_WIDTH},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -9136,6 +9161,276 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         if (isDetached)
             return llvm::ConstantInt::get(i64Ty, 0);
         return builder->CreateAlignedLoad(i64Ty, tidAlloca, llvm::MaybeAlign(8), "tcex.tid.val");
+    }
+
+    // ── Round-92: zero-cost builtins ─────────────────────────────────────────
+
+    // lerp(a, b, t) → fma(t, b-a, a)  (single FMA instruction, zero overhead)
+    // Linear interpolation: lerp(0.0, 1.0, 0.5) == 0.5
+    if (bid == BuiltinId::LERP) {
+        validateArgCount(expr, "lerp", 3);
+        // Compile-time fold when all three args are float or int constants.
+        {
+            auto ca = tryFoldExprToConst(expr->arguments[0].get());
+            auto cb = tryFoldExprToConst(expr->arguments[1].get());
+            auto ct = tryFoldExprToConst(expr->arguments[2].get());
+            if (ca && cb && ct) {
+                auto toD = [](const ConstValue& v) {
+                    return v.kind == ConstValue::Kind::Float
+                               ? v.floatVal
+                               : static_cast<double>(v.intVal);
+                };
+                double da = toD(*ca), db = toD(*cb), dt = toD(*ct);
+                // Use the mathematically exact form to avoid excess error.
+                double result = da + (db - da) * dt;
+                optStats_.constFolded++;
+                return llvm::ConstantFP::get(getFloatType(), result);
+            }
+        }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        llvm::Value* t = generateExpression(expr->arguments[2].get());
+        a = ensureFloat(a);
+        b = ensureFloat(b);
+        t = ensureFloat(t);
+        // lerp(a, b, t) = fma(t, b-a, a) — one FMA on hardware that supports it.
+        llvm::Value* bma    = builder->CreateFSub(b, a, "lerp.bma");
+        llvm::Function* fmaFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::fma, {getFloatType()});
+        return builder->CreateCall(fmaFn, {t, bma, a}, "lerp.result");
+    }
+
+    // trunc(x) → round towards zero (llvm.trunc intrinsic)
+    // Completes the floor/ceil/round/trunc quad.
+    if (bid == BuiltinId::TRUNC_BUILTIN) {
+        validateArgCount(expr, "trunc", 1);
+        if (auto v = tryFoldInt(expr->arguments[0].get()))
+            return llvm::ConstantInt::get(getDefaultType(), *v);
+        if (auto v = tryFoldExprToConst(expr->arguments[0].get())) {
+            if (v->kind == ConstValue::Kind::Float) {
+                double t = v->floatVal < 0.0 ? std::ceil(v->floatVal) : std::floor(v->floatVal);
+                optStats_.constFolded++;
+                return llvm::ConstantFP::get(getFloatType(), t);
+            }
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        const bool inputIsDouble = arg->getType()->isDoubleTy();
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::Function* truncFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::trunc, {getFloatType()});
+        llvm::Value* result = builder->CreateCall(truncFn, {fval}, "trunc.result");
+        if (inputIsDouble)
+            return result;
+        return builder->CreateFPToSI(result, getDefaultType(), "trunc.int");
+    }
+
+    // rint(x) → round to nearest, ties to even (banker's rounding, llvm.rint)
+    if (bid == BuiltinId::RINT) {
+        validateArgCount(expr, "rint", 1);
+        if (auto v = tryFoldInt(expr->arguments[0].get()))
+            return llvm::ConstantInt::get(getDefaultType(), *v);
+        if (auto v = tryFoldExprToConst(expr->arguments[0].get())) {
+            if (v->kind == ConstValue::Kind::Float) {
+                optStats_.constFolded++;
+                return llvm::ConstantFP::get(getFloatType(), std::rint(v->floatVal));
+            }
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        const bool inputIsDouble = arg->getType()->isDoubleTy();
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::Function* rintFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::rint, {getFloatType()});
+        llvm::Value* result = builder->CreateCall(rintFn, {fval}, "rint.result");
+        if (inputIsDouble)
+            return result;
+        return builder->CreateFPToSI(result, getDefaultType(), "rint.int");
+    }
+
+    // saturating_mul(a, b) → signed saturating multiply (llvm.smul.fix.sat)
+    if (bid == BuiltinId::SATURATING_MUL) {
+        validateArgCount(expr, "saturating_mul", 2);
+        if (auto va = tryFoldInt(expr->arguments[0].get())) {
+            if (auto vb = tryFoldInt(expr->arguments[1].get())) {
+                __int128 prod = static_cast<__int128>(*va) * static_cast<__int128>(*vb);
+                if (prod > INT64_MAX) prod = INT64_MAX;
+                if (prod < INT64_MIN) prod = INT64_MIN;
+                optStats_.constFolded++;
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(prod));
+            }
+        }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = toDefaultType(a);
+        b = toDefaultType(b);
+        // llvm.smul.fix.sat(a, b, scale=0) is the signed saturating multiply.
+        llvm::Function* smulSatFn =
+            OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smul_fix_sat, {getDefaultType()});
+        return builder->CreateCall(smulSatFn, {a, b, builder->getInt32(0)}, "smul.sat.result");
+    }
+
+    // wrap_add(a, b) — wrapping add (no nsw/nuw: defined overflow wraps)
+    if (bid == BuiltinId::WRAP_ADD) {
+        validateArgCount(expr, "wrap_add", 2);
+        if (auto va = tryFoldInt(expr->arguments[0].get())) {
+            if (auto vb = tryFoldInt(expr->arguments[1].get())) {
+                optStats_.constFolded++;
+                return llvm::ConstantInt::get(getDefaultType(),
+                    static_cast<int64_t>(static_cast<uint64_t>(*va) + static_cast<uint64_t>(*vb)));
+            }
+        }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = toDefaultType(a);
+        b = toDefaultType(b);
+        // Emit without nsw/nuw flags — wrapping is well-defined and intentional.
+        return builder->CreateAdd(a, b, "wrap.add.result");
+    }
+
+    // wrap_sub(a, b) — wrapping subtract
+    if (bid == BuiltinId::WRAP_SUB) {
+        validateArgCount(expr, "wrap_sub", 2);
+        if (auto va = tryFoldInt(expr->arguments[0].get())) {
+            if (auto vb = tryFoldInt(expr->arguments[1].get())) {
+                optStats_.constFolded++;
+                return llvm::ConstantInt::get(getDefaultType(),
+                    static_cast<int64_t>(static_cast<uint64_t>(*va) - static_cast<uint64_t>(*vb)));
+            }
+        }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = toDefaultType(a);
+        b = toDefaultType(b);
+        return builder->CreateSub(a, b, "wrap.sub.result");
+    }
+
+    // wrap_mul(a, b) — wrapping multiply
+    if (bid == BuiltinId::WRAP_MUL) {
+        validateArgCount(expr, "wrap_mul", 2);
+        if (auto va = tryFoldInt(expr->arguments[0].get())) {
+            if (auto vb = tryFoldInt(expr->arguments[1].get())) {
+                optStats_.constFolded++;
+                return llvm::ConstantInt::get(getDefaultType(),
+                    static_cast<int64_t>(static_cast<uint64_t>(*va) * static_cast<uint64_t>(*vb)));
+            }
+        }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = toDefaultType(a);
+        b = toDefaultType(b);
+        return builder->CreateMul(a, b, "wrap.mul.result");
+    }
+
+    // bit_floor(n) → highest power-of-2 ≤ n (0 if n ≤ 0)
+    // C++20 std::bit_floor.  Zero-cost: 1 << (63 - clz(n)) for n > 0.
+    if (bid == BuiltinId::BIT_FLOOR) {
+        validateArgCount(expr, "bit_floor", 1);
+        if (auto v = tryFoldInt(expr->arguments[0].get())) {
+            int64_t n = *v;
+            optStats_.constFolded++;
+            if (n <= 0) return llvm::ConstantInt::get(getDefaultType(), 0);
+            return llvm::ConstantInt::get(getDefaultType(),
+                static_cast<int64_t>(1ULL << (63 - __builtin_clzll(static_cast<uint64_t>(n)))));
+        }
+        llvm::Value* n = generateExpression(expr->arguments[0].get());
+        n = toDefaultType(n);
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        // If n <= 0: result = 0.
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* posBB  = llvm::BasicBlock::Create(*context, "bfloor.pos",  parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "bfloor.done", parentFn);
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::Value* isPos = builder->CreateICmpSGT(n, zero, "bfloor.ispos");
+        builder->CreateCondBr(isPos, posBB, doneBB);
+
+        builder->SetInsertPoint(posBB);
+        // clz(n) = ctlz(n, /*is_zero_poison=*/true) — safe since n > 0 here.
+        llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ctlz, {getDefaultType()});
+        llvm::Value* lz   = builder->CreateCall(ctlzFn, {n, builder->getTrue()}, "bfloor.lz");
+        llvm::Value* shift = builder->CreateSub(llvm::ConstantInt::get(getDefaultType(), 63), lz,
+                                                "bfloor.shift", /*NUW=*/true, /*NSW=*/true);
+        llvm::Value* result = builder->CreateShl(one, shift, "bfloor.result", /*NUW=*/true, /*NSW=*/true);
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "bfloor.phi");
+        phi->addIncoming(zero,   entryBB);
+        phi->addIncoming(result, posBB);
+        nonNegValues_.insert(phi);
+        return phi;
+    }
+
+    // bit_ceil(n) → smallest power-of-2 ≥ n (returns 1 for n ≤ 1)
+    // C++20 std::bit_ceil.  Zero-cost: 1 << (64 - clz(n-1)) for n > 1.
+    if (bid == BuiltinId::BIT_CEIL) {
+        validateArgCount(expr, "bit_ceil", 1);
+        if (auto v = tryFoldInt(expr->arguments[0].get())) {
+            int64_t n = *v;
+            optStats_.constFolded++;
+            if (n <= 1) return llvm::ConstantInt::get(getDefaultType(), 1);
+            uint64_t un = static_cast<uint64_t>(n) - 1;
+            return llvm::ConstantInt::get(getDefaultType(),
+                static_cast<int64_t>(1ULL << (64 - __builtin_clzll(un))));
+        }
+        llvm::Value* n = generateExpression(expr->arguments[0].get());
+        n = toDefaultType(n);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        // For n <= 1 result is 1.  For n > 1: 1 << (64 - clz(n-1)).
+        llvm::Function* parentFn  = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* bigBB   = llvm::BasicBlock::Create(*context, "bceil.big",  parentFn);
+        llvm::BasicBlock* doneBB  = llvm::BasicBlock::Create(*context, "bceil.done", parentFn);
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::Value* isBig = builder->CreateICmpSGT(n, one, "bceil.isbig");
+        builder->CreateCondBr(isBig, bigBB, doneBB);
+
+        builder->SetInsertPoint(bigBB);
+        llvm::Value* nm1  = builder->CreateSub(n, one, "bceil.nm1", /*NUW=*/true, /*NSW=*/true);
+        llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ctlz, {getDefaultType()});
+        llvm::Value* lz    = builder->CreateCall(ctlzFn, {nm1, builder->getTrue()}, "bceil.lz");
+        llvm::Value* shift = builder->CreateSub(llvm::ConstantInt::get(getDefaultType(), 64), lz,
+                                                "bceil.shift", /*NUW=*/false, /*NSW=*/true);
+        llvm::Value* result = builder->CreateShl(one, shift, "bceil.result");
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "bceil.phi");
+        phi->addIncoming(one,    entryBB);
+        phi->addIncoming(result, bigBB);
+        nonNegValues_.insert(phi);
+        return phi;
+    }
+
+    // bit_width(n) → number of bits needed to represent n (0 if n == 0)
+    // C++20 std::bit_width.  Zero-cost: 64 - clz(n) for n > 0.
+    if (bid == BuiltinId::BIT_WIDTH) {
+        validateArgCount(expr, "bit_width", 1);
+        if (auto v = tryFoldInt(expr->arguments[0].get())) {
+            int64_t n = *v;
+            optStats_.constFolded++;
+            if (n <= 0) return llvm::ConstantInt::get(getDefaultType(), 0);
+            return llvm::ConstantInt::get(getDefaultType(),
+                static_cast<int64_t>(64 - __builtin_clzll(static_cast<uint64_t>(n))));
+        }
+        llvm::Value* n = generateExpression(expr->arguments[0].get());
+        n = toDefaultType(n);
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* isZero = builder->CreateICmpSLE(n, zero, "bwidth.iszero");
+        llvm::Function* parentFn  = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* nonzeroBB = llvm::BasicBlock::Create(*context, "bwidth.nonzero", parentFn);
+        llvm::BasicBlock* doneBB   = llvm::BasicBlock::Create(*context, "bwidth.done",    parentFn);
+        llvm::BasicBlock* entryBB  = builder->GetInsertBlock();
+        builder->CreateCondBr(isZero, doneBB, nonzeroBB);
+
+        builder->SetInsertPoint(nonzeroBB);
+        llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ctlz, {getDefaultType()});
+        llvm::Value* lz     = builder->CreateCall(ctlzFn, {n, builder->getTrue()}, "bwidth.lz");
+        llvm::Value* width  = builder->CreateSub(llvm::ConstantInt::get(getDefaultType(), 64), lz,
+                                                  "bwidth.width", /*NUW=*/true, /*NSW=*/true);
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "bwidth.phi");
+        phi->addIncoming(zero,  entryBB);
+        phi->addIncoming(width, nonzeroBB);
+        nonNegValues_.insert(phi);
+        return phi;
     }
 
     if (bid == BuiltinId::THREAD_JOIN) {

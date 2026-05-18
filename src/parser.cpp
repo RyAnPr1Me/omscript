@@ -271,6 +271,20 @@ void Parser::registerStdNamespace() {
         {"fast_sqrt", "fast_sqrt"},
         {"is_nan", "is_nan"},
         {"is_inf", "is_inf"},
+        // ── Round-92: zero-cost builtins ─────────────────────────────────────
+        {"lerp",             "lerp"},
+        {"trunc",            "trunc"},
+        {"rint",             "rint"},
+        {"saturating_mul",   "saturating_mul"},
+        {"sat_add",          "sat_add"},
+        {"sat_sub",          "sat_sub"},
+        {"sat_mul",          "sat_mul"},
+        {"wrap_add",         "wrap_add"},
+        {"wrap_sub",         "wrap_sub"},
+        {"wrap_mul",         "wrap_mul"},
+        {"bit_floor",        "bit_floor"},
+        {"bit_ceil",         "bit_ceil"},
+        {"bit_width",        "bit_width"},
     };
 
     auto& stdNS = importNamespaces_["std"];
