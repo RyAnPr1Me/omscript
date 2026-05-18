@@ -1316,6 +1316,21 @@ class CodeGenerator {
     llvm::Function* getOrDeclarePthreadMutexTryLock();
     llvm::Function* getOrDeclarePthreadMutexUnlock();
     llvm::Function* getOrDeclarePthreadMutexDestroy();
+    // ── Round-90: rwlock + condvar + thread_self ─────────────────────────────
+    llvm::Function* getOrDeclarePthreadRwlockInit();
+    llvm::Function* getOrDeclarePthreadRwlockRdlock();
+    llvm::Function* getOrDeclarePthreadRwlockTryRdlock();
+    llvm::Function* getOrDeclarePthreadRwlockWrlock();
+    llvm::Function* getOrDeclarePthreadRwlockTryWrlock();
+    llvm::Function* getOrDeclarePthreadRwlockUnlock();
+    llvm::Function* getOrDeclarePthreadRwlockDestroy();
+    llvm::Function* getOrDeclarePthreadCondInit();
+    llvm::Function* getOrDeclarePthreadCondWait();
+    llvm::Function* getOrDeclarePthreadCondSignal();
+    llvm::Function* getOrDeclarePthreadCondBroadcast();
+    llvm::Function* getOrDeclarePthreadCondDestroy();
+    llvm::Function* getOrDeclarePthreadSelf();
+    llvm::Function* getOrDeclarePthreadEqual();
     llvm::Function* getOrDeclareGetenv();
     llvm::Function* getOrDeclareSetenv();
 

@@ -342,6 +342,21 @@ enum class BuiltinId : uint16_t {
     MAP_TO_PAIRS,    ///< map_to_pairs(m)        → flat array [k1,v1,k2,v2,...] of all entries
     STR_INSERT,      ///< str_insert(s, pos, sub)→ new string with sub inserted at pos
     STR_DELETE,      ///< str_delete(s, pos, len)→ new string with len chars removed at pos
+    // ── Round-90: threading improvements ────────────────────────────────────
+    RWLOCK_NEW,         ///< rwlock_new()          → RWLock handle
+    RWLOCK_RDLOCK,      ///< rwlock_rdlock(rw)     → acquires read lock (blocks); returns 0
+    RWLOCK_TRY_RDLOCK,  ///< rwlock_try_rdlock(rw) → 1=acquired, 0=busy
+    RWLOCK_WRLOCK,      ///< rwlock_wrlock(rw)     → acquires write lock (blocks); returns 0
+    RWLOCK_TRY_WRLOCK,  ///< rwlock_try_wrlock(rw) → 1=acquired, 0=busy
+    RWLOCK_UNLOCK,      ///< rwlock_unlock(rw)     → releases any held lock; returns 0
+    RWLOCK_DESTROY,     ///< rwlock_destroy(rw)    → destroys + frees; returns 0
+    COND_NEW,           ///< cond_new()            → Condvar handle
+    COND_WAIT,          ///< cond_wait(cv, mx)     → atomically releases mx and sleeps; returns 0
+    COND_SIGNAL,        ///< cond_signal(cv)       → wakes one waiter; returns 0
+    COND_BROADCAST,     ///< cond_broadcast(cv)    → wakes all waiters; returns 0
+    COND_DESTROY,       ///< cond_destroy(cv)      → destroys + frees; returns 0
+    THREAD_SELF,        ///< thread_self()         → current thread id as i64
+    THREAD_EQUAL,       ///< thread_equal(t1, t2)  → 1 if same thread, else 0
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -633,6 +648,21 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"map_to_pairs",     BuiltinId::MAP_TO_PAIRS},
     {"str_insert",       BuiltinId::STR_INSERT},
     {"str_delete",       BuiltinId::STR_DELETE},
+    // ── Round-90: threading improvements ─────────────────────────────────────
+    {"rwlock_new",       BuiltinId::RWLOCK_NEW},
+    {"rwlock_rdlock",    BuiltinId::RWLOCK_RDLOCK},
+    {"rwlock_try_rdlock",BuiltinId::RWLOCK_TRY_RDLOCK},
+    {"rwlock_wrlock",    BuiltinId::RWLOCK_WRLOCK},
+    {"rwlock_try_wrlock",BuiltinId::RWLOCK_TRY_WRLOCK},
+    {"rwlock_unlock",    BuiltinId::RWLOCK_UNLOCK},
+    {"rwlock_destroy",   BuiltinId::RWLOCK_DESTROY},
+    {"cond_new",         BuiltinId::COND_NEW},
+    {"cond_wait",        BuiltinId::COND_WAIT},
+    {"cond_signal",      BuiltinId::COND_SIGNAL},
+    {"cond_broadcast",   BuiltinId::COND_BROADCAST},
+    {"cond_destroy",     BuiltinId::COND_DESTROY},
+    {"thread_self",      BuiltinId::THREAD_SELF},
+    {"thread_equal",     BuiltinId::THREAD_EQUAL},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
