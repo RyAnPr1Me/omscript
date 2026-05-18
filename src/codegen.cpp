@@ -563,10 +563,11 @@ llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
         return llvm::Type::getInt64Ty(*context);
     if (ann == "uintptr_t" || ann == "c_uintptr")
         return llvm::Type::getInt64Ty(*context);
+    // File — user-facing file-handle type (Rust-style bare value, backed by FILE*)
     // c_FILE — opaque pointer representing C FILE* (like ptr)
     // c_dir  — opaque pointer for POSIX DIR* (like ptr)
     // c_jmp_buf — opaque pointer for setjmp/longjmp state (like ptr)
-    if (ann == "c_FILE" || ann == "c_dir" || ann == "c_DIR" || ann == "c_jmp_buf")
+    if (ann == "File" || ann == "c_FILE" || ann == "c_dir" || ann == "c_DIR" || ann == "c_jmp_buf")
         return llvm::PointerType::getUnqual(*context);
     // never — bottom type; used as return type of functions that never return.
     // Maps to void in LLVM IR (hintNoReturn is set separately by the parser).
@@ -2112,6 +2113,23 @@ llvm::Function* CodeGenerator::getOrDeclareFclose() {
     // internal buffer (all state is inside the opaque FILE struct — not directly
     // accessible to the caller).
     fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(*context, llvm::MemoryEffects::inaccessibleOrArgMemOnly()));
+    return fn;
+}
+
+llvm::Function* CodeGenerator::getOrDeclareFeof() {
+    if (auto* fn = module->getFunction("feof"))
+        return fn;
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* ty = llvm::FunctionType::get(llvm::Type::getInt32Ty(*context), {ptrTy}, false);
+    llvm::Function* fn = llvm::Function::Create(ty, llvm::Function::ExternalLinkage, "feof", module.get());
+    fn->addFnAttr(llvm::Attribute::NoUnwind);
+    fn->addFnAttr(llvm::Attribute::WillReturn);
+    fn->addFnAttr(llvm::Attribute::NoFree);
+    fn->addParamAttr(0, llvm::Attribute::NonNull);
+    OMSC_ADD_NOCAPTURE(fn, 0);
+    // memory(inaccessiblemem: read): feof only reads the FILE*'s internal EOF flag.
+    fn->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        *context, llvm::MemoryEffects::inaccessibleOrArgMemOnly(llvm::ModRefInfo::Ref)));
     return fn;
 }
 

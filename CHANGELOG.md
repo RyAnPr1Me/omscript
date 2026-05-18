@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-88: `File` handle type** (`src/codegen_builtins.cpp`, `src/codegen.cpp`, `include/codegen.h`, `include/pass_utils.h`, `src/parser.cpp`, `examples/file_type_test.om`, `run_tests.sh`):
+  - Added `File` as a first-class bare value type (Rust-style): declare as `var f: File = file_open(path, mode);`.
+  - `File` is internally an opaque file-handle pointer (same LLVM representation as `c_FILE`), but exposed without the pointer syntax at the language level.
+  - Compile-time error when a `File` variable is declared without an initializer (`var f: File;` is rejected).
+  - `sizeof(File)` returns `8` (pointer width).
+  - `File` recognized by `isKnownScalarTypeName` so type annotations parse correctly everywhere.
+  - New streaming builtins: `file_open`, `file_close`, `file_write_str`, `file_read_line`, `file_read_all`, `file_flush`, `file_eof`, `file_is_open`.
+  - Added `getOrDeclareFeof()` helper to the codegen layer.
+  - Widened `BuiltinId` underlying type from `uint8_t` to `uint16_t` to accommodate the growing builtin table.
+  - Added `examples/file_type_test.om` (10 assertions) and wired it into `run_tests.sh`.
+
 - **Round-87: Namespace type aliases + qualified type annotations** (`src/parser.cpp`, `examples/round87_ns_type_qualtype_test.om`, `run_tests.sh`):
   - Added `type` alias declarations inside `namespace` blocks.
   - Added namespace-qualified type annotation support (`A::B::Type`) in variable, parameter, and return type positions, including array forms like `A::B::Type[]`.

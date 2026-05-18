@@ -3249,6 +3249,15 @@ std::unique_ptr<Statement> Parser::parseVarDecl(bool isConst) {
               "silently defaults to 'i64'.");
     }
 
+    // `File` variables must be initialized immediately with file_open(...).
+    // A bare `var f: File` without an initializer would hold an uninitialised
+    // file handle, which is always a bug.
+    if (typeName == "File" && !initializer) {
+        error("Variable '" + name.lexeme +
+              "' of type 'File' must be initialized with file_open(...). "
+              "Use: var " + name.lexeme + ": File = file_open(path, mode);");
+    }
+
     // Shorthand borrow: `var name: &T = &expr;` → equivalent to `borrow var name: &T = &expr;`
     // If the type annotation is a reference type (&T) and an initializer is present,
     // automatically wrap the initializer in a BorrowExpr so the reference codegen path fires.
@@ -6021,7 +6030,8 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
                  typeName == "c_size_t" || typeName == "c_ssize_t" ||
                  typeName == "intptr_t" || typeName == "uintptr_t" || typeName == "ptrdiff_t" ||
                  typeName == "c_intptr" || typeName == "c_uintptr" || typeName == "c_ptrdiff" ||
-                 typeName == "c_FILE" || typeName == "c_dir" || typeName == "c_DIR" || typeName == "c_jmp_buf")
+                 typeName == "c_FILE" || typeName == "c_dir" || typeName == "c_DIR" || typeName == "c_jmp_buf" ||
+                 typeName == "File")
             byteSize = 8;
         else if (typeName == "i128" || typeName == "u128")
             byteSize = 16;

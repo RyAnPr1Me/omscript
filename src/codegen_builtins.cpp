@@ -40,7 +40,7 @@ namespace omscript {
 
 // ---------------------------------------------------------------------------
 
-enum class BuiltinId : uint8_t {
+enum class BuiltinId : uint16_t {
     NONE = 0, // Not a builtin — fall through to user-defined function lookup
     PRINT,
     ABS,
@@ -328,6 +328,15 @@ enum class BuiltinId : uint8_t {
     ARRAY_ZIP_WITH,    ///< array_zip_with(a, b, fn) → result[i] = fn(a[i], b[i])
     ARRAY_CHUNK,       ///< array_chunk(arr, n)      → split into sub-arrays of size n
     ARRAY_FIND_INDEX,  ///< array_find_index(arr, fn)→ index of first matching element (or -1)
+    // ── Round-88: File handle type ───────────────────────────────────────────
+    FILE_OPEN,       ///< file_open(path, mode) → File handle (null on error)
+    FILE_CLOSE,      ///< file_close(f)         → void (returns i64 0)
+    FILE_WRITE_STR,  ///< file_write_str(f, s)  → bytes written as i64 (-1 on error)
+    FILE_READ_LINE,  ///< file_read_line(f)     → one line string (no trailing \n); "" at EOF
+    FILE_READ_ALL,   ///< file_read_all(f)      → remaining content as string
+    FILE_FLUSH,      ///< file_flush(f)         → 0 on success, non-zero on error
+    FILE_EOF,        ///< file_eof(f)           → 1 if at EOF, else 0
+    FILE_IS_OPEN,    ///< file_is_open(f)       → 1 if handle is non-null, else 0
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -605,6 +614,15 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"array_zip_with",   BuiltinId::ARRAY_ZIP_WITH},
     {"array_chunk",      BuiltinId::ARRAY_CHUNK},
     {"array_find_index", BuiltinId::ARRAY_FIND_INDEX},
+    // ── Round-88: File handle type ───────────────────────────────────────────
+    {"file_open",        BuiltinId::FILE_OPEN},
+    {"file_close",       BuiltinId::FILE_CLOSE},
+    {"file_write_str",   BuiltinId::FILE_WRITE_STR},
+    {"file_read_line",   BuiltinId::FILE_READ_LINE},
+    {"file_read_all",    BuiltinId::FILE_READ_ALL},
+    {"file_flush",       BuiltinId::FILE_FLUSH},
+    {"file_eof",         BuiltinId::FILE_EOF},
+    {"file_is_open",     BuiltinId::FILE_IS_OPEN},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -8116,6 +8134,216 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* isZero =
             builder->CreateICmpEQ(result, llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "fexists.cmp");
         return emitBoolZExt(isZero, "fexists.result");
+    }
+
+    // ── Round-88: File handle builtins ───────────────────────────────────────
+
+    if (bid == BuiltinId::FILE_OPEN) {
+        validateArgCount(expr, "file_open", 2);
+        llvm::Value* pathArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* modeArg = generateExpression(expr->arguments[1].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* pathPtr =
+            pathArg->getType()->isPointerTy() ? pathArg : builder->CreateIntToPtr(pathArg, ptrTy, "fhopen.path");
+        llvm::Value* modePtr =
+            modeArg->getType()->isPointerTy() ? modeArg : builder->CreateIntToPtr(modeArg, ptrTy, "fhopen.mode");
+        // Both are fat-strings; extract C-string data at offset 16.
+        llvm::Value* pathData = emitStringData(pathPtr, "fhopen.pathdata");
+        llvm::Value* modeData = emitStringData(modePtr, "fhopen.modedata");
+        // FILE* fp = fopen(pathData, modeData); returns null on failure.
+        llvm::Value* fp = builder->CreateCall(getOrDeclareFopen(), {pathData, modeData}, "fhopen.fp");
+        return fp;
+    }
+
+    if (bid == BuiltinId::FILE_CLOSE) {
+        validateArgCount(expr, "file_close", 1);
+        llvm::Value* fArg = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* fp = fArg->getType()->isPointerTy() ? fArg : builder->CreateIntToPtr(fArg, ptrTy, "fhclose.fp");
+        builder->CreateCall(getOrDeclareFclose(), {fp});
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::FILE_WRITE_STR) {
+        validateArgCount(expr, "file_write_str", 2);
+        llvm::Value* fArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* sArg = generateExpression(expr->arguments[1].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* fp = fArg->getType()->isPointerTy() ? fArg : builder->CreateIntToPtr(fArg, ptrTy, "fwrstr.fp");
+        llvm::Value* sPtr = sArg->getType()->isPointerTy() ? sArg : builder->CreateIntToPtr(sArg, ptrTy, "fwrstr.sptr");
+        llvm::Value* sLen  = emitStringLen(sPtr,  "fwrstr.len");
+        llvm::Value* sData = emitStringData(sPtr, "fwrstr.data");
+        // fwrite(data, 1, len, fp) → number of items (bytes) written
+        llvm::Value* written = builder->CreateCall(
+            getOrDeclareFwrite(),
+            {sData, llvm::ConstantInt::get(getDefaultType(), 1), sLen, fp},
+            "fwrstr.written");
+        nonNegValues_.insert(written);
+        return written;
+    }
+
+    if (bid == BuiltinId::FILE_READ_LINE) {
+        validateArgCount(expr, "file_read_line", 1);
+        llvm::Value* fArg = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* fp = fArg->getType()->isPointerTy() ? fArg : builder->CreateIntToPtr(fArg, ptrTy, "freadln.fp");
+
+        // Allocate a 4096-byte heap buffer for fgets.
+        llvm::Value* bufSize4k = llvm::ConstantInt::get(getDefaultType(), 4096);
+        llvm::Value* rawBuf = builder->CreateCall(getOrDeclareMalloc(), {bufSize4k}, "freadln.rawbuf");
+
+        // fgets(rawBuf, 4096, fp)
+        llvm::Value* intSize4k = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 4096);
+        llvm::Value* fgetsRet = builder->CreateCall(getOrDeclareFgets(), {rawBuf, intSize4k, fp}, "freadln.fgets");
+
+        // null return → EOF/error: free buffer, return empty fat-string.
+        llvm::Value* fgetsNull =
+            builder->CreateICmpEQ(fgetsRet, llvm::ConstantPointerNull::get(ptrTy), "freadln.eof");
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* eofBB     = llvm::BasicBlock::Create(*context, "freadln.eof",     parentFn);
+        llvm::BasicBlock* okBB      = llvm::BasicBlock::Create(*context, "freadln.ok",      parentFn);
+        llvm::BasicBlock* stripBB   = llvm::BasicBlock::Create(*context, "freadln.strip",   parentFn);
+        llvm::BasicBlock* noStripBB = llvm::BasicBlock::Create(*context, "freadln.nostrip", parentFn);
+        llvm::BasicBlock* mergeBB   = llvm::BasicBlock::Create(*context, "freadln.merge",   parentFn);
+        auto* freadlnW = llvm::MDBuilder(*context).createBranchWeights(1, 100);
+        builder->CreateCondBr(fgetsNull, eofBB, okBB, freadlnW);
+
+        // EOF path: free buffer, return empty fat-string.
+        builder->SetInsertPoint(eofBB);
+        builder->CreateCall(getOrDeclareFree(), {rawBuf});
+        llvm::Value* z64  = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* eofHdr = emitAllocString(z64, z64, "freadln.empty");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0),
+                             emitStringData(eofHdr, "freadln.empty.data"))
+            ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        builder->CreateBr(mergeBB);
+        llvm::BasicBlock* eofEndBB = builder->GetInsertBlock();
+
+        // OK path: strip trailing '\n' if present.
+        builder->SetInsertPoint(okBB);
+        llvm::Value* nlChar = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), '\n');
+        llvm::Value* nlPtr  = builder->CreateCall(getOrDeclareStrchr(), {rawBuf, nlChar}, "freadln.nl");
+        llvm::Value* nlIsNull =
+            builder->CreateICmpEQ(nlPtr, llvm::ConstantPointerNull::get(ptrTy), "freadln.nlnull");
+        builder->CreateCondBr(nlIsNull, noStripBB, stripBB);
+
+        // Strip: null-terminate at the '\n'.
+        builder->SetInsertPoint(stripBB);
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nlPtr)
+            ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        builder->CreateBr(noStripBB);
+
+        // Build fat-string from rawBuf.
+        builder->SetInsertPoint(noStripBB);
+        llvm::Value* rawLen = builder->CreateCall(getOrDeclareStrlen(), {rawBuf}, "freadln.rawlen");
+        llvm::Value* hdr    = emitAllocString(rawLen, rawLen, "freadln");
+        llvm::Value* charData = emitStringData(hdr, "freadln.data");
+        llvm::Value* rawLenP1 =
+            builder->CreateAdd(rawLen, llvm::ConstantInt::get(getDefaultType(), 1), "freadln.rawlenp1", true, true);
+        builder->CreateCall(getOrDeclareMemcpy(), {charData, rawBuf, rawLenP1});
+        builder->CreateCall(getOrDeclareFree(), {rawBuf});
+        builder->CreateBr(mergeBB);
+        llvm::BasicBlock* noStripEndBB = builder->GetInsertBlock();
+
+        // Merge.
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* phi = builder->CreatePHI(ptrTy, 2, "freadln.result");
+        phi->addIncoming(eofHdr, eofEndBB);
+        phi->addIncoming(hdr, noStripEndBB);
+        stringReturningFunctions_.insert("file_read_line");
+        return phi;
+    }
+
+    if (bid == BuiltinId::FILE_READ_ALL) {
+        validateArgCount(expr, "file_read_all", 1);
+        llvm::Value* fArg = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* fp = fArg->getType()->isPointerTy() ? fArg : builder->CreateIntToPtr(fArg, ptrTy, "fra.fp");
+
+        // Save current position.
+        llvm::Value* curPos = builder->CreateCall(getOrDeclareFtell(), {fp}, "fra.curpos");
+        // fseek to end (SEEK_END = 2).
+        builder->CreateCall(getOrDeclareFseek(),
+                            {fp, llvm::ConstantInt::get(getDefaultType(), 0),
+                             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 2)});
+        llvm::Value* endPos = builder->CreateCall(getOrDeclareFtell(), {fp}, "fra.endpos");
+        // fseek back to saved position (SEEK_SET = 0).
+        builder->CreateCall(getOrDeclareFseek(),
+                            {fp, curPos,
+                             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0)});
+        llvm::Value* remaining = builder->CreateSub(endPos, curPos, "fra.remaining");
+
+        // If remaining <= 0, return empty string.
+        llvm::Value* isEmpty =
+            builder->CreateICmpSLE(remaining, llvm::ConstantInt::get(getDefaultType(), 0), "fra.isempty");
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* emptyBB = llvm::BasicBlock::Create(*context, "fra.empty", parentFn);
+        llvm::BasicBlock* readBB  = llvm::BasicBlock::Create(*context, "fra.read",  parentFn);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "fra.merge", parentFn);
+        builder->CreateCondBr(isEmpty, emptyBB, readBB);
+
+        // Empty path.
+        builder->SetInsertPoint(emptyBB);
+        llvm::Value* z64 = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* emptyHdr = emitAllocString(z64, z64, "fra.emptyhdr");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0),
+                             emitStringData(emptyHdr, "fra.emptydata"))
+            ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        builder->CreateBr(mergeBB);
+        llvm::BasicBlock* emptyEndBB = builder->GetInsertBlock();
+
+        // Read path: allocate fat-string, fread, null-terminate.
+        builder->SetInsertPoint(readBB);
+        llvm::Value* readHdr  = emitAllocString(remaining, remaining, "fra.hdr");
+        llvm::Value* readData = emitStringData(readHdr, "fra.data");
+        builder->CreateCall(getOrDeclareFread(),
+                            {readData, llvm::ConstantInt::get(getDefaultType(), 1), remaining, fp});
+        llvm::Value* nullTermPtr =
+            builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), readData, remaining, "fra.nullterm");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nullTermPtr)
+            ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        builder->CreateBr(mergeBB);
+        llvm::BasicBlock* readEndBB = builder->GetInsertBlock();
+
+        // Merge.
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* phi = builder->CreatePHI(ptrTy, 2, "fra.result");
+        phi->addIncoming(emptyHdr, emptyEndBB);
+        phi->addIncoming(readHdr,  readEndBB);
+        stringReturningFunctions_.insert("file_read_all");
+        return phi;
+    }
+
+    if (bid == BuiltinId::FILE_FLUSH) {
+        validateArgCount(expr, "file_flush", 1);
+        llvm::Value* fArg = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* fp = fArg->getType()->isPointerTy() ? fArg : builder->CreateIntToPtr(fArg, ptrTy, "fhflush.fp");
+        // fflush returns i32 (0 on success, EOF on error); sign-extend to i64.
+        llvm::Value* ret = builder->CreateCall(getOrDeclareFflush(), {fp}, "fhflush.ret");
+        return builder->CreateSExt(ret, getDefaultType(), "fhflush.ret64");
+    }
+
+    if (bid == BuiltinId::FILE_EOF) {
+        validateArgCount(expr, "file_eof", 1);
+        llvm::Value* fArg = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* fp = fArg->getType()->isPointerTy() ? fArg : builder->CreateIntToPtr(fArg, ptrTy, "fheof.fp");
+        // feof returns nonzero if at EOF.
+        llvm::Value* ret = builder->CreateCall(getOrDeclareFeof(), {fp}, "fheof.ret");
+        llvm::Value* isEof =
+            builder->CreateICmpNE(ret, llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context), 0), "fheof.cmp");
+        return emitBoolZExt(isEof, "fheof.result");
+    }
+
+    if (bid == BuiltinId::FILE_IS_OPEN) {
+        validateArgCount(expr, "file_is_open", 1);
+        llvm::Value* fArg = generateExpression(expr->arguments[0].get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* fp = fArg->getType()->isPointerTy() ? fArg : builder->CreateIntToPtr(fArg, ptrTy, "fisopen.fp");
+        llvm::Value* isNonNull =
+            builder->CreateICmpNE(fp, llvm::ConstantPointerNull::get(ptrTy), "fisopen.cmp");
+        return emitBoolZExt(isNonNull, "fisopen.result");
     }
 
     // -----------------------------------------------------------------------

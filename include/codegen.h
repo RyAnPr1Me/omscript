@@ -1303,6 +1303,7 @@ class CodeGenerator {
     llvm::Function* getOrDeclareFgets();
     llvm::Function* getOrDeclareFopen();
     llvm::Function* getOrDeclareFclose();
+    llvm::Function* getOrDeclareFeof();
     llvm::Function* getOrDeclareFread();
     llvm::Function* getOrDeclareFseek();
     llvm::Function* getOrDeclareFtell();

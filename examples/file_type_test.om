@@ -1,0 +1,89 @@
+// file_type_test.om — tests for the File handle type (Round-88)
+//
+// The File type is a Rust-style bare value type: declare as `var f: File = file_open(...)`.
+// Internally it holds an opaque FILE* pointer. All file_open / file_close /
+// file_read_line / file_read_all / file_write_str / file_flush / file_eof /
+// file_is_open operations work on this handle.
+
+import std;
+
+fn main() -> int {
+    const path = "/tmp/omscript_file_type_test.txt";
+    var passed = 0;
+
+    // ── Test 1: file_open returns a non-null handle ───────────────────────────
+    var f: File = file_open(path, "w");
+    if (file_is_open(f)) {
+        passed = passed + 1;
+    }
+    file_close(f);
+
+    // ── Test 2: file_is_open returns false for a null (failed) open ───────────
+    var f2: File = file_open("/nonexistent/path/xyz.txt", "r");
+    if (!file_is_open(f2)) {
+        passed = passed + 1;
+    }
+
+    // ── Test 3: file_write_str returns bytes written ──────────────────────────
+    var fw: File = file_open(path, "w");
+    var n = file_write_str(fw, "hello\nworld\n");
+    if (n == 12) {
+        passed = passed + 1;
+    }
+    file_flush(fw);
+    file_close(fw);
+
+    // ── Test 4: file_read_line reads the first line (stripped of \n) ─────────
+    var fr: File = file_open(path, "r");
+    var line1 = file_read_line(fr);
+    if (line1 == "hello") {
+        passed = passed + 1;
+    }
+
+    // ── Test 5: file_read_line reads the second line ──────────────────────────
+    var line2 = file_read_line(fr);
+    if (line2 == "world") {
+        passed = passed + 1;
+    }
+
+    // ── Test 6: file_read_line returns "" at EOF ──────────────────────────────
+    var line3 = file_read_line(fr);
+    if (line3 == "") {
+        passed = passed + 1;
+    }
+
+    // ── Test 7: file_eof returns true after reading past end ──────────────────
+    if (file_eof(fr)) {
+        passed = passed + 1;
+    }
+    file_close(fr);
+
+    // ── Test 8: file_read_all reads entire remaining content ─────────────────
+    var fr2: File = file_open(path, "r");
+    var all = file_read_all(fr2);
+    if (all == "hello\nworld\n") {
+        passed = passed + 1;
+    }
+    file_close(fr2);
+
+    // ── Test 9: file_flush returns 0 on an open writable handle ──────────────
+    var ff: File = file_open(path, "a");
+    var flushRet = file_flush(ff);
+    if (flushRet == 0) {
+        passed = passed + 1;
+    }
+    file_close(ff);
+
+    // ── Test 10: file_read_all from mid-position reads remainder only ─────────
+    var fr3: File = file_open(path, "r");
+    // Consume first line; remainder should be "world\n"
+    file_read_line(fr3);
+    var rest = file_read_all(fr3);
+    if (rest == "world\n") {
+        passed = passed + 1;
+    }
+    file_close(fr3);
+
+    println(passed);
+    return passed;
+}

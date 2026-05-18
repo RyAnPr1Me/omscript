@@ -954,6 +954,7 @@ ptest_program "examples/round84_ns_struct_test.om" 6
 ptest_program "examples/round85_ns_enum_test.om" 7
 ptest_program "examples/round86_ns_global_test.om" 7
 ptest_program "examples/round87_ns_type_qualtype_test.om" 8
+ptest_program "examples/file_type_test.om" 10
 flush_ptests
 
 echo ""

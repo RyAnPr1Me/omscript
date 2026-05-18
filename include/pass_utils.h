@@ -156,6 +156,7 @@ inline bool isIntWidthTypeName(std::string_view name) noexcept {
 inline bool isKnownScalarTypeName(std::string_view name) noexcept {
     if (name == "int" || name == "float" || name == "double" || name == "bool" || name == "string" || name == "dict" ||
         name == "bigint" || name == "ptr" || name == "usize" || name == "isize" || name == "char" || name == "never" ||
+        name == "File" ||
         name == "c_int" || name == "c_uint" || name == "c_short" || name == "c_ushort" ||
         name == "c_long" || name == "c_ulong" || name == "c_longlong" || name == "c_ulonglong" ||
         name == "c_size_t" || name == "c_ssize_t" || name == "c_char" || name == "c_uchar" || name == "c_void")
