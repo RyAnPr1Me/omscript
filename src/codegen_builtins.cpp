@@ -6672,10 +6672,11 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
     if (bid == BuiltinId::ARRAY_SLICE) {
         validateArgCount(expr, "array_slice", 3);
 
-        // ── String slice path: s[start..end] → str_substr semantics ──────────
-        // Dispatch based on whether the first argument is a string expression.
-        // This lets the `[a..b]` and `[a:b]` syntax work uniformly on both
-        // arrays and strings without needing a separate builtin.
+        // ── String slice path: s[start..end] — inline substring extraction ─────
+        // When the first argument is a string expression, emit substring IR
+        // directly (equivalent to str_substr but inlined here so we can share
+        // the compile-time constant-folding path with the array branch above).
+        // Dispatch is purely based on the AST: no runtime type check needed.
         if (isStringExpr(expr->arguments[0].get())) {
             // Compile-time folding when all three args are constants.
             if (auto strConst = tryFoldStr(expr->arguments[0].get())) {
