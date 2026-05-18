@@ -6671,6 +6671,77 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::ARRAY_SLICE) {
         validateArgCount(expr, "array_slice", 3);
+
+        // ── String slice path: s[start..end] → str_substr semantics ──────────
+        // Dispatch based on whether the first argument is a string expression.
+        // This lets the `[a..b]` and `[a:b]` syntax work uniformly on both
+        // arrays and strings without needing a separate builtin.
+        if (isStringExpr(expr->arguments[0].get())) {
+            // Compile-time folding when all three args are constants.
+            if (auto strConst = tryFoldStr(expr->arguments[0].get())) {
+                if (auto startConst = tryFoldInt(expr->arguments[1].get())) {
+                    if (auto endConst = tryFoldInt(expr->arguments[2].get())) {
+                        const auto& s = *strConst;
+                        int64_t slen = static_cast<int64_t>(s.size());
+                        int64_t startVal = *startConst, endVal = *endConst;
+                        if (startVal < 0) startVal = 0;
+                        if (startVal > slen) startVal = slen;
+                        if (endVal < startVal) endVal = startVal;
+                        if (endVal > slen) endVal = slen;
+                        int64_t lenVal = endVal - startVal;
+                        std::string result = s.substr(static_cast<size_t>(startVal), static_cast<size_t>(lenVal));
+                        llvm::GlobalVariable* gv = internString(result);
+                        stringReturningFunctions_.insert("array_slice");
+                        return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                            gv->getValueType(), gv,
+                            llvm::ArrayRef<llvm::Constant*>{
+                                llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                                llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+                    }
+                }
+            }
+            llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+            llvm::Value* startArg = generateExpression(expr->arguments[1].get());
+            llvm::Value* endArg = generateExpression(expr->arguments[2].get());
+            startArg = toDefaultType(startArg);
+            endArg = toDefaultType(endArg);
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            llvm::Value* strPtr =
+                strArg->getType()->isPointerTy() ? strArg : builder->CreateIntToPtr(strArg, ptrTy, "sslice.ptr");
+            llvm::Value* strLen = emitStringLen(strPtr, "sslice.strlen");
+            llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+            // Clamp start to [0, strLen].
+            llvm::Value* startNeg = builder->CreateICmpSLT(startArg, zero, "sslice.startneg");
+            startArg = builder->CreateSelect(startNeg, zero, startArg, "sslice.startclamp");
+            nonNegValues_.insert(startArg);
+            llvm::Value* startOver = builder->CreateICmpSGT(startArg, strLen, "sslice.startover");
+            startArg = builder->CreateSelect(startOver, strLen, startArg, "sslice.startfinal");
+            nonNegValues_.insert(startArg);
+            // Clamp end to [start, strLen].
+            llvm::Value* endNeg = builder->CreateICmpSLT(endArg, startArg, "sslice.endneg");
+            endArg = builder->CreateSelect(endNeg, startArg, endArg, "sslice.endclamp");
+            llvm::Value* endOver = builder->CreateICmpSGT(endArg, strLen, "sslice.endover");
+            endArg = builder->CreateSelect(endOver, strLen, endArg, "sslice.endfinal");
+            // length = end - start (always ≥ 0 after clamping).
+            llvm::Value* lenArg = builder->CreateSub(endArg, startArg, "sslice.len",
+                                                     /*HasNUW=*/true, /*HasNSW=*/true);
+            nonNegValues_.insert(lenArg);
+            llvm::Value* hdr = emitAllocString(lenArg, lenArg, "sslice");
+            llvm::Value* substrData = emitStringData(strPtr, "sslice.data");
+            llvm::Value* srcPtr =
+                builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), substrData, startArg, "sslice.src");
+            llvm::Value* dstData = emitStringData(hdr, "sslice.dst");
+            builder->CreateCall(getOrDeclareMemcpy(), {dstData, srcPtr, lenArg});
+            // Null-terminate.
+            llvm::Value* endPtr =
+                builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dstData, lenArg, "sslice.end");
+            builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), endPtr)
+                ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+            stringReturningFunctions_.insert("array_slice");
+            return hdr;
+        }
+
+        // ── Array slice path ──────────────────────────────────────────────────
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         llvm::Value* startArg = generateExpression(expr->arguments[1].get());
         llvm::Value* endArg = generateExpression(expr->arguments[2].get());

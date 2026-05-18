@@ -4793,6 +4793,14 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl(StructRepr repr, int reprAli
 std::unique_ptr<Expression> Parser::parseStructLiteral(const std::string& name, int line, int col) {
     std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fieldValues;
 
+    // Optional spread base: `Struct { ..base, field: val }`.
+    // The spread expression must appear first (like Rust / JavaScript spread).
+    std::unique_ptr<Expression> spreadBase;
+    if (match(TokenType::DOT_DOT)) {
+        spreadBase = parseExpression();
+        match(TokenType::COMMA); // optional comma after spread
+    }
+
     while (!check(TokenType::RBRACE) && !isAtEnd()) {
         const Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name in struct literal");
         consume(TokenType::COLON, "Expected ':' after field name");
@@ -4803,6 +4811,7 @@ std::unique_ptr<Expression> Parser::parseStructLiteral(const std::string& name, 
 
     consume(TokenType::RBRACE, "Expected '}' after struct literal");
     auto expr = std::make_unique<StructLiteralExpr>(name, std::move(fieldValues));
+    expr->spreadBase = std::move(spreadBase);
     expr->line = line;
     expr->column = col;
     return expr;
@@ -5899,11 +5908,10 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
             expr->line = opToken.line;
             expr->column = opToken.column;
         }
-        // Handle array indexing or slice syntax arr[start:end]
+        // Handle array indexing or slice syntax arr[start:end] / arr[start..end]
         else if (match(TokenType::LBRACKET)) {
             const Token bracketToken = tokens[current - 1];
-            // Check for slice syntax: arr[start:end]
-            // If first token after '[' is ':', it's arr[:end] (start defaults to 0)
+            // ── `arr[:end]` — from-zero colon slice ─────────────────────────
             if (match(TokenType::COLON)) {
                 // arr[:end] → array_slice(arr, 0, end)
                 auto endIdx = parseExpression();
@@ -5920,6 +5928,31 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
                 callExpr->line = bracketToken.line;
                 callExpr->column = bracketToken.column;
                 expr = std::move(callExpr);
+            // ── `arr[..end]` / `arr[..=end]` — range-style from-zero slice ──
+            } else if (match(TokenType::DOT_DOT)) {
+                // arr[..end]  → array_slice(arr, 0, end)      exclusive
+                // arr[..=end] → array_slice(arr, 0, end + 1)  inclusive
+                const bool inclusive = match(TokenType::ASSIGN);
+                auto endIdx = parseExpression();
+                if (inclusive) {
+                    auto oneLit = std::make_unique<LiteralExpr>(static_cast<long long>(1));
+                    oneLit->line = bracketToken.line;
+                    oneLit->column = bracketToken.column;
+                    endIdx = std::make_unique<BinaryExpr>("+", std::move(endIdx), std::move(oneLit));
+                }
+                consume(TokenType::RBRACKET, "Expected ']' after range slice");
+                std::vector<std::unique_ptr<Expression>> args;
+                args.push_back(std::move(expr));
+                auto zeroLit = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+                zeroLit->line = bracketToken.line;
+                zeroLit->column = bracketToken.column;
+                args.push_back(std::move(zeroLit));
+                args.push_back(std::move(endIdx));
+                auto callExpr = std::make_unique<CallExpr>("array_slice", std::move(args));
+                callExpr->fromStdNamespace = true;
+                callExpr->line = bracketToken.line;
+                callExpr->column = bracketToken.column;
+                expr = std::move(callExpr);
             } else {
                 auto index = parseExpression();
                 if (match(TokenType::COLON)) {
@@ -5932,6 +5965,27 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
                     args.push_back(std::move(endIdx));
                     auto callExpr = std::make_unique<CallExpr>("array_slice", std::move(args));
                     callExpr->fromStdNamespace = true; // compiler-generated (slice syntax)
+                    callExpr->line = bracketToken.line;
+                    callExpr->column = bracketToken.column;
+                    expr = std::move(callExpr);
+                } else if (match(TokenType::DOT_DOT)) {
+                    // arr[start..end]  → array_slice(arr, start, end)      exclusive
+                    // arr[start..=end] → array_slice(arr, start, end + 1)  inclusive
+                    const bool inclusive = match(TokenType::ASSIGN);
+                    auto endIdx = parseExpression();
+                    if (inclusive) {
+                        auto oneLit = std::make_unique<LiteralExpr>(static_cast<long long>(1));
+                        oneLit->line = bracketToken.line;
+                        oneLit->column = bracketToken.column;
+                        endIdx = std::make_unique<BinaryExpr>("+", std::move(endIdx), std::move(oneLit));
+                    }
+                    consume(TokenType::RBRACKET, "Expected ']' after range slice");
+                    std::vector<std::unique_ptr<Expression>> args;
+                    args.push_back(std::move(expr));
+                    args.push_back(std::move(index));
+                    args.push_back(std::move(endIdx));
+                    auto callExpr = std::make_unique<CallExpr>("array_slice", std::move(args));
+                    callExpr->fromStdNamespace = true;
                     callExpr->line = bracketToken.line;
                     callExpr->column = bracketToken.column;
                     expr = std::move(callExpr);

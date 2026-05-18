@@ -809,6 +809,19 @@ OmScript provides signed and unsigned integer types of various widths:
 | Type | Representation | Encoding | LLVM Type |
 | --- | --- | --- | --- |
 | `string` | Heap-allocated, immutable | UTF-8 | `ptr` (opaque) |
+| `str` | Alias for `string` | UTF-8 | `ptr` (opaque) |
+
+`str` is a built-in alias for `string` and may be used interchangeably in any type
+annotation position (variable declarations, function parameters, return types, struct
+fields).
+
+```omscript
+fn greet(name: str) -> str {
+    return "Hello, " + name;
+}
+
+var s: str = "hello";
+```
 
 **Semantics**:
 - Strings are immutable heap objects (reference-counted in the runtime)
@@ -1099,6 +1112,18 @@ struct Point {
 }
 ```
 
+**Inline type-alias form**: `type Name = struct { ... }`
+
+A struct can be declared inline as a type alias.  The resulting name behaves
+identically to a top-level `struct` declaration.
+
+```omscript
+type Point = struct { x: int, y: int }
+type Rect  = struct { w: int, h: int }
+
+fn area(r: Rect) -> int { return r.w * r.h; }
+```
+
 **Fields** must have explicit type annotations when the struct is declared with typed fields. For structs declared without per-field annotations (legacy form), fields default to `i64` and type information is inferred from usage.
 
 **Representation**: Opaque pointer to heap-allocated struct object (reference-counted).
@@ -1107,6 +1132,7 @@ struct Point {
 
 **Operations**:
 - Creation: `Point { x: 10, y: 20 }`
+- Spread / update: `Point { ..p, y: 20 }` (see §10.5)
 - Field access: `p.x`, `p.y`
 - Field assignment: `p.x = 30`
 
@@ -2511,9 +2537,9 @@ fn main() -> int {
 
 For a complete description including JIT usage and platform notes, see §4.4.10.
 
-### 6.10 Lambdas — Anonymous Functions
+### 6.10 Lambdas and Anonymous Functions
 
-**Syntax**: `|param1, param2, ...| expression` or `|param1, param2, ...| { statements }`
+**Lambda syntax**: `|param1, param2, ...| expression` or `|param1, param2, ...| { statements }`
 
 **Semantics**:
 - Defines an anonymous function (lambda)
@@ -2536,14 +2562,32 @@ var total: int = array_reduce(arr, |acc, x| {
 // total = 15
 ```
 
-**Captures**: Lambdas **do not capture** variables from the enclosing scope. All data must be passed explicitly as parameters. (True closures are not implemented.)
+**`fn` anonymous expression syntax**: `fn(params) { body }` or `fn(params) -> type { body }`
+
+A `fn` literal can be used as an expression anywhere a function value is expected.
+This is equivalent to a lambda but supports explicit parameter type annotations and
+a declared return type.
+
+```omscript
+var double = fn(x: int) -> int { return x * 2; };
+println(double(5));  // 10
+
+// Passed directly to a higher-order function:
+var arr = [1, 2, 3];
+var neg = array_map(arr, fn(x: int) -> int { return -x; });
+```
+
+**Captures**: Lambdas and `fn` expressions **do not capture** variables from the
+enclosing scope. All data must be passed explicitly as parameters.
+(True closures are not implemented.)
 
 **Use cases**:
 - Higher-order functions: `array_map`, `array_filter`, `array_reduce`
 - Inline predicates and transformations
 - Pipe chains (see §9.11)
 
-**Internal representation**: Each lambda is desugared to a top-level named function with a compiler-generated name (e.g., `__lambda_0`, `__lambda_1`).
+**Internal representation**: Each lambda / `fn` expression is desugared to a top-level
+named function with a compiler-generated name (e.g., `__lambda_0`, `__lambda_1`).
 
 ---
 
@@ -2581,7 +2625,9 @@ if (x > 0) {
 
 ### 7.2 `unless`
 
-**Syntax**: `unless (condition) { ... } else { ... }`
+**Syntax**: `unless condition { ... } else { ... }`
+
+Parentheses around the condition are **optional** (either form is accepted).
 
 **Semantics**:
 - Syntactic sugar for `if (!condition) { ... } else { ... }`
@@ -2589,6 +2635,10 @@ if (x > 0) {
 
 **Example**:
 ```omscript
+unless x > 10 {
+    println("x is not greater than 10");
+}
+// Parenthesized form is also valid:
 unless (x > 10) {
     println("x is not greater than 10");
 }
@@ -2603,7 +2653,9 @@ if (!(x > 10)) {
 
 ### 7.3 `guard`
 
-**Syntax**: `guard (condition) else { early_exit }`
+**Syntax**: `guard condition else { early_exit }`
+
+Parentheses around the condition are **optional** (either form is accepted).
 
 **Semantics**:
 - Early-exit pattern: if `condition` is **false**, executes `early_exit` block (which must exit the function, e.g., via `return`, `throw`, `break`)
@@ -2612,9 +2664,14 @@ if (!(x > 10)) {
 **Example**:
 ```omscript
 fn validate(x: int) -> int {
-    guard (x > 0) else {
+    guard x > 0 else {
         return -1;
     }
+    return x * 2;
+}
+// Parenthesized form is also valid:
+fn validate2(x: int) -> int {
+    guard (x > 0) else { return -1; }
     return x * 2;
 }
 ```
@@ -2683,33 +2740,64 @@ switch (x) {
 
 ### 7.5 `when` — Pattern-Matching Variant
 
-**Syntax**:
+**Syntax** (statement form):
 ```omscript
-when (expression) {
+when discriminant {
     value1, value2, ... => { body }
     value3 => { body }
     _ => { body }
 }
 ```
 
+Parentheses around the discriminant are **optional** (either form is accepted).
+
+**Expression form** — `when` as an expression (usable anywhere an expression is expected):
+```omscript
+var result = when discriminant { arm1 => expr1, arm2 => expr2, _ => expr_default };
+```
+
+**Discriminant**: Any expression — integer, string, float, the result of an arithmetic
+expression, a function call, etc. The discriminant is evaluated once.
+
 **Semantics**:
-- Similar to `switch` but with pattern-matching syntax
+- Each arm matches if the discriminant equals one of the listed values
 - `=>` separates pattern from body
 - `_` is a wildcard pattern (matches any value, equivalent to `default`)
 - **No fallthrough**: each arm is independent
 - **No `break` required**: arms are non-fallthrough by design
 
-**Example**:
+**Statement example**:
 ```omscript
 fn day_name(day: int) -> string {
     var result: string = "";
-    when (day) {
+    when day {
         1, 2, 3, 4, 5 => { result = "Weekday"; }
-        6, 7 => { result = "Weekend"; }
-        _ => { result = "Invalid"; }
+        6, 7           => { result = "Weekend"; }
+        _              => { result = "Invalid"; }
     }
     return result;
 }
+```
+
+**Expression example**:
+```omscript
+var label = when (x * 2) {
+    0 => "zero",
+    2 => "one",
+    4 => "two",
+    _ => "other"
+};
+```
+
+**Arbitrary discriminant** (function call, arithmetic):
+```omscript
+var score = 87;
+var grade = when (score / 10) {
+    10, 9 => "A",
+    8     => "B",
+    7     => "C",
+    _     => "F"
+};
 ```
 
 ### 7.6 `defer`
@@ -3038,7 +3126,9 @@ do {
 
 ### 8.3 `until`
 
-**Syntax**: `until (condition) { body }`
+**Syntax**: `until condition { body }`
+
+Parentheses around the condition are **optional** (either form is accepted).
 
 **Semantics**:
 - Syntactic sugar for `while (!condition) { body }`
@@ -3047,10 +3137,12 @@ do {
 **Example**:
 ```omscript
 var i: int = 0;
-until (i == 10) {
+until i == 10 {
     println(i);
     i = i + 1;
 }
+// Parenthesized form is also valid:
+until (i == 10) { i++; }
 ```
 
 ### 8.4 `for (i in start...end)` — Range Loops
@@ -3907,19 +3999,40 @@ var first: int = arr[0];  // 10
 var second: int = arr[1]; // 20
 ```
 
-**Out-of-bounds access**: Undefined behavior (may trap, return garbage, or wrap).
+**Out-of-bounds access**: Produces a runtime error (bounds check with abort).
 
-**Slicing** (half-open range): `arr[i..j]` extracts elements from index `i` to `j-1`.
-
-```omscript
-var slice: int[] = arr[1..3];  // [20, 30]
-```
-
-**Slicing** (closed range): `arr[i...j]` extracts elements from index `i` to `j` (inclusive).
+**Slicing — range syntax** (exclusive end): `arr[start..end]` extracts elements from index
+`start` to `end - 1`.
 
 ```omscript
-var slice2: int[] = arr[0...1];  // [10, 20]
+var arr = [10, 20, 30, 40, 50];
+var sl = arr[1..4];   // [20, 30, 40]  — indices 1, 2, 3
 ```
+
+**Slicing — range syntax** (inclusive end): `arr[start..=end]` extracts elements from
+`start` to `end` (both inclusive).
+
+```omscript
+var sl2 = arr[1..=3]; // [20, 30, 40]  — indices 1, 2, 3
+```
+
+**Slicing — from-zero forms**: `arr[..end]` (exclusive) and `arr[..=end]` (inclusive)
+default the start to `0`.
+
+```omscript
+var sl3 = arr[..3];   // [10, 20, 30]  — indices 0, 1, 2
+var sl4 = arr[..=2];  // [10, 20, 30]  — indices 0, 1, 2
+```
+
+**Slicing — colon syntax**: `arr[start:end]` (exclusive, alternate form).
+
+```omscript
+var sl5 = arr[1:4];   // [20, 30, 40]  — identical to arr[1..4]
+var sl6 = arr[:3];    // [10, 20, 30]  — identical to arr[..3]
+```
+
+**Semantics**: Indices are clamped to `[0, len]`; out-of-range bounds never abort.
+The result is always a fresh heap-allocated array (the slice never aliases the source).
 
 **Negative indices**: **Not currently supported**. Use positive indices only.
 
@@ -3946,11 +4059,37 @@ var first_byte: int = s[0];  // 104 (ASCII 'h')
 var ch: string = char_at(s, 1);  // "e"
 ```
 
-**Slicing**: `s[i..j]` and `s[i...j]` extract substrings.
+**Slicing — range syntax** (exclusive end): `s[start..end]` extracts a substring from
+byte index `start` to `end - 1`.
 
 ```omscript
-var sub: string = s[1..4];  // "ell"
+var s = "hello world";
+var greeting = s[0..5];    // "hello"
+var place    = s[6..11];   // "world"
 ```
+
+**Slicing — range syntax** (inclusive end): `s[start..=end]` includes the byte at `end`.
+
+```omscript
+var greeting2 = s[0..=4];  // "hello"
+```
+
+**Slicing — from-zero forms**: `s[..end]` (exclusive) and `s[..=end]` (inclusive) start
+from index `0`.
+
+```omscript
+var prefix = s[..5];       // "hello"
+```
+
+**Slicing — colon syntax**: `s[start:end]` (exclusive, alternate form).
+
+```omscript
+var world = s[6:11];       // "world"  — identical to s[6..11]
+var hello = s[:5];         // "hello"  — identical to s[..5]
+```
+
+**Semantics**: Indices are clamped to `[0, len]`; out-of-range bounds never abort.
+The result is always a newly allocated string.
 
 **Length**: `len(s)` returns the byte count (not character count for multibyte UTF-8).
 
@@ -4007,6 +4146,32 @@ var x_val: int = p.x;  // 10
 ```omscript
 p.y = 25;  // p.y is now 25
 ```
+
+**Struct spread / update syntax**: `StructName { ..base, field: override, ... }`
+
+Copy all fields from an existing struct value, optionally overriding specific fields.
+The spread base (`..base`) must appear first in the literal.
+
+```omscript
+struct Color { r: int, g: int, b: int }
+
+var red  = Color { r: 255, g: 0, b: 0 };
+
+// Pure copy via spread:
+var red2 = Color { ..red };              // r=255, g=0, b=0
+
+// Update one field:
+var orange = Color { ..red, g: 165 };   // r=255, g=165, b=0
+
+// Update multiple fields:
+var purple = Color { ..red, g: 0, b: 255 }; // r=255, g=0, b=255
+```
+
+**Zero-cost**: The spread lowers to exactly the same sequence of typed `GEP + store`
+instructions as writing each field by hand — no extra copies or allocations.
+
+**Uninitialized fields**: Fields not present in the literal and not covered by the spread
+base are zero-initialized.
 
 **Layout control**: Prefix the struct declaration with `@repr(...)` to control memory layout (see §4.4.6).
 
@@ -4357,14 +4522,36 @@ var x = array_remove(a, 2);  // x = 30, a = [10, 20, 40]
 #### `array_slice(array, start, end) → array`
 
 **Signature:** `array_slice(array, i64, i64) → array`  
-**Semantics:** Return a NEW array containing elements `[start, end)`.  
+**Semantics:** Return a NEW array containing elements `[start, end)` (exclusive end).  
 **Time:** O(end - start)  
-**Alias:** This is the implementation of the slice operator `arr[start:end]`.
+**Alias:** This is the underlying implementation for all slice syntax forms on arrays and
+strings:
+
+| Syntax | Equivalent |
+| --- | --- |
+| `arr[start..end]` | `array_slice(arr, start, end)` — exclusive |
+| `arr[start..=end]` | `array_slice(arr, start, end + 1)` — inclusive |
+| `arr[..end]` | `array_slice(arr, 0, end)` — from-zero exclusive |
+| `arr[..=end]` | `array_slice(arr, 0, end + 1)` — from-zero inclusive |
+| `arr[start:end]` | `array_slice(arr, start, end)` — colon form (identical to `..`) |
+| `arr[:end]` | `array_slice(arr, 0, end)` — colon from-zero |
+| `s[start..end]` | string substr `s[start, end)` — dispatches to `str_substr` path |
+
+Bounds are clamped to `[0, len]`; out-of-range indices never abort.
 
 **Example:**
 ```omscript
 var a = [10, 20, 30, 40];
 var b = array_slice(a, 1, 3);  // [20, 30]
+
+// Slice syntax (all equivalent):
+var c = a[1..3];     // [20, 30]  exclusive
+var d = a[1..=2];    // [20, 30]  inclusive
+var e = a[..2];      // [10, 20]  from-zero
+
+// String slicing (same syntax):
+var s = "hello world";
+var sub = s[6..11];  // "world"
 ```
 
 ---

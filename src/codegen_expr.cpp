@@ -6971,6 +6971,32 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
     // declared type for value conversion.
     auto declIt = structFieldDecls_.find(expr->structName);
 
+    // ── Struct spread / update: `Struct { ..base, field: val }` ──────────────
+    // Copy all fields from the spread base first (zero-cost: same GEP+store
+    // sequence as writing each field by hand).  Explicit fieldValues below
+    // overwrite whichever fields were named.
+    if (expr->spreadBase) {
+        llvm::Value* baseVal = generateExpression(expr->spreadBase.get());
+        // The spread base evaluates to a struct pointer.  Convert from integer
+        // if the value arrived via ptrtoint (legacy path).
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* basePtr =
+            baseVal->getType()->isPointerTy() ? baseVal : builder->CreateIntToPtr(baseVal, ptrTy, "spread.baseptr");
+        for (size_t i = 0; i < numFields; i++) {
+            llvm::Type* elemTy = sty->getElementType(static_cast<unsigned>(i));
+            llvm::Align fieldAlign = module->getDataLayout().getABITypeAlign(elemTy);
+            llvm::Value* srcPtr =
+                builder->CreateStructGEP(sty, basePtr, static_cast<unsigned>(i), "spread.src.ptr");
+            llvm::Value* srcVal = builder->CreateAlignedLoad(elemTy, srcPtr, fieldAlign, "spread.src.val");
+            if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(srcVal))
+                loadInst->setMetadata(llvm::LLVMContext::MD_tbaa, getOrCreateFieldTBAA(expr->structName, i));
+            llvm::Value* dstPtr =
+                builder->CreateStructGEP(sty, structAlloca, static_cast<unsigned>(i), "spread.dst.ptr");
+            llvm::StoreInst* st = builder->CreateStore(srcVal, dstPtr);
+            st->setMetadata(llvm::LLVMContext::MD_tbaa, getOrCreateFieldTBAA(expr->structName, i));
+        }
+    }
+
     // Apply default values for unspecified fields
     if (declIt != structFieldDecls_.end()) {
         std::unordered_set<std::string> specifiedFields;

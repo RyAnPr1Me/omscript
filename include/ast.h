@@ -592,6 +592,11 @@ class StructLiteralExpr : public Expression {
   public:
     std::string structName;
     std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fieldValues;
+    /// Optional spread base: `Struct { ..base, field: val }`.
+    /// When non-null, all fields from `base` are copied first, then
+    /// explicit fieldValues overwrite the specified fields.  Zero-cost:
+    /// lowers to the same GEP+store sequence as writing each field by hand.
+    std::unique_ptr<Expression> spreadBase;
 
     StructLiteralExpr(const std::string& name, std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fv)
         : Expression(ASTNodeType::STRUCT_LITERAL_EXPR), structName(name), fieldValues(std::move(fv)) {}

@@ -1,0 +1,146 @@
+import std;
+// round94_language_test.om — Round-94: language features & zero-cost improvements
+// Tests: range slice syntax (arr[a..b], arr[a..=b], arr[..b], arr[..=b]),
+//        string range slice (s[a..b] / s[a:b] fix),
+//        struct spread / update syntax (Struct { ..base, field: val }).
+// Expected return value: 35
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+struct Point2 { x: int, y: int }
+struct Color  { r: int, g: int, b: int }
+struct Rect2  { x: int, y: int, w: int, h: int }
+
+fn sum_arr(a: int[]) -> int {
+    var total = 0;
+    for v in a { total = total + v; }
+    return total;
+}
+
+// ── 1. Array range-slice syntax ───────────────────────────────────────────────
+fn test_array_slice() -> int {
+    var pass = 0;
+    var arr = [1, 2, 3, 4, 5, 6, 7, 8];
+
+    // Exclusive: arr[2..5] → elements at indices 2,3,4 → [3,4,5]
+    var s1 = arr[2..5];
+    pass = pass + (len(s1) == 3);
+    pass = pass + (s1[0] == 3);
+    pass = pass + (s1[2] == 5);
+
+    // Inclusive: arr[2..=4] → elements at indices 2,3,4 → [3,4,5]
+    var s2 = arr[2..=4];
+    pass = pass + (len(s2) == 3);
+    pass = pass + (s2[0] == 3);
+    pass = pass + (s2[2] == 5);
+
+    // From-zero exclusive: arr[..3] → [1,2,3]
+    var s3 = arr[..3];
+    pass = pass + (len(s3) == 3);
+    pass = pass + (s3[0] == 1);
+
+    // From-zero inclusive: arr[..=2] → [1,2,3]
+    var s4 = arr[..=2];
+    pass = pass + (len(s4) == 3);
+    pass = pass + (s4[2] == 3);
+
+    // Empty slice: arr[3..3] → []
+    var s5 = arr[3..3];
+    pass = pass + (len(s5) == 0);
+
+    // Out-of-bounds clamping: arr[5..100] → [6,7,8] (clamped to len=8)
+    var s6 = arr[5..100];
+    pass = pass + (len(s6) == 3);
+    pass = pass + (sum_arr(s6) == 21);
+
+    return pass;
+}
+
+// ── 2. String range-slice syntax ─────────────────────────────────────────────
+fn test_string_slice() -> int {
+    var pass = 0;
+    var s = "hello world";
+
+    // s[0..5] → "hello"
+    var h = s[0..5];
+    pass = pass + (h == "hello");
+
+    // s[6..11] → "world"
+    var w = s[6..11];
+    pass = pass + (w == "world");
+
+    // from-zero: s[..5] → "hello"
+    var h2 = s[..5];
+    pass = pass + (h2 == "hello");
+
+    // inclusive: s[0..=4] → "hello"
+    var h3 = s[0..=4];
+    pass = pass + (h3 == "hello");
+
+    // Colon syntax also works for strings now (fixed):
+    var w2 = s[6:11];
+    pass = pass + (w2 == "world");
+
+    // Empty slice
+    var empty = s[3..3];
+    pass = pass + (empty == "");
+
+    // Out-of-bounds: clamped gracefully
+    var rest = s[6..999];
+    pass = pass + (rest == "world");
+
+    return pass;
+}
+
+// ── 3. Struct spread / update syntax ─────────────────────────────────────────
+fn test_struct_spread() -> int {
+    var pass = 0;
+
+    // Pure copy via spread
+    var p1 = Point2 { x: 10, y: 20 };
+    var p2 = Point2 { ..p1 };
+    pass = pass + (p2.x == 10);
+    pass = pass + (p2.y == 20);
+
+    // Update one field
+    var p3 = Point2 { ..p1, y: 99 };
+    pass = pass + (p3.x == 10);  // copied
+    pass = pass + (p3.y == 99);  // overridden
+
+    // Update two fields (all fields overridden)
+    var p4 = Point2 { ..p1, x: 5, y: 6 };
+    pass = pass + (p4.x == 5);
+    pass = pass + (p4.y == 6);
+
+    // Three-field struct
+    var red   = Color { r: 255, g: 0, b: 0 };
+    var pink  = Color { ..red, g: 128, b: 128 };
+    pass = pass + (pink.r == 255);
+    pass = pass + (pink.g == 128);
+    pass = pass + (pink.b == 128);
+
+    // Four-field struct
+    var base  = Rect2 { x: 0, y: 0, w: 100, h: 50 };
+    var moved = Rect2 { ..base, x: 10, y: 20 };
+    pass = pass + (moved.x == 10);
+    pass = pass + (moved.y == 20);
+    pass = pass + (moved.w == 100);  // copied
+    pass = pass + (moved.h == 50);   // copied
+
+    // Chained spread: spread from a spread-derived value
+    var p5 = Point2 { ..p3, x: 7 };  // p3.x=10 but we override with 7
+    pass = pass + (p5.x == 7);
+    pass = pass + (p5.y == 99);  // from p3
+
+    return pass;
+}
+
+fn main() -> int {
+    var pass = 0;
+
+    pass = pass + test_array_slice();   // 12 tests
+    pass = pass + test_string_slice();  // 7 tests
+    pass = pass + test_struct_spread(); // 11+ tests
+
+    return pass;
+}
