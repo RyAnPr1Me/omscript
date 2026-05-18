@@ -3327,7 +3327,7 @@ std::unique_ptr<Statement> Parser::parseVarDeclWithInheritedType(bool isConst, c
 std::unique_ptr<VarDecl> Parser::parseGlobalDecl() {
     const Token kw = advance(); // consume 'global'
     // Accept optional `mut` qualifier: `global mut var name` — the explicit
-    // mutable form chosen for v5.0 compatibility.  Semantically identical to
+    // mutable form chosen for v5.0 compatibility. Semantically identical to
     // `global var` in the current release.
     const bool hasMut = match(TokenType::MUT);
     (void)hasMut; // semantic enforcement reserved for v5.0
