@@ -534,6 +534,7 @@ ptest_program "examples/round91_threading_test.om" 14
 ptest_program "examples/round92_zero_cost_test.om" 32
 ptest_program "examples/round93_language_test.om" 20
 ptest_program "examples/round94_language_test.om" 35
+ptest_program "examples/round95_language_test.om" 0
 flush_ptests
 test_cli_output "error-location-arrow" "-->" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "error-includes-filename" "undefined_var.om" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err

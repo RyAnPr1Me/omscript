@@ -6242,6 +6242,46 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         return parseWhenExpr();
     }
 
+    // ── if-expression: `if cond { expr } else { expr }` ────────────────────
+    // Zero-cost: desugars to TernaryExpr which compiles to a single LLVM
+    // select (or conditional branch + phi) — identical to `cond ? a : b`.
+    //
+    // Syntax:
+    //   if cond { expr }                    -- else branch defaults to 0
+    //   if cond { expr } else { expr }
+    //   if (cond) { expr } else { expr }    -- parens optional
+    //
+    // Each block body is a single expression (no statements).  Use the
+    // statement form `if cond { stmts }` for multi-statement bodies.
+    if (check(TokenType::IF)) {
+        const Token ifTok = tokens[current];
+        advance(); // consume 'if'
+        // Optional parentheses around condition.
+        const bool hasParen = match(TokenType::LPAREN);
+        auto cond = parseExpression();
+        if (hasParen)
+            consume(TokenType::RPAREN, "Expected ')' after if-expression condition");
+        consume(TokenType::LBRACE, "Expected '{' for if-expression then branch");
+        auto thenExpr = parseExpression();
+        consume(TokenType::RBRACE, "Expected '}' after if-expression then branch");
+        std::unique_ptr<Expression> elseExpr;
+        if (match(TokenType::ELSE)) {
+            consume(TokenType::LBRACE, "Expected '{' after 'else' in if-expression");
+            elseExpr = parseExpression();
+            consume(TokenType::RBRACE, "Expected '}' after if-expression else branch");
+        } else {
+            // No else branch: produce 0 (integer or null pointer in context).
+            elseExpr = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+            elseExpr->line = ifTok.line;
+            elseExpr->column = ifTok.column;
+        }
+        auto ternary =
+            std::make_unique<TernaryExpr>(std::move(cond), std::move(thenExpr), std::move(elseExpr));
+        ternary->line = ifTok.line;
+        ternary->column = ifTok.column;
+        return ternary;
+    }
+
     // Anonymous function expression: fn(params) -> RetType { body }
     // or: fn(params) { body }  (return type inferred as i64/default)
     // Desugars to a lambda — named __lambda_N — exactly like |params| { body }.
@@ -7561,6 +7601,165 @@ std::unique_ptr<Expression> Parser::parseArrayLiteral() {
     std::vector<std::unique_ptr<Expression>> elements;
 
     if (!check(TokenType::RBRACKET)) {
+        // ── Array comprehension: [expr for var in iterable [if cond]] ────────
+        // Desugars to: array_map([array_filter(]iterable[, |var| cond)], |var| expr)
+        // where "iterable" is either a range expression (start..end / start..=end)
+        // or an existing collection.
+        //
+        // Examples:
+        //   [x * x for x in 1..6]           -- squares of 1..5
+        //   [x for x in arr if x % 2 == 0]  -- filter by predicate
+        //   [x * 2 for x in arr]             -- map each element
+        //
+        // Zero-cost: desugars entirely at parse time to existing AST nodes;
+        // array_map / array_filter / range are already zero-overhead builtins.
+        //
+        // Skip comprehension check when the first element starts with `...`
+        // (spread operator, tokenized as TokenType::RANGE — the three-dot `...`
+        // token — distinct from the two-dot `..` DOT_DOT range token).
+        if (!check(TokenType::RANGE)) {
+            // Snapshot position so we can roll back if this isn't a comprehension.
+            const size_t savedPos = current;
+            // Parse the map expression (may be complex).
+            auto mapExpr = parseExpression();
+            if (check(TokenType::FOR)) {
+                // This is a comprehension.
+                advance(); // consume 'for'
+                const Token varTok = consume(TokenType::IDENTIFIER, "Expected variable name after 'for' in array comprehension");
+                const std::string varName = varTok.lexeme;
+                consume(TokenType::IN, "Expected 'in' after variable in array comprehension");
+
+                // Parse the iterable.  Accept:
+                //   start..end    (exclusive)
+                //   start..=end   (inclusive: desugars to range(start, end+1))
+                //   expression    (existing array/collection)
+                std::unique_ptr<Expression> collection;
+                auto startExpr = parseExpression();
+                if (match(TokenType::DOT_DOT)) {
+                    // start..end (exclusive range) or start..=end (inclusive)
+                    bool inclusive = match(TokenType::ASSIGN); // ..= parsed as DOT_DOT ASSIGN
+                    auto endExpr = parseExpression();
+                    // Build range(start, end) or range(start, end+1)
+                    std::vector<std::unique_ptr<Expression>> rangeArgs;
+                    rangeArgs.push_back(std::move(startExpr));
+                    if (inclusive) {
+                        // end + 1
+                        auto one = std::make_unique<LiteralExpr>(static_cast<long long>(1));
+                        one->line = varTok.line;
+                        one->column = varTok.column;
+                        auto endPlusOne = std::make_unique<BinaryExpr>("+", std::move(endExpr), std::move(one));
+                        endPlusOne->line = varTok.line;
+                        endPlusOne->column = varTok.column;
+                        rangeArgs.push_back(std::move(endPlusOne));
+                    } else {
+                        rangeArgs.push_back(std::move(endExpr));
+                    }
+                    auto rangeCall = std::make_unique<CallExpr>("range", std::move(rangeArgs));
+                    rangeCall->line = varTok.line;
+                    rangeCall->column = varTok.column;
+                    collection = std::move(rangeCall);
+                } else if (match(TokenType::RANGE)) {
+                    // start...end (classic OmScript inclusive range)
+                    auto endExpr = parseExpression();
+                    auto one = std::make_unique<LiteralExpr>(static_cast<long long>(1));
+                    one->line = varTok.line;
+                    one->column = varTok.column;
+                    auto endPlusOne = std::make_unique<BinaryExpr>("+", std::move(endExpr), std::move(one));
+                    endPlusOne->line = varTok.line;
+                    endPlusOne->column = varTok.column;
+                    std::vector<std::unique_ptr<Expression>> rangeArgs;
+                    rangeArgs.push_back(std::move(startExpr));
+                    rangeArgs.push_back(std::move(endPlusOne));
+                    auto rangeCall = std::make_unique<CallExpr>("range", std::move(rangeArgs));
+                    rangeCall->line = varTok.line;
+                    rangeCall->column = varTok.column;
+                    collection = std::move(rangeCall);
+                } else {
+                    // Plain expression iterable (already parsed as startExpr).
+                    collection = std::move(startExpr);
+                }
+
+                // Optional filter: `if cond`
+                std::unique_ptr<Expression> filterLambda;
+                if (check(TokenType::IF)) {
+                    advance(); // consume 'if'
+                    auto filterCond = parseExpression();
+                    // Build filter lambda: |varName| filterCond
+                    const std::string filterLambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
+                    std::vector<Parameter> fParams;
+                    Parameter fp(varName);
+                    fp.typeName = "i64";
+                    fParams.push_back(std::move(fp));
+                    auto retStmt = std::make_unique<ReturnStmt>(std::move(filterCond));
+                    retStmt->line = varTok.line;
+                    retStmt->column = varTok.column;
+                    std::vector<std::unique_ptr<Statement>> fbody;
+                    fbody.push_back(std::move(retStmt));
+                    auto fblock = std::make_unique<BlockStmt>(std::move(fbody));
+                    fblock->line = varTok.line;
+                    fblock->column = varTok.column;
+                    auto fDecl = std::make_unique<FunctionDecl>(
+                        filterLambdaName, std::vector<std::string>{}, std::move(fParams), std::move(fblock));
+                    fDecl->line = varTok.line;
+                    fDecl->column = varTok.column;
+                    fDecl->returnType = "i64";
+                    lambdaFunctions_.push_back(std::move(fDecl));
+                    auto fid = std::make_unique<IdentifierExpr>(filterLambdaName);
+                    fid->line = varTok.line;
+                    fid->column = varTok.column;
+                    filterLambda = std::move(fid);
+                }
+
+                // Build map lambda: |varName| mapExpr
+                const std::string mapLambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
+                std::vector<Parameter> mParams;
+                Parameter mp(varName);
+                mp.typeName = "i64";
+                mParams.push_back(std::move(mp));
+                auto retStmt2 = std::make_unique<ReturnStmt>(std::move(mapExpr));
+                retStmt2->line = varTok.line;
+                retStmt2->column = varTok.column;
+                std::vector<std::unique_ptr<Statement>> mbody;
+                mbody.push_back(std::move(retStmt2));
+                auto mblock = std::make_unique<BlockStmt>(std::move(mbody));
+                mblock->line = varTok.line;
+                mblock->column = varTok.column;
+                auto mDecl = std::make_unique<FunctionDecl>(
+                    mapLambdaName, std::vector<std::string>{}, std::move(mParams), std::move(mblock));
+                mDecl->line = varTok.line;
+                mDecl->column = varTok.column;
+                mDecl->returnType = "i64";
+                lambdaFunctions_.push_back(std::move(mDecl));
+                auto mid = std::make_unique<IdentifierExpr>(mapLambdaName);
+                mid->line = varTok.line;
+                mid->column = varTok.column;
+
+                // If there's a filter, apply it first.
+                if (filterLambda) {
+                    std::vector<std::unique_ptr<Expression>> filterArgs;
+                    filterArgs.push_back(std::move(collection));
+                    filterArgs.push_back(std::move(filterLambda));
+                    auto filterCall = std::make_unique<CallExpr>("array_filter", std::move(filterArgs));
+                    filterCall->line = varTok.line;
+                    filterCall->column = varTok.column;
+                    collection = std::move(filterCall);
+                }
+
+                // Wrap in array_map(collection, |var| mapExpr).
+                std::vector<std::unique_ptr<Expression>> mapArgs;
+                mapArgs.push_back(std::move(collection));
+                mapArgs.push_back(std::move(mid));
+                auto mapCall = std::make_unique<CallExpr>("array_map", std::move(mapArgs));
+                mapCall->line = varTok.line;
+                mapCall->column = varTok.column;
+
+                consume(TokenType::RBRACKET, "Expected ']' to close array comprehension");
+                return mapCall;
+            }
+            // Not a comprehension — restore position and fall through to normal parsing.
+            current = savedPos;
+        }
+
         do {
             // Handle spread operator: ...expr
             if (match(TokenType::RANGE)) {

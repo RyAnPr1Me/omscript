@@ -2706,12 +2706,111 @@ void CodeGenerator::generateExprStmt(ExprStmt* stmt) {
 }
 
 void CodeGenerator::generateSwitch(SwitchStmt* stmt) {
-    llvm::Value* condVal = generateExpression(stmt->condition.get());
-    condVal = toDefaultType(condVal);
+    // Evaluate discriminant once.  For string dispatch we need the raw
+    // pointer before toDefaultType would convert it to an integer.
+    llvm::Value* condRaw = generateExpression(stmt->condition.get());
 
     llvm::Function* function = builder->GetInsertBlock()->getParent();
 
-    // Constant switch condition elimination: when the condition is a known
+    // ── String dispatch path ────────────────────────────────────────────────
+    // When the discriminant or any case value is a string, emit an if-else
+    // chain of strcmp comparisons.  This makes `when s { "foo" => ..., _ => }` work.
+    {
+        bool anyStringCase = false;
+        for (auto& sc : stmt->cases) {
+            if (sc.isDefault) continue;
+            if (isStringExpr(sc.value.get())) { anyStringCase = true; break; }
+            for (auto& ev : sc.values) {
+                if (isStringExpr(ev.get())) { anyStringCase = true; break; }
+                if (anyStringCase) break;
+            }
+            if (anyStringCase) break;
+        }
+
+        if (anyStringCase || isStringExpr(stmt->condition.get())) {
+            // Helper: emit strcmp == 0, leave insertion point unchanged.
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            llvm::Value* discPtr = condRaw->getType()->isPointerTy()
+                                       ? condRaw
+                                       : builder->CreateIntToPtr(condRaw, ptrTy, "swstr.disc");
+            auto emitStrEq = [&](Expression* valExpr) -> llvm::Value* {
+                llvm::Value* caseVal = generateExpression(valExpr);
+                llvm::Value* rPtr = caseVal->getType()->isPointerTy()
+                                        ? caseVal
+                                        : builder->CreateIntToPtr(caseVal, ptrTy, "swstr.cval");
+                llvm::Value* lData = emitStringData(discPtr, "swstr.ldata");
+                llvm::Value* rData = emitStringData(rPtr, "swstr.rdata");
+                llvm::Value* cmpRes =
+                    builder->CreateCall(getOrDeclareStrcmp(), {lData, rData}, "swstr.cmpres");
+                return builder->CreateICmpEQ(cmpRes, builder->getInt32(0), "swstr.eq");
+            };
+
+            llvm::BasicBlock* mergeBB =
+                llvm::BasicBlock::Create(*context, "swstr.end", function);
+            loopStack.push_back({mergeBB, nullptr});
+
+            // Separate default from non-default cases.
+            SwitchCase* defaultCase = nullptr;
+            std::vector<SwitchCase*> nonDefault;
+            for (auto& sc : stmt->cases) {
+                if (sc.isDefault) defaultCase = &sc;
+                else nonDefault.push_back(&sc);
+            }
+
+            // Chain: for each arm emit cmp + condbr(caseBB, nextCheckBB).
+            for (size_t ci = 0; ci < nonDefault.size(); ++ci) {
+                SwitchCase* sc = nonDefault[ci];
+
+                // Build OR of per-value equality checks.
+                std::vector<Expression*> allVals;
+                allVals.push_back(sc->value.get());
+                for (auto& ev : sc->values) allVals.push_back(ev.get());
+
+                llvm::Value* armCond = emitStrEq(allVals[0]);
+                for (size_t vi = 1; vi < allVals.size(); ++vi)
+                    armCond = builder->CreateOr(armCond, emitStrEq(allVals[vi]), "swstr.or");
+
+                llvm::BasicBlock* caseBB =
+                    llvm::BasicBlock::Create(*context, "swstr.case", function, mergeBB);
+                llvm::BasicBlock* nextBB =
+                    llvm::BasicBlock::Create(*context, "swstr.next", function, mergeBB);
+
+                builder->CreateCondBr(armCond, caseBB, nextBB);
+
+                // Emit case body.
+                builder->SetInsertPoint(caseBB);
+                {
+                    const ScopeGuard scope(*this);
+                    for (auto& bodyStmt : sc->body) {
+                        generateStatement(bodyStmt.get());
+                        if (builder->GetInsertBlock()->getTerminator()) break;
+                    }
+                }
+                if (!builder->GetInsertBlock()->getTerminator())
+                    builder->CreateBr(mergeBB);
+
+                builder->SetInsertPoint(nextBB);
+            }
+
+            // After all checks: emit default body (if any) then jump to merge.
+            if (defaultCase) {
+                const ScopeGuard scope(*this);
+                for (auto& bodyStmt : defaultCase->body) {
+                    generateStatement(bodyStmt.get());
+                    if (builder->GetInsertBlock()->getTerminator()) break;
+                }
+            }
+            if (!builder->GetInsertBlock()->getTerminator())
+                builder->CreateBr(mergeBB);
+
+            loopStack.pop_back();
+            builder->SetInsertPoint(mergeBB);
+            return;
+        }
+    }
+
+    llvm::Value* condVal = toDefaultType(condRaw);
+
     if (auto* condConst = llvm::dyn_cast<llvm::ConstantInt>(condVal)) {
         const int64_t condIntVal = condConst->getSExtValue();
 

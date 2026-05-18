@@ -2595,7 +2595,7 @@ named function with a compiler-generated name (e.g., `__lambda_0`, `__lambda_1`)
 
 ### 7.1 `if` / `elif` / `else`
 
-**Syntax**:
+**Statement syntax**:
 ```omscript
 if (condition) {
     // then-branch
@@ -2606,22 +2606,67 @@ if (condition) {
 }
 ```
 
+Parentheses around each condition are **optional** (both `if x > 0 {` and `if (x > 0) {` are accepted).
+
 **Semantics**:
 - Evaluates `condition`; if true, executes then-branch; otherwise checks `elif` conditions in order; if all false, executes `else`-branch
 - Conditions are evaluated lazily (short-circuit)
 - Braces `{ }` are **required** for all branches (no braceless single-statement forms)
 
-**Example**:
+**Statement example**:
 ```omscript
 var x: int = 10;
-if (x > 0) {
+if x > 0 {
     println("Positive");
-} elif (x < 0) {
+} elif x < 0 {
     println("Negative");
 } else {
     println("Zero");
 }
 ```
+
+#### `if` as an expression
+
+`if` can be used anywhere an expression is expected.  Each branch must contain a
+single expression (no statements); omitting `else` produces `0` / `null`.
+
+**Zero-cost**: desugars to a single LLVM `select` instruction — identical IR to
+the ternary operator `cond ? a : b`.
+
+**Expression syntax**:
+```omscript
+var result = if condition { expr } else { expr }
+```
+
+**Examples**:
+```omscript
+var x = 5;
+
+// Basic if-expression
+var size = if x > 3 { "big" } else { "small" };
+
+// Without else — produces 0 when condition is false
+var bonus = if x > 10 { 100 };   // 0 when x ≤ 10
+
+// Nested
+var grade = if x > 9 { "A" } else { if x > 7 { "B" } else { "C" } };
+
+// As function argument
+println(if x == 5 { "five" } else { "other" });
+
+// Optional parens on condition
+var y = if (x > 0) { x } else { -x };   // absolute value
+```
+
+**Comparison with ternary**:
+
+| Form | Style |
+| --- | --- |
+| `cond ? a : b` | Traditional C-style ternary (also supported) |
+| `if cond { a } else { b }` | Block-style; reads more naturally for complex conditions |
+
+Both compile to the same IR.
+
 
 ### 7.2 `unless`
 
@@ -2765,8 +2810,9 @@ expression, a function call, etc. The discriminant is evaluated once.
 - `_` is a wildcard pattern (matches any value, equivalent to `default`)
 - **No fallthrough**: each arm is independent
 - **No `break` required**: arms are non-fallthrough by design
+- **String dispatch**: when any arm value is a string literal, the compiler emits a chain of `strcmp` comparisons — no integer switch table required
 
-**Statement example**:
+**Integer statement example**:
 ```omscript
 fn day_name(day: int) -> string {
     var result: string = "";
@@ -2779,26 +2825,54 @@ fn day_name(day: int) -> string {
 }
 ```
 
-**Expression example**:
+**String dispatch statement example**:
 ```omscript
-var label = when (x * 2) {
-    0 => "zero",
-    2 => "one",
-    4 => "two",
-    _ => "other"
-};
+fn fruit_color(fruit: string) -> string {
+    var color = "unknown";
+    when fruit {
+        "apple"  => { color = "red"; }
+        "banana" => { color = "yellow"; }
+        "grape"  => { color = "purple"; }
+        _ => { color = "other"; }
+    }
+    return color;
+}
+
+// Multi-value string arms
+fn day_type(day: string) -> string {
+    var kind = "unknown";
+    when day {
+        "Saturday", "Sunday" => { kind = "weekend"; }
+        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday" => { kind = "weekday"; }
+        _ => { kind = "unknown"; }
+    }
+    return kind;
+}
 ```
 
-**Arbitrary discriminant** (function call, arithmetic):
+**Expression example** (integers and strings both work):
 ```omscript
-var score = 87;
+// Integer expression
 var grade = when (score / 10) {
     10, 9 => "A",
     8     => "B",
     7     => "C",
     _     => "F"
 };
+
+// String expression
+var icon = when status {
+    "ok"      => "✓",
+    "warning" => "⚠",
+    "error"   => "✗",
+    _         => "?"
+};
 ```
+
+**Codegen notes**:
+- **Integer discriminant**: compiled to LLVM `SwitchInst` (O(1) dispatch via a jump table or binary search, at the optimizer's discretion).  Small switches (≤ 2 arms) use a conditional-branch chain at O2+.
+- **String discriminant**: compiled to a sequential chain of `strcmp` calls.  The compiler evaluates the discriminant once, then tests each arm in source order.  The `_` default arm, if present, executes after all arms fail.
+
 
 ### 7.6 `defer`
 
@@ -3988,6 +4062,52 @@ var zeros: int[] = array_fill(10, 0);  // [0, 0, ..., 0] (10 elements)
 var seq: int[] = range(0, 5);          // [0, 1, 2, 3, 4]
 var evens: int[] = range_step(0, 10, 2);  // [0, 2, 4, 6, 8]
 ```
+
+#### 10.1.1 Array Comprehensions
+
+Array comprehensions are a concise way to build arrays by mapping and optionally
+filtering an iterable.  They desugar entirely at parse time to `array_map` /
+`array_filter` / `range` calls, so they carry **zero overhead** compared to
+writing those calls by hand.
+
+**Syntax**:
+```omscript
+[expr for var in iterable]
+[expr for var in iterable if condition]
+```
+
+- `expr` — expression evaluated for each element (may reference `var`)
+- `var`  — loop variable bound to each element
+- `iterable` — range (`start..end`, `start..=end`, `start...end`) or any existing array
+- `if condition` — optional filter; only elements where `condition` is true are included
+
+**Range comprehensions** (builds a new array from a numeric range):
+```omscript
+var squares  = [x * x for x in 1..6];        // [1, 4, 9, 16, 25]   (exclusive end)
+var cubes    = [x * x * x for x in 1..=5];   // [1, 8, 27, 64, 125] (inclusive end)
+```
+
+**Map comprehension** (transform each element of an existing array):
+```omscript
+var arr     = [1, 2, 3, 4, 5];
+var doubled = [x * 2 for x in arr];           // [2, 4, 6, 8, 10]
+```
+
+**Filter + map comprehension**:
+```omscript
+var evens      = [x for x in arr if x % 2 == 0];         // [2, 4]
+var big_sq     = [x * x for x in 1..11 if x * x > 25];  // [36, 49, 64, 81, 100]
+```
+
+**Desugaring** (for documentation purposes):
+
+| Comprehension | Equivalent expression |
+| --- | --- |
+| `[f(x) for x in a..b]` | `array_map(range(a, b), \|x\| f(x))` |
+| `[f(x) for x in a..=b]` | `array_map(range(a, b+1), \|x\| f(x))` |
+| `[f(x) for x in arr]` | `array_map(arr, \|x\| f(x))` |
+| `[f(x) for x in arr if p(x)]` | `array_map(array_filter(arr, \|x\| p(x)), \|x\| f(x))` |
+
 
 ### 10.2 Indexing and Slicing
 
