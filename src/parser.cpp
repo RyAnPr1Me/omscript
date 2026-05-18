@@ -2781,8 +2781,10 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     if (match(TokenType::GLOBAL)) {
         const Token kw = tokens[current - 1];
         // Accept optional `mut` qualifier: `global mut var name` — the explicit
-        // mutable form chosen for v5.0 compatibility.
-        match(TokenType::MUT); // consume `mut` if present; semantically a no-op currently
+        // mutable form chosen for v5.0 compatibility. In v4.x this only records
+        // the spelling choice; enforcement and deprecation of bare `global var`
+        // are planned for the v5.0 transition.
+        match(TokenType::MUT); // consume `mut` if present
         const bool isConst = check(TokenType::CONST);
         if (!match(TokenType::VAR) && !match(TokenType::CONST)) {
             error("Expected 'var' or 'const' after 'global'");
@@ -5751,9 +5753,10 @@ std::unique_ptr<Expression> Parser::parseCall() {
                     // Unknown function — append named args in the order given
                     if (!namedArgs.empty()) {
                         const NamedArg& firstNamed = namedArgs.front();
-                        warnings_.push_back("line " + std::to_string(firstNamed.line) + ":" +
+                        warnings_.push_back("warning: line " + std::to_string(firstNamed.line) + ":" +
                                             std::to_string(firstNamed.column) +
-                                            ": named arguments ignored for unresolved call '" + calleeName + "'");
+                                            ": named arguments are ignored for unresolved call '" +
+                                            calleeName + "'");
                     }
                     arguments = std::move(positionalArgs);
                     for (auto& na : namedArgs)

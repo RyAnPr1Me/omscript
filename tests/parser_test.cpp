@@ -207,7 +207,8 @@ TEST(ParserTest, FunctionCall) {
 TEST(ParserTest, NamedArgsWarnWhenCalleeUnresolved) {
     const auto warnings = extractParserWarnings("fn main() { foo(a: 1, b: 2); }");
     ASSERT_EQ(warnings.size(), 1u);
-    EXPECT_NE(warnings[0].find("named arguments ignored for unresolved call 'foo'"), std::string::npos);
+    EXPECT_NE(warnings[0].find("warning: line "), std::string::npos);
+    EXPECT_NE(warnings[0].find("named arguments are ignored for unresolved call 'foo'"), std::string::npos);
 }
 
 TEST(ParserTest, NamedArgsDoNotWarnWhenCalleeKnown) {
