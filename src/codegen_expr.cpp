@@ -6294,7 +6294,7 @@ llvm::Value* CodeGenerator::generateIndex(IndexExpr* expr) {
                 return llvm::ConstantInt::get(getDefaultType(), 0);
             };
 
-            // Last matching key wins (matches runtime set-overwrite semantics).
+            // Last matching key wins (matches runtime SET-overwrite semantics).
             for (auto& [k, v] : dict->pairs) {
                 auto keyConst = tryFoldExprToConst(k.get());
                 auto valConst = tryFoldExprToConst(v.get());
