@@ -367,6 +367,7 @@ class WhileStmt : public Statement {
   public:
     std::unique_ptr<Expression> condition;
     std::unique_ptr<Statement> body;
+    std::unique_ptr<Statement> elseBody; ///< Optional: runs if loop exits without break
     LoopConfig loopHints;
     std::string label; ///< Optional loop label for labeled break/continue
 
@@ -393,6 +394,7 @@ class ForStmt : public Statement {
     std::unique_ptr<Expression> end;
     std::unique_ptr<Expression> step; // Optional, can be nullptr
     std::unique_ptr<Statement> body;
+    std::unique_ptr<Statement> elseBody; ///< Optional: runs if loop exits without break
     LoopConfig loopHints;
     std::string label; ///< Optional loop label for labeled break/continue
 
@@ -419,6 +421,7 @@ class ForEachStmt : public Statement {
     std::string iteratorVar;
     std::unique_ptr<Expression> collection;
     std::unique_ptr<Statement> body;
+    std::unique_ptr<Statement> elseBody; ///< Optional: runs if loop exits without break
     LoopConfig loopHints;
     std::string label; ///< Optional loop label for labeled break/continue
 

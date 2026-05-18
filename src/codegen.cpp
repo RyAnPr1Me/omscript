@@ -5394,7 +5394,11 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
             function->setNoSync();
             if (!isSelfRecursive) {
                 function->setWillReturn();
-                function->addFnAttr(llvm::Attribute::Speculatable);
+                // Don't mark as speculatable when the function contains a
+                // for/while...else loop: LLVM's IPSCCP constant-folding can
+                // produce incorrect results for that control-flow pattern.
+                if (!currentFuncHasLoopElse_)
+                    function->addFnAttr(llvm::Attribute::Speculatable);
             }
         } else if (fx.isReadOnly()) {
             // Reads memory but does not write or do I/O: readonly + nosync
@@ -5709,6 +5713,7 @@ llvm::Function* CodeGenerator::generateFunction(FunctionDecl* func) {
     // @hot: per-function hot annotation.  Used for bounds check elimination
     // and other performance-critical optimizations.
     currentFuncHintHot_ = func->hintHot;
+    currentFuncHasLoopElse_ = false;
 
     // @optmax: enable full fast-math flags for all float operations in this
     const llvm::FastMathFlags savedFMF = builder->getFastMathFlags();
@@ -6063,7 +6068,9 @@ void CodeGenerator::generateStatement(Statement* stmt) {
             codegenError("break used outside of a loop", stmt);
         }
         if (breakNode->label.empty()) {
-            // Unlabeled break: target nearest enclosing loop
+            // Unlabeled break: jump to nearest enclosing loop's break target.
+            // With for/while...else, breakTarget is afterBB (past the else);
+            // without else, it is the normal end block — same as before.
             builder->CreateBr(loopStack.back().breakTarget);
         } else {
             // Labeled break: search for the loop with the matching label

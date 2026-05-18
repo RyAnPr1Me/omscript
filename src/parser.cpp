@@ -3482,6 +3482,12 @@ std::unique_ptr<Statement> Parser::parseWhileStmt() {
     auto body = parseStatement();
     auto stmt = std::make_unique<WhileStmt>(std::move(condition), std::move(body));
     stmt->loopHints = loopHints;
+
+    // while...else: else block runs if the loop exits without break.
+    if (match(TokenType::ELSE)) {
+        stmt->elseBody = parseStatement();
+    }
+
     return stmt;
 }
 
@@ -3630,6 +3636,8 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(endPlusOne),
                                                  std::move(step), std::move(body), iteratorType);
         forStmt->loopHints = loopHints;
+        // for...else: else block runs if loop exits without break.
+        if (match(TokenType::ELSE)) forStmt->elseBody = parseStatement();
         return forStmt;
     }
 
@@ -3669,6 +3677,8 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end), std::move(step),
                                                  std::move(body), iteratorType);
         forStmt->loopHints = loopHints;
+        // for...else: else block runs if loop exits without break.
+        if (match(TokenType::ELSE)) forStmt->elseBody = parseStatement();
         return forStmt;
     }
 
@@ -3696,6 +3706,7 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
             auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
                                                      std::move(negStep), std::move(body), iteratorType);
             forStmt->loopHints = loopHints;
+            if (match(TokenType::ELSE)) forStmt->elseBody = parseStatement();
             return forStmt;
         }
 
@@ -3712,6 +3723,7 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
                                                  std::move(negOne), std::move(body), iteratorType);
         forStmt->loopHints = loopHints;
+        if (match(TokenType::ELSE)) forStmt->elseBody = parseStatement();
         return forStmt;
     }
 
@@ -3730,7 +3742,10 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         auto innerBlock = std::make_unique<BlockStmt>(std::move(innerStmts));
         body = std::make_unique<IfStmt>(std::move(whereFilter), std::move(innerBlock));
     }
-    return std::make_unique<ForEachStmt>(varName.lexeme, std::move(firstExpr), std::move(body));
+    auto feStmt = std::make_unique<ForEachStmt>(varName.lexeme, std::move(firstExpr), std::move(body));
+    // for...else: else block runs if loop exits without break.
+    if (match(TokenType::ELSE)) feStmt->elseBody = parseStatement();
+    return feStmt;
 }
 
 std::unique_ptr<Statement> Parser::parseBreakStmt() {
@@ -4021,12 +4036,29 @@ std::unique_ptr<Statement> Parser::parseGuardStmt() {
 // when (expr) { val1 => { stmts }, val2, val3 => { stmts }, _ => { stmts } }
 // Desugars to a switch statement with fat-arrow syntax
 std::unique_ptr<Statement> Parser::parseWhenStmt() {
-    // Paren-free form: when x { ... }  (same as if/while/for Round-70)
+    // Paren-free form: when x { ... }  (same as if/unless/while/for)
     const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
     if (hasParen)
         consume(TokenType::RPAREN, "Expected ')' after when expression");
     consume(TokenType::LBRACE, "Expected '{' after when expression");
+
+    // Helper: parse a single arm value, handling optional range suffix (a..b, a..=b).
+    // The `..` operator is not part of the general expression parser, so we
+    // intercept it explicitly here to support range patterns.
+    auto parseArmVal = [&]() -> std::unique_ptr<Expression> {
+        auto lo = parseExpression();
+        if (match(TokenType::DOT_DOT)) {
+            const bool inclusive = match(TokenType::ASSIGN); // ..=
+            auto hi = parseExpression();
+            const std::string op = inclusive ? "..=" : "..";
+            const int hiLine = hi->line, hiCol = hi->column;
+            auto range = std::make_unique<BinaryExpr>(op, std::move(lo), std::move(hi));
+            range->line = hiLine; range->column = hiCol;
+            return range;
+        }
+        return lo;
+    };
 
     std::vector<SwitchCase> cases;
 
@@ -4041,12 +4073,12 @@ std::unique_ptr<Statement> Parser::parseWhenStmt() {
         } else {
             // Parse one or more case values: val1, val2, val3 => { ... }
             std::vector<std::unique_ptr<Expression>> values;
-            values.push_back(parseExpression());
+            values.push_back(parseArmVal());
             while (match(TokenType::COMMA)) {
                 // Check if next is '=>' (end of value list)
                 if (check(TokenType::FAT_ARROW))
                     break;
-                values.push_back(parseExpression());
+                values.push_back(parseArmVal());
             }
             consume(TokenType::FAT_ARROW, "Expected '=>' after value(s) in when clause");
             std::vector<std::unique_ptr<Statement>> body;
@@ -4059,6 +4091,98 @@ std::unique_ptr<Statement> Parser::parseWhenStmt() {
     }
 
     consume(TokenType::RBRACE, "Expected '}' to close when block");
+
+    // ── Range-pattern detection ──────────────────────────────────────────────
+    // If any arm contains a range pattern (a..b or a..=b), desugar the entire
+    // `when` to an if-else chain so that LLVM's switch instruction is avoided.
+    auto isRangeExpr = [](Expression* e) -> bool {
+        if (!e || e->type != ASTNodeType::BINARY_EXPR) return false;
+        const auto* b = static_cast<const BinaryExpr*>(e);
+        return b->op == ".." || b->op == "..=";
+    };
+
+    bool hasRangePattern = false;
+    for (auto& sc : cases) {
+        if (sc.isDefault) continue;
+        if (isRangeExpr(sc.value.get())) { hasRangePattern = true; break; }
+        for (auto& ev : sc.values)
+            if (isRangeExpr(ev.get())) { hasRangePattern = true; break; }
+        if (hasRangePattern) break;
+    }
+
+    if (hasRangePattern) {
+        // Determine a name for the discriminant (evaluate once).
+        const bool isIdent = condition->type == ASTNodeType::IDENTIFIER_EXPR;
+        std::string discName;
+        if (isIdent) {
+            discName = static_cast<IdentifierExpr*>(condition.get())->name;
+        } else {
+            discName = "__when_disc_" + std::to_string(lambdaCounter_++);
+        }
+
+        // Helper: build a condition expression for one arm value vs discName.
+        auto makeValCond = [&](std::unique_ptr<Expression>& v) -> std::unique_ptr<Expression> {
+            if (isRangeExpr(v.get())) {
+                auto* bin = static_cast<BinaryExpr*>(v.get());
+                auto discLo = std::make_unique<IdentifierExpr>(discName);
+                discLo->line = bin->line; discLo->column = bin->column;
+                auto discHi = std::make_unique<IdentifierExpr>(discName);
+                discHi->line = bin->line; discHi->column = bin->column;
+                auto ge = std::make_unique<BinaryExpr>(">=", std::move(discLo), std::move(bin->left));
+                const std::string hiOp = (bin->op == "..=") ? "<=" : "<";
+                auto lt = std::make_unique<BinaryExpr>(hiOp, std::move(discHi), std::move(bin->right));
+                return std::make_unique<BinaryExpr>("&&", std::move(ge), std::move(lt));
+            }
+            auto discRef = std::make_unique<IdentifierExpr>(discName);
+            return std::make_unique<BinaryExpr>("==", std::move(discRef), std::move(v));
+        };
+
+        // Collect the default body if present.
+        std::unique_ptr<Statement> elseChain = nullptr;
+        for (auto& sc : cases) {
+            if (sc.isDefault) {
+                std::vector<std::unique_ptr<Statement>> bv;
+                for (auto& s : sc.body) bv.push_back(std::move(s));
+                elseChain = std::make_unique<BlockStmt>(std::move(bv));
+                break;
+            }
+        }
+
+        // Build if-else chain in reverse so the first arm has highest priority.
+        for (int i = static_cast<int>(cases.size()) - 1; i >= 0; --i) {
+            auto& sc = cases[i];
+            if (sc.isDefault) continue;
+
+            // Build OR of per-value conditions.
+            std::unique_ptr<Expression> armCond;
+            if (sc.value)
+                armCond = makeValCond(sc.value);
+            for (auto& ev : sc.values) {
+                auto c = makeValCond(ev);
+                armCond = armCond ? std::make_unique<BinaryExpr>("||", std::move(armCond), std::move(c))
+                                  : std::move(c);
+            }
+            if (!armCond) continue;
+
+            std::vector<std::unique_ptr<Statement>> bv;
+            for (auto& s : sc.body) bv.push_back(std::move(s));
+            auto thenBlock = std::make_unique<BlockStmt>(std::move(bv));
+            elseChain = std::make_unique<IfStmt>(std::move(armCond), std::move(thenBlock), std::move(elseChain));
+        }
+
+        if (!elseChain)
+            elseChain = std::make_unique<BlockStmt>(std::vector<std::unique_ptr<Statement>>{});
+
+        // If the discriminant is complex, wrap in a block with a temp var.
+        if (!isIdent) {
+            std::vector<std::unique_ptr<Statement>> outerStmts;
+            outerStmts.push_back(std::make_unique<VarDecl>(discName, std::move(condition)));
+            outerStmts.push_back(std::move(elseChain));
+            return std::make_unique<BlockStmt>(std::move(outerStmts));
+        }
+        return elseChain;
+    }
+
     return std::make_unique<SwitchStmt>(std::move(condition), std::move(cases));
 }
 
@@ -4087,6 +4211,21 @@ std::unique_ptr<Expression> Parser::parseWhenExpr() {
 
     consume(TokenType::LBRACE, "Expected '{' after when expression");
 
+    // Helper: parse a single arm value, handling optional range suffix (a..b, a..=b).
+    auto parseArmVal = [&]() -> std::unique_ptr<Expression> {
+        auto lo = parseExpression();
+        if (match(TokenType::DOT_DOT)) {
+            const bool inclusive = match(TokenType::ASSIGN); // ..=
+            auto hi = parseExpression();
+            const std::string op = inclusive ? "..=" : "..";
+            const int hiLine = hi->line, hiCol = hi->column;
+            auto range = std::make_unique<BinaryExpr>(op, std::move(lo), std::move(hi));
+            range->line = hiLine; range->column = hiCol;
+            return range;
+        }
+        return lo;
+    };
+
     struct WhenArm {
         std::vector<std::unique_ptr<Expression>> values; // empty means default
         std::unique_ptr<Expression> result;
@@ -4103,10 +4242,10 @@ std::unique_ptr<Expression> Parser::parseWhenExpr() {
             arm.result = parseExpression();
             isDefault = true;
         } else {
-            arm.values.push_back(parseExpression());
+            arm.values.push_back(parseArmVal());
             while (match(TokenType::COMMA)) {
                 if (check(TokenType::FAT_ARROW)) break;
-                arm.values.push_back(parseExpression());
+                arm.values.push_back(parseArmVal());
             }
             consume(TokenType::FAT_ARROW, "Expected '=>' after value in when expression");
             arm.result = parseExpression();
@@ -4136,14 +4275,32 @@ std::unique_ptr<Expression> Parser::parseWhenExpr() {
         if (arm.values.empty()) continue;
 
         // Build condition: discName == v1 || discName == v2 || ...
+        // Range patterns (a..b, a..=b) desugar to: discName >= a && discName < b
+        // (or discName <= b for inclusive ..= ranges).
         std::unique_ptr<Expression> cond = nullptr;
         for (auto& v : arm.values) {
-            auto discRef = std::make_unique<IdentifierExpr>(discName);
-            auto eq = std::make_unique<BinaryExpr>("==", std::move(discRef), std::move(v));
+            std::unique_ptr<Expression> cond_v;
+            if (v->type == ASTNodeType::BINARY_EXPR) {
+                auto* bin = static_cast<BinaryExpr*>(v.get());
+                if (bin->op == ".." || bin->op == "..=") {
+                    auto discRefLo = std::make_unique<IdentifierExpr>(discName);
+                    discRefLo->line = bin->line; discRefLo->column = bin->column;
+                    auto discRefHi = std::make_unique<IdentifierExpr>(discName);
+                    discRefHi->line = bin->line; discRefHi->column = bin->column;
+                    auto geExpr = std::make_unique<BinaryExpr>(">=", std::move(discRefLo), std::move(bin->left));
+                    const std::string hiOp = (bin->op == "..=") ? "<=" : "<";
+                    auto ltExpr = std::make_unique<BinaryExpr>(hiOp, std::move(discRefHi), std::move(bin->right));
+                    cond_v = std::make_unique<BinaryExpr>("&&", std::move(geExpr), std::move(ltExpr));
+                }
+            }
+            if (!cond_v) {
+                auto discRef = std::make_unique<IdentifierExpr>(discName);
+                cond_v = std::make_unique<BinaryExpr>("==", std::move(discRef), std::move(v));
+            }
             if (!cond) {
-                cond = std::move(eq);
+                cond = std::move(cond_v);
             } else {
-                cond = std::make_unique<BinaryExpr>("||", std::move(cond), std::move(eq));
+                cond = std::make_unique<BinaryExpr>("||", std::move(cond), std::move(cond_v));
             }
         }
 
@@ -4273,7 +4430,10 @@ std::unique_ptr<Statement> Parser::parseForEachStmt() {
         auto innerBlock = std::make_unique<BlockStmt>(std::move(innerStmts));
         body = std::make_unique<IfStmt>(std::move(whereFilter), std::move(innerBlock));
     }
-    return std::make_unique<ForEachStmt>(firstName.lexeme, std::move(collection), std::move(body));
+    auto feStmt = std::make_unique<ForEachStmt>(firstName.lexeme, std::move(collection), std::move(body));
+    // foreach...else: else block runs if loop exits without break.
+    if (match(TokenType::ELSE)) feStmt->elseBody = parseStatement();
+    return feStmt;
 }
 
 // elif (condition) { ... } [elif (...) { ... }] [else { ... }]

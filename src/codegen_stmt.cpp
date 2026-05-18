@@ -1239,16 +1239,20 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     if (auto* ci = llvm::dyn_cast<llvm::ConstantInt>(preCondition)) {
         if (ci->isZero()) {
             // Condition is statically false: loop body never executes.
+            // An else body (if present) always runs in this case.
+            if (stmt->elseBody)
+                generateStatement(stmt->elseBody.get());
             return;
         }
         // Condition is statically true: emit an unconditional infinite loop
         // (no condition check on each iteration).
         llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "whilebody", function);
+        // For while(true)...else: only break can exit, so break→afterBB;
+        // else never runs on normal exit (there is none).
         llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "whileend", function);
         builder->CreateBr(bodyBB);
         builder->SetInsertPoint(bodyBB);
-        loopStack.push_back({endBB, bodyBB});
-        loopStack.back().label = stmt->label;
+        loopStack.push_back({endBB, bodyBB, stmt->label});
         auto savedLenCacheWI = std::move(loopArrayLenCache_);
         loopArrayLenCache_.clear();
         generateStatement(stmt->body.get());
@@ -1263,7 +1267,19 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
 
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "whilecond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "whilebody", function);
-    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "whileend", function);
+    // ── while...else: use two exit blocks ───────────────────────────────────
+    // normalExitBB: reached when the condition becomes false (else body runs).
+    // afterBB:      break target — reached via `break` (else body is skipped).
+    // Without an else, both are the same block (endBB).
+    llvm::BasicBlock* normalExitBB;
+    llvm::BasicBlock* afterBB;
+    if (stmt->elseBody) {
+        currentFuncHasLoopElse_ = true;
+        normalExitBB = llvm::BasicBlock::Create(*context, "while.else.entry", function);
+        afterBB      = llvm::BasicBlock::Create(*context, "while.after",       function);
+    } else {
+        normalExitBB = afterBB = llvm::BasicBlock::Create(*context, "whileend", function);
+    }
 
     // ── Preheader: emit loop-entry non-negativity assumes ────────────────────
     // These assumes are placed in the loop preheader (before the back-edge)
@@ -1316,7 +1332,8 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
     llvm::Value* condition = generateExpression(stmt->condition.get());
     llvm::Value* condBool = toBool(condition);
     // Loop condition branches: hint the back-edge (body) as likely-taken.
-    auto* whileCondBr = builder->CreateCondBr(condBool, bodyBB, endBB);
+    // Condition-false exit goes to normalExitBB (→else or →end).
+    auto* whileCondBr = builder->CreateCondBr(condBool, bodyBB, normalExitBB);
     if (optimizationLevel >= OptimizationLevel::O2) {
         llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
         whileCondBr->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
@@ -1325,8 +1342,8 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
 
     // Body block
     builder->SetInsertPoint(bodyBB);
-    loopStack.push_back({endBB, condBB});
-    loopStack.back().label = stmt->label;
+    // break goes to afterBB (past the else); continue goes back to condBB.
+    loopStack.push_back({afterBB, condBB, stmt->label});
 
     auto savedLenCacheW = std::move(loopArrayLenCache_);
     loopArrayLenCache_.clear();
@@ -1435,14 +1452,25 @@ void CodeGenerator::generateWhile(WhileStmt* stmt) {
         backBrWhile->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
     }
 
-    // End block
-    builder->SetInsertPoint(endBB);
+    // End block / else entry
+    // normalExitBB: where the condition-false edge lands.
+    // If elseBody is present, normalExitBB != afterBB; we run else then fall to afterBB.
+    // If no elseBody, normalExitBB == afterBB (single end block, same as before).
+    builder->SetInsertPoint(normalExitBB);
     --loopNestDepth_;
     // Restore body-analysis flags, OR-ing this while loop's findings back in
     // so enclosing loops can see them.
     bodyHasNonPow2Modulo_ = savedBodyHasNonPow2Modulo || bodyHasNonPow2Modulo_;
     bodyHasNonPow2ModuloValue_ = savedBodyHasNonPow2ModuloValue || bodyHasNonPow2ModuloValue_;
     bodyHasNonPow2ModuloArrayStore_ = savedBodyHasNonPow2ModuloArrayStore || bodyHasNonPow2ModuloArrayStore_;
+
+    if (stmt->elseBody) {
+        // Emit else body in normalExitBB, then branch to afterBB.
+        generateStatement(stmt->elseBody.get());
+        if (!builder->GetInsertBlock()->getTerminator())
+            builder->CreateBr(afterBB);
+        builder->SetInsertPoint(afterBB);
+    }
 }
 
 void CodeGenerator::generateDoWhile(DoWhileStmt* stmt) {
@@ -1594,6 +1622,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     if (auto* startCI = llvm::dyn_cast<llvm::ConstantInt>(startVal)) {
         if (auto* endCI = llvm::dyn_cast<llvm::ConstantInt>(endVal)) {
             if (startCI->getSExtValue() == endCI->getSExtValue()) {
+                // Empty range: loop never runs — else body executes if present.
+                if (stmt->elseBody) generateStatement(stmt->elseBody.get());
                 return;
             }
         }
@@ -1619,6 +1649,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
                     // Ascending step but start > end → condition (i < end) fails immediately.
                     // Descending step but start < end → condition (i > end) fails immediately.
                     if ((step > 0 && sv > ev) || (step < 0 && sv < ev)) {
+                        // Empty range: else body executes if present.
+                        if (stmt->elseBody) generateStatement(stmt->elseBody.get());
                         return;
                     }
                 }
@@ -1676,8 +1708,20 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     // Create blocks
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "forcond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "forbody", function);
-    llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "forinc", function);
-    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "forend", function);
+    llvm::BasicBlock* incBB  = llvm::BasicBlock::Create(*context, "forinc",  function);
+    // ── for...else: two exit blocks ──────────────────────────────────────────
+    // normalExitBB: reached when condition becomes false (else body runs here).
+    // afterBB:      break target — reached via `break` (else skipped).
+    // Without an else, normalExitBB == afterBB.
+    llvm::BasicBlock* normalExitBBF;
+    llvm::BasicBlock* afterBBF;
+    if (stmt->elseBody) {
+        currentFuncHasLoopElse_ = true;
+        normalExitBBF = llvm::BasicBlock::Create(*context, "for.else.entry", function);
+        afterBBF      = llvm::BasicBlock::Create(*context, "for.after",      function);
+    } else {
+        normalExitBBF = afterBBF = llvm::BasicBlock::Create(*context, "forend", function);
+    }
 
     // Skip the step-zero check when step is known non-zero at compile time.
     if (stepKnownNonZero) {
@@ -1764,7 +1808,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         llvm::Value* backwardCond = builder->CreateICmpSGT(curVal, endVal, "forcond_gt");
         continueCond = builder->CreateSelect(stepPositive, forwardCond, backwardCond, "forcond_range");
     }
-    auto* forCondBr = builder->CreateCondBr(continueCond, bodyBB, endBB);
+    auto* forCondBr = builder->CreateCondBr(continueCond, bodyBB, normalExitBBF);
     // Hint loop back-edge as likely-taken for branch prediction.
     if (optimizationLevel >= OptimizationLevel::O2) {
         uint32_t bodyWeight = 2000;
@@ -1948,8 +1992,7 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         }
     }
 
-    loopStack.push_back({endBB, incBB});
-    loopStack.back().label = stmt->label;
+    loopStack.push_back({afterBBF, incBB, stmt->label});
     // Clear per-iteration array length cache so inner-body bounds checks
     // get fresh values.  Save outer cache for nested loop restore.
     auto savedLenCache = std::move(loopArrayLenCache_);
@@ -2276,8 +2319,8 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
         backBr->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
     }
 
-    // End block
-    builder->SetInsertPoint(endBB);
+    // End / else-entry block
+    builder->SetInsertPoint(normalExitBBF);
     --loopNestDepth_;
     loopIterVars_.erase(stmt->iteratorVar);
     // Restore the flag; propagate upward so enclosing for-loops also see it.
@@ -2290,6 +2333,13 @@ void CodeGenerator::generateFor(ForStmt* stmt) {
     bodyHasBackwardArrayRef_ = savedBodyHasBackwardArrayRef;
     loopWrittenArrays_ = std::move(savedLoopWrittenArrays);
     loopBackwardReadArrays_ = std::move(savedLoopBackwardReadArrays);
+
+    if (stmt->elseBody) {
+        generateStatement(stmt->elseBody.get());
+        if (!builder->GetInsertBlock()->getTerminator())
+            builder->CreateBr(afterBBF);
+        builder->SetInsertPoint(afterBBF);
+    }
 }
 
 void CodeGenerator::generateForEach(ForEachStmt* stmt) {
@@ -2367,8 +2417,16 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
 
             llvm::BasicBlock* condBBR = llvm::BasicBlock::Create(*context, "frng.cond", function);
             llvm::BasicBlock* bodyBBR = llvm::BasicBlock::Create(*context, "frng.body", function);
-            llvm::BasicBlock* incBBR = llvm::BasicBlock::Create(*context, "frng.inc", function);
-            llvm::BasicBlock* endBBR = llvm::BasicBlock::Create(*context, "frng.end", function);
+            llvm::BasicBlock* incBBR  = llvm::BasicBlock::Create(*context, "frng.inc",  function);
+            // Two-exit blocks for foreach...else on the range fast path.
+            llvm::BasicBlock* normalExitBBR;
+            llvm::BasicBlock* afterBBR;
+            if (stmt->elseBody) {
+                normalExitBBR = llvm::BasicBlock::Create(*context, "frng.else.entry", function);
+                afterBBR      = llvm::BasicBlock::Create(*context, "frng.after",      function);
+            } else {
+                normalExitBBR = afterBBR = llvm::BasicBlock::Create(*context, "frng.end", function);
+            }
 
             builder->CreateBr(condBBR);
 
@@ -2380,7 +2438,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
                 llvm::cast<llvm::LoadInst>(curIdxR)->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
             }
             llvm::Value* condR = builder->CreateICmpULT(curIdxR, count, "frng.cmp");
-            auto* condBrR = builder->CreateCondBr(condR, bodyBBR, endBBR);
+            auto* condBrR = builder->CreateCondBr(condR, bodyBBR, normalExitBBR);
             if (optimizationLevel >= OptimizationLevel::O2) {
                 llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
                 condBrR->setMetadata(llvm::LLVMContext::MD_prof, brWeights);
@@ -2407,8 +2465,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
                                                       /*HasNUW=*/false, /*HasNSW=*/iterNSW);
             builder->CreateAlignedStore(iterVal, iterAllocaR, iterAllocaR->getAlign());
 
-            loopStack.push_back({endBBR, incBBR});
-            loopStack.back().label = stmt->label;
+            loopStack.push_back({afterBBR, incBBR, stmt->label});
             auto savedLenCacheR = std::move(loopArrayLenCache_);
             loopArrayLenCache_.clear();
             generateStatement(stmt->body.get());
@@ -2443,7 +2500,13 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
                 backBrR->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
             }
 
-            builder->SetInsertPoint(endBBR);
+            builder->SetInsertPoint(normalExitBBR);
+            if (stmt->elseBody) {
+                generateStatement(stmt->elseBody.get());
+                if (!builder->GetInsertBlock()->getTerminator())
+                    builder->CreateBr(afterBBR);
+                builder->SetInsertPoint(afterBBR);
+            }
             optStats_.foreachRangeFused++;
             return;
         }
@@ -2500,8 +2563,17 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     // Create blocks
     llvm::BasicBlock* condBB = llvm::BasicBlock::Create(*context, "foreach.cond", function);
     llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "foreach.body", function);
-    llvm::BasicBlock* incBB = llvm::BasicBlock::Create(*context, "foreach.inc", function);
-    llvm::BasicBlock* endBB = llvm::BasicBlock::Create(*context, "foreach.end", function);
+    llvm::BasicBlock* incBB  = llvm::BasicBlock::Create(*context, "foreach.inc",  function);
+    // Two-exit blocks for foreach...else.
+    llvm::BasicBlock* normalExitBBFE;
+    llvm::BasicBlock* afterBBFE;
+    if (stmt->elseBody) {
+        currentFuncHasLoopElse_ = true;
+        normalExitBBFE = llvm::BasicBlock::Create(*context, "fe.else.entry", function);
+        afterBBFE      = llvm::BasicBlock::Create(*context, "fe.after",      function);
+    } else {
+        normalExitBBFE = afterBBFE = llvm::BasicBlock::Create(*context, "foreach.end", function);
+    }
 
     builder->CreateBr(condBB);
 
@@ -2520,7 +2592,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
     }
 
     llvm::Value* cond = builder->CreateICmpULT(curIdx, lenVal, "foreach.cmp");
-    auto* foreachCondBr = builder->CreateCondBr(cond, bodyBB, endBB);
+    auto* foreachCondBr = builder->CreateCondBr(cond, bodyBB, normalExitBBFE);
     // Hint the back-edge (body) as likely-taken.
     if (optimizationLevel >= OptimizationLevel::O2) {
         llvm::MDNode* brWeights = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
@@ -2586,8 +2658,7 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
             elemStoreLast->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaScalar_);
     }
 
-    loopStack.push_back({endBB, incBB});
-    loopStack.back().label = stmt->label;
+    loopStack.push_back({afterBBFE, incBB, stmt->label});
     auto savedLenCacheFE = std::move(loopArrayLenCache_);
     loopArrayLenCache_.clear();
     generateStatement(stmt->body.get());
@@ -2664,8 +2735,15 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         backBr->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
     }
 
-    // End
-    builder->SetInsertPoint(endBB);
+    // End / else entry
+    builder->SetInsertPoint(normalExitBBFE);
+
+    if (stmt->elseBody) {
+        generateStatement(stmt->elseBody.get());
+        if (!builder->GetInsertBlock()->getTerminator())
+            builder->CreateBr(afterBBFE);
+        builder->SetInsertPoint(afterBBFE);
+    }
 }
 
 void CodeGenerator::generateBlock(BlockStmt* stmt) {

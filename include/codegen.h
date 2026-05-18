@@ -839,6 +839,7 @@ class CodeGenerator {
     bool currentFuncHintParallelize_ = false;
     bool currentFuncHintNoParallelize_ = false;
     bool currentFuncHintHot_ = false;               ///< Current function has @hot annotation
+    bool currentFuncHasLoopElse_ = false;           ///< Current function contains a for/while...else loop
     const FunctionDecl* currentFuncDecl_ = nullptr; ///< Currently-generating function declaration
     unsigned loopNestDepth_ = 0;                    ///< Current for-loop nesting depth (0 = not in a loop)
     bool bodyHasInnerLoop_ = false;                 ///< Set when a while/for loop is found inside a for-loop body
