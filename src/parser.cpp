@@ -8036,8 +8036,7 @@ bool Parser::isTupleDestrAssign() const {
         ++pos;
         if (pos >= tokens.size())
             return false;
-        if (tokens[pos].type != TokenType::IDENTIFIER &&
-            tokens[pos].type != TokenType::IDENTIFIER) // _ is a valid identifier
+        if (tokens[pos].type != TokenType::IDENTIFIER)
             return false;
         ++pos;
     }
