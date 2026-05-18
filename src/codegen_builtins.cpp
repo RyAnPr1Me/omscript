@@ -2692,8 +2692,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* mcPtrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* mcSrcPtr = builder->CreateIntToPtr(mapArg, mcPtrTy, "mcopy.srcptr");
 
-        // Allocate fresh result map
-        llvm::Value* mcRes = builder->CreateCall(getOrEmitHashMapNew(), {}, "mcopy.res");
+        // Allocate fresh result map pre-sized to source live-entry count.
+        auto* mcSizeLoad = builder->CreateAlignedLoad(
+            getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mcSrcPtr, llvm::ConstantInt::get(getDefaultType(), 1)),
+            llvm::MaybeAlign(8), "mcopy.size");
+        mcSizeLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+        llvm::Value* mcRes = builder->CreateCall(getOrEmitHashMapNewForItems(), {mcSizeLoad}, "mcopy.res");
         llvm::AllocaInst* mcResA =
             createEntryBlockAlloca(builder->GetInsertBlock()->getParent(), "mcopy.resmap", mcPtrTy);
         builder->CreateStore(mcRes, mcResA);
@@ -10276,8 +10281,19 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         // Create new result map (copy of a)
         llvm::Value* mmAPtr = builder->CreateIntToPtr(mmA, mmPtrTy, "mmerge.aptr");
         llvm::Value* mmBPtr = builder->CreateIntToPtr(mmB, mmPtrTy, "mmerge.bptr");
-        // result = map_new(); then insert all of a, then all of b (b wins)
-        llvm::Value* mmRes = builder->CreateCall(getOrEmitHashMapNew(), {}, "mmerge.res");
+        // result = pre-sized map; then insert all of a, then all of b (b wins)
+        auto* mmASizeLoad = builder->CreateAlignedLoad(
+            getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mmAPtr, llvm::ConstantInt::get(getDefaultType(), 1)),
+            llvm::MaybeAlign(8), "mmerge.asize");
+        mmASizeLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+        auto* mmBSizeLoad = builder->CreateAlignedLoad(
+            getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mmBPtr, llvm::ConstantInt::get(getDefaultType(), 1)),
+            llvm::MaybeAlign(8), "mmerge.bsize");
+        mmBSizeLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+        llvm::Value* mmExpected = builder->CreateAdd(mmASizeLoad, mmBSizeLoad, "mmerge.expected");
+        llvm::Value* mmRes = builder->CreateCall(getOrEmitHashMapNewForItems(), {mmExpected}, "mmerge.res");
         llvm::AllocaInst* mmResA =
             createEntryBlockAlloca(builder->GetInsertBlock()->getParent(), "mmerge.resmap", mmPtrTy);
         builder->CreateStore(mmRes, mmResA);
@@ -10354,8 +10370,13 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         llvm::Value* miCap = builder->CreateAlignedLoad(getDefaultType(), miMPtr, llvm::MaybeAlign(8), "minv.cap");
         llvm::Value* miZero = llvm::ConstantInt::get(getDefaultType(), 0);
         llvm::Value* miOne = llvm::ConstantInt::get(getDefaultType(), 1);
-        // Create result map
-        llvm::Value* miRes = builder->CreateCall(getOrEmitHashMapNew(), {}, "minv.res");
+        // Create result map pre-sized to source live-entry count.
+        auto* miSizeLoad = builder->CreateAlignedLoad(
+            getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), miMPtr, llvm::ConstantInt::get(getDefaultType(), 1)),
+            llvm::MaybeAlign(8), "minv.size");
+        miSizeLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+        llvm::Value* miRes = builder->CreateCall(getOrEmitHashMapNewForItems(), {miSizeLoad}, "minv.res");
         llvm::AllocaInst* miResA =
             createEntryBlockAlloca(builder->GetInsertBlock()->getParent(), "minv.resmap", miPtrTy);
         builder->CreateStore(miRes, miResA);
