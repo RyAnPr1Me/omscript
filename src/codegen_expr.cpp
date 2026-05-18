@@ -7231,7 +7231,16 @@ llvm::Value* CodeGenerator::generateDict(DictExpr* expr) {
 
     // Create an empty hash table, then insert each pair via __omsc_hmap_set.
     // Each set call returns the (possibly reallocated) map pointer.
-    llvm::Value* mapPtr = builder->CreateCall(getOrEmitHashMapNew(), {}, "dict.new");
+    // For larger literals, pre-size capacity to avoid runtime grow/rehash.
+    static constexpr size_t kInitThreshold =
+        (kHashMapInitCapacity * kHashMapLoadFactorNum) / kHashMapLoadFactorDen;
+    llvm::Value* mapPtr = nullptr;
+    if (numPairs > kInitThreshold) {
+        llvm::Value* items = llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(numPairs));
+        mapPtr = builder->CreateCall(getOrEmitHashMapNewForItems(), {items}, "dict.new");
+    } else {
+        mapPtr = builder->CreateCall(getOrEmitHashMapNew(), {}, "dict.new");
+    }
 
     for (size_t i = 0; i < numPairs; i++) {
         llvm::Value* keyVal = toDefaultType(generateExpression(expr->pairs[i].first.get()));

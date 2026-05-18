@@ -1351,9 +1351,14 @@ class CodeGenerator {
     llvm::Function* getOrDeclareHttpRequest();
     llvm::Function* getOrDeclareHttpGetStatus();
 
+    static constexpr int64_t kHashMapInitCapacity = 8;
+    static constexpr int64_t kHashMapLoadFactorNum = 3;
+    static constexpr int64_t kHashMapLoadFactorDen = 4;
+
     // Hash-table map runtime helpers: open-addressing, linear probing, power-of-2 capacity, FNV-1a.
     // Layout (all i64): [capacity, size, hash0, key0, val0, ...]; empty=0, tombstone=1, occupied≥2.
     llvm::Function* getOrEmitHashMapNew();
+    llvm::Function* getOrEmitHashMapNewForItems();
     llvm::Function* getOrEmitHashMapSet();
     llvm::Function* getOrEmitHashMapGet();
     llvm::Function* getOrEmitHashMapHas();

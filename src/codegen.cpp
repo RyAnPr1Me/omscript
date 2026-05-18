@@ -2676,7 +2676,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapNew() {
     builder->SetInsertPoint(entryBB);
 
     // capacity = 8, total slots = 2 + 3*8 = 26, bytes = 26*8 = 208
-    static constexpr int64_t kInitCapacity = 8;
+    static constexpr int64_t kInitCapacity = kHashMapInitCapacity;
     static constexpr int64_t kSlotsPerBucket = 3; // key, value, hash
     static constexpr int64_t kHeaderSlots = 2;    // length, capacity
     static constexpr int64_t kInitTotalSlots = kHeaderSlots + kSlotsPerBucket * kInitCapacity;
@@ -2696,6 +2696,75 @@ llvm::Function* CodeGenerator::getOrEmitHashMapNew() {
         st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
     }
     // Size (slot 1) is already 0 from calloc
+    builder->CreateRet(buf);
+
+    builder->restoreIP(savedIP);
+    return fn;
+}
+
+// __omsc_hmap_new_for_items(items: i64) -> ptr
+//   Allocates a hash table whose capacity can hold `items` without triggering
+//   a load-factor growth rehash (threshold = cap*3/4).
+llvm::Function* CodeGenerator::getOrEmitHashMapNewForItems() {
+    if (auto* fn = module->getFunction("__omsc_hmap_new_for_items"))
+        return fn;
+
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+    auto* i64Ty = getDefaultType();
+    auto* fnTy = llvm::FunctionType::get(ptrTy, {i64Ty}, false);
+    auto* fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage, "__omsc_hmap_new_for_items", module.get());
+    setHashMapFnAttrs(fn);
+    fn->addRetAttr(llvm::Attribute::NoAlias);
+    fn->addRetAttr(llvm::Attribute::NonNull);
+    fn->getArg(0)->setName("items");
+
+    auto savedIP = builder->saveIP();
+    auto* entryBB = llvm::BasicBlock::Create(*context, "entry", fn);
+    auto* capLoopBB = llvm::BasicBlock::Create(*context, "cap.loop", fn);
+    auto* capGrowBB = llvm::BasicBlock::Create(*context, "cap.grow", fn);
+    auto* allocBB = llvm::BasicBlock::Create(*context, "alloc", fn);
+
+    builder->SetInsertPoint(entryBB);
+    llvm::Value* itemsArg = fn->getArg(0);
+    llvm::Value* zero = llvm::ConstantInt::get(i64Ty, 0);
+    llvm::Value* minCapConst = llvm::ConstantInt::get(i64Ty, kHashMapInitCapacity);
+
+    // Clamp negatives to zero.
+    llvm::Value* nonNegItems = builder->CreateSelect(builder->CreateICmpSLT(itemsArg, zero), zero, itemsArg, "items.nn");
+
+    // required = ceil(items * 4 / 3) to avoid a grow during insertion.
+    llvm::Value* reqNumer = builder->CreateMul(
+        nonNegItems, llvm::ConstantInt::get(i64Ty, kHashMapLoadFactorDen), "req.numer");
+    llvm::Value* reqCeil = builder->CreateUDiv(
+        builder->CreateAdd(reqNumer, llvm::ConstantInt::get(i64Ty, kHashMapLoadFactorNum - 1), "req.plus"),
+        llvm::ConstantInt::get(i64Ty, kHashMapLoadFactorNum), "req.ceil");
+    llvm::Value* reqCap = builder->CreateSelect(builder->CreateICmpULT(reqCeil, minCapConst), minCapConst, reqCeil,
+                                                "req.cap");
+    builder->CreateBr(capLoopBB);
+
+    builder->SetInsertPoint(capLoopBB);
+    llvm::PHINode* capPhi = builder->CreatePHI(i64Ty, 2, "cap");
+    capPhi->addIncoming(minCapConst, entryBB);
+    llvm::Value* needGrow = builder->CreateICmpULT(capPhi, reqCap, "need.grow");
+    builder->CreateCondBr(needGrow, capGrowBB, allocBB);
+
+    builder->SetInsertPoint(capGrowBB);
+    llvm::Value* capNext = builder->CreateShl(capPhi, llvm::ConstantInt::get(i64Ty, 1), "cap.next");
+    capPhi->addIncoming(capNext, capGrowBB);
+    attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(capLoopBB)));
+
+    builder->SetInsertPoint(allocBB);
+    llvm::Value* totalSlots = builder->CreateAdd(
+        builder->CreateMul(capPhi, llvm::ConstantInt::get(i64Ty, 3), "slots.buckets"), llvm::ConstantInt::get(i64Ty, 2),
+        "slots.total");
+    llvm::Value* totalBytes = builder->CreateMul(totalSlots, llvm::ConstantInt::get(i64Ty, 8), "bytes.total");
+    llvm::Value* buf =
+        builder->CreateCall(getOrDeclareCalloc(), {llvm::ConstantInt::get(i64Ty, 1), totalBytes}, "hmap.buf");
+    llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
+    {
+        auto* st = builder->CreateAlignedStore(capPhi, buf, llvm::MaybeAlign(8));
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+    }
     builder->CreateRet(buf);
 
     builder->restoreIP(savedIP);
