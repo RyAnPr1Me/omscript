@@ -26,6 +26,15 @@ fn main() {
     total = total + (map_get(nums, 2, 0) == 200);    // 1
     total = total + (map_get(nums, 3, 0) == 300);    // 1
 
+    // Constant-foldable expressions in keys/values.
+    var folded = {(1 + 1): (1 + 2), ("ab" + "c"): (10 - 3)};
+    total = total + (folded[2] == 3);                // 1
+    total = total + (folded["abc"] == 7);            // 1
+
+    // Dict values are stored as map i64 payloads (float truncation via toDefaultType).
+    var float_payload = {"f": 3.9};
+    total = total + (float_payload["f"] == 3);       // 1
+
     // Dict passed to map_set / map_remove still works
     var m = {"key": 42};
     m = map_set(m, "key2", 99);

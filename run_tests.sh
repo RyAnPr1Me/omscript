@@ -828,7 +828,7 @@ echo "Running optimization and feature tests (parallel, $(_nproc) workers):"
 echo "--------------------------------------------"
 ptest_program "examples/runtime_div_opt_test.om" 5
 ptest_program "examples/loop_ucmp_test.om" 5
-ptest_program "examples/dict_literal_test.om" 18
+ptest_program "examples/dict_literal_test.om" 21
 ptest_program "examples/dict_assign_test.om" 0
 ptest_program "examples/preprocessor_test.om" 12
 ptest_program "examples/preprocessor_modern_test.om" 13
@@ -954,6 +954,7 @@ ptest_program "examples/round84_ns_struct_test.om" 6
 ptest_program "examples/round85_ns_enum_test.om" 7
 ptest_program "examples/round86_ns_global_test.om" 7
 ptest_program "examples/round87_ns_type_qualtype_test.om" 8
+ptest_program "examples/file_type_test.om" 10
 flush_ptests
 
 echo ""

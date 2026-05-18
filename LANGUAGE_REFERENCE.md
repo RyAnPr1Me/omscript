@@ -8594,15 +8594,20 @@ for (i in 0...n) {
 
 ## 21. File I/O
 
-OmScript exposes a small set of synchronous, **whole-file** I/O built-ins backed by the C runtime (`fopen` / `fread` / `fwrite` / `fclose`) and POSIX `access`. There is no streaming, seeking, or file-handle abstraction at the language level — each call opens, performs its operation, and closes the file in one step.
+OmScript provides two complementary I/O models:
 
-**I/O model:**
-- Files are opened in **binary mode** (`"rb"`, `"wb"`, `"a"`).
+1. **Whole-file operations** — single-call helpers that open, read/write, and close in one step (`file_read`, `file_write`, `file_append`, `file_exists`).
+2. **Handle-based streaming I/O** — the `File` type, a Rust-style bare value that holds an open file handle. Use `file_open` / `file_close` to manage the handle lifetime explicitly, and the streaming builtins (`file_read_line`, `file_read_all`, `file_write_str`, `file_flush`, `file_eof`, `file_is_open`) to operate on it.
+
+**I/O model (both variants):**
+- Files are opened in the mode string you provide (`"r"`, `"w"`, `"a"`, `"rb"`, `"wb"`, etc.).
 - Paths are interpreted by the underlying C library (relative paths resolve against the process's current working directory).
-- Errors do **not** throw or abort — every built-in returns a sentinel value (empty string, or non-zero return code) so callers can branch explicitly.
-- There is no implicit buffering or text-mode newline translation.
+- Errors do **not** throw or abort — every built-in returns a sentinel value (empty string, null handle, or non-zero return code) so callers can branch explicitly.
+- There is no implicit text-mode newline translation.
 
 ### 21.1 Summary
+
+**Whole-file operations:**
 
 | Built-in | Signature | On success | On failure |
 | --- | --- | --- | --- |
@@ -8611,9 +8616,182 @@ OmScript exposes a small set of synchronous, **whole-file** I/O built-ins backed
 | `file_append` | `(path: string, content: string) → i64` | `0` | `1` |
 | `file_exists` | `(path: string) → bool` | `1` if exists | `0` |
 
+**Handle-based streaming operations (`File` type):**
+
+| Built-in | Signature | Description |
+| --- | --- | --- |
+| `file_open` | `(path: string, mode: string) → File` | Open a file; returns a null handle on failure |
+| `file_close` | `(f: File) → i64` | Close the handle (always call when done) |
+| `file_write_str` | `(f: File, s: string) → i64` | Write string to open file; returns bytes written |
+| `file_read_line` | `(f: File) → string` | Read one line, stripping the trailing `\n`; returns `""` at EOF |
+| `file_read_all` | `(f: File) → string` | Read all remaining content from current position |
+| `file_flush` | `(f: File) → i64` | Flush write buffer; `0` on success |
+| `file_eof` | `(f: File) → bool` | `1` if the handle is at end-of-file |
+| `file_is_open` | `(f: File) → bool` | `1` if the handle is non-null (file opened successfully) |
+
 ---
 
-### 21.2 `file_read(path: string) → string`
+### 21.1a The `File` Type
+
+**Status:** Fully implemented.
+
+`File` is a first-class, bare value type representing an open file handle. Internally it holds an opaque `FILE*` pointer, but at the language level you use it without the `*` — similar to Rust's `std::fs::File`.
+
+**Rules:**
+- Declare with a type annotation and an initializer: `var f: File = file_open(path, mode);`
+- A bare declaration `var f: File;` (without an initializer) is a **compile-time error**.
+- `File` is pointer-sized (8 bytes); `sizeof(File)` returns `8`.
+- There is no implicit close (no RAII/destructor). Always call `file_close(f)` explicitly.
+- A failed `file_open` returns a null handle. Check with `file_is_open(f)` before using it.
+
+**Example — write then read back:**
+```omscript
+import std;
+
+fn main() -> int {
+    // Open for writing
+    var fw: File = file_open("data.txt", "w");
+    if (!file_is_open(fw)) {
+        println("could not open for writing");
+        return 1;
+    }
+    file_write_str(fw, "line one\nline two\n");
+    file_close(fw);
+
+    // Open for reading
+    var fr: File = file_open("data.txt", "r");
+    var line = file_read_line(fr);
+    while (line != "") {
+        println(line);
+        line = file_read_line(fr);
+    }
+    file_close(fr);
+    return 0;
+}
+```
+
+---
+
+### 21.2 `file_open(path: string, mode: string) → File`
+
+**Description:** Open the file at `path` with the given `mode` string (same as C's `fopen` mode: `"r"`, `"w"`, `"a"`, `"rb"`, `"r+"`, etc.). Returns an open `File` handle.
+
+**Returns:** A `File` handle. Returns a null handle if the file cannot be opened. Test with `file_is_open(f)`.
+
+**Example:**
+```omscript
+var f: File = file_open("config.txt", "r");
+if (!file_is_open(f)) {
+    println("open failed");
+}
+```
+
+---
+
+### 21.3 `file_close(f: File) → i64`
+
+**Description:** Close the file handle `f`, flushing any buffered output. Always call this when done with a `File`.
+
+**Returns:** `0` (the return value mirrors `fclose` semantics but is always zero here).
+
+**Example:**
+```omscript
+file_close(f);
+```
+
+---
+
+### 21.4 `file_write_str(f: File, s: string) → i64`
+
+**Description:** Write the string `s` to the open file `f`.
+
+**Returns:** The number of bytes written (same as `strlen(s)` on success).
+
+**Example:**
+```omscript
+var n = file_write_str(f, "hello, world\n");
+```
+
+---
+
+### 21.5 `file_read_line(f: File) → string`
+
+**Description:** Read one line from `f`, stripping the trailing newline character (`\n`). Lines longer than 4095 bytes are truncated.
+
+**Returns:** The line content without the trailing `\n`. Returns `""` (empty string) at EOF.
+
+**Example:**
+```omscript
+var line = file_read_line(f);
+while (line != "") {
+    println(line);
+    line = file_read_line(f);
+}
+```
+
+---
+
+### 21.6 `file_read_all(f: File) → string`
+
+**Description:** Read all remaining content from the current file position to EOF into a single string. Uses `fseek`/`ftell` internally, so it requires a seekable stream.
+
+**Returns:** All remaining content as a string. Returns `""` if already at EOF or if the stream is not seekable.
+
+**Example:**
+```omscript
+var f: File = file_open("data.bin", "rb");
+var content = file_read_all(f);
+file_close(f);
+```
+
+---
+
+### 21.7 `file_flush(f: File) → i64`
+
+**Description:** Flush any pending write buffer for `f` to the underlying file.
+
+**Returns:** `0` on success; a non-zero value (from `fflush`) on error.
+
+**Example:**
+```omscript
+file_write_str(f, "important data");
+file_flush(f);
+```
+
+---
+
+### 21.8 `file_eof(f: File) → bool`
+
+**Description:** Test whether the end-of-file indicator is set on `f`.
+
+**Returns:** `1` (true) if at EOF, `0` (false) otherwise.
+
+**Example:**
+```omscript
+if (file_eof(f)) {
+    println("reached end of file");
+}
+```
+
+---
+
+### 21.9 `file_is_open(f: File) → bool`
+
+**Description:** Test whether `f` is a valid (non-null) open handle. Use this to check whether `file_open` succeeded.
+
+**Returns:** `1` (true) if the handle is non-null, `0` (false) if `file_open` returned a null handle.
+
+**Example:**
+```omscript
+var f: File = file_open("maybe.txt", "r");
+if (file_is_open(f)) {
+    // safe to use f
+}
+```
+
+---
+
+### 21.10 `file_read(path: string) → string`
 
 **Description:** Read the entire contents of `path` into a newly-allocated, null-terminated string. The file is opened in binary mode, so no newline translation occurs.
 
@@ -8629,7 +8807,7 @@ println(content);
 
 ---
 
-### 21.3 `file_write(path: string, content: string) → i64`
+### 21.11 `file_write(path: string, content: string) → i64`
 
 **Description:** Write `content` to `path`, **truncating** any existing file. Opens in binary mode (`"wb"`) and writes exactly `strlen(content)` bytes.
 
@@ -8645,7 +8823,7 @@ if (rc != 0) {
 
 ---
 
-### 21.4 `file_append(path: string, content: string) → i64`
+### 21.12 `file_append(path: string, content: string) → i64`
 
 **Description:** Append `content` to the end of `path`. Opens in append mode (`"a"`); creates the file if it does not exist.
 
@@ -8658,7 +8836,7 @@ file_append("log.txt", "Log entry\n");
 
 ---
 
-### 21.5 `file_exists(path: string) → bool`
+### 21.13 `file_exists(path: string) → bool`
 
 **Description:** Test whether `path` exists and is accessible to the current process. Implemented via POSIX `access(path, F_OK)`.
 
