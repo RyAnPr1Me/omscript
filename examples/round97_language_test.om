@@ -1,0 +1,195 @@
+import std;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Round-97 feature tests
+//   1. when range patterns — when x { 1..10 => body, 10..=20 => body, _ => body }
+//   2. for...else / while...else — else runs only if loop exits without break
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Feature 1: when range patterns ───────────────────────────────────────────
+
+fn classify_score(score: int) -> str {
+    return when score {
+        90..=100 => "A",
+        80..=89  => "B",
+        70..=79  => "C",
+        60..=69  => "D",
+        _        => "F"
+    };
+}
+
+fn classify_range(x: int) -> int {
+    return when x {
+        1..10   => 1,
+        10..20  => 2,
+        20..=30 => 3,
+        _       => 0
+    };
+}
+
+fn test_when_range_patterns() {
+    // Grade classifier (inclusive ranges)
+    assert(classify_score(100) == "A");
+    assert(classify_score(90)  == "A");
+    assert(classify_score(89)  == "B");
+    assert(classify_score(80)  == "B");
+    assert(classify_score(75)  == "C");
+    assert(classify_score(65)  == "D");
+    assert(classify_score(50)  == "F");
+    assert(classify_score(0)   == "F");
+
+    // Mixed half-open / inclusive ranges
+    assert(classify_range(0)  == 0);
+    assert(classify_range(1)  == 1);
+    assert(classify_range(9)  == 1);
+    assert(classify_range(10) == 2);
+    assert(classify_range(19) == 2);
+    assert(classify_range(20) == 3);
+    assert(classify_range(30) == 3);
+    assert(classify_range(31) == 0);
+
+    // Statement-form when with ranges
+    var x: int = 15;
+    var tag = "";
+    when x {
+        1..10   => { tag = "low"; },
+        10..=20 => { tag = "mid"; },
+        _       => { tag = "high"; }
+    }
+    assert(tag == "mid");
+
+    // Inline when-expr with ranges
+    var v: int = 5;
+    var cat: int = when v { 1..5 => 10, 5..=10 => 20, _ => 30 };
+    assert(cat == 20);
+
+    // Boundary: exclusive upper bound falls to next arm
+    var b: int = 10;
+    var r: int = when b { 1..10 => 1, 10..20 => 2, _ => 3 };
+    assert(r == 2);
+
+    println("when range pattern tests passed");
+}
+
+// ── Feature 2: for...else ─────────────────────────────────────────────────────
+
+fn test_for_else_no_break() {
+    var ran: int = 0;
+    for i in 0..5 {
+        ran = ran + 1;
+    } else {
+        ran = ran + 100;
+    }
+    assert(ran == 105);
+}
+
+fn test_for_else_with_break() {
+    var ran: int = 0;
+    for i in 0..10 {
+        if i == 3 { break; }
+        ran = ran + 1;
+    } else {
+        ran = ran + 100;
+    }
+    assert(ran == 3);
+}
+
+fn test_for_else_empty_range() {
+    var flag: int = 0;
+    for i in 5..5 {
+        flag = 99;
+    } else {
+        flag = 42;
+    }
+    assert(flag == 42);
+}
+
+fn test_for_else_nested() {
+    // Break in inner loop does NOT affect outer else
+    var outer_count: int = 0;
+    for i in 0..3 {
+        for j in 0..5 {
+            if j == 2 { break; }
+        }
+        outer_count = outer_count + 1;
+    } else {
+        outer_count = outer_count + 100;
+    }
+    assert(outer_count == 103);
+}
+
+fn test_for_else_search() {
+    var arr = [3, 7, 2, 9, 4, 6, 1, 8];
+    var found_idx: int = -1;
+    for i in 0..8 {
+        if arr[i] > 8 {
+            found_idx = i;
+            break;
+        }
+    } else {
+        found_idx = -2;
+    }
+    assert(found_idx == 3);
+
+    var found_idx2: int = -1;
+    for i in 0..8 {
+        if arr[i] > 100 {
+            found_idx2 = i;
+            break;
+        }
+    } else {
+        found_idx2 = -2;
+    }
+    assert(found_idx2 == -2);
+}
+
+// ── Feature 2: while...else ───────────────────────────────────────────────────
+
+fn test_while_else_no_break() {
+    var count: int = 0;
+    var i: int = 0;
+    while i < 4 {
+        count = count + 1;
+        i = i + 1;
+    } else {
+        count = count + 100;
+    }
+    assert(count == 104);
+}
+
+fn test_while_else_with_break() {
+    var count: int = 0;
+    var i: int = 0;
+    while i < 10 {
+        if i == 4 { break; }
+        count = count + 1;
+        i = i + 1;
+    } else {
+        count = count + 100;
+    }
+    assert(count == 4);
+}
+
+fn test_while_else_false_condition() {
+    var flag: int = 0;
+    var cond: int = 0;
+    while cond > 0 {
+        flag = 99;
+    } else {
+        flag = 42;
+    }
+    assert(flag == 42);
+}
+
+fn main() {
+    test_when_range_patterns();
+    test_for_else_no_break();
+    test_for_else_with_break();
+    test_for_else_empty_range();
+    test_for_else_nested();
+    test_for_else_search();
+    test_while_else_no_break();
+    test_while_else_with_break();
+    test_while_else_false_condition();
+    println("All round97 tests passed");
+}
