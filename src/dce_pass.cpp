@@ -200,8 +200,9 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
 
         long long condVal = 0;
         if (isIntLiteral(whileStmt->condition.get(), &condVal) && condVal == 0) {
-            // while (0) — body is unreachable. For while...else, the condition
-            // failing counts as a normal exit (no break), so run the else body.
+            // while (0) — loop never executes (condition false from the start).
+            // The else body runs on any exit without break, which includes never
+            // having entered the loop, so replace the whole statement with it.
             ++stats.deadLoops;
             if (whileStmt->elseBody)
                 stmt = std::move(whileStmt->elseBody);
