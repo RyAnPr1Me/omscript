@@ -160,6 +160,7 @@ void Parser::registerStdNamespace() {
         {"array_insert", "array_insert"},
         {"array_remove", "array_remove"},
         {"array_mean", "array_mean"},
+        {"array_partition", "array_partition"},
         // ── Map ─────────────────────────────────────────────────────────────
         {"map_new", "map_new"},
         {"map_get", "map_get"},
@@ -172,6 +173,7 @@ void Parser::registerStdNamespace() {
         {"map_merge", "map_merge"},
         {"map_filter", "map_filter"},
         {"map_invert", "map_invert"},
+        {"map_reduce", "map_reduce"},
         // ── Generic ──────────────────────────────────────────────────────────
         {"filter", "filter"},
         // ── I/O ─────────────────────────────────────────────────────────────
@@ -8016,6 +8018,15 @@ std::unique_ptr<Expression> Parser::parsePipe() {
         auto node = std::make_unique<PipeExpr>(std::move(expr), fnName.lexeme);
         node->line = pipeToken.line;
         node->column = pipeToken.column;
+        // Optional extra args: x |> fn(a, b)  →  fn(x, a, b)
+        if (match(TokenType::LPAREN)) {
+            if (!check(TokenType::RPAREN)) {
+                do {
+                    node->extraArgs.push_back(parseExpression());
+                } while (match(TokenType::COMMA));
+            }
+            consume(TokenType::RPAREN, "Expected ')' after pipe extra arguments");
+        }
         expr = std::move(node);
     }
 

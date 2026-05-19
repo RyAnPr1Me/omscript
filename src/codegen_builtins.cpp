@@ -347,6 +347,9 @@ enum class BuiltinId : uint16_t {
     MAP_TO_PAIRS,    ///< map_to_pairs(m)        → flat array [k1,v1,k2,v2,...] of all entries
     STR_INSERT,      ///< str_insert(s, pos, sub)→ new string with sub inserted at pos
     STR_DELETE,      ///< str_delete(s, pos, len)→ new string with len chars removed at pos
+    // ── Round-100 additions ──────────────────────────────────────────────────
+    ARRAY_PARTITION, ///< array_partition(arr, fn) → [[passing...], [failing...]]
+    MAP_REDUCE,      ///< map_reduce(m, init, fn)  → fold over kv pairs: fn(acc, key, val)
     // ── Round-90: threading improvements ────────────────────────────────────
     RWLOCK_NEW,         ///< rwlock_new()          → RWLock handle
     RWLOCK_RDLOCK,      ///< rwlock_rdlock(rw)     → acquires read lock (blocks); returns 0
@@ -670,6 +673,9 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"map_to_pairs",     BuiltinId::MAP_TO_PAIRS},
     {"str_insert",       BuiltinId::STR_INSERT},
     {"str_delete",       BuiltinId::STR_DELETE},
+    // ── Round-100 ────────────────────────────────────────────────────────────
+    {"array_partition",  BuiltinId::ARRAY_PARTITION},
+    {"map_reduce",       BuiltinId::MAP_REDUCE},
     // ── Round-90: threading improvements ─────────────────────────────────────
     {"rwlock_new",       BuiltinId::RWLOCK_NEW},
     {"rwlock_rdlock",    BuiltinId::RWLOCK_RDLOCK},
@@ -11932,6 +11938,206 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nulPtr);
         stringReturningFunctions_.insert("str_delete");
         return hdr;
+    }
+
+    // ── Round-100: array_partition(arr, fn) ──────────────────────────────────
+    // Splits arr into two sub-arrays: [passing[], failing[]] based on fn(elem).
+    // Returns a 2-element array where index 0 = passing, index 1 = failing.
+    if (bid == BuiltinId::ARRAY_PARTITION) {
+        validateArgCount(expr, "array_partition", 2);
+        const std::string apFnName = extractFnName(expr->arguments[1].get());
+        if (apFnName.empty())
+            codegenError("array_partition: second argument must be a function name", expr);
+        auto apCalleeIt = functions.find(apFnName);
+        if (apCalleeIt == functions.end() || !apCalleeIt->second)
+            codegenError("array_partition: unknown function '" + apFnName + "'", expr);
+        llvm::Function* apPredFn = apCalleeIt->second;
+        if (apPredFn->arg_size() < 1)
+            codegenError("array_partition: function '" + apFnName + "' must accept at least 1 argument", expr);
+
+        llvm::Value* apArrArg = generateExpression(expr->arguments[0].get());
+        apArrArg = toDefaultType(apArrArg);
+        llvm::Value* apArrPtr = getArrayPtr(apArrArg);
+        llvm::Value* apLen = emitLoadArrayLen(apArrPtr, "apart.len");
+
+        llvm::Value* apZero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* apOne  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* apEight = llvm::ConstantInt::get(getDefaultType(), 8);
+
+        // Allocate two output buffers — worst case each holds all elements.
+        llvm::Value* apSlots = builder->CreateAdd(apLen, apOne, "apart.slots", true, true);
+        llvm::Value* apBytes = builder->CreateMul(apSlots, apEight, "apart.bytes", true, true);
+        llvm::Value* apPass  = builder->CreateCall(getOrDeclareMalloc(), {apBytes}, "apart.pass");
+        llvm::Value* apFail  = builder->CreateCall(getOrDeclareMalloc(), {apBytes}, "apart.fail");
+        emitStoreArrayLen(apZero, apPass);
+        emitStoreArrayLen(apZero, apFail);
+
+        llvm::Function* apParentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* apPre   = builder->GetInsertBlock();
+        llvm::BasicBlock* apLoop  = llvm::BasicBlock::Create(*context, "apart.loop", apParentFn);
+        llvm::BasicBlock* apTest  = llvm::BasicBlock::Create(*context, "apart.test", apParentFn);
+        llvm::BasicBlock* apAddP  = llvm::BasicBlock::Create(*context, "apart.addp", apParentFn);
+        llvm::BasicBlock* apAddF  = llvm::BasicBlock::Create(*context, "apart.addf", apParentFn);
+        llvm::BasicBlock* apInc   = llvm::BasicBlock::Create(*context, "apart.inc",  apParentFn);
+        llvm::BasicBlock* apDone  = llvm::BasicBlock::Create(*context, "apart.done", apParentFn);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(apLoop)));
+
+        builder->SetInsertPoint(apLoop);
+        llvm::PHINode* apIdx  = builder->CreatePHI(getDefaultType(), 2, "apart.idx");
+        llvm::PHINode* apPIdx = builder->CreatePHI(getDefaultType(), 2, "apart.pidx");
+        llvm::PHINode* apFIdx = builder->CreatePHI(getDefaultType(), 2, "apart.fidx");
+        apIdx->addIncoming(apZero, apPre);
+        apPIdx->addIncoming(apZero, apPre);
+        apFIdx->addIncoming(apZero, apPre);
+        nonNegValues_.insert(apPIdx);
+        nonNegValues_.insert(apFIdx);
+        builder->CreateCondBr(builder->CreateICmpULT(apIdx, apLen, "apart.cond"), apTest, apDone);
+
+        builder->SetInsertPoint(apTest);
+        llvm::Value* apElemOff = builder->CreateAdd(apIdx, apOne, "apart.eoff", true, true);
+        llvm::Value* apElemPtr = builder->CreateInBoundsGEP(getDefaultType(), apArrPtr, apElemOff, "apart.eptr");
+        llvm::Value* apElem    = emitLoadArrayElem(apElemPtr, "apart.elem");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(apElem)->setMetadata(llvm::LLVMContext::MD_noundef,
+                                                               llvm::MDNode::get(*context, {}));
+        llvm::Value* apPred = builder->CreateCall(apPredFn, {apElem}, "apart.pred");
+        apPred = toDefaultType(apPred);
+        builder->CreateCondBr(builder->CreateICmpNE(apPred, apZero, "apart.keep"), apAddP, apAddF);
+
+        // Passing bucket
+        builder->SetInsertPoint(apAddP);
+        llvm::Value* apNewPIdx = builder->CreateAdd(apPIdx, apOne, "apart.npidx", true, true);
+        auto* apPStore = builder->CreateStore(
+            apElem, builder->CreateInBoundsGEP(getDefaultType(), apPass, apNewPIdx, "apart.pdst"));
+        apPStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        builder->CreateBr(apInc);
+
+        // Failing bucket
+        builder->SetInsertPoint(apAddF);
+        llvm::Value* apNewFIdx = builder->CreateAdd(apFIdx, apOne, "apart.nfidx", true, true);
+        auto* apFStore = builder->CreateStore(
+            apElem, builder->CreateInBoundsGEP(getDefaultType(), apFail, apNewFIdx, "apart.fdst"));
+        apFStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        builder->CreateBr(apInc);
+
+        builder->SetInsertPoint(apInc);
+        llvm::PHINode* apMrgP = builder->CreatePHI(getDefaultType(), 2, "apart.mrgp");
+        llvm::PHINode* apMrgF = builder->CreatePHI(getDefaultType(), 2, "apart.mrgf");
+        apMrgP->addIncoming(apNewPIdx, apAddP);
+        apMrgP->addIncoming(apPIdx,    apAddF);
+        apMrgF->addIncoming(apFIdx,    apAddP);
+        apMrgF->addIncoming(apNewFIdx, apAddF);
+        nonNegValues_.insert(apMrgP);
+        nonNegValues_.insert(apMrgF);
+        llvm::Value* apNextIdx = builder->CreateAdd(apIdx, apOne, "apart.next", true, true);
+        apIdx->addIncoming(apNextIdx, apInc);
+        apPIdx->addIncoming(apMrgP,   apInc);
+        apFIdx->addIncoming(apMrgF,   apInc);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(apLoop)));
+
+        builder->SetInsertPoint(apDone);
+        // Write final lengths into the two sub-arrays
+        emitStoreArrayLen(apPIdx, apPass);
+        emitStoreArrayLen(apFIdx, apFail);
+
+        // Allocate outer 2-element array: [2, passPtr_as_i64, failPtr_as_i64]
+        llvm::Value* apOuter = builder->CreateCall(
+            getOrDeclareMalloc(),
+            {llvm::ConstantInt::get(getDefaultType(), 24)}, "apart.outer"); // 3 * 8 bytes
+        emitStoreArrayLen(llvm::ConstantInt::get(getDefaultType(), 2), apOuter);
+        llvm::Value* apPassInt = builder->CreatePtrToInt(apPass, getDefaultType(), "apart.passint");
+        llvm::Value* apFailInt = builder->CreatePtrToInt(apFail, getDefaultType(), "apart.failint");
+        auto* apSlot0 = builder->CreateInBoundsGEP(getDefaultType(), apOuter,
+                            llvm::ConstantInt::get(getDefaultType(), 1), "apart.slot0");
+        auto* apSlot1 = builder->CreateInBoundsGEP(getDefaultType(), apOuter,
+                            llvm::ConstantInt::get(getDefaultType(), 2), "apart.slot1");
+        builder->CreateAlignedStore(apPassInt, apSlot0, llvm::MaybeAlign(8));
+        builder->CreateAlignedStore(apFailInt, apSlot1, llvm::MaybeAlign(8));
+        arrayReturningFunctions_.insert("array_partition");
+        return apOuter;
+    }
+
+    // ── Round-100: map_reduce(m, init, fn) ───────────────────────────────────
+    // Folds over all (key, val) pairs in the map.  fn(acc, key, val) → i64.
+    // Returns the final accumulator value.
+    if (bid == BuiltinId::MAP_REDUCE) {
+        validateArgCount(expr, "map_reduce", 3);
+        const std::string mrFnName = extractFnName(expr->arguments[2].get());
+        if (mrFnName.empty())
+            codegenError("map_reduce: third argument must be a function name", expr);
+        auto mrCalleeIt = functions.find(mrFnName);
+        if (mrCalleeIt == functions.end() || !mrCalleeIt->second)
+            codegenError("map_reduce: unknown function '" + mrFnName + "'", expr);
+        llvm::Function* mrFn = mrCalleeIt->second;
+        if (mrFn->arg_size() < 3)
+            codegenError("map_reduce: function '" + mrFnName +
+                             "' must accept at least 3 arguments (acc, key, val)", expr);
+
+        llvm::Value* mrMapArg  = generateExpression(expr->arguments[0].get());
+        llvm::Value* mrInitVal = generateExpression(expr->arguments[1].get());
+        mrInitVal = toDefaultType(mrInitVal);
+        llvm::Value* mrMapPtr  = emitToArrayPtr(mrMapArg, "mreduce.mapptr");
+
+        // Read cap from map header [cap:i64, count:i64, buckets...]
+        llvm::Value* mrCap  = builder->CreateAlignedLoad(getDefaultType(), mrMapPtr, llvm::MaybeAlign(8), "mreduce.cap");
+        llvm::Value* mrZero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* mrOne  = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        llvm::Function* mrParentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* mrPre  = builder->GetInsertBlock();
+        llvm::BasicBlock* mrLoop = llvm::BasicBlock::Create(*context, "mreduce.loop", mrParentFn);
+        llvm::BasicBlock* mrTest = llvm::BasicBlock::Create(*context, "mreduce.test", mrParentFn);
+        llvm::BasicBlock* mrCall = llvm::BasicBlock::Create(*context, "mreduce.call", mrParentFn);
+        llvm::BasicBlock* mrInc  = llvm::BasicBlock::Create(*context, "mreduce.inc",  mrParentFn);
+        llvm::BasicBlock* mrDone = llvm::BasicBlock::Create(*context, "mreduce.done", mrParentFn);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(mrLoop)));
+
+        builder->SetInsertPoint(mrLoop);
+        llvm::PHINode* mrBi  = builder->CreatePHI(getDefaultType(), 2, "mreduce.bi");
+        llvm::PHINode* mrAcc = builder->CreatePHI(getDefaultType(), 2, "mreduce.acc");
+        mrBi->addIncoming(mrZero, mrPre);
+        mrAcc->addIncoming(mrInitVal, mrPre);
+        builder->CreateCondBr(builder->CreateICmpULT(mrBi, mrCap, "mreduce.bcond"), mrTest, mrDone);
+
+        builder->SetInsertPoint(mrTest);
+        // bucket offset = 2 + bi*3
+        llvm::Value* mrBoff = builder->CreateAdd(
+            builder->CreateMul(mrBi, llvm::ConstantInt::get(getDefaultType(), 3), "mreduce.b3", true, true),
+            llvm::ConstantInt::get(getDefaultType(), 2), "mreduce.boff", true, true);
+        llvm::Value* mrHash = builder->CreateAlignedLoad(
+            getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mrMapPtr, mrBoff, "mreduce.hashp"),
+            llvm::MaybeAlign(8), "mreduce.hash");
+        // Skip empty buckets (hash == 0)
+        builder->CreateCondBr(builder->CreateICmpNE(mrHash, mrZero, "mreduce.occ"), mrCall, mrInc);
+
+        builder->SetInsertPoint(mrCall);
+        llvm::Value* mrKoff = builder->CreateAdd(mrBoff, mrOne, "mreduce.koff", true, true);
+        llvm::Value* mrKey  = builder->CreateAlignedLoad(
+            getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mrMapPtr, mrKoff, "mreduce.keyp"),
+            llvm::MaybeAlign(8), "mreduce.key");
+        llvm::Value* mrVoff = builder->CreateAdd(mrBoff, llvm::ConstantInt::get(getDefaultType(), 2),
+                                                  "mreduce.voff", true, true);
+        llvm::Value* mrVal  = builder->CreateAlignedLoad(
+            getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mrMapPtr, mrVoff, "mreduce.valp"),
+            llvm::MaybeAlign(8), "mreduce.val");
+        llvm::Value* mrNewAcc = builder->CreateCall(mrFn, {mrAcc, mrKey, mrVal}, "mreduce.newacc");
+        mrNewAcc = toDefaultType(mrNewAcc);
+        builder->CreateBr(mrInc);
+
+        builder->SetInsertPoint(mrInc);
+        llvm::PHINode* mrAccMrg = builder->CreatePHI(getDefaultType(), 2, "mreduce.accmrg");
+        mrAccMrg->addIncoming(mrAcc,    mrTest);  // empty bucket: acc unchanged
+        mrAccMrg->addIncoming(mrNewAcc, mrCall);
+        llvm::Value* mrNextBi = builder->CreateAdd(mrBi, mrOne, "mreduce.next", true, true);
+        mrBi->addIncoming(mrNextBi, mrInc);
+        mrAcc->addIncoming(mrAccMrg, mrInc);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(mrLoop)));
+
+        builder->SetInsertPoint(mrDone);
+        return mrAcc;
     }
 
     // -----------------------------------------------------------------------

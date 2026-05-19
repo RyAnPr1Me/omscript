@@ -159,9 +159,13 @@ static unsigned propagateInExpr(std::unique_ptr<Expression>& expr, const CopyMap
     case ASTNodeType::SPREAD_EXPR:
         count += propagateInExpr(static_cast<SpreadExpr*>(expr.get())->operand, map, opaque);
         break;
-    case ASTNodeType::PIPE_EXPR:
-        count += propagateInExpr(static_cast<PipeExpr*>(expr.get())->left, map, opaque);
+    case ASTNodeType::PIPE_EXPR: {
+        auto* pe = static_cast<PipeExpr*>(expr.get());
+        count += propagateInExpr(pe->left, map, opaque);
+        for (auto& ea : pe->extraArgs)
+            count += propagateInExpr(ea, map, opaque);
         break;
+    }
     case ASTNodeType::MOVE_EXPR:
         count += propagateInExpr(static_cast<MoveExpr*>(expr.get())->source, map, opaque);
         break;

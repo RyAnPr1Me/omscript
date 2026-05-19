@@ -967,6 +967,7 @@ ptest_program "examples/round87_ns_type_qualtype_test.om" 8
 ptest_program "examples/file_type_test.om" 10
 ptest_program "examples/round89_test.om" 22
 ptest_program "examples/round99_iterator_opt_test.om" 13
+ptest_program "examples/round100_language_test.om" 14
 flush_ptests
 
 echo ""

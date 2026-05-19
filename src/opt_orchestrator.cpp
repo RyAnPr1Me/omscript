@@ -866,9 +866,13 @@ void OptimizationOrchestrator::runPreflightCheck(Program* program, OptimizationC
         case ASTNodeType::SPREAD_EXPR:
             checkExpr(static_cast<const SpreadExpr*>(e)->operand.get(), fnName);
             break;
-        case ASTNodeType::PIPE_EXPR:
-            checkExpr(static_cast<const PipeExpr*>(e)->left.get(), fnName);
+        case ASTNodeType::PIPE_EXPR: {
+            const auto* pe = static_cast<const PipeExpr*>(e);
+            checkExpr(pe->left.get(), fnName);
+            for (const auto& ea : pe->extraArgs)
+                checkExpr(ea.get(), fnName);
             break;
+        }
         case ASTNodeType::MOVE_EXPR:
             checkExpr(static_cast<const MoveExpr*>(e)->source.get(), fnName);
             break;

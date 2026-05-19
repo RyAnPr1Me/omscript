@@ -156,9 +156,13 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
     case ASTNodeType::SPREAD_EXPR:
         count += simplifyExpr(static_cast<SpreadExpr*>(expr.get())->operand);
         break;
-    case ASTNodeType::PIPE_EXPR:
-        count += simplifyExpr(static_cast<PipeExpr*>(expr.get())->left);
+    case ASTNodeType::PIPE_EXPR: {
+        auto* pe = static_cast<PipeExpr*>(expr.get());
+        count += simplifyExpr(pe->left);
+        for (auto& ea : pe->extraArgs)
+            count += simplifyExpr(ea);
         break;
+    }
     case ASTNodeType::MOVE_EXPR:
         count += simplifyExpr(static_cast<MoveExpr*>(expr.get())->source);
         break;

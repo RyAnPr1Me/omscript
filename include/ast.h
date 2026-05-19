@@ -280,6 +280,9 @@ class PipeExpr : public Expression {
   public:
     std::unique_ptr<Expression> left;
     std::string functionName;
+    /// Extra arguments supplied in `x |> fn(a, b)` form.
+    /// When non-empty, desugars to `fn(x, a, b)` rather than `fn(x)`.
+    std::vector<std::unique_ptr<Expression>> extraArgs;
 
     PipeExpr(std::unique_ptr<Expression> l, const std::string& fn)
         : Expression(ASTNodeType::PIPE_EXPR), left(std::move(l)), functionName(fn) {}

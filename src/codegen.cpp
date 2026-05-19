@@ -6231,11 +6231,14 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
     case ASTNodeType::FIELD_ASSIGN_EXPR:
         return generateFieldAssign(static_cast<FieldAssignExpr*>(expr));
     case ASTNodeType::PIPE_EXPR: {
-        // Desugar: expr |> fn  =>  fn(expr)
+        // Desugar: expr |> fn       =>  fn(expr)
+        //          expr |> fn(a, b) =>  fn(expr, a, b)
         auto* pipe = static_cast<PipeExpr*>(expr);
         // Create a synthetic CallExpr and generate it
         std::vector<std::unique_ptr<Expression>> args;
         args.push_back(std::move(pipe->left));
+        for (auto& extra : pipe->extraArgs)
+            args.push_back(std::move(extra));
         auto callExpr = std::make_unique<CallExpr>(pipe->functionName, std::move(args));
         callExpr->fromStdNamespace = true; // pipe-forward desugaring
         callExpr->line = pipe->line;
