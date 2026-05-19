@@ -1,0 +1,171 @@
+import std;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Round-98 language feature tests
+//   1. do...while paren-free  — do { body } while cond;
+//   2. let...in expressions   — let x = e1, y = e2 in body
+//   3. Named function arguments (already in Round-72, verified here again)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Feature 1: do...while paren-free ─────────────────────────────────────────
+
+fn test_dowhile_paren_free_basic() {
+    var i = 0;
+    do {
+        i = i + 1;
+    } while i < 5;
+    assert(i == 5);
+    println("do-while paren-free basic passed");
+}
+
+fn test_dowhile_runs_at_least_once() {
+    // Condition false from start — body still executes once
+    var ran = 0;
+    do {
+        ran = ran + 1;
+    } while ran > 100;
+    assert(ran == 1);
+    println("do-while runs at least once passed");
+}
+
+fn test_dowhile_paren_free_sum() {
+    var sum = 0;
+    var n = 1;
+    do {
+        sum = sum + n;
+        n = n + 1;
+    } while n <= 10;
+    assert(sum == 55);  // 1+2+...+10
+    println("do-while paren-free sum passed");
+}
+
+fn test_dowhile_with_parens_still_works() {
+    // Original paren form must still be supported
+    var x = 0;
+    do {
+        x = x + 1;
+    } while (x < 3);
+    assert(x == 3);
+    println("do-while with parens still works");
+}
+
+fn test_dowhile_break() {
+    var count = 0;
+    do {
+        count = count + 1;
+        if count == 3 { break; }
+    } while count < 10;
+    assert(count == 3);
+    println("do-while break passed");
+}
+
+// ── Feature 2: let...in expressions ─────────────────────────────────────────
+
+fn test_letin_single_binding() {
+    var result = let x = 42 in x;
+    assert(result == 42);
+    println("let-in single binding passed");
+}
+
+fn test_letin_two_bindings() {
+    var result = let x = 5, y = 10 in x + y;
+    assert(result == 15);
+    println("let-in two bindings passed");
+}
+
+fn test_letin_expression() {
+    var a = 3;
+    var b = 4;
+    var hyp = let dx = a * a, dy = b * b in dx + dy;
+    assert(hyp == 25);  // 9 + 16
+    println("let-in expression passed");
+}
+
+fn test_letin_nested() {
+    var result = let outer = 10 in let inner = outer + 5 in outer + inner;
+    assert(result == 25);  // 10 + 15
+    println("let-in nested passed");
+}
+
+fn test_letin_arithmetic() {
+    var x = 7;
+    var y = let a = x * 2, b = x + 1 in a + b;  // 14 + 8 = 22
+    assert(y == 22);
+    println("let-in arithmetic passed");
+}
+
+fn test_letin_three_bindings() {
+    var result = let a = 1, b = 2, c = 3 in a + b + c;
+    assert(result == 6);
+    println("let-in three bindings passed");
+}
+
+fn test_letin_in_condition() {
+    var val = 10;
+    var ok = let threshold = 5 in val > threshold;
+    assert(ok == 1);
+    println("let-in in condition passed");
+}
+
+fn test_letin_scope_isolation() {
+    var x = 99;
+    // The 'x' inside let...in should not affect the outer x
+    var inner = let x = 7 in x * 2;
+    assert(inner == 14);
+    assert(x == 99);  // outer x unchanged
+    println("let-in scope isolation passed");
+}
+
+// ── Feature 3: Named function arguments (confirmed) ──────────────────────────
+
+fn add3(a: int, b: int, c: int) -> int {
+    return a + b + c;
+}
+
+fn greet(name: str, greeting: str) -> str {
+    return greeting + ", " + name + "!";
+}
+
+fn test_named_args_reorder() {
+    var r = add3(c: 3, a: 1, b: 2);
+    assert(r == 6);
+    println("named args reorder passed");
+}
+
+fn test_named_args_string() {
+    var msg = greet(greeting: "Hello", name: "World");
+    assert(msg == "Hello, World!");
+    println("named args string passed");
+}
+
+fn test_named_args_mixed() {
+    var r = add3(1, c: 3, b: 2);
+    assert(r == 6);
+    println("named args mixed passed");
+}
+
+fn main() {
+    // do...while paren-free
+    test_dowhile_paren_free_basic();
+    test_dowhile_runs_at_least_once();
+    test_dowhile_paren_free_sum();
+    test_dowhile_with_parens_still_works();
+    test_dowhile_break();
+
+    // let...in expressions
+    test_letin_single_binding();
+    test_letin_two_bindings();
+    test_letin_expression();
+    test_letin_nested();
+    test_letin_arithmetic();
+    test_letin_three_bindings();
+    test_letin_in_condition();
+    test_letin_scope_isolation();
+
+    // named args
+    test_named_args_reorder();
+    test_named_args_string();
+    test_named_args_mixed();
+
+    println("All round98 tests passed");
+}

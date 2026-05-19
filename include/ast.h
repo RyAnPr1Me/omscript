@@ -77,6 +77,7 @@ enum class ASTNodeType {
     JMP_STMT,          // jmp label; — unconditional jump to a named label (deprecated)
     LABEL_STMT,        // label name: — declares a named jump target in the current function
     TUPLE_EXPR,        // (v1, v2, ...) — tuple literal; lowered to an anonymous LLVM struct
+    LET_IN_EXPR,       // let x = e1, y = e2 in body — scoped bindings in expression context
 };
 
 class ASTNode {
@@ -1216,6 +1217,22 @@ class NewConstructExpr : public Expression {
 
     NewConstructExpr(std::string tn, std::vector<std::pair<std::string, std::unique_ptr<Expression>>> flds)
         : Expression(ASTNodeType::NEW_CONSTRUCT_EXPR), typeName(std::move(tn)), fields(std::move(flds)) {}
+};
+
+/// `let x = e1, y = e2 in body`
+/// Introduces scoped bindings visible only within `body`. The expression
+/// evaluates to the value of `body`.
+class LetInExpr : public Expression {
+  public:
+    struct Binding {
+        std::string name;
+        std::unique_ptr<Expression> value;
+    };
+    std::vector<Binding> bindings;
+    std::unique_ptr<Expression> body;
+
+    LetInExpr(std::vector<Binding> b, std::unique_ptr<Expression> body)
+        : Expression(ASTNodeType::LET_IN_EXPR), bindings(std::move(b)), body(std::move(body)) {}
 };
 
 } // namespace omscript

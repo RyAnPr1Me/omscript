@@ -96,6 +96,7 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"trylock",   TokenType::TRYLOCK},    // mutex_try_lock sugar
     {"ensure",    TokenType::ENSURE},     // ensure — always-on runtime guard
     {"impl",      TokenType::IMPL},       // impl   — method block for a struct type
+    {"let",       TokenType::LET},        // let    — scoped let...in expression binding
 };
 
 /// Throw a DiagnosticError with the given message and source location.

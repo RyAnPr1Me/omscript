@@ -3507,9 +3507,12 @@ std::unique_ptr<Statement> Parser::parseDoWhileStmt() {
     } else {
         consume(TokenType::WHILE, "Expected 'while' or 'until' after do block");
     }
-    consume(TokenType::LPAREN, isUntil ? "Expected '(' after 'until'" : "Expected '(' after 'while'");
+    // Optional parentheses (paren-free form: `do { } while cond;` also accepted)
+    const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
-    consume(TokenType::RPAREN, "Expected ')' after condition");
+    if (hasParen) {
+        consume(TokenType::RPAREN, "Expected ')' after condition");
+    }
     consume(TokenType::SEMICOLON, "Expected ';' after do-while/until statement");
 
     if (isUntil) {
@@ -5744,7 +5747,10 @@ check_in:
     // 'not in' operator: x not in arr → !array_contains(arr, x)
     // 'not' is parsed as an IDENTIFIER (no dedicated keyword), so check for
     // IDENTIFIER with lexeme "not" followed by the IN keyword.
-    if (check(TokenType::IDENTIFIER) && peek().lexeme == "not" &&
+    // Suppressed inside let...in binding values (inLetBinding_ flag) so that
+    // 'in' terminates the binding rather than being consumed as an operator.
+    if (!inLetBinding_ &&
+        check(TokenType::IDENTIFIER) && peek().lexeme == "not" &&
         current + 1 < tokens.size() && tokens[current + 1].type == TokenType::IN) {
         const Token notToken = tokens[current];
         advance(); // consume 'not'
@@ -5765,7 +5771,8 @@ check_in:
 
     // 'in' operator: x in arr → array_contains(arr, x)
     // Placed at comparison precedence so it binds like other relational ops.
-    if (match(TokenType::IN)) {
+    // Suppressed inside let...in binding values so 'in' terminates the binding.
+    if (!inLetBinding_ && match(TokenType::IN)) {
         const Token inToken = tokens[current - 1];
         auto container = parseShift();
         std::vector<std::unique_ptr<Expression>> args;
@@ -6594,6 +6601,35 @@ std::unique_ptr<Expression> Parser::parsePrimary() {
         ternary->line = ifTok.line;
         ternary->column = ifTok.column;
         return ternary;
+    }
+
+    // ── let...in expression: `let x = e1, y = e2 in body` ─────────────────
+    // Introduces scoped bindings visible only in `body`. Evaluates to body.
+    if (check(TokenType::LET)) {
+        const Token letTok = tokens[current];
+        advance(); // consume 'let'
+        std::vector<LetInExpr::Binding> bindings;
+        do {
+            const Token nameTok = consume(TokenType::IDENTIFIER, "Expected variable name in let binding");
+            consume(TokenType::ASSIGN, "Expected '=' after variable name in let binding");
+            // Suppress the 'in' membership operator while parsing binding values
+            // so that 'in' terminates the binding list rather than being consumed
+            // as an operator (e.g. `let x = 5 in body` must parse as let-in, not
+            // `array_contains(body, 5)`).
+            inLetBinding_ = true;
+            auto val = parseExpression();
+            inLetBinding_ = false;
+            LetInExpr::Binding b;
+            b.name = nameTok.lexeme;
+            b.value = std::move(val);
+            bindings.push_back(std::move(b));
+        } while (match(TokenType::COMMA));
+        consume(TokenType::IN, "Expected 'in' after let bindings");
+        auto body = parseExpression();
+        auto letIn = std::make_unique<LetInExpr>(std::move(bindings), std::move(body));
+        letIn->line = letTok.line;
+        letIn->column = letTok.column;
+        return letIn;
     }
 
     // Anonymous function expression: fn(params) -> RetType { body }

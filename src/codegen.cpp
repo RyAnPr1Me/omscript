@@ -6202,6 +6202,8 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generatePrefix(static_cast<PrefixExpr*>(expr));
     case ASTNodeType::TERNARY_EXPR:
         return generateTernary(static_cast<TernaryExpr*>(expr));
+    case ASTNodeType::LET_IN_EXPR:
+        return generateLetIn(static_cast<LetInExpr*>(expr));
     case ASTNodeType::ARRAY_EXPR:
         return generateArray(static_cast<ArrayExpr*>(expr));
     case ASTNodeType::INDEX_EXPR:

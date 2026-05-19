@@ -96,6 +96,7 @@ enum class TokenType {
     TRYLOCK,   // trylock   — mutex_try_lock keyword sugar
     ENSURE,     // ensure  — always-on runtime guard
     IMPL,       // impl    — method block for a struct type
+    LET,        // let     — scoped let...in expression binding
 
     // Operators
     PLUS,

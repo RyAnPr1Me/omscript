@@ -537,6 +537,7 @@ ptest_program "examples/round94_language_test.om" 35
 ptest_program "examples/round95_language_test.om" 0
 ptest_program "examples/round96_language_test.om" 0
 ptest_program "examples/round97_language_test.om" 0
+ptest_program "examples/round98_language_test.om" 0
 flush_ptests
 test_cli_output "error-location-arrow" "-->" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "error-includes-filename" "undefined_var.om" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err

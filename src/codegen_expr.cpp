@@ -6009,6 +6009,21 @@ bool CodeGenerator::canStackAllocateArray(const std::string& varName) const {
     return stackAllocatedArrays_.count(varName) != 0;
 }
 
+llvm::Value* CodeGenerator::generateLetIn(LetInExpr* expr) {
+    // Evaluate bindings in order, then evaluate body with bindings in scope.
+    beginScope();
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    for (auto& binding : expr->bindings) {
+        llvm::Value* val = generateExpression(binding.value.get());
+        llvm::AllocaInst* alloca = createEntryBlockAlloca(function, binding.name, val->getType());
+        builder->CreateStore(val, alloca);
+        bindVariable(binding.name, alloca);
+    }
+    llvm::Value* result = generateExpression(expr->body.get());
+    endScope();
+    return result;
+}
+
 llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
     // Check if any elements are spread expressions
     bool hasSpread = false;

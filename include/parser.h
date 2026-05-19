@@ -78,6 +78,10 @@ class Parser {
     int lambdaCounter_ = 0;
     int recursionDepth_ = 0;
 
+    /// Set while parsing a let...in binding value; suppresses the 'in'
+    /// membership-test operator so that 'in' terminates the binding.
+    bool inLetBinding_ = false;
+
     /// Set to true by parsePrimary() when it resolves a namespace-qualified
     /// call (e.g. std::abs).  Read and immediately cleared by parseCall() to
     /// set CallExpr::fromStdNamespace on the resulting node.
