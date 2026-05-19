@@ -78,6 +78,8 @@ enum class ASTNodeType {
     LABEL_STMT,        // label name: — declares a named jump target in the current function
     TUPLE_EXPR,        // (v1, v2, ...) — tuple literal; lowered to an anonymous LLVM struct
     LET_IN_EXPR,       // let x = e1, y = e2 in body — scoped bindings in expression context
+    FOR_KV_STMT,       // for k, v in map { ... } — native hashmap key-value iteration
+    ARRAY_COMPREHENSION_EXPR, // [expr for var in coll if cond] — fused single-pass comprehension
 };
 
 class ASTNode {
@@ -206,6 +208,24 @@ class ArrayExpr : public Expression {
 
     explicit ArrayExpr(std::vector<std::unique_ptr<Expression>> elems)
         : Expression(ASTNodeType::ARRAY_EXPR), elements(std::move(elems)) {}
+};
+
+/// [mapExpr for varName in sourceExpr if filterExpr] — fused single-pass comprehension.
+/// filterExpr may be nullptr (no filter condition).  Emitted in codegen as a single loop
+/// that avoids the intermediate array allocation produced by array_map(array_filter(...)).
+class ArrayComprehensionExpr : public Expression {
+  public:
+    std::string varName;                       ///< iteration variable name
+    std::unique_ptr<Expression> sourceExpr;    ///< collection to iterate
+    std::unique_ptr<Expression> filterExpr;    ///< optional filter (may be nullptr)
+    std::unique_ptr<Expression> mapExpr;       ///< element expression to collect
+
+    ArrayComprehensionExpr(const std::string& var,
+                           std::unique_ptr<Expression> src,
+                           std::unique_ptr<Expression> filt,
+                           std::unique_ptr<Expression> map)
+        : Expression(ASTNodeType::ARRAY_COMPREHENSION_EXPR), varName(var),
+          sourceExpr(std::move(src)), filterExpr(std::move(filt)), mapExpr(std::move(map)) {}
 };
 
 class IndexExpr : public Expression {
@@ -428,6 +448,24 @@ class ForEachStmt : public Statement {
 
     ForEachStmt(const std::string& iter, std::unique_ptr<Expression> coll, std::unique_ptr<Statement> b)
         : Statement(ASTNodeType::FOR_EACH_STMT), iteratorVar(iter), collection(std::move(coll)), body(std::move(b)) {}
+};
+
+/// for k, v in map { ... } — native hashmap key-value iteration.
+/// In codegen: if collection is a dict, emits a bucket-walking loop;
+/// otherwise falls back to indexed array access.
+class ForKVStmt : public Statement {
+  public:
+    std::string keyVar;
+    std::string valVar;
+    std::unique_ptr<Expression> collection;
+    std::unique_ptr<Statement> body;
+    std::string label; ///< Optional loop label for labeled break/continue
+    LoopConfig loopHints;
+
+    ForKVStmt(const std::string& k, const std::string& v,
+              std::unique_ptr<Expression> coll, std::unique_ptr<Statement> b)
+        : Statement(ASTNodeType::FOR_KV_STMT), keyVar(k), valVar(v),
+          collection(std::move(coll)), body(std::move(b)) {}
 };
 
 // A single case arm in a switch statement.

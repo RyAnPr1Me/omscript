@@ -2384,6 +2384,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
             case ASTNodeType::DO_WHILE_STMT: collectLabels(static_cast<const DoWhileStmt*>(s)->body.get()); break;
             case ASTNodeType::FOR_STMT: collectLabels(static_cast<const ForStmt*>(s)->body.get()); break;
             case ASTNodeType::FOR_EACH_STMT: collectLabels(static_cast<const ForEachStmt*>(s)->body.get()); break;
+            case ASTNodeType::FOR_KV_STMT: collectLabels(static_cast<const ForKVStmt*>(s)->body.get()); break;
             default: break;
             }
         };
@@ -2416,6 +2417,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
             case ASTNodeType::DO_WHILE_STMT: validateJmps(static_cast<const DoWhileStmt*>(s)->body.get()); break;
             case ASTNodeType::FOR_STMT: validateJmps(static_cast<const ForStmt*>(s)->body.get()); break;
             case ASTNodeType::FOR_EACH_STMT: validateJmps(static_cast<const ForEachStmt*>(s)->body.get()); break;
+            case ASTNodeType::FOR_KV_STMT: validateJmps(static_cast<const ForKVStmt*>(s)->body.get()); break;
             default: break;
             }
         };
@@ -3550,46 +3552,13 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
             consume(TokenType::RPAREN, "Expected ')' after for-each collection");
         auto body = parseStatement();
 
-        // Desugar to: { var __arr = collection; for (idx in 0...len(__arr)) { var item = __arr[idx]; body } }
-        static int forIdxCounter = 0;
-        const int id = forIdxCounter++;
-        const std::string arrTmp = "__for_arr_" + std::to_string(id);
-
-        std::vector<std::unique_ptr<Statement>> outerStmts;
-
-        // var __for_arr_N = collection;
-        auto arrDecl = std::make_unique<VarDecl>(arrTmp, std::move(collection));
-        arrDecl->isCompilerGenerated = true;
-        arrDecl->line = varName.line;
-        arrDecl->column = varName.column;
-        outerStmts.push_back(std::move(arrDecl));
-
-        // Build inner body: { var item = __for_arr_N[idx]; original_body }
-        std::vector<std::unique_ptr<Statement>> innerStmts;
-        auto arrRef = std::make_unique<IdentifierExpr>(arrTmp);
-        auto idxRef = std::make_unique<IdentifierExpr>(varName.lexeme);
-        auto indexExpr = std::make_unique<IndexExpr>(std::move(arrRef), std::move(idxRef));
-        auto itemDecl = std::make_unique<VarDecl>(itemName.lexeme, std::move(indexExpr));
-        itemDecl->isCompilerGenerated = true;
-        itemDecl->line = itemName.line;
-        itemDecl->column = itemName.column;
-        innerStmts.push_back(std::move(itemDecl));
-        innerStmts.push_back(std::move(body));
-        auto innerBlock = std::make_unique<BlockStmt>(std::move(innerStmts));
-
-        // for (idx in 0...len(__for_arr_N))
-        auto zero = std::make_unique<LiteralExpr>(static_cast<long long>(0));
-        std::vector<std::unique_ptr<Expression>> lenArgs;
-        lenArgs.push_back(std::make_unique<IdentifierExpr>(arrTmp));
-        auto lenCall = std::make_unique<CallExpr>("len", std::move(lenArgs));
-        lenCall->fromStdNamespace = true; // compiler-generated
-        auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(zero), std::move(lenCall), nullptr,
-                                                 std::move(innerBlock));
-        forStmt->line = varName.line;
-        forStmt->column = varName.column;
-        outerStmts.push_back(std::move(forStmt));
-
-        return std::make_unique<BlockStmt>(std::move(outerStmts));
+        // Emit a ForKVStmt — codegen decides at code-generation time whether
+        // the collection is a hashmap (bucket-walking) or an array (indexed).
+        auto kvStmt = std::make_unique<ForKVStmt>(varName.lexeme, itemName.lexeme,
+                                                  std::move(collection), std::move(body));
+        kvStmt->line = varName.line;
+        kvStmt->column = varName.column;
+        return kvStmt;
     }
 
     std::string iteratorType;
@@ -4372,48 +4341,13 @@ std::unique_ptr<Statement> Parser::parseForEachStmt() {
         }
         auto body = parseStatement();
 
-        // Desugar to: { var __arr = collection; for (idx in 0...len(__arr)) { var item = __arr[idx]; body } }
-        static int foreachIdxCounter = 0;
-        const int id = foreachIdxCounter++;
-        const std::string arrTmp = "__foreach_arr_" + std::to_string(id);
-
-        std::vector<std::unique_ptr<Statement>> outerStmts;
-
-        // var __foreach_arr_N = collection;
-        auto arrDecl = std::make_unique<VarDecl>(arrTmp, std::move(collection));
-        arrDecl->isCompilerGenerated = true;
-        arrDecl->line = firstName.line;
-        arrDecl->column = firstName.column;
-        outerStmts.push_back(std::move(arrDecl));
-
-        // Build inner body: { var item = __foreach_arr_N[idx]; original_body }
-        std::vector<std::unique_ptr<Statement>> innerStmts;
-
-        // var item = __foreach_arr_N[idx];
-        auto arrRef = std::make_unique<IdentifierExpr>(arrTmp);
-        auto idxRef = std::make_unique<IdentifierExpr>(firstName.lexeme);
-        auto indexExpr = std::make_unique<IndexExpr>(std::move(arrRef), std::move(idxRef));
-        auto itemDecl = std::make_unique<VarDecl>(itemName.lexeme, std::move(indexExpr));
-        itemDecl->isCompilerGenerated = true;
-        itemDecl->line = itemName.line;
-        itemDecl->column = itemName.column;
-        innerStmts.push_back(std::move(itemDecl));
-        innerStmts.push_back(std::move(body));
-        auto innerBlock = std::make_unique<BlockStmt>(std::move(innerStmts));
-
-        // for (idx in 0...len(__foreach_arr_N))
-        auto zero = std::make_unique<LiteralExpr>(static_cast<long long>(0));
-        std::vector<std::unique_ptr<Expression>> lenArgs;
-        lenArgs.push_back(std::make_unique<IdentifierExpr>(arrTmp));
-        auto lenCall = std::make_unique<CallExpr>("len", std::move(lenArgs));
-        lenCall->fromStdNamespace = true; // compiler-generated
-        auto forStmt = std::make_unique<ForStmt>(firstName.lexeme, std::move(zero), std::move(lenCall), nullptr,
-                                                 std::move(innerBlock));
-        forStmt->line = firstName.line;
-        forStmt->column = firstName.column;
-        outerStmts.push_back(std::move(forStmt));
-
-        return std::make_unique<BlockStmt>(std::move(outerStmts));
+        // Emit a ForKVStmt — codegen decides at code-generation time whether
+        // the collection is a hashmap (bucket-walking) or an array (indexed).
+        auto kvStmt = std::make_unique<ForKVStmt>(firstName.lexeme, itemName.lexeme,
+                                                  std::move(collection), std::move(body));
+        kvStmt->line = firstName.line;
+        kvStmt->column = firstName.column;
+        return kvStmt;
     }
 
     consume(TokenType::IN, "Expected 'in' after foreach variable");
@@ -8029,82 +7963,25 @@ std::unique_ptr<Expression> Parser::parseArrayLiteral() {
                     collection = std::move(startExpr);
                 }
 
-                // Optional filter: `if cond`
-                std::unique_ptr<Expression> filterLambda;
+                // Optional filter: `if cond` — parse as raw expression for fused codegen.
+                std::unique_ptr<Expression> filterExprRaw;
                 if (check(TokenType::IF)) {
                     advance(); // consume 'if'
-                    auto filterCond = parseExpression();
-                    // Build filter lambda: |varName| filterCond
-                    const std::string filterLambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
-                    std::vector<Parameter> fParams;
-                    Parameter fp(varName);
-                    fp.typeName = "i64";
-                    fParams.push_back(std::move(fp));
-                    auto retStmt = std::make_unique<ReturnStmt>(std::move(filterCond));
-                    retStmt->line = varTok.line;
-                    retStmt->column = varTok.column;
-                    std::vector<std::unique_ptr<Statement>> fbody;
-                    fbody.push_back(std::move(retStmt));
-                    auto fblock = std::make_unique<BlockStmt>(std::move(fbody));
-                    fblock->line = varTok.line;
-                    fblock->column = varTok.column;
-                    auto fDecl = std::make_unique<FunctionDecl>(
-                        filterLambdaName, std::vector<std::string>{}, std::move(fParams), std::move(fblock));
-                    fDecl->line = varTok.line;
-                    fDecl->column = varTok.column;
-                    fDecl->returnType = "i64";
-                    lambdaFunctions_.push_back(std::move(fDecl));
-                    auto fid = std::make_unique<IdentifierExpr>(filterLambdaName);
-                    fid->line = varTok.line;
-                    fid->column = varTok.column;
-                    filterLambda = std::move(fid);
+                    filterExprRaw = parseExpression();
                 }
 
-                // Build map lambda: |varName| mapExpr
-                const std::string mapLambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
-                std::vector<Parameter> mParams;
-                Parameter mp(varName);
-                mp.typeName = "i64";
-                mParams.push_back(std::move(mp));
-                auto retStmt2 = std::make_unique<ReturnStmt>(std::move(mapExpr));
-                retStmt2->line = varTok.line;
-                retStmt2->column = varTok.column;
-                std::vector<std::unique_ptr<Statement>> mbody;
-                mbody.push_back(std::move(retStmt2));
-                auto mblock = std::make_unique<BlockStmt>(std::move(mbody));
-                mblock->line = varTok.line;
-                mblock->column = varTok.column;
-                auto mDecl = std::make_unique<FunctionDecl>(
-                    mapLambdaName, std::vector<std::string>{}, std::move(mParams), std::move(mblock));
-                mDecl->line = varTok.line;
-                mDecl->column = varTok.column;
-                mDecl->returnType = "i64";
-                lambdaFunctions_.push_back(std::move(mDecl));
-                auto mid = std::make_unique<IdentifierExpr>(mapLambdaName);
-                mid->line = varTok.line;
-                mid->column = varTok.column;
-
-                // If there's a filter, apply it first.
-                if (filterLambda) {
-                    std::vector<std::unique_ptr<Expression>> filterArgs;
-                    filterArgs.push_back(std::move(collection));
-                    filterArgs.push_back(std::move(filterLambda));
-                    auto filterCall = std::make_unique<CallExpr>("array_filter", std::move(filterArgs));
-                    filterCall->line = varTok.line;
-                    filterCall->column = varTok.column;
-                    collection = std::move(filterCall);
-                }
-
-                // Wrap in array_map(collection, |var| mapExpr).
-                std::vector<std::unique_ptr<Expression>> mapArgs;
-                mapArgs.push_back(std::move(collection));
-                mapArgs.push_back(std::move(mid));
-                auto mapCall = std::make_unique<CallExpr>("array_map", std::move(mapArgs));
-                mapCall->line = varTok.line;
-                mapCall->column = varTok.column;
+                // Emit ArrayComprehensionExpr — single-pass fused loop in codegen.
+                // filterExprRaw may be nullptr (no filter).  mapExpr is the element
+                // to collect.  This avoids the two-allocation array_map(array_filter(...))
+                // pattern when a filter is present.
+                auto comprExpr = std::make_unique<ArrayComprehensionExpr>(
+                    varName, std::move(collection),
+                    std::move(filterExprRaw), std::move(mapExpr));
+                comprExpr->line = varTok.line;
+                comprExpr->column = varTok.column;
 
                 consume(TokenType::RBRACKET, "Expected ']' to close array comprehension");
-                return mapCall;
+                return comprExpr;
             }
             // Not a comprehension — restore position and fall through to normal parsing.
             current = savedPos;

@@ -2543,6 +2543,17 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         lenVal = lenLoad;
     }
 
+    // Opt-3 (pointer-mode): for non-string arrays, pre-compute dataPtr = &arr[1]
+    // before the loop header.  The body then uses GEP(dataPtr, idx) instead of
+    // GEP(basePtr, idx+1), removing one ADD per iteration and giving LLVM a
+    // cleaner base for loop-strength-reduction.
+    llvm::Value* dataPtrOpt = nullptr;
+    if (!isStr && optimizationLevel >= OptimizationLevel::O1) {
+        dataPtrOpt = builder->CreateInBoundsGEP(getDefaultType(), basePtr,
+                                                llvm::ConstantInt::get(getDefaultType(), 1),
+                                                "foreach.dataptr");
+    }
+
     // Allocate hidden index variable and the user's iterator variable
     llvm::AllocaInst* idxAlloca = createEntryBlockAlloca(function, "_foreach_idx");
     {
@@ -2638,9 +2649,16 @@ void CodeGenerator::generateForEach(ForEachStmt* stmt) {
         elemVal = charExt;
     } else {
         // Array: element is at slot (bodyIdx + 1).
-        llvm::Value* offset = builder->CreateAdd(bodyIdx, llvm::ConstantInt::get(getDefaultType(), 1), "foreach.offset",
-                                                 /*HasNUW=*/true, /*HasNSW=*/true);
-        llvm::Value* elemPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr, offset, "foreach.elem.ptr");
+        // If pointer-mode is enabled, use the pre-cached dataPtr = &arr[1]
+        // and index directly by bodyIdx (no +1 add per iteration).
+        llvm::Value* elemPtr;
+        if (dataPtrOpt) {
+            elemPtr = builder->CreateInBoundsGEP(getDefaultType(), dataPtrOpt, bodyIdx, "foreach.elem.ptr");
+        } else {
+            llvm::Value* offset = builder->CreateAdd(bodyIdx, llvm::ConstantInt::get(getDefaultType(), 1),
+                                                     "foreach.offset", /*HasNUW=*/true, /*HasNSW=*/true);
+            elemPtr = builder->CreateInBoundsGEP(getDefaultType(), basePtr, offset, "foreach.elem.ptr");
+        }
         elemVal = builder->CreateAlignedLoad(getDefaultType(), elemPtr, llvm::MaybeAlign(8), "foreach.elem");
         // TBAA: foreach element loads (slots 1+) never alias the array length
         if (auto* elemLoad = llvm::dyn_cast<llvm::LoadInst>(elemVal)) {
@@ -4359,6 +4377,12 @@ static void collectArrayBases(const Statement* s, std::vector<std::string>& out)
             scanStmt(fe->body.get());
             break;
         }
+        case ASTNodeType::FOR_KV_STMT: {
+            const auto* fkv = static_cast<const ForKVStmt*>(s);
+            scanExpr(fkv->collection.get());
+            scanStmt(fkv->body.get());
+            break;
+        }
         case ASTNodeType::DO_WHILE_STMT: {
             const auto* dw = static_cast<const DoWhileStmt*>(s);
             scanStmt(dw->body.get());
@@ -4754,6 +4778,11 @@ void scanStmtForArrayAccesses(const Statement* stmt, const std::string& iterVar,
         scanStmtForArrayAccesses(fes->body.get(), iterVar, goodArrays, badArrays, depth + 1);
         return;
     }
+    case ASTNodeType::FOR_KV_STMT: {
+        const auto* fkv = static_cast<const ForKVStmt*>(stmt);
+        scanStmtForArrayAccesses(fkv->body.get(), iterVar, goodArrays, badArrays, depth + 1);
+        return;
+    }
     default:
         return;
     }
@@ -4805,6 +4834,9 @@ void CodeGenerator::prescanLabels(Statement* body, llvm::Function* fn) {
     case ASTNodeType::FOR_EACH_STMT:
         prescanLabels(static_cast<const ForEachStmt*>(body)->body.get(), fn);
         break;
+    case ASTNodeType::FOR_KV_STMT:
+        prescanLabels(static_cast<const ForKVStmt*>(body)->body.get(), fn);
+        break;
     default:
         break;
     }
@@ -4847,6 +4879,331 @@ void CodeGenerator::generateLabel(LabelStmt* stmt) {
 
     // Continue code generation in the label's block.
     builder->SetInsertPoint(labelBB);
+}
+
+// ── for k, v in map { ... } ──────────────────────────────────────────────────
+// Optimization 1: native hashmap key-value iteration via bucket-walking.
+// If the collection is a dict (dictVarNames_), emit a C-style loop over the
+// hashmap's bucket array (cap/size header + 3-slot buckets: [hash, key, val]).
+// Otherwise fall back to indexed array access identical to the old desugared form.
+void CodeGenerator::generateForKV(ForKVStmt* stmt) {
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    if (!function)
+        codegenError("for-kv loop outside of function", stmt);
+
+    // Determine whether the collection is a hashmap.
+    bool isMap = false;
+    if (stmt->collection->type == ASTNodeType::IDENTIFIER_EXPR) {
+        const std::string& name = static_cast<IdentifierExpr*>(stmt->collection.get())->name;
+        isMap = dictVarNames_.count(name) > 0;
+    } else if (stmt->collection->type == ASTNodeType::CALL_EXPR) {
+        const std::string& callee = static_cast<CallExpr*>(stmt->collection.get())->callee;
+        isMap = (callee == "map_new" || callee == "map_set" || callee == "map_copy");
+    }
+
+    if (isMap) {
+        // ── Map iteration path: walk hash table buckets ──────────────────────
+        // Hashmap layout (all i64 slots, 8-byte aligned):
+        //   slot 0:        capacity (number of buckets)
+        //   slot 1:        size     (number of live entries)
+        //   slots 2+3*i:   hash of bucket i  (active when hash >= 2)
+        //   slots 2+3*i+1: key  of bucket i  (i64 — pointer-as-int for strings)
+        //   slots 2+3*i+2: value of bucket i
+        const ScopeGuard scope(*this);
+
+        llvm::Value* mapVal = generateExpression(stmt->collection.get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* mapPtr = mapVal->getType()->isPointerTy()
+                                  ? mapVal
+                                  : builder->CreateIntToPtr(toDefaultType(mapVal), ptrTy, "fkv.mapptr");
+
+        auto* i64Ty = getDefaultType();
+        // Load capacity (slot 0) — drives the bucket loop bound.
+        llvm::Value* capLoad = builder->CreateAlignedLoad(i64Ty, mapPtr, llvm::MaybeAlign(8), "fkv.cap");
+        if (tbaaMapMeta_)
+            llvm::cast<llvm::LoadInst>(capLoad)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+
+        llvm::AllocaInst* bucketIdxAlloca = createEntryBlockAlloca(function, "__fkv_bidx");
+        builder->CreateAlignedStore(llvm::ConstantInt::get(i64Ty, 0), bucketIdxAlloca, llvm::MaybeAlign(8));
+        nonNegValues_.insert(bucketIdxAlloca);
+
+        llvm::AllocaInst* keyAlloca = createEntryBlockAlloca(function, stmt->keyVar);
+        llvm::AllocaInst* valAlloca = createEntryBlockAlloca(function, stmt->valVar);
+        bindVariable(stmt->keyVar, keyAlloca);
+        bindVariable(stmt->valVar, valAlloca);
+
+        llvm::BasicBlock* condBB   = llvm::BasicBlock::Create(*context, "fkv.cond",   function);
+        llvm::BasicBlock* checkBB  = llvm::BasicBlock::Create(*context, "fkv.check",  function);
+        llvm::BasicBlock* bodyBB   = llvm::BasicBlock::Create(*context, "fkv.body",   function);
+        llvm::BasicBlock* incBB    = llvm::BasicBlock::Create(*context, "fkv.inc",    function);
+        llvm::BasicBlock* afterBB  = llvm::BasicBlock::Create(*context, "fkv.after",  function);
+
+        builder->CreateBr(condBB);
+
+        // Condition: bucket index < capacity
+        builder->SetInsertPoint(condBB);
+        llvm::Value* curBidx = builder->CreateAlignedLoad(i64Ty, bucketIdxAlloca, llvm::MaybeAlign(8), "fkv.bidx");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::LoadInst>(curBidx)->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        llvm::Value* cond = builder->CreateICmpULT(curBidx, capLoad, "fkv.cmp");
+        auto* condBr = builder->CreateCondBr(cond, checkBB, afterBB);
+        if (optimizationLevel >= OptimizationLevel::O2)
+            condBr->setMetadata(llvm::LLVMContext::MD_prof, llvm::MDBuilder(*context).createBranchWeights(2000, 1));
+
+        // Check: is this bucket active? (hash >= 2)
+        // Bucket layout: offset = 2 + bucketIdx * 3
+        builder->SetInsertPoint(checkBB);
+        llvm::Value* three = llvm::ConstantInt::get(i64Ty, 3);
+        llvm::Value* two   = llvm::ConstantInt::get(i64Ty, 2);
+        llvm::Value* bucketBase = builder->CreateAdd(
+            builder->CreateMul(curBidx, three, "fkv.i3", true, true),
+            two, "fkv.base", true, true);
+        llvm::Value* hashPtr = builder->CreateInBoundsGEP(i64Ty, mapPtr, bucketBase, "fkv.hashptr");
+        llvm::Value* slotHash = builder->CreateAlignedLoad(i64Ty, hashPtr, llvm::MaybeAlign(8), "fkv.hash");
+        if (tbaaMapHash_)
+            llvm::cast<llvm::LoadInst>(slotHash)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
+        llvm::Value* isActive = builder->CreateICmpUGE(slotHash, two, "fkv.active");
+        builder->CreateCondBr(isActive, bodyBB, incBB);
+
+        // Body: bind key and value, run user code
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* keyOff = builder->CreateAdd(bucketBase, llvm::ConstantInt::get(i64Ty, 1), "fkv.keyoff", true, true);
+        llvm::Value* keyPtr = builder->CreateInBoundsGEP(i64Ty, mapPtr, keyOff, "fkv.keyptr");
+        llvm::Value* keyVal = builder->CreateAlignedLoad(i64Ty, keyPtr, llvm::MaybeAlign(8), "fkv.key");
+        if (tbaaMapKey_)
+            llvm::cast<llvm::LoadInst>(keyVal)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
+        llvm::Value* valOff = builder->CreateAdd(bucketBase, llvm::ConstantInt::get(i64Ty, 2), "fkv.valoff", true, true);
+        llvm::Value* valPtr = builder->CreateInBoundsGEP(i64Ty, mapPtr, valOff, "fkv.valptr");
+        llvm::Value* valVal = builder->CreateAlignedLoad(i64Ty, valPtr, llvm::MaybeAlign(8), "fkv.val");
+        if (tbaaMapVal_)
+            llvm::cast<llvm::LoadInst>(valVal)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
+
+        builder->CreateAlignedStore(keyVal, keyAlloca, llvm::MaybeAlign(8));
+        builder->CreateAlignedStore(valVal, valAlloca, llvm::MaybeAlign(8));
+
+        loopStack.push_back({afterBB, incBB, stmt->label});
+        generateStatement(stmt->body.get());
+        loopStack.pop_back();
+        if (!builder->GetInsertBlock()->getTerminator())
+            builder->CreateBr(incBB);
+
+        // Increment bucket index
+        builder->SetInsertPoint(incBB);
+        llvm::Value* nextBidx = builder->CreateAdd(curBidx, llvm::ConstantInt::get(i64Ty, 1),
+                                                   "fkv.next", true, true);
+        builder->CreateAlignedStore(nextBidx, bucketIdxAlloca, llvm::MaybeAlign(8));
+        auto* backBr = builder->CreateBr(condBB);
+        if (optimizationLevel >= OptimizationLevel::O1) {
+            llvm::MDNode* mustProgress =
+                llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
+            llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
+            loopMDs.push_back(nullptr);
+            loopMDs.push_back(mustProgress);
+            llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
+            loopMD->replaceOperandWith(0, loopMD);
+            backBr->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
+        }
+
+        builder->SetInsertPoint(afterBB);
+
+    } else {
+        // ── Array fallback path: indexed access ──────────────────────────────
+        // Semantics: for keyVar (index), valVar (element) in array
+        // Equivalent to the old desugared form:
+        //   var __arr = collection;
+        //   for keyVar in 0...len(__arr) { var valVar = __arr[keyVar]; body }
+        const ScopeGuard scope(*this);
+
+        llvm::Value* collVal = generateExpression(stmt->collection.get());
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* basePtr = collVal->getType()->isPointerTy()
+                                   ? collVal
+                                   : builder->CreateIntToPtr(toDefaultType(collVal), ptrTy, "fkv.arrptr");
+
+        llvm::Value* lenVal = emitLoadArrayLen(basePtr, "fkv.arrlen");
+
+        auto* i64Ty = getDefaultType();
+        llvm::AllocaInst* idxAlloca = createEntryBlockAlloca(function, stmt->keyVar);
+        builder->CreateAlignedStore(llvm::ConstantInt::get(i64Ty, 0), idxAlloca, llvm::MaybeAlign(8));
+        nonNegValues_.insert(idxAlloca);
+        bindVariable(stmt->keyVar, idxAlloca);
+
+        llvm::AllocaInst* valAlloca = createEntryBlockAlloca(function, stmt->valVar);
+        bindVariable(stmt->valVar, valAlloca);
+
+        llvm::BasicBlock* condBB  = llvm::BasicBlock::Create(*context, "fkv.arr.cond",  function);
+        llvm::BasicBlock* bodyBB  = llvm::BasicBlock::Create(*context, "fkv.arr.body",  function);
+        llvm::BasicBlock* incBB   = llvm::BasicBlock::Create(*context, "fkv.arr.inc",   function);
+        llvm::BasicBlock* afterBB = llvm::BasicBlock::Create(*context, "fkv.arr.after", function);
+
+        builder->CreateBr(condBB);
+
+        builder->SetInsertPoint(condBB);
+        llvm::Value* curIdx = builder->CreateAlignedLoad(i64Ty, idxAlloca, llvm::MaybeAlign(8), "fkv.idx");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::LoadInst>(curIdx)->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+        llvm::Value* cond = builder->CreateICmpULT(curIdx, lenVal, "fkv.cmp");
+        auto* condBr = builder->CreateCondBr(cond, bodyBB, afterBB);
+        if (optimizationLevel >= OptimizationLevel::O2)
+            condBr->setMetadata(llvm::LLVMContext::MD_prof, llvm::MDBuilder(*context).createBranchWeights(2000, 1));
+
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* elemOff = builder->CreateAdd(curIdx, llvm::ConstantInt::get(i64Ty, 1),
+                                                  "fkv.elemoff", true, true);
+        llvm::Value* elemPtr = builder->CreateInBoundsGEP(i64Ty, basePtr, elemOff, "fkv.elemptr");
+        llvm::Value* elemVal = builder->CreateAlignedLoad(i64Ty, elemPtr, llvm::MaybeAlign(8), "fkv.elem");
+        if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(elemVal))
+            ld->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        builder->CreateAlignedStore(curIdx, idxAlloca, llvm::MaybeAlign(8));
+        builder->CreateAlignedStore(elemVal, valAlloca, llvm::MaybeAlign(8));
+
+        loopStack.push_back({afterBB, incBB, stmt->label});
+        generateStatement(stmt->body.get());
+        loopStack.pop_back();
+        if (!builder->GetInsertBlock()->getTerminator())
+            builder->CreateBr(incBB);
+
+        builder->SetInsertPoint(incBB);
+        llvm::Value* nextIdx = builder->CreateAdd(curIdx, llvm::ConstantInt::get(i64Ty, 1),
+                                                  "fkv.next", true, true);
+        builder->CreateAlignedStore(nextIdx, idxAlloca, llvm::MaybeAlign(8));
+        auto* backBr = builder->CreateBr(condBB);
+        if (optimizationLevel >= OptimizationLevel::O1) {
+            llvm::MDNode* mustProgress =
+                llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
+            llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
+            loopMDs.push_back(nullptr);
+            loopMDs.push_back(mustProgress);
+            llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
+            loopMD->replaceOperandWith(0, loopMD);
+            backBr->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
+        }
+
+        builder->SetInsertPoint(afterBB);
+    }
+}
+
+// ── Array comprehension: [mapExpr for var in source if filterExpr] ────────────
+// Optimization 2: single-pass fused loop — avoids the two-allocation
+// array_map(array_filter(...)) pattern.  Both the filter check and the element
+// transform are inlined into one loop that builds the result array directly.
+llvm::Value* CodeGenerator::generateArrayComprehension(ArrayComprehensionExpr* expr) {
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    if (!function)
+        codegenError("array comprehension outside of function", expr);
+
+    const ScopeGuard scope(*this);
+
+    auto* i64Ty = getDefaultType();
+    auto* ptrTy = llvm::PointerType::getUnqual(*context);
+
+    // Evaluate source array exactly once.
+    llvm::Value* srcVal = generateExpression(expr->sourceExpr.get());
+    llvm::Value* srcPtr = srcVal->getType()->isPointerTy()
+                              ? srcVal
+                              : builder->CreateIntToPtr(toDefaultType(srcVal), ptrTy, "compr.srcptr");
+
+    // Load source length (slot 0).
+    llvm::Value* srcLen = emitLoadArrayLen(srcPtr, "compr.srclen");
+
+    // Allocate result array: worst case same size as source (all elements pass).
+    // Layout: slot 0 = length, slots 1..srcLen = elements.
+    llvm::Value* eight = llvm::ConstantInt::get(i64Ty, 8);
+    llvm::Value* slots = builder->CreateAdd(srcLen, llvm::ConstantInt::get(i64Ty, 1), "compr.slots", true, true);
+    llvm::Value* bytes = builder->CreateMul(slots, eight, "compr.bytes", true, true);
+    llvm::Value* resBuf = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "compr.res");
+    llvm::cast<llvm::CallInst>(resBuf)->addRetAttr(llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+    // Initialize length slot to 0; it will be updated at the end.
+    builder->CreateAlignedStore(llvm::ConstantInt::get(i64Ty, 0), resBuf, llvm::MaybeAlign(8));
+
+    // Pre-cache the element data pointers (past length header) so the loop body
+    // doesn't recompute them.
+    llvm::Value* srcData = builder->CreateInBoundsGEP(i64Ty, srcPtr, llvm::ConstantInt::get(i64Ty, 1), "compr.srcdata");
+    llvm::Value* resData = builder->CreateInBoundsGEP(i64Ty, resBuf, llvm::ConstantInt::get(i64Ty, 1), "compr.resdata");
+
+    // Index alloca for the source and separate write-index alloca for result.
+    llvm::AllocaInst* srcIdxAlloca = createEntryBlockAlloca(function, "__compr_sidx");
+    builder->CreateAlignedStore(llvm::ConstantInt::get(i64Ty, 0), srcIdxAlloca, llvm::MaybeAlign(8));
+    nonNegValues_.insert(srcIdxAlloca);
+    llvm::AllocaInst* resIdxAlloca = createEntryBlockAlloca(function, "__compr_ridx");
+    builder->CreateAlignedStore(llvm::ConstantInt::get(i64Ty, 0), resIdxAlloca, llvm::MaybeAlign(8));
+    nonNegValues_.insert(resIdxAlloca);
+
+    // Bind iteration variable (used by filterExpr and mapExpr).
+    llvm::AllocaInst* varAlloca = createEntryBlockAlloca(function, expr->varName);
+    bindVariable(expr->varName, varAlloca);
+
+    llvm::BasicBlock* condBB  = llvm::BasicBlock::Create(*context, "compr.cond",  function);
+    llvm::BasicBlock* bodyBB  = llvm::BasicBlock::Create(*context, "compr.body",  function);
+    llvm::BasicBlock* storeBB = llvm::BasicBlock::Create(*context, "compr.store", function);
+    llvm::BasicBlock* incBB   = llvm::BasicBlock::Create(*context, "compr.inc",   function);
+    llvm::BasicBlock* doneBB  = llvm::BasicBlock::Create(*context, "compr.done",  function);
+
+    builder->CreateBr(condBB);
+
+    // Condition: srcIdx < srcLen
+    builder->SetInsertPoint(condBB);
+    llvm::Value* curSrcIdx = builder->CreateAlignedLoad(i64Ty, srcIdxAlloca, llvm::MaybeAlign(8), "compr.sidx");
+    if (optimizationLevel >= OptimizationLevel::O1)
+        llvm::cast<llvm::LoadInst>(curSrcIdx)->setMetadata(llvm::LLVMContext::MD_range, arrayLenRangeMD_);
+    llvm::Value* cond = builder->CreateICmpULT(curSrcIdx, srcLen, "compr.cmp");
+    auto* condBr = builder->CreateCondBr(cond, bodyBB, doneBB);
+    if (optimizationLevel >= OptimizationLevel::O2)
+        condBr->setMetadata(llvm::LLVMContext::MD_prof, llvm::MDBuilder(*context).createBranchWeights(2000, 1));
+
+    // Body: load element, check filter, potentially store mapped value
+    builder->SetInsertPoint(bodyBB);
+    llvm::Value* elemPtr = builder->CreateInBoundsGEP(i64Ty, srcData, curSrcIdx, "compr.elem.ptr");
+    llvm::Value* elemVal = builder->CreateAlignedLoad(i64Ty, elemPtr, llvm::MaybeAlign(8), "compr.elem");
+    if (auto* ld = llvm::dyn_cast<llvm::LoadInst>(elemVal))
+        ld->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+    builder->CreateAlignedStore(elemVal, varAlloca, llvm::MaybeAlign(8));
+
+    if (expr->filterExpr) {
+        // Evaluate filter condition inline — no lambda overhead.
+        llvm::Value* filterVal = generateExpression(expr->filterExpr.get());
+        llvm::Value* filterBool = toBool(filterVal);
+        builder->CreateCondBr(filterBool, storeBB, incBB);
+    } else {
+        builder->CreateBr(storeBB);
+    }
+
+    // Store: evaluate map expression and append to result
+    builder->SetInsertPoint(storeBB);
+    llvm::Value* mappedVal = generateExpression(expr->mapExpr.get());
+    mappedVal = toDefaultType(mappedVal);
+    llvm::Value* curResIdx = builder->CreateAlignedLoad(i64Ty, resIdxAlloca, llvm::MaybeAlign(8), "compr.ridx");
+    llvm::Value* storePtr = builder->CreateInBoundsGEP(i64Ty, resData, curResIdx, "compr.store.ptr");
+    builder->CreateAlignedStore(mappedVal, storePtr, llvm::MaybeAlign(8));
+    llvm::Value* nextResIdx = builder->CreateAdd(curResIdx, llvm::ConstantInt::get(i64Ty, 1),
+                                                 "compr.ridx.next", true, true);
+    builder->CreateAlignedStore(nextResIdx, resIdxAlloca, llvm::MaybeAlign(8));
+    builder->CreateBr(incBB);
+
+    // Increment source index
+    builder->SetInsertPoint(incBB);
+    llvm::Value* nextSrcIdx = builder->CreateAdd(curSrcIdx, llvm::ConstantInt::get(i64Ty, 1),
+                                                 "compr.sidx.next", true, true);
+    builder->CreateAlignedStore(nextSrcIdx, srcIdxAlloca, llvm::MaybeAlign(8));
+    auto* backBr = builder->CreateBr(condBB);
+    if (optimizationLevel >= OptimizationLevel::O1) {
+        llvm::MDNode* mustProgress =
+            llvm::MDNode::get(*context, {llvm::MDString::get(*context, "llvm.loop.mustprogress")});
+        llvm::SmallVector<llvm::Metadata*, 4> loopMDs;
+        loopMDs.push_back(nullptr);
+        loopMDs.push_back(mustProgress);
+        llvm::MDNode* loopMD = llvm::MDNode::get(*context, loopMDs);
+        loopMD->replaceOperandWith(0, loopMD);
+        backBr->setMetadata(llvm::LLVMContext::MD_loop, loopMD);
+    }
+
+    // Done: write the final length into slot 0 of resBuf
+    builder->SetInsertPoint(doneBB);
+    llvm::Value* finalLen = builder->CreateAlignedLoad(i64Ty, resIdxAlloca, llvm::MaybeAlign(8), "compr.final.len");
+    builder->CreateAlignedStore(finalLen, resBuf, llvm::MaybeAlign(8));
+
+    // Return the result buffer as i64 (pointer-as-int, OmScript array convention)
+    return builder->CreatePtrToInt(resBuf, i64Ty, "compr.result");
 }
 
 } // namespace omscript

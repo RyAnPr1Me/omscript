@@ -79,6 +79,7 @@ using omscript::DoWhileStmt;
 using omscript::Expression;
 using omscript::ExprStmt;
 using omscript::ForEachStmt;
+using omscript::ForKVStmt;
 using omscript::ForStmt;
 using omscript::IdentifierExpr;
 using omscript::IfStmt;
@@ -180,6 +181,10 @@ static bool stmtCallsAny(const Statement* s, const std::unordered_set<std::strin
     case ASTNodeType::FOR_EACH_STMT: {
         auto* fe = static_cast<const ForEachStmt*>(s);
         return exprCallsAny(fe->collection.get(), names) || stmtCallsAny(fe->body.get(), names);
+    }
+    case ASTNodeType::FOR_KV_STMT: {
+        auto* fkv = static_cast<const ForKVStmt*>(s);
+        return exprCallsAny(fkv->collection.get(), names) || stmtCallsAny(fkv->body.get(), names);
     }
     case ASTNodeType::SWITCH_STMT: {
         auto* sw = static_cast<const SwitchStmt*>(s);
@@ -6062,6 +6067,9 @@ void CodeGenerator::generateStatement(Statement* stmt) {
     case ASTNodeType::FOR_EACH_STMT:
         generateForEach(static_cast<ForEachStmt*>(stmt));
         break;
+    case ASTNodeType::FOR_KV_STMT:
+        generateForKV(static_cast<ForKVStmt*>(stmt));
+        break;
     case ASTNodeType::BREAK_STMT: {
         auto* breakNode = static_cast<BreakStmt*>(stmt);
         if (loopStack.empty()) {
@@ -6206,6 +6214,8 @@ llvm::Value* CodeGenerator::generateExpression(Expression* expr) {
         return generateLetIn(static_cast<LetInExpr*>(expr));
     case ASTNodeType::ARRAY_EXPR:
         return generateArray(static_cast<ArrayExpr*>(expr));
+    case ASTNodeType::ARRAY_COMPREHENSION_EXPR:
+        return generateArrayComprehension(static_cast<ArrayComprehensionExpr*>(expr));
     case ASTNodeType::INDEX_EXPR:
         return generateIndex(static_cast<IndexExpr*>(expr));
     case ASTNodeType::INDEX_ASSIGN_EXPR:
@@ -7571,6 +7581,14 @@ void CodeGenerator::inferFunctionEffects(Program* program) {
             fx.mergeFrom(exprEffects(fe->collection.get(), self));
             fx.mergeFrom(stmtEffects(fe->body.get(), self));
             // Iterating an array reads it.
+            fx.readsMemory = true;
+            break;
+        }
+        case ASTNodeType::FOR_KV_STMT: {
+            auto* fkv = static_cast<const ForKVStmt*>(stmt);
+            fx.mergeFrom(exprEffects(fkv->collection.get(), self));
+            fx.mergeFrom(stmtEffects(fkv->body.get(), self));
+            // Iterating a map/array reads it.
             fx.readsMemory = true;
             break;
         }

@@ -906,6 +906,7 @@ class CodeGenerator {
     llvm::Value* generateLetIn(LetInExpr* expr);
     llvm::Value* generateArray(ArrayExpr* expr);
     llvm::Value* generateDict(DictExpr* expr);
+    llvm::Value* generateArrayComprehension(ArrayComprehensionExpr* expr);
     llvm::Value* generateIndex(IndexExpr* expr);
     llvm::Value* generateScopeResolution(ScopeResolutionExpr* expr);
 
@@ -987,6 +988,7 @@ class CodeGenerator {
     void generateDoWhile(DoWhileStmt* stmt);
     void generateFor(ForStmt* stmt);
     void generateForEach(ForEachStmt* stmt);
+    void generateForKV(ForKVStmt* stmt);
     void generateBlock(BlockStmt* stmt);
     void generateExprStmt(ExprStmt* stmt);
     void generateSwitch(SwitchStmt* stmt);
