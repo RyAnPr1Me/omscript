@@ -27,9 +27,11 @@ namespace {
 // duration so the views remain valid for the lifetime of the program.
 static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"fn", TokenType::FN},
+    {"func", TokenType::FN},       // alias for fn
     {"return", TokenType::RETURN},
     {"if", TokenType::IF},
     {"else", TokenType::ELSE},
+    {"otherwise", TokenType::ELSE}, // alias for else
     {"while", TokenType::WHILE},
     {"do", TokenType::DO},
     {"for", TokenType::FOR},
@@ -69,6 +71,7 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"forever", TokenType::FOREVER},
     {"foreach", TokenType::FOREACH},
     {"elif", TokenType::ELIF},
+    {"elseif", TokenType::ELIF},   // alias for elif
     {"swap", TokenType::SWAP},
     {"times", TokenType::TIMES},
     {"with", TokenType::WITH},

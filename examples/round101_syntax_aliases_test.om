@@ -1,0 +1,71 @@
+import std;
+
+// Round-101 syntax aliases:
+//   func           -> fn
+//   otherwise      -> else
+//   elseif         -> elif
+
+func add(a: int, b: int) -> int {
+    return a + b;
+}
+
+func clamp(v: int, lo: int, hi: int) -> int {
+    if v < lo { return lo; }
+    if v > hi { return hi; }
+    return v;
+}
+
+func classify(n: int) -> int {
+    return when n {
+        0      => 100,
+        1..10  => 200,
+        10..=20 => 300,
+        _      => 400
+    };
+}
+
+func test_function_aliases() -> int {
+    var ok = 0;
+    if add(2, 3) == 5 { ok = ok + 1; }
+    if clamp(12, 0, 10) == 10 { ok = ok + 1; }
+    if clamp(-4, 0, 10) == 0 { ok = ok + 1; }
+    if clamp(7, 0, 10) == 7 { ok = ok + 1; }
+    return ok; // 4
+}
+
+func test_when_baseline_with_alias_round() -> int {
+    var ok = 0;
+    if classify(0) == 100 { ok = ok + 1; }
+    if classify(5) == 200 { ok = ok + 1; }
+    if classify(10) == 300 { ok = ok + 1; }
+    if classify(22) == 400 { ok = ok + 1; }
+    return ok; // 4
+}
+
+func test_otherwise_alias() -> int {
+    var x = 7;
+    var y = if x < 0 { 11 } otherwise { 22 };
+    return y == 22 ? 1 : 0;
+}
+
+func test_elseif_alias() -> int {
+    var x = 12;
+    var out = 0;
+    if x < 0 {
+        out = 1;
+    } elseif x < 10 {
+        out = 2;
+    } else {
+        out = 3;
+    }
+    return out == 3 ? 1 : 0;
+}
+
+func main() -> int {
+    var total = 0;
+    total = total + test_function_aliases(); // +4
+    total = total + test_when_baseline_with_alias_round(); // +4 -> 8
+    total = total + test_otherwise_alias();  // +1 -> 9
+    total = total + test_elseif_alias();     // +1 -> 10
+    return total;
+}
