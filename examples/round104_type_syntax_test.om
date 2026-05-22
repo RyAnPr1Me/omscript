@@ -1,0 +1,41 @@
+import std;
+
+// Round-104: type syntax modernization aliases.
+// Verifies:
+//   integer   -> int
+//   boolean   -> bool
+//   character -> char
+//   array<T>  -> T[]
+//   map<K,V>  -> dict[K,V]
+//   dict<K,V> -> dict[K,V]
+// plus nested generic closers (`>>`) in type annotations.
+
+fn is_even(n: integer) -> boolean {
+    return n % 2 == 0;
+}
+
+fn main() -> int {
+    var score: int = 0;
+
+    var nums: array<int> = [2, 4, 6];
+    if nums[0] == 2 { score = score + 1; } // 1
+
+    var matrix: array<array<int>> = [[1, 2], [3, 4]];
+    if matrix[1][0] == 3 { score = score + 1; } // 2
+
+    var counts: map<int, int> = {1: 10, 2: 20};
+    if counts[2] == 20 { score = score + 1; } // 3
+
+    var grouped: dict<int, array<int>> = {7: [8, 9]};
+    if grouped[7][1] == 9 { score = score + 1; } // 4
+
+    var ch: character = 'A';
+    if ch == 65 { score = score + 1; } // 5
+
+    if is_even(8) { score = score + 1; } // 6
+
+    var ok: boolean = true;
+    if ok { score = score + 1; } // 7
+
+    return score;
+}

@@ -710,6 +710,12 @@ OmScript is **statically typed**. Variable declarations may be typed explicitly 
 
 Type annotations use the colon `:` separator: `name: type`.
 
+Canonical and alias spellings are both accepted for common scalar types:
+- `int` / `integer`
+- `bool` / `boolean`
+- `char` / `character`
+- `string` / `str`
+
 **Variable declarations**:
 ```omscript
 var x: int = 42;
@@ -900,7 +906,9 @@ fn print_hello() -> void {
 
 #### 4.4.1 Array Type: `T[]`
 
-**Syntax**: `T[]` denotes an array of elements of type `T`.
+**Syntax**:
+- `T[]` denotes an array of elements of type `T`.
+- `array<T>` is equivalent shorthand for `T[]`.
 
 **Representation**: Heap-allocated, dynamically-sized array (reference-counted).
 
@@ -932,6 +940,8 @@ var cell: int = matrix[0][1];  // 2
 **Syntax**:
 - `dict` (untyped dictionary)
 - `dict[K, V]` (typed dictionary annotation — parsed but keys and values are stored as `i64`; the type parameters are informational only)
+- `dict<K, V>` (equivalent angle-bracket form)
+- `map<K, V>` / `map[K, V]` (aliases for `dict<K, V>` / `dict[K, V]`)
 
 **Representation**: Hash map (heap-allocated, reference-counted).
 

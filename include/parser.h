@@ -81,6 +81,9 @@ class Parser {
     /// Set while parsing a let...in binding value; suppresses the 'in'
     /// membership-test operator so that 'in' terminates the binding.
     bool inLetBinding_ = false;
+    /// Extra `>` closers buffered when type-generic parsing consumes a `>>`
+    /// token as two consecutive generic terminators.
+    int pendingTypeGtClosers_ = 0;
 
     /// Set to true by parsePrimary() when it resolves a namespace-qualified
     /// call (e.g. std::abs).  Read and immediately cleared by parseCall() to
@@ -323,6 +326,9 @@ class Parser {
 
     /// Parse a type annotation (e.g. "int", "int[]", "string[][]", "Point").
     std::string parseTypeAnnotation();
+    /// Consume one generic type-argument closer (`>`), also accepting `>>` by
+    /// splitting it across nested generic parse frames.
+    void consumeTypeGenericClose(const std::string& errMsg);
 
     [[noreturn]] void error(const std::string& message);
 };

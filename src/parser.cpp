@@ -2007,6 +2007,21 @@ std::string Parser::resolveNamespacedPath(const std::vector<std::string>& segmen
     return ""; // no namespace prefix matched — caller uses flat-name fallback
 }
 
+void Parser::consumeTypeGenericClose(const std::string& errMsg) {
+    if (pendingTypeGtClosers_ > 0) {
+        --pendingTypeGtClosers_;
+        return;
+    }
+    if (match(TokenType::GT))
+        return;
+    if (match(TokenType::RSHIFT)) {
+        // `>>` closes the current generic plus one enclosing generic.
+        ++pendingTypeGtClosers_;
+        return;
+    }
+    error(errMsg);
+}
+
 std::string Parser::parseTypeAnnotation() {
     // Support reference type annotations: &type (e.g., &i32, &f64)
     std::string prefix;
@@ -2084,9 +2099,15 @@ std::string Parser::parseTypeAnnotation() {
     } else {
         typeName = consume(TokenType::IDENTIFIER, "Expected type name").lexeme;
     }
-    // Normalize 'str' → 'string' so both spellings work identically.
+    // Normalize common aliases to canonical internal names.
     if (typeName == "str")
         typeName = "string";
+    else if (typeName == "integer")
+        typeName = "int";
+    else if (typeName == "boolean")
+        typeName = "bool";
+    else if (typeName == "character")
+        typeName = "char";
     // Support namespace-qualified type names: Math::Scalar, A::B::Type, etc.
     // Consume '::' + IDENTIFIER suffix segments until the pattern breaks.
     while (check(TokenType::SCOPE) && (current + 1 < tokens.size()) &&
@@ -2113,6 +2134,46 @@ std::string Parser::parseTypeAnnotation() {
         consume(TokenType::RBRACE, "Expected '}' after SIMD lane count");
         typeName = typeName + sizeStr;
     }
+    // Support generic shorthand aliases:
+    //   array<T>       -> T[]
+    //   dict<K, V>     -> dict[K,V]
+    //   map<K, V>      -> dict[K,V]
+    //   tuple<T1, ...> -> tuple<T1,...>
+    if (typeName == "array" && check(TokenType::LT)) {
+        advance(); // consume '<'
+        std::string inner = parseTypeAnnotation();
+        consumeTypeGenericClose("Expected '>' to close array<T> type parameter");
+        typeName = inner + "[]";
+    }
+    if ((typeName == "dict" || typeName == "map") && check(TokenType::LT)) {
+        advance(); // consume '<'
+        std::string keyType = parseTypeAnnotation();
+        consume(TokenType::COMMA, "Expected ',' between key and value types in dict<K,V>");
+        std::string valType = parseTypeAnnotation();
+        consumeTypeGenericClose("Expected '>' to close dict<K,V> type parameters");
+        typeName = "dict[" + keyType + "," + valType + "]";
+    }
+    if (typeName == "tuple" && check(TokenType::LT)) {
+        advance(); // consume '<'
+        std::vector<std::string> elemTypes;
+        if (!(check(TokenType::GT) || check(TokenType::RSHIFT))) {
+            elemTypes.push_back(parseTypeAnnotation());
+            while (match(TokenType::COMMA)) {
+                if (check(TokenType::GT) || check(TokenType::RSHIFT))
+                    break;
+                elemTypes.push_back(parseTypeAnnotation());
+            }
+        }
+        consumeTypeGenericClose("Expected '>' to close tuple<...> type parameters");
+        std::string tupleAnn = "tuple<";
+        for (size_t i = 0; i < elemTypes.size(); ++i) {
+            if (i)
+                tupleAnn += ',';
+            tupleAnn += elemTypes[i];
+        }
+        tupleAnn += '>';
+        typeName = tupleAnn;
+    }
     // Support array type annotations: type[], type[][], etc.
     while (check(TokenType::LBRACKET) && (current + 1 < tokens.size()) &&
            tokens[current + 1].type == TokenType::RBRACKET) {
@@ -2125,20 +2186,20 @@ std::string Parser::parseTypeAnnotation() {
     if (typeName == "ptr" && check(TokenType::LT)) {
         advance();                                 // consume '<'
         std::string inner = parseTypeAnnotation(); // recursively parse element type
-        consume(TokenType::GT, "Expected '>' to close ptr<T> type parameter");
+        consumeTypeGenericClose("Expected '>' to close ptr<T> type parameter");
         typeName = "ptr<" + inner + ">";
     }
     // Support pslice<T> fat-pointer slice annotation: pslice<i64>, pslice<f64>, etc.
     if (typeName == "pslice" && check(TokenType::LT)) {
         advance();                                 // consume '<'
         std::string inner = parseTypeAnnotation(); // recursively parse element type
-        consume(TokenType::GT, "Expected '>' to close pslice<T> type parameter");
+        consumeTypeGenericClose("Expected '>' to close pslice<T> type parameter");
         typeName = "pslice<" + inner + ">";
     }
     // Support dict[KeyType, ValType] generic annotation (e.g., dict[str, int])
     // Only activates when the type name is exactly "dict" followed by '[' with
     // non-empty content — avoids any collision with the existing type[] handling.
-    if (typeName == "dict" && check(TokenType::LBRACKET) && current + 1 < tokens.size() &&
+    if ((typeName == "dict" || typeName == "map") && check(TokenType::LBRACKET) && current + 1 < tokens.size() &&
         tokens[current + 1].type != TokenType::RBRACKET) {
         advance(); // consume '['
         std::string typeParams;
@@ -2155,7 +2216,7 @@ std::string Parser::parseTypeAnnotation() {
             if (depth > 0)
                 typeParams += t.lexeme;
         }
-        typeName += "[" + typeParams + "]";
+        typeName = "dict[" + typeParams + "]";
     }
     // Resolve type aliases transitively (e.g. A → B → int from
     //   type A = B; type B = int;).  Chase up to 32 hops to avoid infinite
