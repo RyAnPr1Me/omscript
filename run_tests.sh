@@ -970,6 +970,7 @@ ptest_program "examples/round99_iterator_opt_test.om" 13
 ptest_program "examples/round100_language_test.om" 14
 ptest_program "examples/round101_syntax_aliases_test.om" 10
 ptest_program "examples/round102_when_else_arm_test.om" 8
+ptest_program "examples/round103_keyword_ops_test.om" 9
 flush_ptests
 
 echo ""

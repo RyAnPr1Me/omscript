@@ -100,6 +100,9 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"ensure",    TokenType::ENSURE},     // ensure — always-on runtime guard
     {"impl",      TokenType::IMPL},       // impl   — method block for a struct type
     {"let",       TokenType::LET},        // let    — scoped let...in expression binding
+    {"and",       TokenType::AND},        // alias for &&
+    {"or",        TokenType::OR},         // alias for ||
+    {"not",       TokenType::NOT},        // alias for !
 };
 
 /// Throw a DiagnosticError with the given message and source location.
@@ -389,7 +392,13 @@ Token Lexer::scanIdentifier() {
     const std::string_view idView(source.data() + start, pos - start);
     auto it = keywords.find(idView);
     if (it != keywords.end()) {
-        return makeToken(it->second, std::string(idView));
+        // Normalize operator-keyword aliases to canonical operator lexemes so that
+        // AST op strings remain the symbolic forms that codegen expects.
+        std::string lexeme(idView);
+        if (lexeme == "and") lexeme = "&&";
+        else if (lexeme == "or")  lexeme = "||";
+        else if (lexeme == "not") lexeme = "!";
+        return makeToken(it->second, std::move(lexeme));
     }
 
     return makeToken(TokenType::IDENTIFIER, std::string(idView));

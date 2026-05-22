@@ -1,0 +1,43 @@
+import std;
+
+// Round-103: and / or / not keyword operator aliases for && / || / !
+//
+// Verifies that 'and', 'or', 'not' work as keyword spellings of the
+// corresponding boolean operators, including inside expressions, conditions,
+// and the compound 'not in' containment test.
+
+fn main() {
+    var score = 0;
+    var t = true;
+    var f = false;
+
+    // Basic and / or / not
+    if t and t { score = score + 1; }     // 1
+    if t or  f { score = score + 1; }     // 2
+    if not f   { score = score + 1; }     // 3
+
+    // Mixed symbolic and keyword forms (no outer parens to avoid paren-as-condition ambiguity)
+    if t && true and true || f { score = score + 1; }  // 4
+    if not (f or f) { score = score + 1; }             // 5
+
+    // Inside variable initialisation
+    var a = true and false;   // false
+    var b = false or true;    // true
+    var c = not true;         // false
+    if not a and b and not c { score = score + 1; }  // 6
+
+    // Compound 'not in' still works
+    var arr = [10, 20, 30];
+    if 99 not in arr { score = score + 1; }   // 7
+
+    // not in: result stored in variable
+    var missing = 5 not in arr;
+    if missing { score = score + 1; }   // 8
+
+    // Chained keyword ops
+    var x = 3;
+    var y = 7;
+    if x < 5 and y > 5 and not (x == y) { score = score + 1; }  // 9
+
+    return score;
+}

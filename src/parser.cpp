@@ -5685,12 +5685,12 @@ std::unique_ptr<Expression> Parser::parseComparison() {
 
 check_in:
     // 'not in' operator: x not in arr → !array_contains(arr, x)
-    // 'not' is parsed as an IDENTIFIER (no dedicated keyword), so check for
-    // IDENTIFIER with lexeme "not" followed by the IN keyword.
+    // 'not' may be the NOT keyword (from the 'not' keyword alias for '!')
+    // or an IDENTIFIER with lexeme "not" in older code paths.
     // Suppressed inside let...in binding values (inLetBinding_ flag) so that
     // 'in' terminates the binding rather than being consumed as an operator.
     if (!inLetBinding_ &&
-        check(TokenType::IDENTIFIER) && peek().lexeme == "not" &&
+        (check(TokenType::NOT) || (check(TokenType::IDENTIFIER) && peek().lexeme == "not")) &&
         current + 1 < tokens.size() && tokens[current + 1].type == TokenType::IN) {
         const Token notToken = tokens[current];
         advance(); // consume 'not'
