@@ -4008,6 +4008,7 @@ std::unique_ptr<Statement> Parser::parseGuardStmt() {
 }
 
 // when (expr) { val1 => { stmts }, val2, val3 => { stmts }, _ => { stmts } }
+// Default arm also accepts: else => { stmts }
 // Desugars to a switch statement with fat-arrow syntax
 std::unique_ptr<Statement> Parser::parseWhenStmt() {
     // Paren-free form: when x { ... }  (same as if/unless/while/for)
@@ -4037,10 +4038,11 @@ std::unique_ptr<Statement> Parser::parseWhenStmt() {
     std::vector<SwitchCase> cases;
 
     while (!check(TokenType::RBRACE) && !isAtEnd()) {
-        // Check for default case: _ => { ... }
-        if (check(TokenType::IDENTIFIER) && peek().lexeme == "_") {
-            advance(); // consume '_'
-            consume(TokenType::FAT_ARROW, "Expected '=>' after '_' in when clause");
+        // Check for default case: _ => { ... } or else => { ... }
+        if ((check(TokenType::IDENTIFIER) && peek().lexeme == "_") || match(TokenType::ELSE)) {
+            if (check(TokenType::IDENTIFIER) && peek().lexeme == "_")
+                advance(); // consume '_'
+            consume(TokenType::FAT_ARROW, "Expected '=>' after default arm in when clause");
             std::vector<std::unique_ptr<Statement>> body;
             body.push_back(parseStatement());
             cases.emplace_back(std::vector<std::unique_ptr<Expression>>{}, std::move(body), true);
@@ -4162,6 +4164,7 @@ std::unique_ptr<Statement> Parser::parseWhenStmt() {
 
 std::unique_ptr<Expression> Parser::parseWhenExpr() {
     // when val { 1 => expr1, 2 => expr2, _ => expr3 }
+    // Default arm also accepts: else => expr
     // Desugars to ternary chain: (val==1) ? e1 : (val==2) ? e2 : e3
     // The discriminant may be any expression.
     // If it is not a bare identifier, it is lifted into a synthetic IIFE so
@@ -4210,9 +4213,10 @@ std::unique_ptr<Expression> Parser::parseWhenExpr() {
         WhenArm arm;
         bool isDefault = false;
 
-        if (check(TokenType::IDENTIFIER) && peek().lexeme == "_") {
-            advance(); // consume '_'
-            consume(TokenType::FAT_ARROW, "Expected '=>' after '_' in when expression");
+        if ((check(TokenType::IDENTIFIER) && peek().lexeme == "_") || match(TokenType::ELSE)) {
+            if (check(TokenType::IDENTIFIER) && peek().lexeme == "_")
+                advance(); // consume '_'
+            consume(TokenType::FAT_ARROW, "Expected '=>' after default arm in when expression");
             arm.result = parseExpression();
             isDefault = true;
         } else {
