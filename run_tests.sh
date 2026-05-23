@@ -712,11 +712,13 @@ fi
 rm -f exit_zero.o
 
 # help / version (parallel)
-ptest_cli_output "help-shows-check" "check" 0 ./build/omsc --help
+ptest_cli_output "help-shows-check" "check, --check" 0 ./build/omsc --help
+ptest_cli_output "help-shows-check-description" "Validate syntax and types" 0 ./build/omsc --help
 ptest_cli_output "help-shows-time" "--time" 0 ./build/omsc --help
 ptest_cli_output "help-shows-emit-obj" "--emit-obj" 0 ./build/omsc --help
 ptest_cli_output "help-shows-dry-run" "--dry-run" 0 ./build/omsc --help
 ptest_cli_output "help-shows-quiet" "--quiet" 0 ./build/omsc --help
+ptest_cli_output "help-shows-dump-tokens-alias" "--dump-tokens" 0 ./build/omsc --help
 ptest_cli_output "version-full-semver" "OmScript Compiler v" 0 ./build/omsc --version
 flush_ptests
 
