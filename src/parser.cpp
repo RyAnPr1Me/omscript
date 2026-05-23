@@ -2135,22 +2135,21 @@ std::string Parser::parseTypeAnnotation() {
         typeName = typeName + sizeStr;
     }
     // Support generic shorthand aliases:
-    //   array<T>       -> T[]
-    //   dict<K, V>     -> dict[K,V]
-    //   map<K, V>      -> dict[K,V]
+    //   array<T>/list<T>/vector<T> -> T[]
+    //   dict<K, V>/map<K, V>/hashmap<K, V> -> dict[K,V]
     //   tuple<T1, ...> -> tuple<T1,...>
-    if (typeName == "array" && check(TokenType::LT)) {
+    if ((typeName == "array" || typeName == "list" || typeName == "vector") && check(TokenType::LT)) {
         advance(); // consume '<'
         std::string inner = parseTypeAnnotation();
-        consumeTypeGenericClose("Expected '>' to close array<T> type parameter");
+        consumeTypeGenericClose("Expected '>' to close array/list/vector type parameter");
         typeName = inner + "[]";
     }
-    if ((typeName == "dict" || typeName == "map") && check(TokenType::LT)) {
+    if ((typeName == "dict" || typeName == "map" || typeName == "hashmap") && check(TokenType::LT)) {
         advance(); // consume '<'
         std::string keyType = parseTypeAnnotation();
         consume(TokenType::COMMA, "Expected ',' between key and value types in dict<K,V>");
         std::string valType = parseTypeAnnotation();
-        consumeTypeGenericClose("Expected '>' to close dict<K,V> type parameters");
+        consumeTypeGenericClose("Expected '>' to close dict/map/hashmap type parameters");
         typeName = "dict[" + keyType + "," + valType + "]";
     }
     if (typeName == "tuple" && check(TokenType::LT)) {
@@ -2199,8 +2198,8 @@ std::string Parser::parseTypeAnnotation() {
     // Support dict[KeyType, ValType] generic annotation (e.g., dict[str, int])
     // Only activates when the type name is exactly "dict" followed by '[' with
     // non-empty content — avoids any collision with the existing type[] handling.
-    if ((typeName == "dict" || typeName == "map") && check(TokenType::LBRACKET) && current + 1 < tokens.size() &&
-        tokens[current + 1].type != TokenType::RBRACKET) {
+    if ((typeName == "dict" || typeName == "map" || typeName == "hashmap") &&
+        check(TokenType::LBRACKET) && current + 1 < tokens.size() && tokens[current + 1].type != TokenType::RBRACKET) {
         advance(); // consume '['
         std::string typeParams;
         int depth = 1;

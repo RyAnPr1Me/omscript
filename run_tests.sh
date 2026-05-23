@@ -972,6 +972,7 @@ ptest_program "examples/round101_syntax_aliases_test.om" 10
 ptest_program "examples/round102_when_else_arm_test.om" 8
 ptest_program "examples/round103_keyword_ops_test.om" 9
 ptest_program "examples/round104_type_syntax_test.om" 7
+ptest_program "examples/round105_type_collection_aliases_test.om" 5
 flush_ptests
 
 echo ""
