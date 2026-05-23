@@ -1,0 +1,51 @@
+import std;
+
+fn main() -> int {
+    var score: int = 0;
+
+    // str_is_alpha
+    if str_is_alpha("hello") == 1 { score = score + 1; }     // 1
+    if str_is_alpha("Hello") == 1 { score = score + 1; }     // 2
+    if str_is_alpha("hello1") == 0 { score = score + 1; }    // 3
+    if str_is_alpha("") == 0 { score = score + 1; }          // 4
+
+    // str_is_digit
+    if str_is_digit("123") == 1 { score = score + 1; }       // 5
+    if str_is_digit("007") == 1 { score = score + 1; }       // 6
+    if str_is_digit("12x") == 0 { score = score + 1; }       // 7
+    if str_is_digit("") == 0 { score = score + 1; }          // 8
+
+    // str_is_alnum
+    if str_is_alnum("abc123") == 1 { score = score + 1; }    // 9
+    if str_is_alnum("ABC") == 1 { score = score + 1; }       // 10
+    if str_is_alnum("abc!") == 0 { score = score + 1; }      // 11
+    if str_is_alnum("") == 0 { score = score + 1; }          // 12
+
+    // str_center
+    if str_len(str_center("hi", 6)) == 6 { score = score + 1; }   // 13
+    if str_len(str_center("hello", 3)) == 5 { score = score + 1; } // 14  no-op when already wide enough
+    if str_len(str_center("a", 5)) == 5 { score = score + 1; }    // 15
+
+    // str_zfill
+    if str_eq(str_zfill("42", 5), "00042") { score = score + 1; }  // 16
+    if str_eq(str_zfill("100", 3), "100") { score = score + 1; }   // 17  no-op when already wide enough
+    if str_eq(str_zfill("7", 4), "0007") { score = score + 1; }    // 18
+
+    // map_from_pairs  (pairs: key0, val0, key1, val1, ...)
+    var pairs: int[] = [1, 10, 2, 20, 3, 30];
+    var m: dict[int, int] = map_from_pairs(pairs);
+    if map_get(m, 1, 0) == 10 { score = score + 1; }  // 19
+    if map_get(m, 2, 0) == 20 { score = score + 1; }  // 20
+    if map_get(m, 3, 0) == 30 { score = score + 1; }  // 21
+
+    // array_step
+    var xs: int[] = array_step([0, 1, 2, 3, 4, 5], 2);
+    if xs[0] == 0 { score = score + 1; }                     // 22
+    if xs[1] == 2 { score = score + 1; }                     // 23
+    if xs[2] == 4 { score = score + 1; }                     // 24
+    var ys: int[] = array_step([10, 20, 30, 40, 50], 3);
+    if ys[0] == 10 { score = score + 1; }                    // 25
+    if ys[1] == 40 { score = score + 1; }                    // 26
+
+    return score;
+}
