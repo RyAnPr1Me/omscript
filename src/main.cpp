@@ -97,6 +97,19 @@ bool portableMkdtemp(std::vector<char>& templateBuf) {
 #endif
 }
 
+/// Create a secure temporary file from a mkstemp-style template path.
+/// Returns the created file path on success, std::nullopt on failure.
+std::optional<std::string> createSecureTempFilePath(const std::string& pathTemplate) {
+    std::vector<char> tmpBuf(pathTemplate.begin(), pathTemplate.end());
+    tmpBuf.push_back('\0');
+    const int fd = portableMkstemp(tmpBuf);
+    if (fd == -1) {
+        return std::nullopt;
+    }
+    portableClose(fd);
+    return std::string(tmpBuf.data());
+}
+
 /// Return the path to the currently running executable.
 std::string getExecutablePath() {
     const char* envPath = std::getenv("OMSC_BINARY_PATH");
@@ -315,15 +328,10 @@ std::string fetchLatestReleaseTag() {
     const std::string curlBin = *curlPathOrErr;
 
     // Create a secure temporary file.
-    std::string tmpTemplate = std::filesystem::temp_directory_path().string() + "/omsc_release_XXXXXX";
-    std::vector<char> tmpBuf(tmpTemplate.begin(), tmpTemplate.end());
-    tmpBuf.push_back('\0');
-    const int fd = portableMkstemp(tmpBuf);
-    if (fd == -1) {
+    const auto tmpFile = createSecureTempFilePath(std::filesystem::temp_directory_path().string() + "/omsc_release_XXXXXX");
+    if (!tmpFile) {
         return "";
     }
-    portableClose(fd);
-    const std::string tmpFile(tmpBuf.data());
 
     const std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
     const std::vector<std::string> args = {curlBin,
@@ -336,7 +344,7 @@ std::string fetchLatestReleaseTag() {
                                            "-H",
                                            "User-Agent: omsc-updater",
                                            "-o",
-                                           tmpFile,
+                                           *tmpFile,
                                            kGitHubReleasesApiUrl};
     llvm::SmallVector<llvm::StringRef, 14> argRefs;
     for (const auto& a : args) {
@@ -346,20 +354,20 @@ std::string fetchLatestReleaseTag() {
     const int rc = llvm::sys::ExecuteAndWait(curlBin, argRefs);
     if (rc != 0) {
         std::error_code ec;
-        std::filesystem::remove(tmpFile, ec);
+        std::filesystem::remove(*tmpFile, ec);
         return "";
     }
 
-    std::ifstream f(tmpFile);
+    std::ifstream f(*tmpFile);
     if (!f.is_open()) {
         std::error_code ec;
-        std::filesystem::remove(tmpFile, ec);
+        std::filesystem::remove(*tmpFile, ec);
         return "";
     }
     const std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     f.close();
     std::error_code ec;
-    std::filesystem::remove(tmpFile, ec);
+    std::filesystem::remove(*tmpFile, ec);
 
     if (json.empty()) {
         return "";
@@ -406,16 +414,11 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
 
     // Create a secure temporary file for the tarball.
     const std::string tmpBase = std::filesystem::temp_directory_path().string();
-    std::string tarTemplate = tmpBase + "/omsc_update_XXXXXX";
-    std::vector<char> tarBuf(tarTemplate.begin(), tarTemplate.end());
-    tarBuf.push_back('\0');
-    const int tarFd = portableMkstemp(tarBuf);
-    if (tarFd == -1) {
+    const auto tmpTarball = createSecureTempFilePath(tmpBase + "/omsc_update_XXXXXX");
+    if (!tmpTarball) {
         std::cerr << "Error: failed to create temporary file for download\n";
         return false;
     }
-    portableClose(tarFd);
-    const std::string tmpTarball(tarBuf.data());
 
     // Create a secure temporary directory for extraction.
     std::string dirTemplate = tmpBase + "/omsc_extract_XXXXXX";
@@ -424,7 +427,7 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
     if (!portableMkdtemp(dirBuf)) {
         std::cerr << "Error: failed to create temporary directory for extraction\n";
         std::error_code ec;
-        std::filesystem::remove(tmpTarball, ec);
+        std::filesystem::remove(*tmpTarball, ec);
         return false;
     }
     const std::string tmpDir(dirBuf.data());
@@ -434,7 +437,7 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
     // Download tarball
     const std::string downloadTimeout = std::to_string(kDownloadTimeoutSeconds);
     const std::vector<std::string> dlArgs = {
-        curlBin, "-L", "--max-time", downloadTimeout, "-H", "User-Agent: omsc-updater", "-o", tmpTarball, downloadUrl};
+        curlBin, "-L", "--max-time", downloadTimeout, "-H", "User-Agent: omsc-updater", "-o", *tmpTarball, downloadUrl};
     llvm::SmallVector<llvm::StringRef, 10> dlArgRefs;
     for (const auto& a : dlArgs) {
         dlArgRefs.push_back(a);
@@ -443,7 +446,7 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
     if (rc != 0) {
         std::cerr << "Error: failed to download " << assetName << "\n";
         std::error_code ec;
-        std::filesystem::remove(tmpTarball, ec);
+        std::filesystem::remove(*tmpTarball, ec);
         std::filesystem::remove_all(tmpDir, ec);
         return false;
     }
@@ -464,10 +467,10 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
         return out;
     };
     std::string psCmd =
-        "Expand-Archive -Path '" + psEscape(tmpTarball) + "' -DestinationPath '" + psEscape(tmpDir) + "' -Force";
+        "Expand-Archive -Path '" + psEscape(*tmpTarball) + "' -DestinationPath '" + psEscape(tmpDir) + "' -Force";
     std::vector<std::string> extractArgs = {extractBin, "-NoProfile", "-Command", psCmd};
 #else
-    const std::vector<std::string> extractArgs = {extractBin, "-xzf", tmpTarball, "-C", tmpDir};
+    const std::vector<std::string> extractArgs = {extractBin, "-xzf", *tmpTarball, "-C", tmpDir};
 #endif
     llvm::SmallVector<llvm::StringRef, 6> tarArgRefs;
     for (const auto& a : extractArgs) {
@@ -475,7 +478,7 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
     }
     rc = llvm::sys::ExecuteAndWait(extractBin, tarArgRefs);
     std::error_code ec;
-    std::filesystem::remove(tmpTarball, ec);
+    std::filesystem::remove(*tmpTarball, ec);
     if (rc != 0) {
         std::cerr << "Error: failed to extract " << assetName << "\n";
         std::filesystem::remove_all(tmpDir, ec);
@@ -506,28 +509,23 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
 
     // Install the binary atomically: copy to temp file then rename.
     const std::string targetPath = installDir + "/" + std::string(kBinaryName);
-    std::string tmpTemplate = installDir + "/omsc_update_XXXXXX";
-    std::vector<char> installTmpBuf(tmpTemplate.begin(), tmpTemplate.end());
-    installTmpBuf.push_back('\0');
-    const int installTmpFd = portableMkstemp(installTmpBuf);
-    if (installTmpFd == -1) {
+    const auto installTmpPath = createSecureTempFilePath(installDir + "/omsc_update_XXXXXX");
+    if (!installTmpPath) {
         std::cerr << "Error: failed to create temporary file for installation in " << installDir << "\n";
         std::filesystem::remove_all(tmpDir, ec);
         return false;
     }
-    portableClose(installTmpFd);
-    const std::string installTmpPath(installTmpBuf.data());
     try {
-        std::filesystem::copy_file(binaryPath, installTmpPath, std::filesystem::copy_options::overwrite_existing);
-        std::filesystem::permissions(installTmpPath,
+        std::filesystem::copy_file(binaryPath, *installTmpPath, std::filesystem::copy_options::overwrite_existing);
+        std::filesystem::permissions(*installTmpPath,
                                      std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec |
                                          std::filesystem::perms::group_read | std::filesystem::perms::group_exec |
                                          std::filesystem::perms::others_read | std::filesystem::perms::others_exec,
                                      std::filesystem::perm_options::replace);
-        std::filesystem::rename(installTmpPath, targetPath);
+        std::filesystem::rename(*installTmpPath, targetPath);
     } catch (const std::exception& e) {
         std::cerr << "Error installing update: " << e.what() << "\n";
-        std::filesystem::remove(installTmpPath, ec);
+        std::filesystem::remove(*installTmpPath, ec);
         std::filesystem::remove_all(tmpDir, ec);
         return false;
     }
@@ -647,29 +645,24 @@ bool installToSystem(const std::string& targetDir, bool force) {
 
     // Write to a temp file in the target directory, then atomically rename so
     // the in-place replace is safe even if the copy fails partway through.
-    std::string tmpTemplate = targetDir + "/omsc_install_XXXXXX";
-    std::vector<char> tmpBuf(tmpTemplate.begin(), tmpTemplate.end());
-    tmpBuf.push_back('\0');
-    const int tmpFd = portableMkstemp(tmpBuf);
-    if (tmpFd == -1) {
+    const auto tmpPath = createSecureTempFilePath(targetDir + "/omsc_install_XXXXXX");
+    if (!tmpPath) {
         std::cerr << "Error: failed to create temporary file in " << targetDir << "\n";
         return false;
     }
-    portableClose(tmpFd);
-    const std::string tmpPath(tmpBuf.data());
 
     try {
-        std::filesystem::copy_file(exePath, tmpPath, std::filesystem::copy_options::overwrite_existing);
-        std::filesystem::permissions(tmpPath,
+        std::filesystem::copy_file(exePath, *tmpPath, std::filesystem::copy_options::overwrite_existing);
+        std::filesystem::permissions(*tmpPath,
                                      std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec |
                                          std::filesystem::perms::group_read | std::filesystem::perms::group_exec |
                                          std::filesystem::perms::others_read | std::filesystem::perms::others_exec,
                                      std::filesystem::perm_options::replace);
-        std::filesystem::rename(tmpPath, targetPath);
+        std::filesystem::rename(*tmpPath, targetPath);
     } catch (const std::exception& e) {
         std::cerr << "Error installing binary: " << e.what() << "\n";
         std::error_code ec;
-        std::filesystem::remove(tmpPath, ec);
+        std::filesystem::remove(*tmpPath, ec);
         return false;
     }
 
@@ -846,22 +839,17 @@ void doUninstall() {
             }
 
             // Write atomically: write to a temp file then rename.
-            std::string tmpTemplate = configPath + ".omsc_XXXXXX";
-            std::vector<char> cfgTmpBuf(tmpTemplate.begin(), tmpTemplate.end());
-            cfgTmpBuf.push_back('\0');
-            const int cfgTmpFd = portableMkstemp(cfgTmpBuf);
-            if (cfgTmpFd == -1) {
+            const auto cfgTmpPath = createSecureTempFilePath(configPath + ".omsc_XXXXXX");
+            if (!cfgTmpPath) {
                 std::cerr << "Warning: could not create temp file to update " << configPath << "\n";
                 continue;
             }
-            portableClose(cfgTmpFd);
-            const std::string cfgTmpPath(cfgTmpBuf.data());
             {
-                std::ofstream out(cfgTmpPath, std::ios::trunc);
+                std::ofstream out(*cfgTmpPath, std::ios::trunc);
                 if (!out.is_open()) {
                     std::cerr << "Warning: could not update " << configPath << "\n";
                     std::error_code ec;
-                    std::filesystem::remove(cfgTmpPath, ec);
+                    std::filesystem::remove(*cfgTmpPath, ec);
                     continue;
                 }
                 for (const auto& l : filtered) {
@@ -869,10 +857,10 @@ void doUninstall() {
                 }
             }
             std::error_code ec;
-            std::filesystem::rename(cfgTmpPath, configPath, ec);
+            std::filesystem::rename(*cfgTmpPath, configPath, ec);
             if (ec) {
                 std::cerr << "Warning: could not update " << configPath << ": " << ec.message() << "\n";
-                std::filesystem::remove(cfgTmpPath, ec);
+                std::filesystem::remove(*cfgTmpPath, ec);
                 continue;
             }
             std::cout << "Removed PATH entry from " << configPath << "\n";
@@ -1089,19 +1077,14 @@ std::string downloadString(const std::string& url) {
     const std::string curlBin = *curlPathOrErr;
 
     // Create a secure temporary file
-    std::string tmpTemplate = std::filesystem::temp_directory_path().string() + "/omsc_pkg_XXXXXX";
-    std::vector<char> tmpBuf(tmpTemplate.begin(), tmpTemplate.end());
-    tmpBuf.push_back('\0');
-    const int fd = portableMkstemp(tmpBuf);
-    if (fd == -1) {
+    const auto tmpFile = createSecureTempFilePath(std::filesystem::temp_directory_path().string() + "/omsc_pkg_XXXXXX");
+    if (!tmpFile) {
         return "";
     }
-    portableClose(fd);
-    const std::string tmpFile(tmpBuf.data());
 
     const std::string timeoutStr = std::to_string(kApiTimeoutSeconds);
     const std::vector<std::string> args = {curlBin,    "-s", "-f",    "-L", "--max-redirs", "5", "--max-time",
-                                           timeoutStr, "-o", tmpFile, url};
+                                           timeoutStr, "-o", *tmpFile, url};
     llvm::SmallVector<llvm::StringRef, 12> argRefs;
     for (const auto& a : args) {
         argRefs.push_back(a);
@@ -1109,19 +1092,19 @@ std::string downloadString(const std::string& url) {
     const int rc = llvm::sys::ExecuteAndWait(curlBin, argRefs);
     if (rc != 0) {
         std::error_code ec;
-        std::filesystem::remove(tmpFile, ec);
+        std::filesystem::remove(*tmpFile, ec);
         return "";
     }
-    std::ifstream f(tmpFile);
+    std::ifstream f(*tmpFile);
     if (!f.is_open()) {
         std::error_code ec;
-        std::filesystem::remove(tmpFile, ec);
+        std::filesystem::remove(*tmpFile, ec);
         return "";
     }
     std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     f.close();
     std::error_code ec;
-    std::filesystem::remove(tmpFile, ec);
+    std::filesystem::remove(*tmpFile, ec);
     return content;
 }
 
