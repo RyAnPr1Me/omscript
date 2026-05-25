@@ -189,6 +189,8 @@ class CodeGenerator {
 
     void generate(Program* program);
     void writeObjectFile(const std::string& filename);
+    /// Emit object code into an in-memory buffer (used by the compile() builtin).
+    void writeObjectToBuffer(llvm::SmallVectorImpl<char>& buf);
     /// Write the module as LLVM bitcode for full link-time optimization (FLTO).
     void writeBitcodeFile(const std::string& filename);
     [[nodiscard]] llvm::Module* getModule() noexcept {
@@ -747,6 +749,10 @@ class CodeGenerator {
     /// Dereferencing a funcptr (`*f`) calls the code at the stored address.
     llvm::StringSet<> funcptrVarNames_;
 
+    /// Variables whose initializer was a lambda or named-function identifier,
+    /// making them directly callable as `f(args...)` at the call site.
+    llvm::StringSet<> lambdaVarNames_;
+
     /// Variables with type `ptr`/`ptr<T>` (excluded from isStringExpr).
     llvm::StringSet<> ptrVarNames_;
 
@@ -833,6 +839,7 @@ class CodeGenerator {
     bool currentFuncHintParallelize_ = false;
     bool currentFuncHintNoParallelize_ = false;
     bool currentFuncHintHot_ = false;               ///< Current function has @hot annotation
+    bool currentFuncHasLoopElse_ = false;           ///< Current function contains a for/while...else loop
     const FunctionDecl* currentFuncDecl_ = nullptr; ///< Currently-generating function declaration
     unsigned loopNestDepth_ = 0;                    ///< Current for-loop nesting depth (0 = not in a loop)
     bool bodyHasInnerLoop_ = false;                 ///< Set when a while/for loop is found inside a for-loop body
@@ -896,8 +903,10 @@ class CodeGenerator {
     llvm::Value* generatePostfix(PostfixExpr* expr);
     llvm::Value* generatePrefix(PrefixExpr* expr);
     llvm::Value* generateTernary(TernaryExpr* expr);
+    llvm::Value* generateLetIn(LetInExpr* expr);
     llvm::Value* generateArray(ArrayExpr* expr);
     llvm::Value* generateDict(DictExpr* expr);
+    llvm::Value* generateArrayComprehension(ArrayComprehensionExpr* expr);
     llvm::Value* generateIndex(IndexExpr* expr);
     llvm::Value* generateScopeResolution(ScopeResolutionExpr* expr);
 
@@ -979,6 +988,7 @@ class CodeGenerator {
     void generateDoWhile(DoWhileStmt* stmt);
     void generateFor(ForStmt* stmt);
     void generateForEach(ForEachStmt* stmt);
+    void generateForKV(ForKVStmt* stmt);
     void generateBlock(BlockStmt* stmt);
     void generateExprStmt(ExprStmt* stmt);
     void generateSwitch(SwitchStmt* stmt);
@@ -1316,6 +1326,29 @@ class CodeGenerator {
     llvm::Function* getOrDeclarePthreadMutexTryLock();
     llvm::Function* getOrDeclarePthreadMutexUnlock();
     llvm::Function* getOrDeclarePthreadMutexDestroy();
+    // ── Round-90: rwlock + condvar + thread_self ─────────────────────────────
+    llvm::Function* getOrDeclarePthreadRwlockInit();
+    llvm::Function* getOrDeclarePthreadRwlockRdlock();
+    llvm::Function* getOrDeclarePthreadRwlockTryRdlock();
+    llvm::Function* getOrDeclarePthreadRwlockWrlock();
+    llvm::Function* getOrDeclarePthreadRwlockTryWrlock();
+    llvm::Function* getOrDeclarePthreadRwlockUnlock();
+    llvm::Function* getOrDeclarePthreadRwlockDestroy();
+    llvm::Function* getOrDeclarePthreadCondInit();
+    llvm::Function* getOrDeclarePthreadCondWait();
+    llvm::Function* getOrDeclarePthreadCondSignal();
+    llvm::Function* getOrDeclarePthreadCondBroadcast();
+    llvm::Function* getOrDeclarePthreadCondDestroy();
+    llvm::Function* getOrDeclarePthreadSelf();
+    llvm::Function* getOrDeclarePthreadEqual();
+    // ── pthread_attr_t helpers ────────────────────────────────────────────────
+    llvm::Function* getOrDeclarePthreadAttrInit();
+    llvm::Function* getOrDeclarePthreadAttrDestroy();
+    llvm::Function* getOrDeclarePthreadAttrSetdetachstate();
+    llvm::Function* getOrDeclarePthreadAttrSetstacksize();
+    llvm::Function* getOrDeclarePthreadAttrSetschedparam();
+    llvm::Function* getOrDeclarePthreadAttrSetinheritsched();
+    llvm::Function* getOrDeclarePthreadAttrSetschedpolicy();
     llvm::Function* getOrDeclareGetenv();
     llvm::Function* getOrDeclareSetenv();
 

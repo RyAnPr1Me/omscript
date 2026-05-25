@@ -1,0 +1,216 @@
+import std;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Round-96 feature tests
+//   1. impl blocks       — `impl StructName { fn method(self, ...) { ... } }`
+//   2. Lambda var calls  — `var f = |x| x*2; f(5)`
+//   3. Tuple destructure assignment — `(a, b) = (b, a)`
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── 1. impl blocks ───────────────────────────────────────────────────────────
+
+struct Vec2 {
+    x: int,
+    y: int,
+}
+
+impl Vec2 {
+    fn new(x: int, y: int) -> Vec2 {
+        return Vec2 { x: x, y: y };
+    }
+    fn len_sq(self) -> int {
+        return self.x * self.x + self.y * self.y;
+    }
+    fn scale(self, k: int) -> Vec2 {
+        return Vec2 { x: self.x * k, y: self.y * k };
+    }
+    fn add(self, other: Vec2) -> Vec2 {
+        return Vec2 { x: self.x + other.x, y: self.y + other.y };
+    }
+    fn dot(self, other: Vec2) -> int {
+        return self.x * other.x + self.y * other.y;
+    }
+    fn eq(self, other: Vec2) -> int {
+        return (self.x == other.x && self.y == other.y) as int;
+    }
+    fn neg(self) -> Vec2 {
+        return Vec2 { x: -self.x, y: -self.y };
+    }
+}
+
+struct Matrix2 {
+    a: int, b: int,
+    c: int, d: int,
+}
+
+impl Matrix2 {
+    fn identity() -> Matrix2 {
+        return Matrix2 { a: 1, b: 0, c: 0, d: 1 };
+    }
+    fn det(self) -> int {
+        return self.a * self.d - self.b * self.c;
+    }
+    fn trace(self) -> int {
+        return self.a + self.d;
+    }
+    fn scale(self, k: int) -> Matrix2 {
+        return Matrix2 { a: self.a * k, b: self.b * k,
+                         c: self.c * k, d: self.d * k };
+    }
+    fn transpose(self) -> Matrix2 {
+        return Matrix2 { a: self.a, b: self.c, c: self.b, d: self.d };
+    }
+}
+
+// ── 2. Lambda var calls ───────────────────────────────────────────────────────
+
+fn triple(x: int) -> int { return x * 3; }
+fn square(x: int) -> int { return x * x; }
+fn negate(x: int) -> int { return -x; }
+
+// ── 3. Tuple destructure assignment ──────────────────────────────────────────
+
+fn bubble_sort(arr: int[]) -> int[] {
+    var n = len(arr);
+    for i in 0..n {
+        for j in 0..n-1 {
+            if arr[j] > arr[j+1] {
+                var tmp = arr[j];
+                arr[j] = arr[j+1];
+                arr[j+1] = tmp;
+            }
+        }
+    }
+    return arr;
+}
+
+fn main() {
+
+    // ── impl: Vec2 ────────────────────────────────────────────────────────────
+    var v = Vec2::new(3, 4);
+    assert(v.len_sq() == 25);
+
+    var v2 = v.scale(2);
+    assert(v2.x == 6);
+    assert(v2.y == 8);
+
+    var v3 = v.add(v2);
+    assert(v3.x == 9);
+    assert(v3.y == 12);
+
+    assert(v.dot(v2) == 50);         // 3*6 + 4*8
+
+    assert(v.eq(Vec2::new(3, 4)) == 1);
+    assert(v.eq(v2) == 0);
+
+    var vn = v.neg();
+    assert(vn.x == -3);
+    assert(vn.y == -4);
+
+    // Method chaining
+    var v4 = Vec2::new(1, 0).scale(5).add(Vec2::new(0, 3));
+    assert(v4.x == 5);
+    assert(v4.y == 3);
+
+    // ── impl: Matrix2 ────────────────────────────────────────────────────────
+    var m = Matrix2::identity();
+    assert(m.det() == 1);
+    assert(m.trace() == 2);
+
+    var m2 = Matrix2 { a: 1, b: 2, c: 3, d: 4 };
+    assert(m2.det() == -2);         // 1*4 - 2*3
+    assert(m2.trace() == 5);        // 1+4
+
+    var m3 = m2.scale(3);
+    assert(m3.a == 3);
+    assert(m3.d == 12);
+
+    var m4 = m2.transpose();
+    assert(m4.b == 3);              // original c
+    assert(m4.c == 2);              // original b
+
+    // ── lambda var calls ─────────────────────────────────────────────────────
+    var dbl = |x| x * 2;
+    assert(dbl(5) == 10);
+    assert(dbl(0) == 0);
+    assert(dbl(-3) == -6);
+
+    var inc = |x| x + 1;
+    assert(inc(9) == 10);
+
+    // Chaining
+    assert(dbl(inc(4)) == 10);
+
+    // Named function in var
+    var tri = triple;
+    assert(tri(4) == 12);
+    assert(tri(0) == 0);
+
+    var sq = square;
+    assert(sq(5) == 25);
+    assert(sq(7) == 49);
+
+    // Copy a lambda var
+    var also_dbl = dbl;
+    assert(also_dbl(6) == 12);
+
+    // Lambda var with array_map (existing feature)
+    var arr2 = array_map([1, 2, 3, 4], dbl);
+    assert(arr2[0] == 2);
+    assert(arr2[3] == 8);
+
+    // Lambda var with array_filter
+    var odds = array_filter([1, 2, 3, 4, 5], |x| x % 2);
+    assert(len(odds) == 3);
+    assert(odds[0] == 1);
+
+    // ── tuple destructure assignment ─────────────────────────────────────────
+    var a: int = 10;
+    var b: int = 20;
+
+    // Basic swap
+    (a, b) = (b, a);
+    assert(a == 20);
+    assert(b == 10);
+
+    // Swap again
+    (a, b) = (b, a);
+    assert(a == 10);
+    assert(b == 20);
+
+    // With expressions on RHS
+    (a, b) = (a + b, a - b);   // a=30, b=-10
+    assert(a == 30);
+    assert(b == -10);
+
+    // Three-variable rotation
+    var x: int = 1;
+    var y: int = 2;
+    var z: int = 3;
+    (x, y, z) = (y, z, x);
+    assert(x == 2);
+    assert(y == 3);
+    assert(z == 1);
+
+    (x, y, z) = (y, z, x);
+    assert(x == 3);
+    assert(y == 1);
+    assert(z == 2);
+
+    // In a loop: rotate 3 times → back to start
+    x = 10; y = 20; z = 30;
+    for _ in 0..3 { (x, y, z) = (y, z, x); }
+    assert(x == 10);
+    assert(y == 20);
+    assert(z == 30);
+
+    // Bubble sort using tuple swap
+    var arr = [5, 3, 8, 1, 9, 2, 7, 4, 6];
+    var sorted = bubble_sort(arr);
+    for i in 0..9 {
+        assert(sorted[i] == i + 1);
+    }
+
+    println("All round96 tests passed");
+    return 0;
+}

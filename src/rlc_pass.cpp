@@ -124,8 +124,15 @@ static bool exprUsesVar(const Expression* expr, const std::string& name) {
         return exprUsesVar(static_cast<const ReborrowExpr*>(expr)->source.get(), name);
     case ASTNodeType::SPREAD_EXPR:
         return exprUsesVar(static_cast<const SpreadExpr*>(expr)->operand.get(), name);
-    case ASTNodeType::PIPE_EXPR:
-        return exprUsesVar(static_cast<const PipeExpr*>(expr)->left.get(), name);
+    case ASTNodeType::PIPE_EXPR: {
+        const auto* pipe = static_cast<const PipeExpr*>(expr);
+        if (exprUsesVar(pipe->left.get(), name))
+            return true;
+        for (const auto& ea : pipe->extraArgs)
+            if (exprUsesVar(ea.get(), name))
+                return true;
+        return false;
+    }
     case ASTNodeType::STRUCT_LITERAL_EXPR: {
         const auto* sl = static_cast<const StructLiteralExpr*>(expr);
         for (const auto& fv : sl->fieldValues)
@@ -338,6 +345,8 @@ static void renameInExpr(Expression* expr, const std::unordered_map<std::string,
         break;
     case ASTNodeType::PIPE_EXPR:
         renameInExpr(static_cast<PipeExpr*>(expr)->left.get(), rmap);
+        for (auto& ea : static_cast<PipeExpr*>(expr)->extraArgs)
+            renameInExpr(ea.get(), rmap);
         break;
     case ASTNodeType::RANGE_ANNOT_EXPR:
         renameInExpr(static_cast<RangeAnnotExpr*>(expr)->inner.get(), rmap);

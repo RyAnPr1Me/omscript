@@ -1,12 +1,17 @@
 #include "codegen.h"
 #include "diagnostic.h"
 #include "hardware_graph.h"
+#include "lexer.h"
+#include "parser.h"
 #include <climits>
 #include <cmath>
 #include <cstdlib>
+#include <cerrno>
 #include <iostream>
 #include <limits>
 #include <unordered_set>
+#include <llvm/ADT/SmallVector.h>
+#include <llvm/Object/ObjectFile.h>
 
 // Apply maximum compiler optimizations to this hot path.
 #ifdef __GNUC__
@@ -337,6 +342,53 @@ enum class BuiltinId : uint16_t {
     FILE_FLUSH,      ///< file_flush(f)         → 0 on success, non-zero on error
     FILE_EOF,        ///< file_eof(f)           → 1 if at EOF, else 0
     FILE_IS_OPEN,    ///< file_is_open(f)       → 1 if handle is non-null, else 0
+    // ── Round-89 additions ───────────────────────────────────────────────────
+    MAP_MAP,         ///< map_map(m, fn)         → new map: same keys, values transformed by fn(val)
+    MAP_TO_PAIRS,    ///< map_to_pairs(m)        → flat array [k1,v1,k2,v2,...] of all entries
+    STR_INSERT,      ///< str_insert(s, pos, sub)→ new string with sub inserted at pos
+    STR_DELETE,      ///< str_delete(s, pos, len)→ new string with len chars removed at pos
+    // ── Round-100 additions ──────────────────────────────────────────────────
+    ARRAY_PARTITION, ///< array_partition(arr, fn) → [[passing...], [failing...]]
+    MAP_REDUCE,      ///< map_reduce(m, init, fn)  → fold over kv pairs: fn(acc, key, val)
+    // ── Round-90: threading improvements ────────────────────────────────────
+    RWLOCK_NEW,         ///< rwlock_new()          → RWLock handle
+    RWLOCK_RDLOCK,      ///< rwlock_rdlock(rw)     → acquires read lock (blocks); returns 0
+    RWLOCK_TRY_RDLOCK,  ///< rwlock_try_rdlock(rw) → 1=acquired, 0=busy
+    RWLOCK_WRLOCK,      ///< rwlock_wrlock(rw)     → acquires write lock (blocks); returns 0
+    RWLOCK_TRY_WRLOCK,  ///< rwlock_try_wrlock(rw) → 1=acquired, 0=busy
+    RWLOCK_UNLOCK,      ///< rwlock_unlock(rw)     → releases any held lock; returns 0
+    RWLOCK_DESTROY,     ///< rwlock_destroy(rw)    → destroys + frees; returns 0
+    COND_NEW,           ///< cond_new()            → Condvar handle
+    COND_WAIT,          ///< cond_wait(cv, mx)     → atomically releases mx and sleeps; returns 0
+    COND_SIGNAL,        ///< cond_signal(cv)       → wakes one waiter; returns 0
+    COND_BROADCAST,     ///< cond_broadcast(cv)    → wakes all waiters; returns 0
+    COND_DESTROY,       ///< cond_destroy(cv)      → destroys + frees; returns 0
+    THREAD_SELF,        ///< thread_self()         → current thread id as i64
+    THREAD_EQUAL,       ///< thread_equal(t1, t2)  → 1 if same thread, else 0
+    IS_TYPE,            ///< is_type(val, "typename") → 1 if val matches type
+    ENSURE_BUILTIN,     ///< ensure(cond[, msg]) → always-on runtime guard
+    // ── Round-90: compile() builtin ──────────────────────────────────────────
+    COMPILE_BUILTIN,    ///< compile("src") → array of object file bytes (compile-time)
+    // ── Round-92: zero-cost builtins ─────────────────────────────────────────
+    LERP,               ///< lerp(a, b, t)       → a + (b-a)*t via FMA (single instruction)
+    TRUNC_BUILTIN,      ///< trunc(x)            → float truncation towards zero (llvm.trunc)
+    RINT,               ///< rint(x)             → round to nearest even (banker's rounding)
+    SATURATING_MUL,     ///< saturating_mul(a,b) → signed saturating multiply (llvm.smul.fix.sat)
+    WRAP_ADD,           ///< wrap_add(a, b)      → wrapping add (no nsw, explicit overflow)
+    WRAP_SUB,           ///< wrap_sub(a, b)      → wrapping subtract
+    WRAP_MUL,           ///< wrap_mul(a, b)      → wrapping multiply
+    BIT_FLOOR,          ///< bit_floor(n)        → highest power-of-2 ≤ n (0 if n≤0)
+    BIT_CEIL,           ///< bit_ceil(n)         → smallest power-of-2 ≥ n (1 if n≤1)
+    BIT_WIDTH,          ///< bit_width(n)        → bits needed to represent n (0 if n==0)
+    THREAD_CREATE_EX,   ///< thread_create_ex(fn, arg, flags, stack_sz, priority, affinity)
+    // ── Round-106 additions ──────────────────────────────────────────────────
+    STR_IS_ALPHA,     ///< str_is_alpha(s)       → 1 if non-empty and all chars are a-z/A-Z
+    STR_IS_DIGIT,     ///< str_is_digit(s)       → 1 if non-empty and all chars are 0-9
+    STR_IS_ALNUM_STR, ///< str_is_alnum(s)       → 1 if non-empty and all chars are alphanumeric
+    STR_CENTER,       ///< str_center(s, width)  → center-pad to width with spaces
+    STR_ZFILL,        ///< str_zfill(s, width)   → left-pad with '0' to width
+    MAP_FROM_PAIRS,   ///< map_from_pairs(arr)   → build map from flat [k1,v1,k2,v2,...] array
+    ARRAY_STEP,       ///< array_step(arr, step) → every nth element: [arr[0],arr[step],...]
 };
 
 static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
@@ -442,6 +494,7 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"number_to_string", BuiltinId::NUMBER_TO_STRING},
     {"string_to_number", BuiltinId::STRING_TO_NUMBER},
     {"thread_create", BuiltinId::THREAD_CREATE},
+    {"thread_create_ex", BuiltinId::THREAD_CREATE_EX},
     {"thread_join", BuiltinId::THREAD_JOIN},
     {"thread_detach", BuiltinId::THREAD_DETACH},
     {"mutex_new", BuiltinId::MUTEX_NEW},
@@ -623,6 +676,54 @@ static const std::unordered_map<std::string_view, BuiltinId> builtinLookup = {
     {"file_flush",       BuiltinId::FILE_FLUSH},
     {"file_eof",         BuiltinId::FILE_EOF},
     {"file_is_open",     BuiltinId::FILE_IS_OPEN},
+    // ── Round-89 ─────────────────────────────────────────────────────────────
+    {"map_map",          BuiltinId::MAP_MAP},
+    {"map_to_pairs",     BuiltinId::MAP_TO_PAIRS},
+    {"str_insert",       BuiltinId::STR_INSERT},
+    {"str_delete",       BuiltinId::STR_DELETE},
+    // ── Round-100 ────────────────────────────────────────────────────────────
+    {"array_partition",  BuiltinId::ARRAY_PARTITION},
+    {"map_reduce",       BuiltinId::MAP_REDUCE},
+    // ── Round-90: threading improvements ─────────────────────────────────────
+    {"rwlock_new",       BuiltinId::RWLOCK_NEW},
+    {"rwlock_rdlock",    BuiltinId::RWLOCK_RDLOCK},
+    {"rwlock_try_rdlock",BuiltinId::RWLOCK_TRY_RDLOCK},
+    {"rwlock_wrlock",    BuiltinId::RWLOCK_WRLOCK},
+    {"rwlock_try_wrlock",BuiltinId::RWLOCK_TRY_WRLOCK},
+    {"rwlock_unlock",    BuiltinId::RWLOCK_UNLOCK},
+    {"rwlock_destroy",   BuiltinId::RWLOCK_DESTROY},
+    {"cond_new",         BuiltinId::COND_NEW},
+    {"cond_wait",        BuiltinId::COND_WAIT},
+    {"cond_signal",      BuiltinId::COND_SIGNAL},
+    {"cond_broadcast",   BuiltinId::COND_BROADCAST},
+    {"cond_destroy",     BuiltinId::COND_DESTROY},
+    {"thread_self",      BuiltinId::THREAD_SELF},
+    {"thread_equal",     BuiltinId::THREAD_EQUAL},
+    {"is_type",          BuiltinId::IS_TYPE},
+    {"ensure",           BuiltinId::ENSURE_BUILTIN},
+    {"compile",          BuiltinId::COMPILE_BUILTIN},
+    // ── Round-92: zero-cost builtins ─────────────────────────────────────────
+    {"lerp",             BuiltinId::LERP},
+    {"trunc",            BuiltinId::TRUNC_BUILTIN},
+    {"rint",             BuiltinId::RINT},
+    {"saturating_mul",   BuiltinId::SATURATING_MUL},
+    {"sat_add",          BuiltinId::SATURATING_ADD},
+    {"sat_sub",          BuiltinId::SATURATING_SUB},
+    {"sat_mul",          BuiltinId::SATURATING_MUL},
+    {"wrap_add",         BuiltinId::WRAP_ADD},
+    {"wrap_sub",         BuiltinId::WRAP_SUB},
+    {"wrap_mul",         BuiltinId::WRAP_MUL},
+    {"bit_floor",        BuiltinId::BIT_FLOOR},
+    {"bit_ceil",         BuiltinId::BIT_CEIL},
+    {"bit_width",        BuiltinId::BIT_WIDTH},
+    // ── Round-106 ────────────────────────────────────────────────────────────
+    {"str_is_alpha",     BuiltinId::STR_IS_ALPHA},
+    {"str_is_digit",     BuiltinId::STR_IS_DIGIT},
+    {"str_is_alnum",     BuiltinId::STR_IS_ALNUM_STR},
+    {"str_center",       BuiltinId::STR_CENTER},
+    {"str_zfill",        BuiltinId::STR_ZFILL},
+    {"map_from_pairs",   BuiltinId::MAP_FROM_PAIRS},
+    {"array_step",       BuiltinId::ARRAY_STEP},
 };
 
 static BuiltinId lookupBuiltin(const std::string& name) {
@@ -3753,7 +3854,151 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return llvm::ConstantInt::get(getDefaultType(), 1);
     }
 
-    // ── Round-76 builtins ────────────────────────────────────────────────────
+    if (bid == BuiltinId::IS_TYPE) {
+        if (expr->arguments.size() != 2)
+            codegenError("is_type: requires 2 arguments", expr);
+        auto* arg1 = expr->arguments[1].get();
+        std::string typeName;
+        if (arg1->type == ASTNodeType::LITERAL_EXPR) {
+            typeName = static_cast<LiteralExpr*>(arg1)->stringValue;
+        } else {
+            codegenError("is_type: second argument must be a type name string literal", expr);
+        }
+        llvm::Value* val = generateExpression(expr->arguments[0].get());
+        llvm::Type* t = val->getType();
+        bool matches = false;
+        auto getVarName = [](Expression* e) -> std::string {
+            if (e->type == ASTNodeType::IDENTIFIER_EXPR)
+                return static_cast<IdentifierExpr*>(e)->name;
+            return "";
+        };
+        std::string vname = getVarName(expr->arguments[0].get());
+        if (typeName == "int" || typeName == "integer") {
+            matches = t->isIntegerTy() && !t->isIntegerTy(1);
+        } else if (typeName == "float") {
+            matches = t->isDoubleTy() || t->isFloatTy();
+        } else if (typeName == "bool") {
+            matches = t->isIntegerTy(1);
+        } else if (typeName == "string") {
+            matches = isStringExpr(expr->arguments[0].get());
+        } else if (typeName == "array") {
+            matches = !vname.empty() && arrayVars_.count(vname) > 0;
+        } else if (typeName == "dict") {
+            matches = !vname.empty() && dictVarNames_.count(vname) > 0;
+        } else if (typeName == "ptr") {
+            matches = !vname.empty() && ptrVarNames_.count(vname) > 0;
+        }
+        (void)val;
+        return llvm::ConstantInt::get(getDefaultType(), matches ? 1 : 0);
+    }
+
+    if (bid == BuiltinId::ENSURE_BUILTIN) {
+        if (expr->arguments.size() < 1 || expr->arguments.size() > 2)
+            codegenError("ensure() requires 1 or 2 arguments (condition[, message])", expr);
+        llvm::Value* condVal = generateExpression(expr->arguments[0].get());
+        condVal = toBool(condVal);
+        llvm::Function* function = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "ensure.fail", function);
+        llvm::BasicBlock* okBB = llvm::BasicBlock::Create(*context, "ensure.ok", function);
+        llvm::MDNode* w = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(condVal, okBB, failBB, w);
+        builder->SetInsertPoint(failBB);
+        {
+            if (expr->arguments.size() == 2) {
+                llvm::Value* msgVal = generateExpression(expr->arguments[1].get());
+                llvm::Value* msgPtr = msgVal->getType()->isPointerTy() ? msgVal
+                    : builder->CreateIntToPtr(msgVal, llvm::PointerType::getUnqual(*context), "ensure.msg.ptr");
+                llvm::Value* msgData = emitStringData(msgPtr, "ensure.msg.data");
+                std::string prefix = expr->line > 0
+                    ? "Runtime error: ensure failed at line " + std::to_string(expr->line) + ": %s\n"
+                    : "Runtime error: ensure failed: %s\n";
+                builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(prefix, "ensure_fail_fmt"), msgData});
+            } else {
+                std::string msg = expr->line > 0
+                    ? "Runtime error: ensure failed at line " + std::to_string(expr->line) + "\n"
+                    : "Runtime error: ensure failed\n";
+                builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString(msg, "ensure_fail_msg")});
+            }
+        }
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        return llvm::ConstantInt::get(getDefaultType(), 1);
+    }
+
+    // ── Round-90: compile("source") ──────────────────────────────────────────
+    // Compiles an OmScript source string at compile time and returns an array of
+    // object-file bytes (i64 elements, one per byte).  The result is a constant
+    // array embedded in the program's data section.
+    //
+    // Usage:  var bytes = compile("fn add(a: int, b: int) -> int { return a + b; }");
+    //         // bytes is [i64] with len = object file size
+    //
+    // Constraints:
+    //   - Argument must be a compile-time string literal.
+    //   - Errors in the nested source are reported as compile-time errors.
+    //   - The returned array is a standard OmScript array of i64 values (0–255).
+    if (bid == BuiltinId::COMPILE_BUILTIN) {
+        validateArgCount(expr, "compile", 1);
+
+        // ── 1. Extract the source string (must be a compile-time literal) ──
+        auto* arg0 = expr->arguments[0].get();
+        if (arg0->type != ASTNodeType::LITERAL_EXPR) {
+            codegenError("compile(): argument must be a string literal "
+                         "(compile-time constant OmScript source code)", expr);
+        }
+        auto* lit = static_cast<LiteralExpr*>(arg0);
+        if (lit->literalType != LiteralExpr::LiteralType::STRING) {
+            codegenError("compile(): argument must be a string literal", expr);
+        }
+        const std::string source = lit->stringValue;
+
+        // ── 2. Lex + parse the nested source ──────────────────────────────
+        std::unique_ptr<Program> innerProg;
+        try {
+            Lexer innerLexer(source);
+            std::vector<Token> innerToks = innerLexer.tokenize();
+            Parser innerParser(std::move(innerToks));
+            innerProg = innerParser.parse();
+        } catch (const std::exception& e) {
+            codegenError(std::string("compile(): parse error in nested source — ") + e.what(), expr);
+        }
+
+        // ── 3. Codegen the inner program into a fresh module ──────────────
+        llvm::SmallVector<char, 0> objBytes;
+        try {
+            CodeGenerator innerCg(OptimizationLevel::O1);
+            innerCg.generate(innerProg.get());
+            innerCg.writeObjectToBuffer(objBytes);
+        } catch (const std::exception& e) {
+            codegenError(std::string("compile(): codegen/emission error — ") + e.what(), expr);
+        }
+
+        // ── 4. Build an OmScript array of i64 bytes ───────────────────────
+        // Layout: [len_slot (i64), elem0 (i64), elem1 (i64), …]
+        // We allocate at runtime and fill with compile-time constants.
+        const size_t numBytes = static_cast<size_t>(objBytes.size());
+        llvm::Value* lenVal = llvm::ConstantInt::get(getDefaultType(), static_cast<uint64_t>(numBytes));
+
+        // Allocate the array buffer: (numBytes + 1) × 8 bytes
+        llvm::Value* buf = emitAllocArray(lenVal, "compile.arr");
+
+        // Fill each slot with the corresponding byte value
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        auto* i64Ty = getDefaultType();
+        for (size_t i = 0; i < numBytes; ++i) {
+            llvm::Value* idx = llvm::ConstantInt::get(i64Ty, static_cast<uint64_t>(i + 1)); // slot 0 = length
+            llvm::Value* slot = builder->CreateInBoundsGEP(i64Ty, buf, idx, "compile.slot");
+            slot = builder->CreateIntToPtr(slot, ptrTy, "compile.slotptr");
+            uint8_t byteVal = static_cast<uint8_t>(objBytes[i]);
+            builder->CreateAlignedStore(
+                llvm::ConstantInt::get(i64Ty, byteVal),
+                slot, llvm::MaybeAlign(8));
+        }
+
+        arrayReturningFunctions_.insert("compile");
+        return builder->CreatePtrToInt(buf, i64Ty, "compile.arr.val");
+    }
 
     // array_flat_map(arr, fn) → apply fn to each element, treat each result as an inner array,
     // then flatten all inner arrays into one output array.  Equivalent to
@@ -6448,6 +6693,78 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
     if (bid == BuiltinId::ARRAY_SLICE) {
         validateArgCount(expr, "array_slice", 3);
+
+        // ── String slice path: s[start..end] — inline substring extraction ─────
+        // When the first argument is a string expression, emit substring IR
+        // directly (equivalent to str_substr but inlined here so we can share
+        // the compile-time constant-folding path with the array branch above).
+        // Dispatch is purely based on the AST: no runtime type check needed.
+        if (isStringExpr(expr->arguments[0].get())) {
+            // Compile-time folding when all three args are constants.
+            if (auto strConst = tryFoldStr(expr->arguments[0].get())) {
+                if (auto startConst = tryFoldInt(expr->arguments[1].get())) {
+                    if (auto endConst = tryFoldInt(expr->arguments[2].get())) {
+                        const auto& s = *strConst;
+                        int64_t slen = static_cast<int64_t>(s.size());
+                        int64_t startVal = *startConst, endVal = *endConst;
+                        if (startVal < 0) startVal = 0;
+                        if (startVal > slen) startVal = slen;
+                        if (endVal < startVal) endVal = startVal;
+                        if (endVal > slen) endVal = slen;
+                        int64_t lenVal = endVal - startVal;
+                        std::string result = s.substr(static_cast<size_t>(startVal), static_cast<size_t>(lenVal));
+                        llvm::GlobalVariable* gv = internString(result);
+                        stringReturningFunctions_.insert("array_slice");
+                        return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                            gv->getValueType(), gv,
+                            llvm::ArrayRef<llvm::Constant*>{
+                                llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                                llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+                    }
+                }
+            }
+            llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+            llvm::Value* startArg = generateExpression(expr->arguments[1].get());
+            llvm::Value* endArg = generateExpression(expr->arguments[2].get());
+            startArg = toDefaultType(startArg);
+            endArg = toDefaultType(endArg);
+            auto* ptrTy = llvm::PointerType::getUnqual(*context);
+            llvm::Value* strPtr =
+                strArg->getType()->isPointerTy() ? strArg : builder->CreateIntToPtr(strArg, ptrTy, "sslice.ptr");
+            llvm::Value* strLen = emitStringLen(strPtr, "sslice.strlen");
+            llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+            // Clamp start to [0, strLen].
+            llvm::Value* startNeg = builder->CreateICmpSLT(startArg, zero, "sslice.startneg");
+            startArg = builder->CreateSelect(startNeg, zero, startArg, "sslice.startclamp");
+            nonNegValues_.insert(startArg);
+            llvm::Value* startOver = builder->CreateICmpSGT(startArg, strLen, "sslice.startover");
+            startArg = builder->CreateSelect(startOver, strLen, startArg, "sslice.startfinal");
+            nonNegValues_.insert(startArg);
+            // Clamp end to [start, strLen].
+            llvm::Value* endNeg = builder->CreateICmpSLT(endArg, startArg, "sslice.endneg");
+            endArg = builder->CreateSelect(endNeg, startArg, endArg, "sslice.endclamp");
+            llvm::Value* endOver = builder->CreateICmpSGT(endArg, strLen, "sslice.endover");
+            endArg = builder->CreateSelect(endOver, strLen, endArg, "sslice.endfinal");
+            // length = end - start (always ≥ 0 after clamping).
+            llvm::Value* lenArg = builder->CreateSub(endArg, startArg, "sslice.len",
+                                                     /*HasNUW=*/true, /*HasNSW=*/true);
+            nonNegValues_.insert(lenArg);
+            llvm::Value* hdr = emitAllocString(lenArg, lenArg, "sslice");
+            llvm::Value* substrData = emitStringData(strPtr, "sslice.data");
+            llvm::Value* srcPtr =
+                builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), substrData, startArg, "sslice.src");
+            llvm::Value* dstData = emitStringData(hdr, "sslice.dst");
+            builder->CreateCall(getOrDeclareMemcpy(), {dstData, srcPtr, lenArg});
+            // Null-terminate.
+            llvm::Value* endPtr =
+                builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dstData, lenArg, "sslice.end");
+            builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), endPtr)
+                ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+            stringReturningFunctions_.insert("array_slice");
+            return hdr;
+        }
+
+        // ── Array slice path ──────────────────────────────────────────────────
         llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
         llvm::Value* startArg = generateExpression(expr->arguments[1].get());
         llvm::Value* endArg = generateExpression(expr->arguments[2].get());
@@ -8779,6 +9096,435 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return builder->CreateAlignedLoad(getDefaultType(), tidAlloca, llvm::MaybeAlign(8), "tid.val");
     }
 
+    // ── thread_create_ex: spawn with attributes ───────────────────────────────
+    // Signature: thread_create_ex(fn_name_literal, arg_or_0, flags, stack_sz, priority, affinity)
+    // flags bits: 0=detached, 2=cold(SCHED_IDLE), 3=hot(SCHED_FIFO/RR)
+    // stack_sz: 0 = default
+    // priority: 0 = default (inherit), > 0 = explicit sched_priority
+    // affinity: -1 = no pin, >= 0 = pin to that CPU core (Linux-only via pthread_setaffinity_np)
+    if (bid == BuiltinId::THREAD_CREATE_EX) {
+        if (expr->arguments.size() != 6)
+            codegenError("thread_create_ex: internal error — requires exactly 6 arguments", expr);
+
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        auto* i32Ty = llvm::Type::getInt32Ty(*context);
+        auto* i64Ty = getDefaultType();
+
+        // Arg 0: function name
+        const std::string fnName = extractFnName(expr->arguments[0].get());
+        if (fnName.empty())
+            codegenError("thread_create_ex: argument 0 must be a function name", expr);
+        auto fnIt = functions.find(fnName);
+        if (fnIt == functions.end() || !fnIt->second)
+            codegenError("thread_create_ex: unknown function '" + fnName + "'", expr);
+        llvm::Function* targetFunc = fnIt->second;
+        const unsigned arity = targetFunc->arg_size();
+        if (arity > 1)
+            codegenError("thread_create_ex target '" + fnName +
+                         "' must take 0 or 1 parameter(s)", expr);
+
+        // Arg 1: thread argument (0 if none)
+        llvm::Value* threadArg = llvm::ConstantPointerNull::get(ptrTy);
+        if (arity == 1) {
+            llvm::Value* argVal = toDefaultType(generateExpression(expr->arguments[1].get()));
+            threadArg = builder->CreateCall(getOrDeclareMalloc(),
+                                            {llvm::ConstantInt::get(i64Ty, 8)}, "tcex.arg");
+            builder->CreateAlignedStore(argVal, threadArg, llvm::MaybeAlign(8));
+        }
+
+        // Arg 2: flags (compile-time constant expected)
+        int64_t flags = 0;
+        if (auto fv = tryFoldInt(expr->arguments[2].get())) flags = *fv;
+
+        // Arg 3: stack size (0 = default)
+        int64_t stackSz = 0;
+        if (auto sv = tryFoldInt(expr->arguments[3].get())) stackSz = *sv;
+
+        // Arg 4: priority (0 = default)
+        int64_t priority = 0;
+        if (auto pv = tryFoldInt(expr->arguments[4].get())) priority = *pv;
+
+        // Arg 5: affinity core (-1 = no pin)
+        int64_t affinityCore = -1;
+        if (auto av = tryFoldInt(expr->arguments[5].get())) affinityCore = *av;
+
+        // Build the wrapper function (same pattern as THREAD_CREATE)
+        const std::string wrapperName = "__thread_wrapper_" + fnName + (arity == 1 ? "_a1" : "_a0");
+        llvm::Function* wrapper = module->getFunction(wrapperName);
+        if (!wrapper) {
+            auto* wrapperType = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
+            wrapper = llvm::Function::Create(wrapperType, llvm::Function::InternalLinkage, wrapperName, module.get());
+            auto* savedBB = builder->GetInsertBlock();
+            auto* savedPt = builder->GetInsertPoint() != builder->GetInsertBlock()->end()
+                                ? &*builder->GetInsertPoint() : nullptr;
+            auto* entry = llvm::BasicBlock::Create(*context, "entry", wrapper);
+            builder->SetInsertPoint(entry);
+            llvm::Value* callRes = nullptr;
+            if (arity == 1) {
+                llvm::Value* argPtr = wrapper->getArg(0);
+                llvm::Value* argI64 = builder->CreateAlignedLoad(i64Ty, argPtr, llvm::MaybeAlign(8), "tcex.thread.arg");
+                builder->CreateCall(getOrDeclareFree(), {argPtr});
+                llvm::Value* coerced = convertTo(argI64, targetFunc->getFunctionType()->getParamType(0));
+                callRes = builder->CreateCall(targetFunc, {coerced});
+            } else {
+                callRes = builder->CreateCall(targetFunc);
+            }
+            if (targetFunc->getReturnType()->isVoidTy())
+                builder->CreateRet(llvm::ConstantPointerNull::get(ptrTy));
+            else
+                builder->CreateRet(builder->CreateIntToPtr(toDefaultType(callRes), ptrTy));
+            if (savedPt) builder->SetInsertPoint(savedBB, llvm::BasicBlock::iterator(savedPt));
+            else         builder->SetInsertPoint(savedBB);
+        }
+
+        // Allocate pthread_attr_t on stack (sizeof ≤ 64 bytes on Linux/macOS)
+        auto* parentFunc = builder->GetInsertBlock()->getParent();
+        auto* attrTy = llvm::ArrayType::get(i64Ty, 8); // 64 bytes
+        llvm::AllocaInst* attrAlloca = nullptr;
+        {
+            llvm::IRBuilder<> tmpB(&parentFunc->getEntryBlock(), parentFunc->getEntryBlock().begin());
+            attrAlloca = tmpB.CreateAlloca(attrTy, nullptr, "tcex.attr");
+            attrAlloca->setAlignment(llvm::MaybeAlign(8).valueOrOne());
+        }
+        llvm::Value* attrPtr = builder->CreateBitOrPointerCast(attrAlloca, ptrTy, "tcex.attr.ptr");
+        builder->CreateCall(getOrDeclarePthreadAttrInit(), {attrPtr});
+
+        // ── detached flag (bit 0) ──────────────────────────────────────────
+        const bool isDetached = (flags & 1) != 0;
+        if (isDetached) {
+            // PTHREAD_CREATE_DETACHED = 1 on Linux; use the constant directly
+            builder->CreateCall(getOrDeclarePthreadAttrSetdetachstate(),
+                                {attrPtr, llvm::ConstantInt::get(i32Ty, 1)});
+        }
+
+        // ── stack size ─────────────────────────────────────────────────────
+        if (stackSz > 0) {
+            // POSIX minimum is 16384; enforce a sane floor
+            const int64_t minStack = 16384;
+            stackSz = (stackSz < minStack) ? minStack : stackSz;
+            builder->CreateCall(getOrDeclarePthreadAttrSetstacksize(),
+                                {attrPtr, llvm::ConstantInt::get(i64Ty, stackSz)});
+        }
+
+        // ── scheduling policy / priority ───────────────────────────────────
+        const bool isCold = (flags & 4) != 0;
+        const bool isHot  = (flags & 8) != 0;
+        if (isCold || isHot || priority > 0) {
+            // PTHREAD_EXPLICIT_SCHED = 1 (use attr policy, not inherit)
+            builder->CreateCall(getOrDeclarePthreadAttrSetinheritsched(),
+                                {attrPtr, llvm::ConstantInt::get(i32Ty, 1)});
+            // SCHED_OTHER=0, SCHED_FIFO=1, SCHED_RR=2, SCHED_IDLE=5(Linux)
+            int schedPolicy = 0; // SCHED_OTHER
+            if (isHot)  schedPolicy = 1; // SCHED_FIFO
+            if (isCold) schedPolicy = 5; // SCHED_IDLE (Linux)
+            builder->CreateCall(getOrDeclarePthreadAttrSetschedpolicy(),
+                                {attrPtr, llvm::ConstantInt::get(i32Ty, schedPolicy)});
+            // Build a sched_param struct on the stack: { int sched_priority }
+            llvm::AllocaInst* spAlloca = nullptr;
+            {
+                llvm::IRBuilder<> tmpB(&parentFunc->getEntryBlock(), parentFunc->getEntryBlock().begin());
+                spAlloca = tmpB.CreateAlloca(i32Ty, nullptr, "tcex.schedparam");
+                spAlloca->setAlignment(llvm::MaybeAlign(4).valueOrOne());
+            }
+            int effPrio = (priority > 0) ? static_cast<int>(priority) : (isHot ? 50 : 0);
+            builder->CreateStore(llvm::ConstantInt::get(i32Ty, effPrio), spAlloca);
+            llvm::Value* spPtr = builder->CreateBitOrPointerCast(spAlloca, ptrTy, "tcex.sp.ptr");
+            builder->CreateCall(getOrDeclarePthreadAttrSetschedparam(), {attrPtr, spPtr});
+        }
+
+        // ── create the thread ─────────────────────────────────────────────
+        auto* tidAlloca = createEntryBlockAlloca(parentFunc, "tcex.tid");
+        llvm::Value* status = builder->CreateCall(
+            getOrDeclarePthreadCreate(), {tidAlloca, attrPtr, wrapper, threadArg}, "tcex.status");
+        builder->CreateCall(getOrDeclarePthreadAttrDestroy(), {attrPtr});
+
+        llvm::BasicBlock* okBB2   = llvm::BasicBlock::Create(*context, "tcex.ok",   parentFunc);
+        llvm::BasicBlock* failBB2 = llvm::BasicBlock::Create(*context, "tcex.fail", parentFunc);
+        builder->CreateCondBr(
+            builder->CreateICmpEQ(status, llvm::ConstantInt::get(status->getType(), 0)), okBB2, failBB2);
+        builder->SetInsertPoint(failBB2);
+        builder->CreateCall(getPrintfFunction(),
+            {builder->CreateGlobalString("Runtime error: spawn failed\n", "tcex_fail_msg")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB2);
+
+        // For detached threads return 0 (no meaningful handle); otherwise return tid
+        if (isDetached)
+            return llvm::ConstantInt::get(i64Ty, 0);
+        return builder->CreateAlignedLoad(i64Ty, tidAlloca, llvm::MaybeAlign(8), "tcex.tid.val");
+    }
+
+    // ── Round-92: zero-cost builtins ─────────────────────────────────────────
+
+    // lerp(a, b, t) → fma(t, b-a, a)  (single FMA instruction, zero overhead)
+    // Linear interpolation: lerp(0.0, 1.0, 0.5) == 0.5
+    if (bid == BuiltinId::LERP) {
+        validateArgCount(expr, "lerp", 3);
+        // Compile-time fold when all three args are float or int constants.
+        {
+            auto ca = tryFoldExprToConst(expr->arguments[0].get());
+            auto cb = tryFoldExprToConst(expr->arguments[1].get());
+            auto ct = tryFoldExprToConst(expr->arguments[2].get());
+            if (ca && cb && ct) {
+                auto toD = [](const ConstValue& v) {
+                    return v.kind == ConstValue::Kind::Float
+                               ? v.floatVal
+                               : static_cast<double>(v.intVal);
+                };
+                double da = toD(*ca), db = toD(*cb), dt = toD(*ct);
+                // Use the mathematically exact form to avoid excess error.
+                double result = da + (db - da) * dt;
+                optStats_.constFolded++;
+                return llvm::ConstantFP::get(getFloatType(), result);
+            }
+        }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        llvm::Value* t = generateExpression(expr->arguments[2].get());
+        a = ensureFloat(a);
+        b = ensureFloat(b);
+        t = ensureFloat(t);
+        // lerp(a, b, t) = fma(t, b-a, a) — one FMA on hardware that supports it.
+        llvm::Value* bma    = builder->CreateFSub(b, a, "lerp.bma");
+        llvm::Function* fmaFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::fma, {getFloatType()});
+        return builder->CreateCall(fmaFn, {t, bma, a}, "lerp.result");
+    }
+
+    // trunc(x) → round towards zero (llvm.trunc intrinsic)
+    // Completes the floor/ceil/round/trunc quad.
+    if (bid == BuiltinId::TRUNC_BUILTIN) {
+        validateArgCount(expr, "trunc", 1);
+        if (auto v = tryFoldInt(expr->arguments[0].get()))
+            return llvm::ConstantInt::get(getDefaultType(), *v);
+        if (auto v = tryFoldExprToConst(expr->arguments[0].get())) {
+            if (v->kind == ConstValue::Kind::Float) {
+                double t = v->floatVal < 0.0 ? std::ceil(v->floatVal) : std::floor(v->floatVal);
+                optStats_.constFolded++;
+                return llvm::ConstantFP::get(getFloatType(), t);
+            }
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        const bool inputIsDouble = arg->getType()->isDoubleTy();
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::Function* truncFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::trunc, {getFloatType()});
+        llvm::Value* result = builder->CreateCall(truncFn, {fval}, "trunc.result");
+        if (inputIsDouble)
+            return result;
+        return builder->CreateFPToSI(result, getDefaultType(), "trunc.int");
+    }
+
+    // rint(x) → round to nearest, ties to even (banker's rounding, llvm.rint)
+    if (bid == BuiltinId::RINT) {
+        validateArgCount(expr, "rint", 1);
+        if (auto v = tryFoldInt(expr->arguments[0].get()))
+            return llvm::ConstantInt::get(getDefaultType(), *v);
+        if (auto v = tryFoldExprToConst(expr->arguments[0].get())) {
+            if (v->kind == ConstValue::Kind::Float) {
+                optStats_.constFolded++;
+                return llvm::ConstantFP::get(getFloatType(), std::rint(v->floatVal));
+            }
+        }
+        llvm::Value* arg = generateExpression(expr->arguments[0].get());
+        const bool inputIsDouble = arg->getType()->isDoubleTy();
+        llvm::Value* fval = ensureFloat(arg);
+        llvm::Function* rintFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::rint, {getFloatType()});
+        llvm::Value* result = builder->CreateCall(rintFn, {fval}, "rint.result");
+        if (inputIsDouble)
+            return result;
+        return builder->CreateFPToSI(result, getDefaultType(), "rint.int");
+    }
+
+    // saturating_mul(a, b) → signed saturating multiply (llvm.smul.fix.sat)
+    if (bid == BuiltinId::SATURATING_MUL) {
+        validateArgCount(expr, "saturating_mul", 2);
+        if (auto va = tryFoldInt(expr->arguments[0].get())) {
+            if (auto vb = tryFoldInt(expr->arguments[1].get())) {
+                __int128 prod = static_cast<__int128>(*va) * static_cast<__int128>(*vb);
+                if (prod > INT64_MAX) prod = INT64_MAX;
+                if (prod < INT64_MIN) prod = INT64_MIN;
+                optStats_.constFolded++;
+                return llvm::ConstantInt::get(getDefaultType(), static_cast<int64_t>(prod));
+            }
+        }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = toDefaultType(a);
+        b = toDefaultType(b);
+        // llvm.smul.fix.sat(a, b, scale=0) is the signed saturating multiply.
+        llvm::Function* smulSatFn =
+            OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::smul_fix_sat, {getDefaultType()});
+        return builder->CreateCall(smulSatFn, {a, b, builder->getInt32(0)}, "smul.sat.result");
+    }
+
+    // wrap_add(a, b) — wrapping add (no nsw/nuw: defined overflow wraps)
+    if (bid == BuiltinId::WRAP_ADD) {
+        validateArgCount(expr, "wrap_add", 2);
+        if (auto va = tryFoldInt(expr->arguments[0].get())) {
+            if (auto vb = tryFoldInt(expr->arguments[1].get())) {
+                optStats_.constFolded++;
+                return llvm::ConstantInt::get(getDefaultType(),
+                    static_cast<int64_t>(static_cast<uint64_t>(*va) + static_cast<uint64_t>(*vb)));
+            }
+        }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = toDefaultType(a);
+        b = toDefaultType(b);
+        // Emit without nsw/nuw flags — wrapping is well-defined and intentional.
+        return builder->CreateAdd(a, b, "wrap.add.result");
+    }
+
+    // wrap_sub(a, b) — wrapping subtract
+    if (bid == BuiltinId::WRAP_SUB) {
+        validateArgCount(expr, "wrap_sub", 2);
+        if (auto va = tryFoldInt(expr->arguments[0].get())) {
+            if (auto vb = tryFoldInt(expr->arguments[1].get())) {
+                optStats_.constFolded++;
+                return llvm::ConstantInt::get(getDefaultType(),
+                    static_cast<int64_t>(static_cast<uint64_t>(*va) - static_cast<uint64_t>(*vb)));
+            }
+        }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = toDefaultType(a);
+        b = toDefaultType(b);
+        return builder->CreateSub(a, b, "wrap.sub.result");
+    }
+
+    // wrap_mul(a, b) — wrapping multiply
+    if (bid == BuiltinId::WRAP_MUL) {
+        validateArgCount(expr, "wrap_mul", 2);
+        if (auto va = tryFoldInt(expr->arguments[0].get())) {
+            if (auto vb = tryFoldInt(expr->arguments[1].get())) {
+                optStats_.constFolded++;
+                return llvm::ConstantInt::get(getDefaultType(),
+                    static_cast<int64_t>(static_cast<uint64_t>(*va) * static_cast<uint64_t>(*vb)));
+            }
+        }
+        llvm::Value* a = generateExpression(expr->arguments[0].get());
+        llvm::Value* b = generateExpression(expr->arguments[1].get());
+        a = toDefaultType(a);
+        b = toDefaultType(b);
+        return builder->CreateMul(a, b, "wrap.mul.result");
+    }
+
+    // bit_floor(n) → highest power-of-2 ≤ n (0 if n ≤ 0)
+    // C++20 std::bit_floor.  Zero-cost: 1 << (63 - clz(n)) for n > 0.
+    if (bid == BuiltinId::BIT_FLOOR) {
+        validateArgCount(expr, "bit_floor", 1);
+        if (auto v = tryFoldInt(expr->arguments[0].get())) {
+            int64_t n = *v;
+            optStats_.constFolded++;
+            if (n <= 0) return llvm::ConstantInt::get(getDefaultType(), 0);
+            return llvm::ConstantInt::get(getDefaultType(),
+                static_cast<int64_t>(1ULL << (63 - __builtin_clzll(static_cast<uint64_t>(n)))));
+        }
+        llvm::Value* n = generateExpression(expr->arguments[0].get());
+        n = toDefaultType(n);
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        // If n <= 0: result = 0.
+        llvm::Function* parentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* posBB  = llvm::BasicBlock::Create(*context, "bfloor.pos",  parentFn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "bfloor.done", parentFn);
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::Value* isPos = builder->CreateICmpSGT(n, zero, "bfloor.ispos");
+        builder->CreateCondBr(isPos, posBB, doneBB);
+
+        builder->SetInsertPoint(posBB);
+        // clz(n) = ctlz(n, /*is_zero_poison=*/true) — safe since n > 0 here.
+        llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ctlz, {getDefaultType()});
+        llvm::Value* lz   = builder->CreateCall(ctlzFn, {n, builder->getTrue()}, "bfloor.lz");
+        llvm::Value* shift = builder->CreateSub(llvm::ConstantInt::get(getDefaultType(), 63), lz,
+                                                "bfloor.shift", /*NUW=*/true, /*NSW=*/true);
+        llvm::Value* result = builder->CreateShl(one, shift, "bfloor.result", /*NUW=*/true, /*NSW=*/true);
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "bfloor.phi");
+        phi->addIncoming(zero,   entryBB);
+        phi->addIncoming(result, posBB);
+        nonNegValues_.insert(phi);
+        return phi;
+    }
+
+    // bit_ceil(n) → smallest power-of-2 ≥ n (returns 1 for n ≤ 1)
+    // C++20 std::bit_ceil.  Zero-cost: 1 << (64 - clz(n-1)) for n > 1.
+    if (bid == BuiltinId::BIT_CEIL) {
+        validateArgCount(expr, "bit_ceil", 1);
+        if (auto v = tryFoldInt(expr->arguments[0].get())) {
+            int64_t n = *v;
+            optStats_.constFolded++;
+            if (n <= 1) return llvm::ConstantInt::get(getDefaultType(), 1);
+            uint64_t un = static_cast<uint64_t>(n) - 1;
+            return llvm::ConstantInt::get(getDefaultType(),
+                static_cast<int64_t>(1ULL << (64 - __builtin_clzll(un))));
+        }
+        llvm::Value* n = generateExpression(expr->arguments[0].get());
+        n = toDefaultType(n);
+        llvm::Value* one = llvm::ConstantInt::get(getDefaultType(), 1);
+        // For n <= 1 result is 1.  For n > 1: 1 << (64 - clz(n-1)).
+        llvm::Function* parentFn  = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* bigBB   = llvm::BasicBlock::Create(*context, "bceil.big",  parentFn);
+        llvm::BasicBlock* doneBB  = llvm::BasicBlock::Create(*context, "bceil.done", parentFn);
+        llvm::BasicBlock* entryBB = builder->GetInsertBlock();
+        llvm::Value* isBig = builder->CreateICmpSGT(n, one, "bceil.isbig");
+        builder->CreateCondBr(isBig, bigBB, doneBB);
+
+        builder->SetInsertPoint(bigBB);
+        llvm::Value* nm1  = builder->CreateSub(n, one, "bceil.nm1", /*NUW=*/true, /*NSW=*/true);
+        llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ctlz, {getDefaultType()});
+        llvm::Value* lz    = builder->CreateCall(ctlzFn, {nm1, builder->getTrue()}, "bceil.lz");
+        llvm::Value* shift = builder->CreateSub(llvm::ConstantInt::get(getDefaultType(), 64), lz,
+                                                "bceil.shift", /*NUW=*/false, /*NSW=*/true);
+        llvm::Value* result = builder->CreateShl(one, shift, "bceil.result");
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "bceil.phi");
+        phi->addIncoming(one,    entryBB);
+        phi->addIncoming(result, bigBB);
+        nonNegValues_.insert(phi);
+        return phi;
+    }
+
+    // bit_width(n) → number of bits needed to represent n (0 if n == 0)
+    // C++20 std::bit_width.  Zero-cost: 64 - clz(n) for n > 0.
+    if (bid == BuiltinId::BIT_WIDTH) {
+        validateArgCount(expr, "bit_width", 1);
+        if (auto v = tryFoldInt(expr->arguments[0].get())) {
+            int64_t n = *v;
+            optStats_.constFolded++;
+            if (n <= 0) return llvm::ConstantInt::get(getDefaultType(), 0);
+            return llvm::ConstantInt::get(getDefaultType(),
+                static_cast<int64_t>(64 - __builtin_clzll(static_cast<uint64_t>(n))));
+        }
+        llvm::Value* n = generateExpression(expr->arguments[0].get());
+        n = toDefaultType(n);
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* isZero = builder->CreateICmpSLE(n, zero, "bwidth.iszero");
+        llvm::Function* parentFn  = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* nonzeroBB = llvm::BasicBlock::Create(*context, "bwidth.nonzero", parentFn);
+        llvm::BasicBlock* doneBB   = llvm::BasicBlock::Create(*context, "bwidth.done",    parentFn);
+        llvm::BasicBlock* entryBB  = builder->GetInsertBlock();
+        builder->CreateCondBr(isZero, doneBB, nonzeroBB);
+
+        builder->SetInsertPoint(nonzeroBB);
+        llvm::Function* ctlzFn = OMSC_GET_INTRINSIC(module.get(), llvm::Intrinsic::ctlz, {getDefaultType()});
+        llvm::Value* lz     = builder->CreateCall(ctlzFn, {n, builder->getTrue()}, "bwidth.lz");
+        llvm::Value* width  = builder->CreateSub(llvm::ConstantInt::get(getDefaultType(), 64), lz,
+                                                  "bwidth.width", /*NUW=*/true, /*NSW=*/true);
+        builder->CreateBr(doneBB);
+
+        builder->SetInsertPoint(doneBB);
+        llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "bwidth.phi");
+        phi->addIncoming(zero,  entryBB);
+        phi->addIncoming(width, nonzeroBB);
+        nonNegValues_.insert(phi);
+        return phi;
+    }
+
     if (bid == BuiltinId::THREAD_JOIN) {
         validateArgCount(expr, "thread_join", 1);
         llvm::Value* tid = generateExpression(expr->arguments[0].get());
@@ -8838,8 +9584,8 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* ptrTy = llvm::PointerType::getUnqual(*context);
         llvm::Value* nullAttr = llvm::ConstantPointerNull::get(ptrTy);
         builder->CreateCall(getOrDeclarePthreadMutexInit(), {mutex, nullAttr});
-        // Return as i64
-        return mutex;
+        // Return as i64 (ptrtoint) so the handle is opaque and comparable with !=0
+        return builder->CreatePtrToInt(mutex, getDefaultType(), "mutex.handle");
     }
 
     if (bid == BuiltinId::MUTEX_LOCK) {
@@ -8870,7 +9616,7 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         auto* parentFunc = builder->GetInsertBlock()->getParent();
         llvm::Value* status = builder->CreateCall(getOrDeclarePthreadMutexTryLock(), {mutexPtr}, "mutex.try.status");
         llvm::Value* c0 = llvm::ConstantInt::get(status->getType(), 0);
-        llvm::Value* cBusy = llvm::ConstantInt::get(status->getType(), 16); // POSIX EBUSY
+        llvm::Value* cBusy = llvm::ConstantInt::get(status->getType(), EBUSY);
         llvm::Value* okAcquired = builder->CreateICmpEQ(status, c0, "mutex.try.is_acquired");
         llvm::Value* okBusy = builder->CreateICmpEQ(status, cBusy, "mutex.try.is_busy");
 
@@ -8945,7 +9691,244 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return llvm::ConstantInt::get(getDefaultType(), 0);
     }
 
-    // ── Bitwise intrinsic builtins ─────────────────────────────────────
+    // ── rwlock builtins ──────────────────────────────────────────────────────
+
+    if (bid == BuiltinId::RWLOCK_NEW) {
+        validateArgCount(expr, "rwlock_new", 0);
+        static constexpr int64_t kRwlockAllocSize = 64;
+        llvm::Value* size = llvm::ConstantInt::get(getDefaultType(), kRwlockAllocSize);
+        llvm::Value* rw = builder->CreateCall(getOrDeclareMalloc(), {size}, "rwlock.ptr");
+        llvm::cast<llvm::CallInst>(rw)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, kRwlockAllocSize));
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        builder->CreateCall(getOrDeclarePthreadRwlockInit(), {rw, llvm::ConstantPointerNull::get(ptrTy)});
+        return builder->CreatePtrToInt(rw, getDefaultType(), "rwlock.handle");
+    }
+
+    if (bid == BuiltinId::RWLOCK_RDLOCK) {
+        validateArgCount(expr, "rwlock_rdlock", 1);
+        llvm::Value* rw = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "rwlock.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadRwlockRdlock(), {rw}, "rwlock.rd.status");
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "rwlock.rd.ok",   fn);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "rwlock.rd.fail", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, llvm::ConstantInt::get(st->getType(), 0)), okBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: rwlock_rdlock failed\n", "rwlock_rd_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::RWLOCK_TRY_RDLOCK) {
+        validateArgCount(expr, "rwlock_try_rdlock", 1);
+        llvm::Value* rw = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "rwlock.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadRwlockTryRdlock(), {rw}, "rwlock.tryrd.status");
+        llvm::Value* c0    = llvm::ConstantInt::get(st->getType(), 0);
+        llvm::Value* cBusy = llvm::ConstantInt::get(st->getType(), EBUSY);
+        llvm::BasicBlock* acqBB   = llvm::BasicBlock::Create(*context, "rwlock.tryrd.acq",   fn);
+        llvm::BasicBlock* busyBB  = llvm::BasicBlock::Create(*context, "rwlock.tryrd.busy",  fn);
+        llvm::BasicBlock* failBB  = llvm::BasicBlock::Create(*context, "rwlock.tryrd.fail",  fn);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "rwlock.tryrd.merge", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, c0), acqBB, busyBB);
+        builder->SetInsertPoint(busyBB);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, cBusy), mergeBB, failBB);
+        builder->SetInsertPoint(acqBB);
+        builder->CreateBr(mergeBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: rwlock_try_rdlock failed\n", "rwlock_tryrd_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "rwlock.tryrd.result");
+        phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), acqBB);
+        phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), busyBB);
+        return phi;
+    }
+
+    if (bid == BuiltinId::RWLOCK_WRLOCK) {
+        validateArgCount(expr, "rwlock_wrlock", 1);
+        llvm::Value* rw = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "rwlock.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadRwlockWrlock(), {rw}, "rwlock.wr.status");
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "rwlock.wr.ok",   fn);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "rwlock.wr.fail", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, llvm::ConstantInt::get(st->getType(), 0)), okBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: rwlock_wrlock failed\n", "rwlock_wr_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::RWLOCK_TRY_WRLOCK) {
+        validateArgCount(expr, "rwlock_try_wrlock", 1);
+        llvm::Value* rw = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "rwlock.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadRwlockTryWrlock(), {rw}, "rwlock.trywr.status");
+        llvm::Value* c0    = llvm::ConstantInt::get(st->getType(), 0);
+        llvm::Value* cBusy = llvm::ConstantInt::get(st->getType(), EBUSY);
+        llvm::BasicBlock* acqBB   = llvm::BasicBlock::Create(*context, "rwlock.trywr.acq",   fn);
+        llvm::BasicBlock* busyBB  = llvm::BasicBlock::Create(*context, "rwlock.trywr.busy",  fn);
+        llvm::BasicBlock* failBB  = llvm::BasicBlock::Create(*context, "rwlock.trywr.fail",  fn);
+        llvm::BasicBlock* mergeBB = llvm::BasicBlock::Create(*context, "rwlock.trywr.merge", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, c0), acqBB, busyBB);
+        builder->SetInsertPoint(busyBB);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, cBusy), mergeBB, failBB);
+        builder->SetInsertPoint(acqBB);
+        builder->CreateBr(mergeBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: rwlock_try_wrlock failed\n", "rwlock_trywr_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* phi = builder->CreatePHI(getDefaultType(), 2, "rwlock.trywr.result");
+        phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 1), acqBB);
+        phi->addIncoming(llvm::ConstantInt::get(getDefaultType(), 0), busyBB);
+        return phi;
+    }
+
+    if (bid == BuiltinId::RWLOCK_UNLOCK) {
+        validateArgCount(expr, "rwlock_unlock", 1);
+        llvm::Value* rw = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "rwlock.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadRwlockUnlock(), {rw}, "rwlock.unlock.status");
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "rwlock.unlock.ok",   fn);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "rwlock.unlock.fail", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, llvm::ConstantInt::get(st->getType(), 0)), okBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: rwlock_unlock failed\n", "rwlock_unlock_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::RWLOCK_DESTROY) {
+        validateArgCount(expr, "rwlock_destroy", 1);
+        llvm::Value* rw = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "rwlock.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadRwlockDestroy(), {rw}, "rwlock.destroy.status");
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "rwlock.destroy.ok",   fn);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "rwlock.destroy.fail", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, llvm::ConstantInt::get(st->getType(), 0)), okBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: rwlock_destroy failed\n", "rwlock_destroy_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        builder->CreateCall(getOrDeclareFree(), {rw});
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    // ── condvar builtins ─────────────────────────────────────────────────────
+
+    if (bid == BuiltinId::COND_NEW) {
+        validateArgCount(expr, "cond_new", 0);
+        static constexpr int64_t kCondAllocSize = 64;
+        llvm::Value* size = llvm::ConstantInt::get(getDefaultType(), kCondAllocSize);
+        llvm::Value* cv = builder->CreateCall(getOrDeclareMalloc(), {size}, "cond.ptr");
+        llvm::cast<llvm::CallInst>(cv)->addRetAttr(
+            llvm::Attribute::getWithDereferenceableBytes(*context, kCondAllocSize));
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        builder->CreateCall(getOrDeclarePthreadCondInit(), {cv, llvm::ConstantPointerNull::get(ptrTy)});
+        return builder->CreatePtrToInt(cv, getDefaultType(), "cond.handle");
+    }
+
+    if (bid == BuiltinId::COND_WAIT) {
+        // cond_wait(cv, mutex) — atomically releases mutex and waits on cv
+        validateArgCount(expr, "cond_wait", 2);
+        llvm::Value* cv = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "cond.ptr");
+        llvm::Value* mx = emitToArrayPtr(generateExpression(expr->arguments[1].get()), "mutex.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadCondWait(), {cv, mx}, "cond.wait.status");
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "cond.wait.ok",   fn);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "cond.wait.fail", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, llvm::ConstantInt::get(st->getType(), 0)), okBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: cond_wait failed\n", "cond_wait_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::COND_SIGNAL) {
+        validateArgCount(expr, "cond_signal", 1);
+        llvm::Value* cv = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "cond.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadCondSignal(), {cv}, "cond.signal.status");
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "cond.signal.ok",   fn);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "cond.signal.fail", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, llvm::ConstantInt::get(st->getType(), 0)), okBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: cond_signal failed\n", "cond_signal_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::COND_BROADCAST) {
+        validateArgCount(expr, "cond_broadcast", 1);
+        llvm::Value* cv = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "cond.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadCondBroadcast(), {cv}, "cond.bc.status");
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "cond.bc.ok",   fn);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "cond.bc.fail", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, llvm::ConstantInt::get(st->getType(), 0)), okBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: cond_broadcast failed\n", "cond_bc_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    if (bid == BuiltinId::COND_DESTROY) {
+        validateArgCount(expr, "cond_destroy", 1);
+        llvm::Value* cv = emitToArrayPtr(generateExpression(expr->arguments[0].get()), "cond.ptr");
+        auto* fn = builder->GetInsertBlock()->getParent();
+        llvm::Value* st = builder->CreateCall(getOrDeclarePthreadCondDestroy(), {cv}, "cond.destroy.status");
+        llvm::BasicBlock* okBB   = llvm::BasicBlock::Create(*context, "cond.destroy.ok",   fn);
+        llvm::BasicBlock* failBB = llvm::BasicBlock::Create(*context, "cond.destroy.fail", fn);
+        builder->CreateCondBr(builder->CreateICmpEQ(st, llvm::ConstantInt::get(st->getType(), 0)), okBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateCall(getPrintfFunction(), {builder->CreateGlobalString("Runtime error: cond_destroy failed\n", "cond_destroy_err")});
+        builder->CreateCall(getOrDeclareAbort());
+        builder->CreateUnreachable();
+        builder->SetInsertPoint(okBB);
+        builder->CreateCall(getOrDeclareFree(), {cv});
+        return llvm::ConstantInt::get(getDefaultType(), 0);
+    }
+
+    // ── thread_self / thread_equal ───────────────────────────────────────────
+
+    if (bid == BuiltinId::THREAD_SELF) {
+        validateArgCount(expr, "thread_self", 0);
+        // pthread_t is modeled as i64; cast the return through ptrtoint if needed.
+        llvm::Value* tid = builder->CreateCall(getOrDeclarePthreadSelf(), {}, "thread.self");
+        // Ensure result is i64 (on some platforms pthread_t may be a pointer type)
+        if (!tid->getType()->isIntegerTy(64))
+            tid = builder->CreatePtrToInt(tid, getDefaultType(), "thread.self.i64");
+        nonNegValues_.insert(tid);
+        return tid;
+    }
+
+    if (bid == BuiltinId::THREAD_EQUAL) {
+        validateArgCount(expr, "thread_equal", 2);
+        llvm::Value* t1 = toDefaultType(generateExpression(expr->arguments[0].get()));
+        llvm::Value* t2 = toDefaultType(generateExpression(expr->arguments[1].get()));
+        llvm::Value* eq = builder->CreateCall(getOrDeclarePthreadEqual(), {t1, t2}, "thread.equal.result");
+        // pthread_equal returns nonzero if equal; convert to OmScript bool (0/1).
+        llvm::Value* isEq = builder->CreateICmpNE(eq, llvm::ConstantInt::get(eq->getType(), 0), "thread.equal.bool");
+        return emitBoolZExt(isEq);
+    }
+
+
     if (bid == BuiltinId::POPCOUNT) {
         validateArgCount(expr, "popcount", 1);
         // Constant-fold popcount(any const expr).
@@ -10664,6 +11647,515 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         return miFinalRes;
     }
 
+    // ── Round-89: map_map(m, fn) ─────────────────────────────────────────────
+    // Transform all values in m: fn(val) → new_val; same keys, returns new map.
+    if (bid == BuiltinId::MAP_MAP) {
+        validateArgCount(expr, "map_map", 2);
+        const std::string mmFnName = extractFnName(expr->arguments[1].get());
+        if (mmFnName.empty())
+            codegenError("map_map: second argument must be a function name (string literal or identifier)", expr);
+        auto mmCalleeIt = functions.find(mmFnName);
+        if (mmCalleeIt == functions.end() || !mmCalleeIt->second)
+            codegenError("map_map: unknown function '" + mmFnName + "'", expr);
+        llvm::Function* mmTransFn = mmCalleeIt->second;
+
+        llvm::Value* mmSrcM = generateExpression(expr->arguments[0].get());
+        mmSrcM = toDefaultType(mmSrcM);
+        auto* mmPtrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* mmSrcPtr = builder->CreateIntToPtr(mmSrcM, mmPtrTy, "mmap.srcptr");
+
+        // Read count (offset 1) to pre-size the result map
+        auto* mmSizeLoad = builder->CreateAlignedLoad(
+            getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mmSrcPtr, llvm::ConstantInt::get(getDefaultType(), 1)),
+            llvm::MaybeAlign(8), "mmap.size");
+        mmSizeLoad->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+        llvm::Value* mmRes = builder->CreateCall(getOrEmitHashMapNewForItems(), {mmSizeLoad}, "mmap.res");
+        llvm::AllocaInst* mmResA =
+            createEntryBlockAlloca(builder->GetInsertBlock()->getParent(), "mmap.resmap", mmPtrTy);
+        builder->CreateStore(mmRes, mmResA);
+
+        // Loop over source map buckets
+        llvm::Value* mmCap = builder->CreateAlignedLoad(getDefaultType(), mmSrcPtr, llvm::MaybeAlign(8), "mmap.cap");
+        llvm::Value* mmZero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* mmOne = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Function* mmFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* mmPreBB = builder->GetInsertBlock();
+        llvm::BasicBlock* mmLoopBB = llvm::BasicBlock::Create(*context, "mmap.loop", mmFn);
+        llvm::BasicBlock* mmTestBB = llvm::BasicBlock::Create(*context, "mmap.test", mmFn);
+        llvm::BasicBlock* mmBodyBB = llvm::BasicBlock::Create(*context, "mmap.body", mmFn);
+        llvm::BasicBlock* mmIncBB  = llvm::BasicBlock::Create(*context, "mmap.inc",  mmFn);
+        llvm::BasicBlock* mmDoneBB = llvm::BasicBlock::Create(*context, "mmap.done", mmFn);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(mmLoopBB)));
+
+        builder->SetInsertPoint(mmLoopBB);
+        llvm::PHINode* mmBi = builder->CreatePHI(getDefaultType(), 2, "mmap.bi");
+        mmBi->addIncoming(mmZero, mmPreBB);
+        builder->CreateCondBr(builder->CreateICmpULT(mmBi, mmCap), mmTestBB, mmDoneBB);
+
+        builder->SetInsertPoint(mmTestBB);
+        llvm::Value* mmBoff = builder->CreateAdd(
+            builder->CreateMul(mmBi, llvm::ConstantInt::get(getDefaultType(), 3), "", true, true),
+            llvm::ConstantInt::get(getDefaultType(), 2), "", true, true);
+        auto* mmHashV = builder->CreateAlignedLoad(
+            getDefaultType(), builder->CreateInBoundsGEP(getDefaultType(), mmSrcPtr, mmBoff), llvm::MaybeAlign(8));
+        llvm::cast<llvm::Instruction>(mmHashV)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
+        builder->CreateCondBr(builder->CreateICmpNE(mmHashV, mmZero), mmBodyBB, mmIncBB);
+
+        builder->SetInsertPoint(mmBodyBB);
+        auto* mmKeyV = builder->CreateAlignedLoad(
+            getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mmSrcPtr,
+                                       builder->CreateAdd(mmBoff, mmOne, "", true, true)),
+            llvm::MaybeAlign(8));
+        llvm::cast<llvm::Instruction>(mmKeyV)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
+        auto* mmValV = builder->CreateAlignedLoad(
+            getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mmSrcPtr,
+                                       builder->CreateAdd(mmBoff, llvm::ConstantInt::get(getDefaultType(), 2), "", true, true)),
+            llvm::MaybeAlign(8));
+        llvm::cast<llvm::Instruction>(mmValV)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
+        // Call transform function with value
+        llvm::Value* mmNewVal = builder->CreateCall(mmTransFn, {mmValV}, "mmap.newval");
+        mmNewVal = builder->CreateIntCast(mmNewVal, getDefaultType(), /*isSigned=*/true, "mmap.newval64");
+        llvm::Value* mmCurRes = builder->CreateAlignedLoad(mmPtrTy, mmResA, llvm::MaybeAlign(8));
+        llvm::Value* mmNewRes = builder->CreateCall(getOrEmitHashMapSet(), {mmCurRes, mmKeyV, mmNewVal});
+        builder->CreateStore(mmNewRes, mmResA);
+        builder->CreateBr(mmIncBB);
+
+        builder->SetInsertPoint(mmIncBB);
+        llvm::Value* mmBi1 = builder->CreateAdd(mmBi, mmOne, "mmap.bi1", true, true);
+        mmBi->addIncoming(mmBi1, mmIncBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(mmLoopBB)));
+
+        builder->SetInsertPoint(mmDoneBB);
+        return builder->CreateAlignedLoad(mmPtrTy, mmResA, llvm::MaybeAlign(8), "mmap.final");
+    }
+
+    // ── Round-89: map_to_pairs(m) ────────────────────────────────────────────
+    // Returns a flat int[] of [k1, v1, k2, v2, ...] for all entries in m.
+    if (bid == BuiltinId::MAP_TO_PAIRS) {
+        validateArgCount(expr, "map_to_pairs", 1);
+        llvm::Value* mtpM = generateExpression(expr->arguments[0].get());
+        mtpM = toDefaultType(mtpM);
+        auto* mtpPtrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* mtpSrcPtr = builder->CreateIntToPtr(mtpM, mtpPtrTy, "mtp.srcptr");
+
+        llvm::Value* mtpCap = builder->CreateAlignedLoad(getDefaultType(), mtpSrcPtr, llvm::MaybeAlign(8), "mtp.cap");
+        llvm::Value* mtpCount = builder->CreateAlignedLoad(
+            getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mtpSrcPtr, llvm::ConstantInt::get(getDefaultType(), 1)),
+            llvm::MaybeAlign(8), "mtp.count");
+        llvm::cast<llvm::Instruction>(mtpCount)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapMeta_);
+
+        // Allocate output array: length slot + 2*count elements
+        llvm::Value* mtpZero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* mtpOne  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* mtpTwo  = llvm::ConstantInt::get(getDefaultType(), 2);
+        llvm::Value* mtpEight = llvm::ConstantInt::get(getDefaultType(), 8);
+        llvm::Value* mtpPairLen = builder->CreateMul(mtpCount, mtpTwo, "mtp.pairlen", true, true);
+        llvm::Value* mtpSlots = builder->CreateAdd(mtpPairLen, mtpOne, "mtp.slots", true, true);
+        llvm::Value* mtpBytes = builder->CreateMul(mtpSlots, mtpEight, "mtp.bytes", true, true);
+        llvm::Value* mtpBuf = builder->CreateCall(getOrDeclareMalloc(), {mtpBytes}, "mtp.buf");
+        llvm::cast<llvm::CallInst>(mtpBuf)->addRetAttr(llvm::Attribute::getWithDereferenceableBytes(*context, 8));
+        emitStoreArrayLen(mtpPairLen, mtpBuf);
+
+        // outIdx alloca
+        llvm::Function* mtpFn = builder->GetInsertBlock()->getParent();
+        llvm::AllocaInst* mtpOutIdxA = createEntryBlockAlloca(mtpFn, "mtp.outidx", getDefaultType());
+        builder->CreateStore(mtpZero, mtpOutIdxA);
+
+        // Loop over source map buckets
+        llvm::BasicBlock* mtpPreBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* mtpLoopBB = llvm::BasicBlock::Create(*context, "mtp.loop", mtpFn);
+        llvm::BasicBlock* mtpTestBB = llvm::BasicBlock::Create(*context, "mtp.test", mtpFn);
+        llvm::BasicBlock* mtpBodyBB = llvm::BasicBlock::Create(*context, "mtp.body", mtpFn);
+        llvm::BasicBlock* mtpIncBB  = llvm::BasicBlock::Create(*context, "mtp.inc",  mtpFn);
+        llvm::BasicBlock* mtpDoneBB = llvm::BasicBlock::Create(*context, "mtp.done", mtpFn);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(mtpLoopBB)));
+
+        builder->SetInsertPoint(mtpLoopBB);
+        llvm::PHINode* mtpBi = builder->CreatePHI(getDefaultType(), 2, "mtp.bi");
+        mtpBi->addIncoming(mtpZero, mtpPreBB);
+        builder->CreateCondBr(builder->CreateICmpULT(mtpBi, mtpCap), mtpTestBB, mtpDoneBB);
+
+        builder->SetInsertPoint(mtpTestBB);
+        llvm::Value* mtpBoff = builder->CreateAdd(
+            builder->CreateMul(mtpBi, llvm::ConstantInt::get(getDefaultType(), 3), "", true, true),
+            llvm::ConstantInt::get(getDefaultType(), 2), "", true, true);
+        auto* mtpHashV = builder->CreateAlignedLoad(
+            getDefaultType(), builder->CreateInBoundsGEP(getDefaultType(), mtpSrcPtr, mtpBoff), llvm::MaybeAlign(8));
+        llvm::cast<llvm::Instruction>(mtpHashV)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapHash_);
+        builder->CreateCondBr(builder->CreateICmpNE(mtpHashV, mtpZero), mtpBodyBB, mtpIncBB);
+
+        builder->SetInsertPoint(mtpBodyBB);
+        auto* mtpKeyV = builder->CreateAlignedLoad(
+            getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mtpSrcPtr,
+                                       builder->CreateAdd(mtpBoff, mtpOne, "", true, true)),
+            llvm::MaybeAlign(8));
+        llvm::cast<llvm::Instruction>(mtpKeyV)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapKey_);
+        auto* mtpValV = builder->CreateAlignedLoad(
+            getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mtpSrcPtr,
+                                       builder->CreateAdd(mtpBoff, mtpTwo, "", true, true)),
+            llvm::MaybeAlign(8));
+        llvm::cast<llvm::Instruction>(mtpValV)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaMapVal_);
+        // Write key and value at buf[outIdx*2+1] and buf[outIdx*2+2]
+        llvm::Value* mtpOutIdx = builder->CreateAlignedLoad(getDefaultType(), mtpOutIdxA, llvm::MaybeAlign(8), "mtp.oi");
+        llvm::Value* mtpKSlot = builder->CreateAdd(
+            builder->CreateMul(mtpOutIdx, mtpTwo, "mtp.kslot2", true, true), mtpOne, "mtp.kslot", true, true);
+        llvm::Value* mtpVSlot = builder->CreateAdd(mtpKSlot, mtpOne, "mtp.vslot", true, true);
+        emitStoreArrayElem(mtpKeyV, builder->CreateInBoundsGEP(getDefaultType(), mtpBuf, mtpKSlot, "mtp.kptr"));
+        emitStoreArrayElem(mtpValV, builder->CreateInBoundsGEP(getDefaultType(), mtpBuf, mtpVSlot, "mtp.vptr"));
+        builder->CreateStore(builder->CreateAdd(mtpOutIdx, mtpOne, "mtp.oi1", true, true), mtpOutIdxA);
+        builder->CreateBr(mtpIncBB);
+
+        builder->SetInsertPoint(mtpIncBB);
+        llvm::Value* mtpBi1 = builder->CreateAdd(mtpBi, mtpOne, "mtp.bi1", true, true);
+        mtpBi->addIncoming(mtpBi1, mtpIncBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(mtpLoopBB)));
+
+        builder->SetInsertPoint(mtpDoneBB);
+        arrayReturningFunctions_.insert("map_to_pairs");
+        return mtpBuf;
+    }
+
+    // ── Round-89: str_insert(s, pos, sub) ────────────────────────────────────
+    // Returns a new string with sub inserted at character position pos (clamped
+    // to [0, len(s)]).
+    if (bid == BuiltinId::STR_INSERT) {
+        validateArgCount(expr, "str_insert", 3);
+        // Compile-time fold
+        if (auto sc = tryFoldStr(expr->arguments[0].get())) {
+            if (auto posC = tryFoldInt(expr->arguments[1].get())) {
+                if (auto sub = tryFoldStr(expr->arguments[2].get())) {
+                    int64_t pos = *posC;
+                    int64_t slen = static_cast<int64_t>(sc->size());
+                    if (pos < 0) pos = 0;
+                    if (pos > slen) pos = slen;
+                    std::string result = sc->substr(0, pos) + *sub + sc->substr(pos);
+                    llvm::GlobalVariable* gv = internString(result.c_str());
+                    stringReturningFunctions_.insert("str_insert");
+                    return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                        gv->getValueType(), gv,
+                        llvm::ArrayRef<llvm::Constant*>{
+                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+                }
+            }
+        }
+        llvm::Value* sArg   = generateExpression(expr->arguments[0].get());
+        llvm::Value* posArg = generateExpression(expr->arguments[1].get());
+        llvm::Value* subArg = generateExpression(expr->arguments[2].get());
+        posArg = toDefaultType(posArg);
+        auto* siPtrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* sPtr   = sArg->getType()->isPointerTy()
+                                  ? sArg
+                                  : builder->CreateIntToPtr(sArg, siPtrTy, "sins.sptr");
+        llvm::Value* subPtr = subArg->getType()->isPointerTy()
+                                  ? subArg
+                                  : builder->CreateIntToPtr(subArg, siPtrTy, "sins.subptr");
+        llvm::Value* sLen   = emitStringLen(sPtr, "sins.slen");
+        llvm::Value* subLen = emitStringLen(subPtr, "sins.sublen");
+        llvm::Value* siZero = llvm::ConstantInt::get(getDefaultType(), 0);
+        // Clamp pos to [0, sLen]
+        llvm::Value* posNeg  = builder->CreateICmpSLT(posArg, siZero, "sins.pneg");
+        llvm::Value* posGtS  = builder->CreateICmpSGT(posArg, sLen,   "sins.pgts");
+        llvm::Value* posClamp = builder->CreateSelect(posNeg, siZero,
+                                    builder->CreateSelect(posGtS, sLen, posArg), "sins.pos");
+        // resultLen = sLen + subLen
+        llvm::Value* resLen = builder->CreateAdd(sLen, subLen, "sins.reslen", true, true);
+        // Allocate output string
+        llvm::Value* hdr = emitAllocString(resLen, resLen, "sins.out");
+        llvm::Value* dst = emitStringData(hdr, "sins.dst");
+        llvm::Value* srcData = emitStringData(sPtr, "sins.srcdata");
+        // Copy s[0..pos] → dst
+        builder->CreateCall(getOrDeclareMemcpy(), {dst, srcData, posClamp});
+        // Copy sub → dst[pos..]
+        llvm::Value* dstMid = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dst, posClamp, "sins.dstmid");
+        llvm::Value* subData = emitStringData(subPtr, "sins.subdata");
+        builder->CreateCall(getOrDeclareMemcpy(), {dstMid, subData, subLen});
+        // Copy s[pos..] → dst[pos+subLen..]
+        llvm::Value* dstTail = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dstMid, subLen, "sins.dsttail");
+        llvm::Value* srcTail = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), srcData, posClamp, "sins.srctail");
+        llvm::Value* tailLen = builder->CreateSub(sLen, posClamp, "sins.taillen", true, true);
+        builder->CreateCall(getOrDeclareMemcpy(), {dstTail, srcTail, tailLen});
+        // Null-terminate
+        llvm::Value* nulPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dst, resLen, "sins.nul");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nulPtr);
+        stringReturningFunctions_.insert("str_insert");
+        return hdr;
+    }
+
+    // ── Round-89: str_delete(s, pos, len) ────────────────────────────────────
+    // Returns a new string with len characters removed starting at pos.
+    // pos is clamped to [0, str_len(s)]; len is clamped to [0, str_len(s)-pos].
+    if (bid == BuiltinId::STR_DELETE) {
+        validateArgCount(expr, "str_delete", 3);
+        // Compile-time fold
+        if (auto sc = tryFoldStr(expr->arguments[0].get())) {
+            if (auto posC = tryFoldInt(expr->arguments[1].get())) {
+                if (auto delC = tryFoldInt(expr->arguments[2].get())) {
+                    int64_t slen = static_cast<int64_t>(sc->size());
+                    int64_t pos  = *posC;
+                    int64_t del  = *delC;
+                    if (pos < 0) pos = 0;
+                    if (pos > slen) pos = slen;
+                    if (del < 0) del = 0;
+                    if (del > slen - pos) del = slen - pos;
+                    std::string result = sc->substr(0, pos) + sc->substr(pos + del);
+                    llvm::GlobalVariable* gv = internString(result.c_str());
+                    stringReturningFunctions_.insert("str_delete");
+                    return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                        gv->getValueType(), gv,
+                        llvm::ArrayRef<llvm::Constant*>{
+                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+                }
+            }
+        }
+        llvm::Value* sArg   = generateExpression(expr->arguments[0].get());
+        llvm::Value* posArg = generateExpression(expr->arguments[1].get());
+        llvm::Value* delArg = generateExpression(expr->arguments[2].get());
+        posArg = toDefaultType(posArg);
+        delArg = toDefaultType(delArg);
+        auto* sdPtrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* sPtr = sArg->getType()->isPointerTy()
+                                ? sArg
+                                : builder->CreateIntToPtr(sArg, sdPtrTy, "sdel.sptr");
+        llvm::Value* sLen = emitStringLen(sPtr, "sdel.slen");
+        llvm::Value* sdZero = llvm::ConstantInt::get(getDefaultType(), 0);
+        // Clamp pos to [0, sLen]
+        llvm::Value* posNeg   = builder->CreateICmpSLT(posArg, sdZero, "sdel.pneg");
+        llvm::Value* posGtS   = builder->CreateICmpSGT(posArg, sLen,   "sdel.pgts");
+        llvm::Value* posC2    = builder->CreateSelect(posNeg, sdZero,
+                                    builder->CreateSelect(posGtS, sLen, posArg), "sdel.pos");
+        // Clamp del to [0, sLen - pos]
+        llvm::Value* maxDel   = builder->CreateSub(sLen, posC2, "sdel.maxdel", true, true);
+        llvm::Value* delNeg   = builder->CreateICmpSLT(delArg, sdZero, "sdel.dneg");
+        llvm::Value* delGtMax = builder->CreateICmpSGT(delArg, maxDel, "sdel.dgtmax");
+        llvm::Value* delC2    = builder->CreateSelect(delNeg, sdZero,
+                                    builder->CreateSelect(delGtMax, maxDel, delArg), "sdel.del");
+        // resultLen = sLen - delC2
+        llvm::Value* resLen = builder->CreateSub(sLen, delC2, "sdel.reslen", true, true);
+        // Allocate output string
+        llvm::Value* hdr = emitAllocString(resLen, resLen, "sdel.out");
+        llvm::Value* dst = emitStringData(hdr, "sdel.dst");
+        llvm::Value* srcData = emitStringData(sPtr, "sdel.srcdata");
+        // Copy s[0..pos] → dst
+        builder->CreateCall(getOrDeclareMemcpy(), {dst, srcData, posC2});
+        // Copy s[pos+del..] → dst[pos..]
+        llvm::Value* dstTail = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dst, posC2, "sdel.dsttail");
+        llvm::Value* srcSkip = builder->CreateAdd(posC2, delC2, "sdel.srcskip", true, true);
+        llvm::Value* srcTail = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), srcData, srcSkip, "sdel.srctail");
+        llvm::Value* tailLen = builder->CreateSub(sLen, srcSkip, "sdel.taillen", true, true);
+        builder->CreateCall(getOrDeclareMemcpy(), {dstTail, srcTail, tailLen});
+        // Null-terminate
+        llvm::Value* nulPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dst, resLen, "sdel.nul");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nulPtr);
+        stringReturningFunctions_.insert("str_delete");
+        return hdr;
+    }
+
+    // ── Round-100: array_partition(arr, fn) ──────────────────────────────────
+    // Splits arr into two sub-arrays: [passing[], failing[]] based on fn(elem).
+    // Returns a 2-element array where index 0 = passing, index 1 = failing.
+    if (bid == BuiltinId::ARRAY_PARTITION) {
+        validateArgCount(expr, "array_partition", 2);
+        const std::string apFnName = extractFnName(expr->arguments[1].get());
+        if (apFnName.empty())
+            codegenError("array_partition: second argument must be a function name", expr);
+        auto apCalleeIt = functions.find(apFnName);
+        if (apCalleeIt == functions.end() || !apCalleeIt->second)
+            codegenError("array_partition: unknown function '" + apFnName + "'", expr);
+        llvm::Function* apPredFn = apCalleeIt->second;
+        if (apPredFn->arg_size() < 1)
+            codegenError("array_partition: function '" + apFnName + "' must accept at least 1 argument", expr);
+
+        llvm::Value* apArrArg = generateExpression(expr->arguments[0].get());
+        apArrArg = toDefaultType(apArrArg);
+        llvm::Value* apArrPtr = getArrayPtr(apArrArg);
+        llvm::Value* apLen = emitLoadArrayLen(apArrPtr, "apart.len");
+
+        llvm::Value* apZero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* apOne  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* apEight = llvm::ConstantInt::get(getDefaultType(), 8);
+
+        // Allocate two output buffers — worst case each holds all elements.
+        llvm::Value* apSlots = builder->CreateAdd(apLen, apOne, "apart.slots", true, true);
+        llvm::Value* apBytes = builder->CreateMul(apSlots, apEight, "apart.bytes", true, true);
+        llvm::Value* apPass  = builder->CreateCall(getOrDeclareMalloc(), {apBytes}, "apart.pass");
+        llvm::Value* apFail  = builder->CreateCall(getOrDeclareMalloc(), {apBytes}, "apart.fail");
+        emitStoreArrayLen(apZero, apPass);
+        emitStoreArrayLen(apZero, apFail);
+
+        llvm::Function* apParentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* apPre   = builder->GetInsertBlock();
+        llvm::BasicBlock* apLoop  = llvm::BasicBlock::Create(*context, "apart.loop", apParentFn);
+        llvm::BasicBlock* apTest  = llvm::BasicBlock::Create(*context, "apart.test", apParentFn);
+        llvm::BasicBlock* apAddP  = llvm::BasicBlock::Create(*context, "apart.addp", apParentFn);
+        llvm::BasicBlock* apAddF  = llvm::BasicBlock::Create(*context, "apart.addf", apParentFn);
+        llvm::BasicBlock* apInc   = llvm::BasicBlock::Create(*context, "apart.inc",  apParentFn);
+        llvm::BasicBlock* apDone  = llvm::BasicBlock::Create(*context, "apart.done", apParentFn);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(apLoop)));
+
+        builder->SetInsertPoint(apLoop);
+        llvm::PHINode* apIdx  = builder->CreatePHI(getDefaultType(), 2, "apart.idx");
+        llvm::PHINode* apPIdx = builder->CreatePHI(getDefaultType(), 2, "apart.pidx");
+        llvm::PHINode* apFIdx = builder->CreatePHI(getDefaultType(), 2, "apart.fidx");
+        apIdx->addIncoming(apZero, apPre);
+        apPIdx->addIncoming(apZero, apPre);
+        apFIdx->addIncoming(apZero, apPre);
+        nonNegValues_.insert(apPIdx);
+        nonNegValues_.insert(apFIdx);
+        builder->CreateCondBr(builder->CreateICmpULT(apIdx, apLen, "apart.cond"), apTest, apDone);
+
+        builder->SetInsertPoint(apTest);
+        llvm::Value* apElemOff = builder->CreateAdd(apIdx, apOne, "apart.eoff", true, true);
+        llvm::Value* apElemPtr = builder->CreateInBoundsGEP(getDefaultType(), apArrPtr, apElemOff, "apart.eptr");
+        llvm::Value* apElem    = emitLoadArrayElem(apElemPtr, "apart.elem");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(apElem)->setMetadata(llvm::LLVMContext::MD_noundef,
+                                                               llvm::MDNode::get(*context, {}));
+        llvm::Value* apPred = builder->CreateCall(apPredFn, {apElem}, "apart.pred");
+        apPred = toDefaultType(apPred);
+        builder->CreateCondBr(builder->CreateICmpNE(apPred, apZero, "apart.keep"), apAddP, apAddF);
+
+        // Passing bucket
+        builder->SetInsertPoint(apAddP);
+        llvm::Value* apNewPIdx = builder->CreateAdd(apPIdx, apOne, "apart.npidx", true, true);
+        auto* apPStore = builder->CreateStore(
+            apElem, builder->CreateInBoundsGEP(getDefaultType(), apPass, apNewPIdx, "apart.pdst"));
+        apPStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        builder->CreateBr(apInc);
+
+        // Failing bucket
+        builder->SetInsertPoint(apAddF);
+        llvm::Value* apNewFIdx = builder->CreateAdd(apFIdx, apOne, "apart.nfidx", true, true);
+        auto* apFStore = builder->CreateStore(
+            apElem, builder->CreateInBoundsGEP(getDefaultType(), apFail, apNewFIdx, "apart.fdst"));
+        apFStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        builder->CreateBr(apInc);
+
+        builder->SetInsertPoint(apInc);
+        llvm::PHINode* apMrgP = builder->CreatePHI(getDefaultType(), 2, "apart.mrgp");
+        llvm::PHINode* apMrgF = builder->CreatePHI(getDefaultType(), 2, "apart.mrgf");
+        apMrgP->addIncoming(apNewPIdx, apAddP);
+        apMrgP->addIncoming(apPIdx,    apAddF);
+        apMrgF->addIncoming(apFIdx,    apAddP);
+        apMrgF->addIncoming(apNewFIdx, apAddF);
+        nonNegValues_.insert(apMrgP);
+        nonNegValues_.insert(apMrgF);
+        llvm::Value* apNextIdx = builder->CreateAdd(apIdx, apOne, "apart.next", true, true);
+        apIdx->addIncoming(apNextIdx, apInc);
+        apPIdx->addIncoming(apMrgP,   apInc);
+        apFIdx->addIncoming(apMrgF,   apInc);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(apLoop)));
+
+        builder->SetInsertPoint(apDone);
+        // Write final lengths into the two sub-arrays
+        emitStoreArrayLen(apPIdx, apPass);
+        emitStoreArrayLen(apFIdx, apFail);
+
+        // Allocate outer 2-element array: [2, passPtr_as_i64, failPtr_as_i64]
+        llvm::Value* apOuter = builder->CreateCall(
+            getOrDeclareMalloc(),
+            {llvm::ConstantInt::get(getDefaultType(), 24)}, "apart.outer"); // 3 * 8 bytes
+        emitStoreArrayLen(llvm::ConstantInt::get(getDefaultType(), 2), apOuter);
+        llvm::Value* apPassInt = builder->CreatePtrToInt(apPass, getDefaultType(), "apart.passint");
+        llvm::Value* apFailInt = builder->CreatePtrToInt(apFail, getDefaultType(), "apart.failint");
+        auto* apSlot0 = builder->CreateInBoundsGEP(getDefaultType(), apOuter,
+                            llvm::ConstantInt::get(getDefaultType(), 1), "apart.slot0");
+        auto* apSlot1 = builder->CreateInBoundsGEP(getDefaultType(), apOuter,
+                            llvm::ConstantInt::get(getDefaultType(), 2), "apart.slot1");
+        builder->CreateAlignedStore(apPassInt, apSlot0, llvm::MaybeAlign(8));
+        builder->CreateAlignedStore(apFailInt, apSlot1, llvm::MaybeAlign(8));
+        arrayReturningFunctions_.insert("array_partition");
+        return apOuter;
+    }
+
+    // ── Round-100: map_reduce(m, init, fn) ───────────────────────────────────
+    // Folds over all (key, val) pairs in the map.  fn(acc, key, val) → i64.
+    // Returns the final accumulator value.
+    if (bid == BuiltinId::MAP_REDUCE) {
+        validateArgCount(expr, "map_reduce", 3);
+        const std::string mrFnName = extractFnName(expr->arguments[2].get());
+        if (mrFnName.empty())
+            codegenError("map_reduce: third argument must be a function name", expr);
+        auto mrCalleeIt = functions.find(mrFnName);
+        if (mrCalleeIt == functions.end() || !mrCalleeIt->second)
+            codegenError("map_reduce: unknown function '" + mrFnName + "'", expr);
+        llvm::Function* mrFn = mrCalleeIt->second;
+        if (mrFn->arg_size() < 3)
+            codegenError("map_reduce: function '" + mrFnName +
+                             "' must accept at least 3 arguments (acc, key, val)", expr);
+
+        llvm::Value* mrMapArg  = generateExpression(expr->arguments[0].get());
+        llvm::Value* mrInitVal = generateExpression(expr->arguments[1].get());
+        mrInitVal = toDefaultType(mrInitVal);
+        llvm::Value* mrMapPtr  = emitToArrayPtr(mrMapArg, "mreduce.mapptr");
+
+        // Read cap from map header [cap:i64, count:i64, buckets...]
+        llvm::Value* mrCap  = builder->CreateAlignedLoad(getDefaultType(), mrMapPtr, llvm::MaybeAlign(8), "mreduce.cap");
+        llvm::Value* mrZero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* mrOne  = llvm::ConstantInt::get(getDefaultType(), 1);
+
+        llvm::Function* mrParentFn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* mrPre  = builder->GetInsertBlock();
+        llvm::BasicBlock* mrLoop = llvm::BasicBlock::Create(*context, "mreduce.loop", mrParentFn);
+        llvm::BasicBlock* mrTest = llvm::BasicBlock::Create(*context, "mreduce.test", mrParentFn);
+        llvm::BasicBlock* mrCall = llvm::BasicBlock::Create(*context, "mreduce.call", mrParentFn);
+        llvm::BasicBlock* mrInc  = llvm::BasicBlock::Create(*context, "mreduce.inc",  mrParentFn);
+        llvm::BasicBlock* mrDone = llvm::BasicBlock::Create(*context, "mreduce.done", mrParentFn);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(mrLoop)));
+
+        builder->SetInsertPoint(mrLoop);
+        llvm::PHINode* mrBi  = builder->CreatePHI(getDefaultType(), 2, "mreduce.bi");
+        llvm::PHINode* mrAcc = builder->CreatePHI(getDefaultType(), 2, "mreduce.acc");
+        mrBi->addIncoming(mrZero, mrPre);
+        mrAcc->addIncoming(mrInitVal, mrPre);
+        builder->CreateCondBr(builder->CreateICmpULT(mrBi, mrCap, "mreduce.bcond"), mrTest, mrDone);
+
+        builder->SetInsertPoint(mrTest);
+        // bucket offset = 2 + bi*3
+        llvm::Value* mrBoff = builder->CreateAdd(
+            builder->CreateMul(mrBi, llvm::ConstantInt::get(getDefaultType(), 3), "mreduce.b3", true, true),
+            llvm::ConstantInt::get(getDefaultType(), 2), "mreduce.boff", true, true);
+        llvm::Value* mrHash = builder->CreateAlignedLoad(
+            getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mrMapPtr, mrBoff, "mreduce.hashp"),
+            llvm::MaybeAlign(8), "mreduce.hash");
+        // Skip empty buckets (hash == 0)
+        builder->CreateCondBr(builder->CreateICmpNE(mrHash, mrZero, "mreduce.occ"), mrCall, mrInc);
+
+        builder->SetInsertPoint(mrCall);
+        llvm::Value* mrKoff = builder->CreateAdd(mrBoff, mrOne, "mreduce.koff", true, true);
+        llvm::Value* mrKey  = builder->CreateAlignedLoad(
+            getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mrMapPtr, mrKoff, "mreduce.keyp"),
+            llvm::MaybeAlign(8), "mreduce.key");
+        llvm::Value* mrVoff = builder->CreateAdd(mrBoff, llvm::ConstantInt::get(getDefaultType(), 2),
+                                                  "mreduce.voff", true, true);
+        llvm::Value* mrVal  = builder->CreateAlignedLoad(
+            getDefaultType(),
+            builder->CreateInBoundsGEP(getDefaultType(), mrMapPtr, mrVoff, "mreduce.valp"),
+            llvm::MaybeAlign(8), "mreduce.val");
+        llvm::Value* mrNewAcc = builder->CreateCall(mrFn, {mrAcc, mrKey, mrVal}, "mreduce.newacc");
+        mrNewAcc = toDefaultType(mrNewAcc);
+        builder->CreateBr(mrInc);
+
+        builder->SetInsertPoint(mrInc);
+        llvm::PHINode* mrAccMrg = builder->CreatePHI(getDefaultType(), 2, "mreduce.accmrg");
+        mrAccMrg->addIncoming(mrAcc,    mrTest);  // empty bucket: acc unchanged
+        mrAccMrg->addIncoming(mrNewAcc, mrCall);
+        llvm::Value* mrNextBi = builder->CreateAdd(mrBi, mrOne, "mreduce.next", true, true);
+        mrBi->addIncoming(mrNextBi, mrInc);
+        mrAcc->addIncoming(mrAccMrg, mrInc);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(mrLoop)));
+
+        builder->SetInsertPoint(mrDone);
+        return mrAcc;
+    }
+
     // -----------------------------------------------------------------------
     if (bid == BuiltinId::SUDO_COMMAND) {
         validateArgCount(expr, "sudo_command", 2);
@@ -11181,6 +12673,391 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
 
         builder->SetInsertPoint(doneBB);
         arrayReturningFunctions_.insert("array_zip");
+        return buf;
+    }
+
+    // ── Round-106: str_is_alpha(s) ────────────────────────────────────────────
+    // Returns 1 if s is non-empty and every character is a letter (a-z or A-Z).
+    if (bid == BuiltinId::STR_IS_ALPHA) {
+        validateArgCount(expr, "str_is_alpha", 1);
+        if (auto sv = tryFoldStr(expr->arguments[0].get())) {
+            bool ok = !sv->empty();
+            for (unsigned char c : *sv) if (!std::isalpha(c)) { ok = false; break; }
+            return llvm::ConstantInt::get(getDefaultType(), ok ? 1 : 0);
+        }
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* strPtr = strArg->getType()->isPointerTy()
+            ? strArg : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "isalpha.ptr");
+        llvm::Value* slen = emitStringLen(strPtr, "isalpha.slen");
+        llvm::Value* data = emitStringData(strPtr, "isalpha.data");
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Function* fn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* emptyBB  = llvm::BasicBlock::Create(*context, "isalpha.empty", fn);
+        llvm::BasicBlock* loopBB   = llvm::BasicBlock::Create(*context, "isalpha.loop",  fn);
+        llvm::BasicBlock* bodyBB   = llvm::BasicBlock::Create(*context, "isalpha.body",  fn);
+        llvm::BasicBlock* failBB   = llvm::BasicBlock::Create(*context, "isalpha.fail",  fn);
+        llvm::BasicBlock* incBB    = llvm::BasicBlock::Create(*context, "isalpha.inc",   fn);
+        llvm::BasicBlock* doneBB2  = llvm::BasicBlock::Create(*context, "isalpha.done",  fn);
+        llvm::BasicBlock* preBB    = builder->GetInsertBlock();
+        builder->CreateCondBr(builder->CreateICmpEQ(slen, zero, "isalpha.mt"), emptyBB, loopBB);
+        builder->SetInsertPoint(emptyBB);
+        builder->CreateBr(doneBB2);
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "isalpha.idx");
+        idx->addIncoming(zero, preBB);
+        builder->CreateCondBr(builder->CreateICmpULT(idx, slen, "isalpha.cond"), bodyBB, doneBB2);
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* cptr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), data, idx, "isalpha.cptr");
+        llvm::Value* c8   = builder->CreateLoad(llvm::Type::getInt8Ty(*context), cptr, "isalpha.c8");
+        llvm::Value* c64  = builder->CreateZExt(c8, getDefaultType(), "isalpha.c64");
+        auto* cA  = llvm::ConstantInt::get(getDefaultType(), 65); // 'A'
+        auto* ca  = llvm::ConstantInt::get(getDefaultType(), 97); // 'a'
+        auto* c25 = llvm::ConstantInt::get(getDefaultType(), 25);
+        llvm::Value* isUp  = builder->CreateICmpULE(builder->CreateSub(c64, cA), c25, "isalpha.up");
+        llvm::Value* isLo  = builder->CreateICmpULE(builder->CreateSub(c64, ca), c25, "isalpha.lo");
+        llvm::Value* isLet = builder->CreateOr(isUp, isLo, "isalpha.islet");
+        builder->CreateCondBr(isLet, incBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateBr(doneBB2);
+        builder->SetInsertPoint(incBB);
+        llvm::Value* nxt = builder->CreateAdd(idx, one, "isalpha.nxt", true, true);
+        idx->addIncoming(nxt, incBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+        builder->SetInsertPoint(doneBB2);
+        llvm::PHINode* result = builder->CreatePHI(getDefaultType(), 3, "isalpha.result");
+        result->addIncoming(zero, emptyBB);
+        result->addIncoming(zero, failBB);
+        result->addIncoming(one,  loopBB);
+        return result;
+    }
+
+    // ── Round-106: str_is_digit(s) ────────────────────────────────────────────
+    // Returns 1 if s is non-empty and every character is a decimal digit (0-9).
+    if (bid == BuiltinId::STR_IS_DIGIT) {
+        validateArgCount(expr, "str_is_digit", 1);
+        if (auto sv = tryFoldStr(expr->arguments[0].get())) {
+            bool ok = !sv->empty();
+            for (unsigned char c : *sv) if (!std::isdigit(c)) { ok = false; break; }
+            return llvm::ConstantInt::get(getDefaultType(), ok ? 1 : 0);
+        }
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* strPtr = strArg->getType()->isPointerTy()
+            ? strArg : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "isdig.ptr");
+        llvm::Value* slen = emitStringLen(strPtr, "isdig.slen");
+        llvm::Value* data = emitStringData(strPtr, "isdig.data");
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Function* fn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* emptyBB = llvm::BasicBlock::Create(*context, "isdig.empty", fn);
+        llvm::BasicBlock* loopBB  = llvm::BasicBlock::Create(*context, "isdig.loop",  fn);
+        llvm::BasicBlock* bodyBB  = llvm::BasicBlock::Create(*context, "isdig.body",  fn);
+        llvm::BasicBlock* failBB  = llvm::BasicBlock::Create(*context, "isdig.fail",  fn);
+        llvm::BasicBlock* incBB   = llvm::BasicBlock::Create(*context, "isdig.inc",   fn);
+        llvm::BasicBlock* doneBB3 = llvm::BasicBlock::Create(*context, "isdig.done",  fn);
+        llvm::BasicBlock* preBB3  = builder->GetInsertBlock();
+        builder->CreateCondBr(builder->CreateICmpEQ(slen, zero, "isdig.mt"), emptyBB, loopBB);
+        builder->SetInsertPoint(emptyBB);
+        builder->CreateBr(doneBB3);
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx3 = builder->CreatePHI(getDefaultType(), 2, "isdig.idx");
+        idx3->addIncoming(zero, preBB3);
+        builder->CreateCondBr(builder->CreateICmpULT(idx3, slen, "isdig.cond"), bodyBB, doneBB3);
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* cptr3 = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), data, idx3, "isdig.cptr");
+        llvm::Value* c8_3  = builder->CreateLoad(llvm::Type::getInt8Ty(*context), cptr3, "isdig.c8");
+        llvm::Value* c64_3 = builder->CreateZExt(c8_3, getDefaultType(), "isdig.c64");
+        auto* c0d = llvm::ConstantInt::get(getDefaultType(), 48); // '0'
+        auto* c9d = llvm::ConstantInt::get(getDefaultType(), 9);  // '9'-'0'
+        llvm::Value* isDig = builder->CreateICmpULE(builder->CreateSub(c64_3, c0d), c9d, "isdig.isdig");
+        builder->CreateCondBr(isDig, incBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateBr(doneBB3);
+        builder->SetInsertPoint(incBB);
+        llvm::Value* nxt3 = builder->CreateAdd(idx3, one, "isdig.nxt", true, true);
+        idx3->addIncoming(nxt3, incBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+        builder->SetInsertPoint(doneBB3);
+        llvm::PHINode* res3 = builder->CreatePHI(getDefaultType(), 3, "isdig.result");
+        res3->addIncoming(zero, emptyBB);
+        res3->addIncoming(zero, failBB);
+        res3->addIncoming(one,  loopBB);
+        return res3;
+    }
+
+    // ── Round-106: str_is_alnum(s) ────────────────────────────────────────────
+    // Returns 1 if s is non-empty and every character is alphanumeric.
+    if (bid == BuiltinId::STR_IS_ALNUM_STR) {
+        validateArgCount(expr, "str_is_alnum", 1);
+        if (auto sv = tryFoldStr(expr->arguments[0].get())) {
+            bool ok = !sv->empty();
+            for (unsigned char c : *sv) if (!std::isalnum(c)) { ok = false; break; }
+            return llvm::ConstantInt::get(getDefaultType(), ok ? 1 : 0);
+        }
+        llvm::Value* strArg = generateExpression(expr->arguments[0].get());
+        llvm::Value* strPtr = strArg->getType()->isPointerTy()
+            ? strArg : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "isaln.ptr");
+        llvm::Value* slen = emitStringLen(strPtr, "isaln.slen");
+        llvm::Value* data = emitStringData(strPtr, "isaln.data");
+        llvm::Value* zero = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one  = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Function* fn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* emptyBB = llvm::BasicBlock::Create(*context, "isaln.empty", fn);
+        llvm::BasicBlock* loopBB  = llvm::BasicBlock::Create(*context, "isaln.loop",  fn);
+        llvm::BasicBlock* bodyBB  = llvm::BasicBlock::Create(*context, "isaln.body",  fn);
+        llvm::BasicBlock* failBB  = llvm::BasicBlock::Create(*context, "isaln.fail",  fn);
+        llvm::BasicBlock* incBB   = llvm::BasicBlock::Create(*context, "isaln.inc",   fn);
+        llvm::BasicBlock* doneBB4 = llvm::BasicBlock::Create(*context, "isaln.done",  fn);
+        llvm::BasicBlock* preBB4  = builder->GetInsertBlock();
+        builder->CreateCondBr(builder->CreateICmpEQ(slen, zero, "isaln.mt"), emptyBB, loopBB);
+        builder->SetInsertPoint(emptyBB);
+        builder->CreateBr(doneBB4);
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx4 = builder->CreatePHI(getDefaultType(), 2, "isaln.idx");
+        idx4->addIncoming(zero, preBB4);
+        builder->CreateCondBr(builder->CreateICmpULT(idx4, slen, "isaln.cond"), bodyBB, doneBB4);
+        builder->SetInsertPoint(bodyBB);
+        llvm::Value* cptr4 = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), data, idx4, "isaln.cptr");
+        llvm::Value* c8_4  = builder->CreateLoad(llvm::Type::getInt8Ty(*context), cptr4, "isaln.c8");
+        llvm::Value* c64_4 = builder->CreateZExt(c8_4, getDefaultType(), "isaln.c64");
+        auto* cA4  = llvm::ConstantInt::get(getDefaultType(), 65); // 'A'
+        auto* ca4  = llvm::ConstantInt::get(getDefaultType(), 97); // 'a'
+        auto* c0_4 = llvm::ConstantInt::get(getDefaultType(), 48); // '0'
+        auto* c25_4 = llvm::ConstantInt::get(getDefaultType(), 25);
+        auto* c9_4  = llvm::ConstantInt::get(getDefaultType(), 9);
+        llvm::Value* isUp4 = builder->CreateICmpULE(builder->CreateSub(c64_4, cA4),  c25_4, "isaln.up");
+        llvm::Value* isLo4 = builder->CreateICmpULE(builder->CreateSub(c64_4, ca4),  c25_4, "isaln.lo");
+        llvm::Value* isDg4 = builder->CreateICmpULE(builder->CreateSub(c64_4, c0_4), c9_4,  "isaln.dg");
+        llvm::Value* isAln = builder->CreateOr(builder->CreateOr(isUp4, isLo4), isDg4, "isaln.ok");
+        builder->CreateCondBr(isAln, incBB, failBB);
+        builder->SetInsertPoint(failBB);
+        builder->CreateBr(doneBB4);
+        builder->SetInsertPoint(incBB);
+        llvm::Value* nxt4 = builder->CreateAdd(idx4, one, "isaln.nxt", true, true);
+        idx4->addIncoming(nxt4, incBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+        builder->SetInsertPoint(doneBB4);
+        llvm::PHINode* res4 = builder->CreatePHI(getDefaultType(), 3, "isaln.result");
+        res4->addIncoming(zero, emptyBB);
+        res4->addIncoming(zero, failBB);
+        res4->addIncoming(one,  loopBB);
+        return res4;
+    }
+
+    // ── Round-106: str_center(s, width) ──────────────────────────────────────
+    // Center-pads s to width characters using spaces.  Returns s unchanged
+    // when len(s) >= width.  If padding is odd, the extra space goes on the right.
+    if (bid == BuiltinId::STR_CENTER) {
+        validateArgCount(expr, "str_center", 2);
+        if (auto sv = tryFoldStr(expr->arguments[0].get())) {
+            if (auto wv = tryFoldInt(expr->arguments[1].get())) {
+                int64_t slen = static_cast<int64_t>(sv->size());
+                if (*wv <= slen) {
+                    llvm::GlobalVariable* gv = internString(*sv);
+                    stringReturningFunctions_.insert("str_center");
+                    return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                        gv->getValueType(), gv,
+                        llvm::ArrayRef<llvm::Constant*>{
+                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                            llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+                }
+                int64_t total = *wv;
+                int64_t pad   = total - slen;
+                int64_t lpad  = pad / 2;
+                int64_t rpad  = pad - lpad;
+                std::string result(lpad, ' ');
+                result += *sv;
+                result.append(rpad, ' ');
+                llvm::GlobalVariable* gv = internString(result);
+                stringReturningFunctions_.insert("str_center");
+                return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                    gv->getValueType(), gv,
+                    llvm::ArrayRef<llvm::Constant*>{
+                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0),
+                        llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context), 0)});
+            }
+        }
+        llvm::Value* strArg   = generateExpression(expr->arguments[0].get());
+        llvm::Value* widthArg = generateExpression(expr->arguments[1].get());
+        widthArg = toDefaultType(widthArg);
+        llvm::Value* strPtr = strArg->getType()->isPointerTy()
+            ? strArg : builder->CreateIntToPtr(strArg, llvm::PointerType::getUnqual(*context), "sctr.strptr");
+        llvm::Value* slen  = emitStringLen(strPtr, "sctr.slen");
+        llvm::Value* zero  = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one   = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* two   = llvm::ConstantInt::get(getDefaultType(), 2);
+        // Clamp width
+        llvm::Value* negW  = builder->CreateICmpSLT(widthArg, zero, "sctr.negw");
+        llvm::Value* effW  = builder->CreateSelect(negW, zero, widthArg, "sctr.effw");
+        nonNegValues_.insert(effW);
+        // needsPad = slen < effW
+        llvm::Value* needsPad = builder->CreateICmpULT(slen, effW, "sctr.needs");
+        llvm::Function* fn = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* padBB  = llvm::BasicBlock::Create(*context, "sctr.pad",   fn);
+        llvm::BasicBlock* noPadBB= llvm::BasicBlock::Create(*context, "sctr.nopad", fn);
+        llvm::BasicBlock* mergeBB= llvm::BasicBlock::Create(*context, "sctr.merge", fn);
+        builder->CreateCondBr(needsPad, padBB, noPadBB);
+        // No-pad: return original
+        builder->SetInsertPoint(noPadBB);
+        builder->CreateBr(mergeBB);
+        // Pad path
+        builder->SetInsertPoint(padBB);
+        llvm::Value* pad  = builder->CreateSub(effW, slen, "sctr.padamt", true, true);
+        nonNegValues_.insert(pad);
+        llvm::Value* lpad = builder->CreateUDiv(pad, two, "sctr.lpad");
+        llvm::Value* rpad = builder->CreateSub(pad, lpad, "sctr.rpad", true, true);
+        nonNegValues_.insert(lpad); nonNegValues_.insert(rpad);
+        // Allocate: effW bytes of data + null terminator
+        llvm::Value* hdr = emitAllocString(effW, effW, "sctr");
+        llvm::Value* dst = emitStringData(hdr, "sctr.dst");
+        // Fill left spaces
+        llvm::Value* spaceConst = llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 32); // ' '
+        builder->CreateMemSet(dst, spaceConst, lpad, llvm::MaybeAlign(1));
+        // Copy original string into middle
+        llvm::Value* midPtr  = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dst, lpad, "sctr.mid");
+        llvm::Value* srcData = emitStringData(strPtr, "sctr.srcdata");
+        builder->CreateCall(getOrDeclareMemcpy(), {midPtr, srcData, slen});
+        // Fill right spaces
+        llvm::Value* rightPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), midPtr, slen, "sctr.rptr");
+        builder->CreateMemSet(rightPtr, spaceConst, rpad, llvm::MaybeAlign(1));
+        // Null-terminate
+        llvm::Value* nullPtr = builder->CreateInBoundsGEP(llvm::Type::getInt8Ty(*context), dst, effW, "sctr.null");
+        builder->CreateStore(llvm::ConstantInt::get(llvm::Type::getInt8Ty(*context), 0), nullPtr)
+            ->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaStringData_);
+        builder->CreateBr(mergeBB);
+        builder->SetInsertPoint(mergeBB);
+        llvm::PHINode* phi = builder->CreatePHI(llvm::PointerType::getUnqual(*context), 2, "sctr.result");
+        phi->addIncoming(strPtr, noPadBB);
+        phi->addIncoming(hdr,    padBB);
+        stringReturningFunctions_.insert("str_center");
+        return phi;
+    }
+
+    // ── Round-106: str_zfill(s, width) ───────────────────────────────────────
+    // Left-pads s with '0' characters to reach width.  Synthesizes via str_pad_left.
+    if (bid == BuiltinId::STR_ZFILL) {
+        validateArgCount(expr, "str_zfill", 2);
+        auto zfZeroLit = std::make_unique<LiteralExpr>(std::string("0"));
+        zfZeroLit->line = expr->line;
+        zfZeroLit->column = expr->column;
+        auto zfSynth = std::make_unique<CallExpr>("str_pad_left", std::vector<std::unique_ptr<Expression>>{});
+        zfSynth->fromStdNamespace = true;
+        zfSynth->arguments.push_back(std::move(expr->arguments[0]));
+        zfSynth->arguments.push_back(std::move(expr->arguments[1]));
+        zfSynth->arguments.push_back(std::move(zfZeroLit));
+        zfSynth->line = expr->line;
+        zfSynth->column = expr->column;
+        llvm::Value* zfResult = generateCall(zfSynth.get());
+        stringReturningFunctions_.insert("str_zfill");
+        return zfResult;
+    }
+
+    // ── Round-106: map_from_pairs(arr) ───────────────────────────────────────
+    // Builds a map from a flat [k1, v1, k2, v2, ...] array (inverse of map_to_pairs).
+    // Pairs with odd-length arrays silently ignore the trailing element.
+    if (bid == BuiltinId::MAP_FROM_PAIRS) {
+        validateArgCount(expr, "map_from_pairs", 1);
+        llvm::Value* arrArg = generateExpression(expr->arguments[0].get());
+        arrArg = toDefaultType(arrArg);
+        llvm::Value* arrPtr = getArrayPtr(arrArg);
+        llvm::Value* arrLen = emitLoadArrayLen(arrPtr, "mfp.len");
+        llvm::Value* zero   = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one    = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* two    = llvm::ConstantInt::get(getDefaultType(), 2);
+        // Create a new map
+        llvm::Value* mapPtr = builder->CreateCall(getOrEmitHashMapNew(), {}, "mfp.map");
+        // pairs = arrLen / 2
+        llvm::Value* pairs = builder->CreateUDiv(arrLen, two, "mfp.pairs");
+        nonNegValues_.insert(pairs);
+        // Loop over pairs
+        llvm::Function* fn   = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "mfp.loop", fn);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "mfp.body", fn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "mfp.done", fn);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* idx = builder->CreatePHI(getDefaultType(), 2, "mfp.idx");
+        idx->addIncoming(zero, preBB);
+        builder->CreateCondBr(builder->CreateICmpULT(idx, pairs, "mfp.cond"), bodyBB, doneBB);
+        builder->SetInsertPoint(bodyBB);
+        // keyOffset = idx*2 + 1,  valOffset = idx*2 + 2
+        llvm::Value* base = builder->CreateAdd(builder->CreateMul(idx, two, "mfp.base2", true, true),
+                                               one, "mfp.koff", true, true);
+        llvm::Value* voff = builder->CreateAdd(base, one, "mfp.voff", true, true);
+        llvm::Value* kPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, base, "mfp.kptr");
+        llvm::Value* vPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, voff, "mfp.vptr");
+        llvm::Value* kVal = emitLoadArrayElem(kPtr, "mfp.kval");
+        llvm::Value* vVal = emitLoadArrayElem(vPtr, "mfp.vval");
+        builder->CreateCall(getOrEmitHashMapSet(), {mapPtr, kVal, vVal}, "mfp.set");
+        llvm::Value* nxt = builder->CreateAdd(idx, one, "mfp.nxt", true, true);
+        idx->addIncoming(nxt, bodyBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+        builder->SetInsertPoint(doneBB);
+        llvm::Value* mapI64 = builder->CreatePtrToInt(mapPtr, getDefaultType(), "mfp.i64");
+        return mapI64;
+    }
+
+    // ── Round-106: array_step(arr, step) ─────────────────────────────────────
+    // Returns a new array with every step-th element: [arr[0], arr[step], arr[2*step], ...].
+    // If step <= 0 the input array is returned unchanged.
+    if (bid == BuiltinId::ARRAY_STEP) {
+        validateArgCount(expr, "array_step", 2);
+        llvm::Value* arrArg  = generateExpression(expr->arguments[0].get());
+        llvm::Value* stepArg = generateExpression(expr->arguments[1].get());
+        arrArg  = toDefaultType(arrArg);
+        stepArg = toDefaultType(stepArg);
+        llvm::Value* arrPtr = getArrayPtr(arrArg);
+        llvm::Value* arrLen = emitLoadArrayLen(arrPtr, "astep.len");
+        llvm::Value* zero   = llvm::ConstantInt::get(getDefaultType(), 0);
+        llvm::Value* one    = llvm::ConstantInt::get(getDefaultType(), 1);
+        llvm::Value* eight  = llvm::ConstantInt::get(getDefaultType(), 8);
+        // Clamp step to max(1, step)
+        llvm::Value* badStep = builder->CreateICmpSLE(stepArg, zero, "astep.bad");
+        llvm::Value* step    = builder->CreateSelect(badStep, one, stepArg, "astep.step");
+        nonNegValues_.insert(step);
+        // outLen = (arrLen + step - 1) / step  (ceiling division, but clamped if arrLen==0)
+        llvm::Value* arrLenP = builder->CreateAdd(arrLen, builder->CreateSub(step, one, "astep.sm1", true, true),
+                                                  "astep.lenp", true, true);
+        llvm::Value* outLen  = builder->CreateUDiv(arrLenP, step, "astep.outlen");
+        nonNegValues_.insert(outLen);
+        // Allocate output: (outLen + 1) * 8 bytes
+        llvm::Value* slots = builder->CreateAdd(outLen, one, "astep.slots", true, true);
+        llvm::Value* bytes = builder->CreateMul(slots, eight, "astep.bytes", true, true);
+        llvm::Value* buf   = builder->CreateCall(getOrDeclareMalloc(), {bytes}, "astep.buf");
+        llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
+        emitStoreArrayLen(outLen, buf);
+        // Loop: for out=0; out<outLen; out++: buf[out+1] = arr[out*step + 1]
+        llvm::Function* fn  = builder->GetInsertBlock()->getParent();
+        llvm::BasicBlock* preBB  = builder->GetInsertBlock();
+        llvm::BasicBlock* loopBB = llvm::BasicBlock::Create(*context, "astep.loop", fn);
+        llvm::BasicBlock* bodyBB = llvm::BasicBlock::Create(*context, "astep.body", fn);
+        llvm::BasicBlock* doneBB = llvm::BasicBlock::Create(*context, "astep.done", fn);
+        auto* skipW = llvm::MDBuilder(*context).createBranchWeights(1000, 1);
+        builder->CreateCondBr(builder->CreateICmpSGT(outLen, zero, "astep.gt0"), loopBB, doneBB, skipW);
+        builder->SetInsertPoint(loopBB);
+        llvm::PHINode* out = builder->CreatePHI(getDefaultType(), 2, "astep.out");
+        out->addIncoming(zero, preBB);
+        builder->CreateCondBr(builder->CreateICmpULT(out, outLen, "astep.cond"), bodyBB, doneBB,
+                              llvm::MDBuilder(*context).createBranchWeights(1000, 1));
+        builder->SetInsertPoint(bodyBB);
+        // srcOff = out*step + 1  (1-based because slot 0 holds the length header)
+        llvm::Value* srcOff = builder->CreateAdd(
+            builder->CreateMul(out, step, "astep.mul", true, true), one, "astep.soff", true, true);
+        llvm::Value* dstOff = builder->CreateAdd(out, one, "astep.doff", true, true);
+        llvm::Value* srcPtr = builder->CreateInBoundsGEP(getDefaultType(), arrPtr, srcOff, "astep.srcptr");
+        llvm::Value* elem   = emitLoadArrayElem(srcPtr, "astep.elem");
+        if (optimizationLevel >= OptimizationLevel::O1)
+            llvm::cast<llvm::Instruction>(elem)->setMetadata(llvm::LLVMContext::MD_noundef,
+                                                              llvm::MDNode::get(*context, {}));
+        llvm::Value* dstPtr = builder->CreateInBoundsGEP(getDefaultType(), buf, dstOff, "astep.dstptr");
+        auto* st = builder->CreateStore(elem, dstPtr);
+        st->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaArrayElem_);
+        llvm::Value* nxt = builder->CreateAdd(out, one, "astep.nxt", true, true);
+        out->addIncoming(nxt, bodyBB);
+        attachLoopMetadata(llvm::cast<llvm::BranchInst>(builder->CreateBr(loopBB)));
+        builder->SetInsertPoint(doneBB);
+        arrayReturningFunctions_.insert("array_step");
         return buf;
     }
 
@@ -12394,6 +14271,45 @@ llvm::Value* CodeGenerator::generateCall(CallExpr* expr) {
         }
     }
     if (calleeIt == functions.end() || !calleeIt->second) {
+        // ── Lambda/funcptr variable call ──────────────────────────────────
+        // If the callee names a local variable that holds a callable function
+        // pointer (lambda var or funcptr var), emit an indirect call through it.
+        if (lambdaVarNames_.count(expr->callee) || funcptrVarNames_.count(expr->callee)) {
+            auto varIt = namedValues.find(expr->callee);
+            if (varIt != namedValues.end()) {
+                llvm::Value* varAlloca = varIt->second;
+                auto* ptrTy = llvm::PointerType::getUnqual(*context);
+                llvm::Value* fnPtr = nullptr;
+                if (auto* allocaInst = llvm::dyn_cast<llvm::AllocaInst>(varAlloca)) {
+                    llvm::Type* allocTy = allocaInst->getAllocatedType();
+                    if (allocTy->isPointerTy()) {
+                        fnPtr = builder->CreateAlignedLoad(ptrTy, varAlloca, llvm::Align(8),
+                                                           expr->callee + ".fnload");
+                    } else if (allocTy->isIntegerTy()) {
+                        llvm::Value* raw = builder->CreateAlignedLoad(getDefaultType(), varAlloca, llvm::Align(8),
+                                                                      expr->callee + ".fnload");
+                        fnPtr = builder->CreateIntToPtr(raw, ptrTy, expr->callee + ".fnptr");
+                    }
+                } else if (varAlloca->getType()->isPointerTy()) {
+                    // Already a pointer value (e.g. global function alias).
+                    fnPtr = varAlloca;
+                }
+                if (fnPtr) {
+                    std::vector<llvm::Type*> paramTys(expr->arguments.size(), getDefaultType());
+                    llvm::FunctionType* fnTy =
+                        llvm::FunctionType::get(getDefaultType(), paramTys, /*isVarArg=*/false);
+                    std::vector<llvm::Value*> callArgs;
+                    callArgs.reserve(expr->arguments.size());
+                    for (auto& arg : expr->arguments) {
+                        llvm::Value* v = generateExpression(arg.get());
+                        callArgs.push_back(toDefaultType(v));
+                    }
+                    auto* ci = builder->CreateCall(fnTy, fnPtr, callArgs, expr->callee + ".icall");
+                    ci->addFnAttr(llvm::Attribute::NoUnwind);
+                    return ci;
+                }
+            }
+        }
         // Build "did you mean?" suggestion from both user-defined functions
         // AND all built-in names so that typos like "abss" → "abs" work.
         std::string msg = "Unknown function: " + expr->callee;

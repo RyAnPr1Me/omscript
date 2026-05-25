@@ -528,6 +528,16 @@ ptest_compile_fail "examples/double_invalidate_error_test.om"
 ptest_compile_fail "examples/write_to_shared_error_test.om"
 ptest_compile_fail "examples/invalidate_while_borrowed_error_test.om"
 ptest_compile_fail "examples/own_on_frozen_error_test.om"
+ptest_program "examples/round90_test.om" 17
+ptest_program "examples/round90_compile_test.om" 3
+ptest_program "examples/round91_threading_test.om" 14
+ptest_program "examples/round92_zero_cost_test.om" 32
+ptest_program "examples/round93_language_test.om" 20
+ptest_program "examples/round94_language_test.om" 35
+ptest_program "examples/round95_language_test.om" 0
+ptest_program "examples/round96_language_test.om" 0
+ptest_program "examples/round97_language_test.om" 0
+ptest_program "examples/round98_language_test.om" 0
 flush_ptests
 test_cli_output "error-location-arrow" "-->" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
 test_cli_output "error-includes-filename" "undefined_var.om" 1 ./build/omsc examples/undefined_var.om -o /tmp/test_err
@@ -702,11 +712,13 @@ fi
 rm -f exit_zero.o
 
 # help / version (parallel)
-ptest_cli_output "help-shows-check" "check" 0 ./build/omsc --help
+ptest_cli_output "help-shows-check" "check, --check" 0 ./build/omsc --help
+ptest_cli_output "help-shows-check-description" "Validate syntax and types" 0 ./build/omsc --help
 ptest_cli_output "help-shows-time" "--time" 0 ./build/omsc --help
 ptest_cli_output "help-shows-emit-obj" "--emit-obj" 0 ./build/omsc --help
 ptest_cli_output "help-shows-dry-run" "--dry-run" 0 ./build/omsc --help
 ptest_cli_output "help-shows-quiet" "--quiet" 0 ./build/omsc --help
+ptest_cli_output "help-shows-dump-tokens-alias" "--dump-tokens" 0 ./build/omsc --help
 ptest_cli_output "version-full-semver" "OmScript Compiler v" 0 ./build/omsc --version
 flush_ptests
 
@@ -955,6 +967,15 @@ ptest_program "examples/round85_ns_enum_test.om" 7
 ptest_program "examples/round86_ns_global_test.om" 7
 ptest_program "examples/round87_ns_type_qualtype_test.om" 8
 ptest_program "examples/file_type_test.om" 10
+ptest_program "examples/round89_test.om" 22
+ptest_program "examples/round99_iterator_opt_test.om" 13
+ptest_program "examples/round100_language_test.om" 14
+ptest_program "examples/round101_syntax_aliases_test.om" 10
+ptest_program "examples/round102_when_else_arm_test.om" 8
+ptest_program "examples/round103_keyword_ops_test.om" 9
+ptest_program "examples/round104_type_syntax_test.om" 7
+ptest_program "examples/round105_type_collection_aliases_test.om" 5
+ptest_program "examples/round106_utility_builtins_test.om" 26
 flush_ptests
 
 echo ""

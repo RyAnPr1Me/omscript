@@ -821,7 +821,14 @@ CTValue CTEngine::evalExpr(CTFrame& frame, const Expression* e) {
         const CTValue lv = evalExpr(frame, pipe->left.get());
         if (!lv.isKnown())
             return CTValue::uninit();
-        return evalCall(frame, pipe->functionName, {lv});
+        std::vector<CTValue> callArgs = {lv};
+        for (const auto& ea : pipe->extraArgs) {
+            CTValue av = evalExpr(frame, ea.get());
+            if (!av.isKnown())
+                return CTValue::uninit();
+            callArgs.push_back(av);
+        }
+        return evalCall(frame, pipe->functionName, callArgs);
     }
 
     // ── Range annotation (strip hint, evaluate inner) ─────────────────────
@@ -4378,6 +4385,8 @@ void CTEngine::runPass(const Program* program) {
             case ASTNodeType::PIPE_EXPR: {
                 auto* pe = static_cast<const PipeExpr*>(ex);
                 walkE(pe->left.get());
+                for (const auto& ea : pe->extraArgs)
+                    walkE(ea.get());
                 graph_.edges.push_back({fn->name, pe->functionName});
                 return;
             }

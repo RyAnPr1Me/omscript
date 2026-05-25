@@ -78,6 +78,13 @@ class Parser {
     int lambdaCounter_ = 0;
     int recursionDepth_ = 0;
 
+    /// Set while parsing a let...in binding value; suppresses the 'in'
+    /// membership-test operator so that 'in' terminates the binding.
+    bool inLetBinding_ = false;
+    /// Extra `>` closers buffered when type-generic parsing consumes a `>>`
+    /// token as two consecutive generic terminators.
+    int pendingTypeGtClosers_ = 0;
+
     /// Set to true by parsePrimary() when it resolves a namespace-qualified
     /// call (e.g. std::abs).  Read and immediately cleared by parseCall() to
     /// set CallExpr::fromStdNamespace on the resulting node.
@@ -160,6 +167,7 @@ class Parser {
     std::unique_ptr<Statement> parseSwitchStmt();
     std::unique_ptr<Statement> parseCatchStmt();
     std::unique_ptr<Statement> parseThrowStmt();
+    std::unique_ptr<Statement> parseEnsureStmt();
     std::unique_ptr<Statement> parseUnlessStmt();
     std::unique_ptr<Statement> parseUntilStmt();
     std::unique_ptr<Statement> parseLoopStmt();
@@ -167,6 +175,7 @@ class Parser {
     std::unique_ptr<Statement> parseDeferStmt();
     std::unique_ptr<Statement> parseGuardStmt();
     std::unique_ptr<Statement> parseWhenStmt();
+    std::unique_ptr<Expression> parseWhenExpr();
     std::unique_ptr<Statement> parseForeverStmt();
     std::unique_ptr<Statement> parseForEachStmt();
     std::unique_ptr<Statement> parseAssumeStmt();
@@ -179,8 +188,10 @@ class Parser {
     std::unique_ptr<Statement> parsePipelineStmt();
     std::vector<std::unique_ptr<Statement>> parseDestructuringDecl(bool isConst);
     std::vector<std::unique_ptr<Statement>> parseTupleDestructuringDecl(bool isConst);
+    std::unique_ptr<Statement> parseTupleDestrAssign();
     std::unique_ptr<EnumDecl> parseEnumDecl();
-    std::unique_ptr<StructDecl> parseStructDecl(StructRepr repr = StructRepr::Auto, int reprAlignN = 0);
+    std::unique_ptr<StructDecl> parseStructDecl(StructRepr repr = StructRepr::Auto, int reprAlignN = 0, const std::string& forcedName = "");
+    void parseImplBlock(std::vector<std::unique_ptr<FunctionDecl>>& functions);
     std::unique_ptr<Expression> parseStructLiteral(const std::string& name, int line, int col);
     std::unique_ptr<Statement> parseExprStmt();
     std::unique_ptr<VarDecl> parseGlobalDecl();
@@ -311,9 +322,13 @@ class Parser {
     /// Returns true when the current token is '(' and the matching ')'
     /// is immediately followed by '=>' (FAT_ARROW) — indicating an arrow lambda.
     bool isArrowLambdaParens() const;
+    bool isTupleDestrAssign() const;
 
     /// Parse a type annotation (e.g. "int", "int[]", "string[][]", "Point").
     std::string parseTypeAnnotation();
+    /// Consume one generic type-argument closer (`>`), also accepting `>>` by
+    /// splitting it across nested generic parse frames.
+    void consumeTypeGenericClose(const std::string& errMsg);
 
     [[noreturn]] void error(const std::string& message);
 };

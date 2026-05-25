@@ -160,6 +160,7 @@ void Parser::registerStdNamespace() {
         {"array_insert", "array_insert"},
         {"array_remove", "array_remove"},
         {"array_mean", "array_mean"},
+        {"array_partition", "array_partition"},
         // ── Map ─────────────────────────────────────────────────────────────
         {"map_new", "map_new"},
         {"map_get", "map_get"},
@@ -172,6 +173,7 @@ void Parser::registerStdNamespace() {
         {"map_merge", "map_merge"},
         {"map_filter", "map_filter"},
         {"map_invert", "map_invert"},
+        {"map_reduce", "map_reduce"},
         // ── Generic ──────────────────────────────────────────────────────────
         {"filter", "filter"},
         // ── I/O ─────────────────────────────────────────────────────────────
@@ -198,18 +200,35 @@ void Parser::registerStdNamespace() {
         {"random", "random"},
         // ── Threading ────────────────────────────────────────────────────────
         {"thread_create", "thread_create"},
+        {"thread_create_ex", "thread_create_ex"},
         {"thread_join", "thread_join"},
         {"thread_detach", "thread_detach"},
+        {"thread_self", "thread_self"},
+        {"thread_equal", "thread_equal"},
         {"mutex_new", "mutex_new"},
         {"mutex_lock", "mutex_lock"},
         {"mutex_try_lock", "mutex_try_lock"},
         {"mutex_unlock", "mutex_unlock"},
         {"mutex_destroy", "mutex_destroy"},
+        {"rwlock_new", "rwlock_new"},
+        {"rwlock_rdlock", "rwlock_rdlock"},
+        {"rwlock_try_rdlock", "rwlock_try_rdlock"},
+        {"rwlock_wrlock", "rwlock_wrlock"},
+        {"rwlock_try_wrlock", "rwlock_try_wrlock"},
+        {"rwlock_unlock", "rwlock_unlock"},
+        {"rwlock_destroy", "rwlock_destroy"},
+        {"cond_new", "cond_new"},
+        {"cond_wait", "cond_wait"},
+        {"cond_signal", "cond_signal"},
+        {"cond_broadcast", "cond_broadcast"},
+        {"cond_destroy", "cond_destroy"},
         // ── Assertions / hints ────────────────────────────────────────────────
         {"assert", "assert"},
         {"expect", "expect"},
         {"assume", "assume"},
         {"unreachable", "unreachable"},
+        // ── Compile-time compilation ──────────────────────────────────────────
+        {"compile", "compile"},
         // ── BigInt ───────────────────────────────────────────────────────────
         {"bigint", "bigint"},
         {"bigint_add", "bigint_add"},
@@ -254,6 +273,20 @@ void Parser::registerStdNamespace() {
         {"fast_sqrt", "fast_sqrt"},
         {"is_nan", "is_nan"},
         {"is_inf", "is_inf"},
+        // ── Round-92: zero-cost builtins ─────────────────────────────────────
+        {"lerp",             "lerp"},
+        {"trunc",            "trunc"},
+        {"rint",             "rint"},
+        {"saturating_mul",   "saturating_mul"},
+        {"sat_add",          "sat_add"},
+        {"sat_sub",          "sat_sub"},
+        {"sat_mul",          "sat_mul"},
+        {"wrap_add",         "wrap_add"},
+        {"wrap_sub",         "wrap_sub"},
+        {"wrap_mul",         "wrap_mul"},
+        {"bit_floor",        "bit_floor"},
+        {"bit_ceil",         "bit_ceil"},
+        {"bit_width",        "bit_width"},
     };
 
     auto& stdNS = importNamespaces_["std"];
@@ -1037,6 +1070,17 @@ std::unique_ptr<Program> Parser::parse() {
                 advance(); // consume 'type'
                 const Token aliasName = consume(TokenType::IDENTIFIER, "Expected alias name after 'type'");
                 consume(TokenType::ASSIGN, "Expected '=' after type alias name");
+                // `type X = struct { ... }` — inline struct type alias.
+                // Parse the struct body using the alias name as the struct name.
+                if (check(TokenType::STRUCT)) {
+                    advance(); // consume 'struct'
+                    auto sd = parseStructDecl(StructRepr::Auto, 0, aliasName.lexeme);
+                    structs.push_back(std::move(sd));
+                    // Also install the alias so that it resolves to itself (no-op alias).
+                    typeAliases_[aliasName.lexeme] = aliasName.lexeme;
+                    match(TokenType::SEMICOLON); // optional trailing semicolon
+                    continue;
+                }
                 // Parse the right-hand side type using the full type annotation
                 // parser so that *T, **T, (T1,T2), ptr<T>, fn(T)->R, etc. all work.
                 if (!check(TokenType::IDENTIFIER) && !check(TokenType::STAR) &&
@@ -1056,6 +1100,15 @@ std::unique_ptr<Program> Parser::parse() {
         if (match(TokenType::STRUCT)) {
             try {
                 structs.push_back(parseStructDecl());
+            } catch (const std::exception& e) {
+                recordException(errors_, diagnostics_, e);
+                synchronize();
+            }
+            continue;
+        }
+        if (match(TokenType::IMPL)) {
+            try {
+                parseImplBlock(functions);
             } catch (const std::exception& e) {
                 recordException(errors_, diagnostics_, e);
                 synchronize();
@@ -1842,6 +1895,8 @@ void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& function
             st->name = qualName;
             nsMap[shortName] = qualName;
             structs.push_back(std::move(st));
+        } else if (match(TokenType::IMPL)) {
+            parseImplBlock(functions);
         } else if (match(TokenType::ENUM)) {
             auto en = parseEnumDecl();
             const std::string shortName = en->name;
@@ -1878,6 +1933,19 @@ void Parser::parseNamespace(std::vector<std::unique_ptr<FunctionDecl>>& function
             advance(); // consume 'type'
             const Token aliasName = consume(TokenType::IDENTIFIER, "Expected alias name after 'type'");
             consume(TokenType::ASSIGN, "Expected '=' after type alias name");
+            // `type X = struct { ... }` — inline struct type alias in namespace.
+            if (check(TokenType::STRUCT)) {
+                advance(); // consume 'struct'
+                const std::string qualName = nsName + "::" + aliasName.lexeme;
+                auto sd = parseStructDecl(StructRepr::Auto, 0, qualName);
+                structs.push_back(std::move(sd));
+                typeAliases_[qualName] = qualName;
+                if (!typeAliases_.count(aliasName.lexeme))
+                    typeAliases_[aliasName.lexeme] = qualName;
+                nsMap[aliasName.lexeme] = qualName;
+                match(TokenType::SEMICOLON);
+                continue;
+            }
             if (!check(TokenType::IDENTIFIER) && !check(TokenType::STAR) &&
                 !check(TokenType::STAR_STAR) && !check(TokenType::LPAREN) &&
                 !check(TokenType::AMPERSAND) && !check(TokenType::FN)) {
@@ -1937,6 +2005,21 @@ std::string Parser::resolveNamespacedPath(const std::vector<std::string>& segmen
         error("Function '" + fn + "' not found in namespace '" + ns + "'");
     }
     return ""; // no namespace prefix matched — caller uses flat-name fallback
+}
+
+void Parser::consumeTypeGenericClose(const std::string& errMsg) {
+    if (pendingTypeGtClosers_ > 0) {
+        --pendingTypeGtClosers_;
+        return;
+    }
+    if (match(TokenType::GT))
+        return;
+    if (match(TokenType::RSHIFT)) {
+        // `>>` closes the current generic plus one enclosing generic.
+        ++pendingTypeGtClosers_;
+        return;
+    }
+    error(errMsg);
 }
 
 std::string Parser::parseTypeAnnotation() {
@@ -2016,6 +2099,15 @@ std::string Parser::parseTypeAnnotation() {
     } else {
         typeName = consume(TokenType::IDENTIFIER, "Expected type name").lexeme;
     }
+    // Normalize common aliases to canonical internal names.
+    if (typeName == "str")
+        typeName = "string";
+    else if (typeName == "integer")
+        typeName = "int";
+    else if (typeName == "boolean")
+        typeName = "bool";
+    else if (typeName == "character")
+        typeName = "char";
     // Support namespace-qualified type names: Math::Scalar, A::B::Type, etc.
     // Consume '::' + IDENTIFIER suffix segments until the pattern breaks.
     while (check(TokenType::SCOPE) && (current + 1 < tokens.size()) &&
@@ -2042,6 +2134,45 @@ std::string Parser::parseTypeAnnotation() {
         consume(TokenType::RBRACE, "Expected '}' after SIMD lane count");
         typeName = typeName + sizeStr;
     }
+    // Support generic shorthand aliases:
+    //   array<T>/list<T>/vector<T> -> T[]
+    //   dict<K, V>/map<K, V>/hashmap<K, V> -> dict[K,V]
+    //   tuple<T1, ...> -> tuple<T1,...>
+    if ((typeName == "array" || typeName == "list" || typeName == "vector") && check(TokenType::LT)) {
+        advance(); // consume '<'
+        std::string inner = parseTypeAnnotation();
+        consumeTypeGenericClose("Expected '>' to close array/list/vector type parameter");
+        typeName = inner + "[]";
+    }
+    if ((typeName == "dict" || typeName == "map" || typeName == "hashmap") && check(TokenType::LT)) {
+        advance(); // consume '<'
+        std::string keyType = parseTypeAnnotation();
+        consume(TokenType::COMMA, "Expected ',' between key and value types in dict<K,V>");
+        std::string valType = parseTypeAnnotation();
+        consumeTypeGenericClose("Expected '>' to close dict/map/hashmap type parameters");
+        typeName = "dict[" + keyType + "," + valType + "]";
+    }
+    if (typeName == "tuple" && check(TokenType::LT)) {
+        advance(); // consume '<'
+        std::vector<std::string> elemTypes;
+        if (!(check(TokenType::GT) || check(TokenType::RSHIFT))) {
+            elemTypes.push_back(parseTypeAnnotation());
+            while (match(TokenType::COMMA)) {
+                if (check(TokenType::GT) || check(TokenType::RSHIFT))
+                    break;
+                elemTypes.push_back(parseTypeAnnotation());
+            }
+        }
+        consumeTypeGenericClose("Expected '>' to close tuple<...> type parameters");
+        std::string tupleAnn = "tuple<";
+        for (size_t i = 0; i < elemTypes.size(); ++i) {
+            if (i)
+                tupleAnn += ',';
+            tupleAnn += elemTypes[i];
+        }
+        tupleAnn += '>';
+        typeName = tupleAnn;
+    }
     // Support array type annotations: type[], type[][], etc.
     while (check(TokenType::LBRACKET) && (current + 1 < tokens.size()) &&
            tokens[current + 1].type == TokenType::RBRACKET) {
@@ -2054,21 +2185,21 @@ std::string Parser::parseTypeAnnotation() {
     if (typeName == "ptr" && check(TokenType::LT)) {
         advance();                                 // consume '<'
         std::string inner = parseTypeAnnotation(); // recursively parse element type
-        consume(TokenType::GT, "Expected '>' to close ptr<T> type parameter");
+        consumeTypeGenericClose("Expected '>' to close ptr<T> type parameter");
         typeName = "ptr<" + inner + ">";
     }
     // Support pslice<T> fat-pointer slice annotation: pslice<i64>, pslice<f64>, etc.
     if (typeName == "pslice" && check(TokenType::LT)) {
         advance();                                 // consume '<'
         std::string inner = parseTypeAnnotation(); // recursively parse element type
-        consume(TokenType::GT, "Expected '>' to close pslice<T> type parameter");
+        consumeTypeGenericClose("Expected '>' to close pslice<T> type parameter");
         typeName = "pslice<" + inner + ">";
     }
     // Support dict[KeyType, ValType] generic annotation (e.g., dict[str, int])
     // Only activates when the type name is exactly "dict" followed by '[' with
     // non-empty content — avoids any collision with the existing type[] handling.
-    if (typeName == "dict" && check(TokenType::LBRACKET) && current + 1 < tokens.size() &&
-        tokens[current + 1].type != TokenType::RBRACKET) {
+    if ((typeName == "dict" || typeName == "map" || typeName == "hashmap") &&
+        check(TokenType::LBRACKET) && current + 1 < tokens.size() && tokens[current + 1].type != TokenType::RBRACKET) {
         advance(); // consume '['
         std::string typeParams;
         int depth = 1;
@@ -2084,7 +2215,7 @@ std::string Parser::parseTypeAnnotation() {
             if (depth > 0)
                 typeParams += t.lexeme;
         }
-        typeName += "[" + typeParams + "]";
+        typeName = "dict[" + typeParams + "]";
     }
     // Resolve type aliases transitively (e.g. A → B → int from
     //   type A = B; type B = int;).  Chase up to 32 hops to avoid infinite
@@ -2315,6 +2446,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
             case ASTNodeType::DO_WHILE_STMT: collectLabels(static_cast<const DoWhileStmt*>(s)->body.get()); break;
             case ASTNodeType::FOR_STMT: collectLabels(static_cast<const ForStmt*>(s)->body.get()); break;
             case ASTNodeType::FOR_EACH_STMT: collectLabels(static_cast<const ForEachStmt*>(s)->body.get()); break;
+            case ASTNodeType::FOR_KV_STMT: collectLabels(static_cast<const ForKVStmt*>(s)->body.get()); break;
             default: break;
             }
         };
@@ -2347,6 +2479,7 @@ std::unique_ptr<FunctionDecl> Parser::parseFunction(bool isOptMax) {
             case ASTNodeType::DO_WHILE_STMT: validateJmps(static_cast<const DoWhileStmt*>(s)->body.get()); break;
             case ASTNodeType::FOR_STMT: validateJmps(static_cast<const ForStmt*>(s)->body.get()); break;
             case ASTNodeType::FOR_EACH_STMT: validateJmps(static_cast<const ForEachStmt*>(s)->body.get()); break;
+            case ASTNodeType::FOR_KV_STMT: validateJmps(static_cast<const ForKVStmt*>(s)->body.get()); break;
             default: break;
             }
         };
@@ -2660,6 +2793,12 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         stmt->column = kw.column;
         return stmt;
     }
+    // Tuple destructuring assignment: (a, b) = expr;
+    if (isTupleDestrAssign()) {
+        auto stmt = parseTupleDestrAssign();
+        consume(TokenType::SEMICOLON, "Expected ';' after tuple destructuring assignment");
+        return stmt;
+    }
     if (match(TokenType::VAR)) {
         // Tuple destructuring: var (a, b) = expr;
         if (check(TokenType::LPAREN)) {
@@ -2732,6 +2871,13 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     if (match(TokenType::THROW)) {
         const Token kw = tokens[current - 1];
         auto stmt = parseThrowStmt();
+        stmt->line = kw.line;
+        stmt->column = kw.column;
+        return stmt;
+    }
+    if (match(TokenType::ENSURE)) {
+        const Token kw = tokens[current - 1];
+        auto stmt = parseEnsureStmt();
         stmt->line = kw.line;
         stmt->column = kw.column;
         return stmt;
@@ -3400,6 +3546,12 @@ std::unique_ptr<Statement> Parser::parseWhileStmt() {
     auto body = parseStatement();
     auto stmt = std::make_unique<WhileStmt>(std::move(condition), std::move(body));
     stmt->loopHints = loopHints;
+
+    // while...else: else block runs if the loop exits without break.
+    if (match(TokenType::ELSE)) {
+        stmt->elseBody = parseStatement();
+    }
+
     return stmt;
 }
 
@@ -3419,9 +3571,12 @@ std::unique_ptr<Statement> Parser::parseDoWhileStmt() {
     } else {
         consume(TokenType::WHILE, "Expected 'while' or 'until' after do block");
     }
-    consume(TokenType::LPAREN, isUntil ? "Expected '(' after 'until'" : "Expected '(' after 'while'");
+    // Optional parentheses (paren-free form: `do { } while cond;` also accepted)
+    const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
-    consume(TokenType::RPAREN, "Expected ')' after condition");
+    if (hasParen) {
+        consume(TokenType::RPAREN, "Expected ')' after condition");
+    }
     consume(TokenType::SEMICOLON, "Expected ';' after do-while/until statement");
 
     if (isUntil) {
@@ -3459,46 +3614,13 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
             consume(TokenType::RPAREN, "Expected ')' after for-each collection");
         auto body = parseStatement();
 
-        // Desugar to: { var __arr = collection; for (idx in 0...len(__arr)) { var item = __arr[idx]; body } }
-        static int forIdxCounter = 0;
-        const int id = forIdxCounter++;
-        const std::string arrTmp = "__for_arr_" + std::to_string(id);
-
-        std::vector<std::unique_ptr<Statement>> outerStmts;
-
-        // var __for_arr_N = collection;
-        auto arrDecl = std::make_unique<VarDecl>(arrTmp, std::move(collection));
-        arrDecl->isCompilerGenerated = true;
-        arrDecl->line = varName.line;
-        arrDecl->column = varName.column;
-        outerStmts.push_back(std::move(arrDecl));
-
-        // Build inner body: { var item = __for_arr_N[idx]; original_body }
-        std::vector<std::unique_ptr<Statement>> innerStmts;
-        auto arrRef = std::make_unique<IdentifierExpr>(arrTmp);
-        auto idxRef = std::make_unique<IdentifierExpr>(varName.lexeme);
-        auto indexExpr = std::make_unique<IndexExpr>(std::move(arrRef), std::move(idxRef));
-        auto itemDecl = std::make_unique<VarDecl>(itemName.lexeme, std::move(indexExpr));
-        itemDecl->isCompilerGenerated = true;
-        itemDecl->line = itemName.line;
-        itemDecl->column = itemName.column;
-        innerStmts.push_back(std::move(itemDecl));
-        innerStmts.push_back(std::move(body));
-        auto innerBlock = std::make_unique<BlockStmt>(std::move(innerStmts));
-
-        // for (idx in 0...len(__for_arr_N))
-        auto zero = std::make_unique<LiteralExpr>(static_cast<long long>(0));
-        std::vector<std::unique_ptr<Expression>> lenArgs;
-        lenArgs.push_back(std::make_unique<IdentifierExpr>(arrTmp));
-        auto lenCall = std::make_unique<CallExpr>("len", std::move(lenArgs));
-        lenCall->fromStdNamespace = true; // compiler-generated
-        auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(zero), std::move(lenCall), nullptr,
-                                                 std::move(innerBlock));
-        forStmt->line = varName.line;
-        forStmt->column = varName.column;
-        outerStmts.push_back(std::move(forStmt));
-
-        return std::make_unique<BlockStmt>(std::move(outerStmts));
+        // Emit a ForKVStmt — codegen decides at code-generation time whether
+        // the collection is a hashmap (bucket-walking) or an array (indexed).
+        auto kvStmt = std::make_unique<ForKVStmt>(varName.lexeme, itemName.lexeme,
+                                                  std::move(collection), std::move(body));
+        kvStmt->line = varName.line;
+        kvStmt->column = varName.column;
+        return kvStmt;
     }
 
     std::string iteratorType;
@@ -3533,10 +3655,23 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
             advance(); advance();
             loopHints = parseLoopAnnotation();
         }
+        std::unique_ptr<Expression> whereFilter_r = nullptr;
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "where") {
+            advance();
+            whereFilter_r = parseExpression();
+        }
         auto body = parseStatement();
+        if (whereFilter_r) {
+            std::vector<std::unique_ptr<Statement>> innerStmts;
+            innerStmts.push_back(std::move(body));
+            auto innerBlock = std::make_unique<BlockStmt>(std::move(innerStmts));
+            body = std::make_unique<IfStmt>(std::move(whereFilter_r), std::move(innerBlock));
+        }
         auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(endPlusOne),
                                                  std::move(step), std::move(body), iteratorType);
         forStmt->loopHints = loopHints;
+        // for...else: else block runs if loop exits without break.
+        if (match(TokenType::ELSE)) forStmt->elseBody = parseStatement();
         return forStmt;
     }
 
@@ -3561,10 +3696,23 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
             advance(); // loop
             loopHints = parseLoopAnnotation();
         }
+        std::unique_ptr<Expression> whereFilter_r = nullptr;
+        if (check(TokenType::IDENTIFIER) && peek().lexeme == "where") {
+            advance();
+            whereFilter_r = parseExpression();
+        }
         auto body = parseStatement();
+        if (whereFilter_r) {
+            std::vector<std::unique_ptr<Statement>> innerStmts;
+            innerStmts.push_back(std::move(body));
+            auto innerBlock = std::make_unique<BlockStmt>(std::move(innerStmts));
+            body = std::make_unique<IfStmt>(std::move(whereFilter_r), std::move(innerBlock));
+        }
         auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end), std::move(step),
                                                  std::move(body), iteratorType);
         forStmt->loopHints = loopHints;
+        // for...else: else block runs if loop exits without break.
+        if (match(TokenType::ELSE)) forStmt->elseBody = parseStatement();
         return forStmt;
     }
 
@@ -3592,6 +3740,7 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
             auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
                                                      std::move(negStep), std::move(body), iteratorType);
             forStmt->loopHints = loopHints;
+            if (match(TokenType::ELSE)) forStmt->elseBody = parseStatement();
             return forStmt;
         }
 
@@ -3608,14 +3757,29 @@ std::unique_ptr<Statement> Parser::parseForStmt() {
         auto forStmt = std::make_unique<ForStmt>(varName.lexeme, std::move(firstExpr), std::move(end),
                                                  std::move(negOne), std::move(body), iteratorType);
         forStmt->loopHints = loopHints;
+        if (match(TokenType::ELSE)) forStmt->elseBody = parseStatement();
         return forStmt;
     }
 
     // Otherwise this is a for-each loop: for (var in collection)
     if (hasParen)
         consume(TokenType::RPAREN, "Expected ')' after for-each collection");
+    std::unique_ptr<Expression> whereFilter = nullptr;
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "where") {
+        advance(); // consume 'where'
+        whereFilter = parseExpression();
+    }
     auto body = parseStatement();
-    return std::make_unique<ForEachStmt>(varName.lexeme, std::move(firstExpr), std::move(body));
+    if (whereFilter) {
+        std::vector<std::unique_ptr<Statement>> innerStmts;
+        innerStmts.push_back(std::move(body));
+        auto innerBlock = std::make_unique<BlockStmt>(std::move(innerStmts));
+        body = std::make_unique<IfStmt>(std::move(whereFilter), std::move(innerBlock));
+    }
+    auto feStmt = std::make_unique<ForEachStmt>(varName.lexeme, std::move(firstExpr), std::move(body));
+    // for...else: else block runs if loop exits without break.
+    if (match(TokenType::ELSE)) feStmt->elseBody = parseStatement();
+    return feStmt;
 }
 
 std::unique_ptr<Statement> Parser::parseBreakStmt() {
@@ -3753,12 +3917,36 @@ std::unique_ptr<Statement> Parser::parseThrowStmt() {
     return std::make_unique<ThrowStmt>(std::move(value));
 }
 
+std::unique_ptr<Statement> Parser::parseEnsureStmt() {
+    // ensure condition;
+    // ensure condition, "message";
+    // Desugars to a call to the 'ensure' builtin (always-active, like assert but never elided)
+    const Token startTok = peek();
+    auto condition = parseExpression();
+    std::unique_ptr<Expression> message = nullptr;
+    if (match(TokenType::COMMA)) {
+        message = parseExpression();
+    }
+    consume(TokenType::SEMICOLON, "Expected ';' after ensure statement");
+
+    std::vector<std::unique_ptr<Expression>> args;
+    args.push_back(std::move(condition));
+    if (message) args.push_back(std::move(message));
+    auto call = std::make_unique<CallExpr>("ensure", std::move(args));
+    call->fromStdNamespace = true;
+    call->line = startTok.line;
+    call->column = startTok.column;
+    return std::make_unique<ExprStmt>(std::move(call));
+}
+
 // unless (condition) { ... } else { ... }
 // Desugars to: if (!condition) { ... } else { ... }
+// Paren-free form accepted: unless cond { ... }  (same as if/while/for)
 std::unique_ptr<Statement> Parser::parseUnlessStmt() {
-    consume(TokenType::LPAREN, "Expected '(' after 'unless'");
+    const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
-    consume(TokenType::RPAREN, "Expected ')' after condition");
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after condition");
 
     auto thenBranch = parseStatement();
     std::unique_ptr<Statement> elseBranch = nullptr;
@@ -3774,10 +3962,12 @@ std::unique_ptr<Statement> Parser::parseUnlessStmt() {
 
 // until (condition) { ... }
 // Desugars to: while (!condition) { ... }
+// Paren-free form accepted: until cond { ... }  (same as if/while/for)
 std::unique_ptr<Statement> Parser::parseUntilStmt() {
-    consume(TokenType::LPAREN, "Expected '(' after 'until'");
+    const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
-    consume(TokenType::RPAREN, "Expected ')' after condition");
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after condition");
 
     auto body = parseStatement();
 
@@ -3863,9 +4053,11 @@ std::unique_ptr<Statement> Parser::parseDeferStmt() {
 // Used for early-exit / precondition patterns:
 //   guard (x > 0) else { return -1; }
 std::unique_ptr<Statement> Parser::parseGuardStmt() {
-    consume(TokenType::LPAREN, "Expected '(' after 'guard'");
+    // Paren-free form: guard cond else { ... }  (same as if/unless/while/for)
+    const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
-    consume(TokenType::RPAREN, "Expected ')' after guard condition");
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after guard condition");
     consume(TokenType::ELSE, "Expected 'else' after guard condition");
 
     auto elseBody = parseStatement();
@@ -3876,34 +4068,53 @@ std::unique_ptr<Statement> Parser::parseGuardStmt() {
 }
 
 // when (expr) { val1 => { stmts }, val2, val3 => { stmts }, _ => { stmts } }
+// Default arm also accepts: else => { stmts }
 // Desugars to a switch statement with fat-arrow syntax
 std::unique_ptr<Statement> Parser::parseWhenStmt() {
-    // Paren-free form: when x { ... }  (same as if/while/for Round-70)
+    // Paren-free form: when x { ... }  (same as if/unless/while/for)
     const bool hasParen = match(TokenType::LPAREN);
     auto condition = parseExpression();
     if (hasParen)
         consume(TokenType::RPAREN, "Expected ')' after when expression");
     consume(TokenType::LBRACE, "Expected '{' after when expression");
 
+    // Helper: parse a single arm value, handling optional range suffix (a..b, a..=b).
+    // The `..` operator is not part of the general expression parser, so we
+    // intercept it explicitly here to support range patterns.
+    auto parseArmVal = [&]() -> std::unique_ptr<Expression> {
+        auto lo = parseExpression();
+        if (match(TokenType::DOT_DOT)) {
+            const bool inclusive = match(TokenType::ASSIGN); // ..=
+            auto hi = parseExpression();
+            const std::string op = inclusive ? "..=" : "..";
+            const int hiLine = hi->line, hiCol = hi->column;
+            auto range = std::make_unique<BinaryExpr>(op, std::move(lo), std::move(hi));
+            range->line = hiLine; range->column = hiCol;
+            return range;
+        }
+        return lo;
+    };
+
     std::vector<SwitchCase> cases;
 
     while (!check(TokenType::RBRACE) && !isAtEnd()) {
-        // Check for default case: _ => { ... }
-        if (check(TokenType::IDENTIFIER) && peek().lexeme == "_") {
-            advance(); // consume '_'
-            consume(TokenType::FAT_ARROW, "Expected '=>' after '_' in when clause");
+        // Check for default case: _ => { ... } or else => { ... }
+        if ((check(TokenType::IDENTIFIER) && peek().lexeme == "_") || match(TokenType::ELSE)) {
+            if (check(TokenType::IDENTIFIER) && peek().lexeme == "_")
+                advance(); // consume '_'
+            consume(TokenType::FAT_ARROW, "Expected '=>' after default arm in when clause");
             std::vector<std::unique_ptr<Statement>> body;
             body.push_back(parseStatement());
             cases.emplace_back(std::vector<std::unique_ptr<Expression>>{}, std::move(body), true);
         } else {
             // Parse one or more case values: val1, val2, val3 => { ... }
             std::vector<std::unique_ptr<Expression>> values;
-            values.push_back(parseExpression());
+            values.push_back(parseArmVal());
             while (match(TokenType::COMMA)) {
                 // Check if next is '=>' (end of value list)
                 if (check(TokenType::FAT_ARROW))
                     break;
-                values.push_back(parseExpression());
+                values.push_back(parseArmVal());
             }
             consume(TokenType::FAT_ARROW, "Expected '=>' after value(s) in when clause");
             std::vector<std::unique_ptr<Statement>> body;
@@ -3916,8 +4127,250 @@ std::unique_ptr<Statement> Parser::parseWhenStmt() {
     }
 
     consume(TokenType::RBRACE, "Expected '}' to close when block");
+
+    // ── Range-pattern detection ──────────────────────────────────────────────
+    // If any arm contains a range pattern (a..b or a..=b), desugar the entire
+    // `when` to an if-else chain so that LLVM's switch instruction is avoided.
+    auto isRangeExpr = [](Expression* e) -> bool {
+        if (!e || e->type != ASTNodeType::BINARY_EXPR) return false;
+        const auto* b = static_cast<const BinaryExpr*>(e);
+        return b->op == ".." || b->op == "..=";
+    };
+
+    bool hasRangePattern = false;
+    for (auto& sc : cases) {
+        if (sc.isDefault) continue;
+        if (isRangeExpr(sc.value.get())) { hasRangePattern = true; break; }
+        for (auto& ev : sc.values)
+            if (isRangeExpr(ev.get())) { hasRangePattern = true; break; }
+        if (hasRangePattern) break;
+    }
+
+    if (hasRangePattern) {
+        // Determine a name for the discriminant (evaluate once).
+        const bool isIdent = condition->type == ASTNodeType::IDENTIFIER_EXPR;
+        std::string discName;
+        if (isIdent) {
+            discName = static_cast<IdentifierExpr*>(condition.get())->name;
+        } else {
+            discName = "__when_disc_" + std::to_string(lambdaCounter_++);
+        }
+
+        // Helper: build a condition expression for one arm value vs discName.
+        auto makeValCond = [&](std::unique_ptr<Expression>& v) -> std::unique_ptr<Expression> {
+            if (isRangeExpr(v.get())) {
+                auto* bin = static_cast<BinaryExpr*>(v.get());
+                auto discLo = std::make_unique<IdentifierExpr>(discName);
+                discLo->line = bin->line; discLo->column = bin->column;
+                auto discHi = std::make_unique<IdentifierExpr>(discName);
+                discHi->line = bin->line; discHi->column = bin->column;
+                auto ge = std::make_unique<BinaryExpr>(">=", std::move(discLo), std::move(bin->left));
+                const std::string hiOp = (bin->op == "..=") ? "<=" : "<";
+                auto lt = std::make_unique<BinaryExpr>(hiOp, std::move(discHi), std::move(bin->right));
+                return std::make_unique<BinaryExpr>("&&", std::move(ge), std::move(lt));
+            }
+            auto discRef = std::make_unique<IdentifierExpr>(discName);
+            return std::make_unique<BinaryExpr>("==", std::move(discRef), std::move(v));
+        };
+
+        // Collect the default body if present.
+        std::unique_ptr<Statement> elseChain = nullptr;
+        for (auto& sc : cases) {
+            if (sc.isDefault) {
+                std::vector<std::unique_ptr<Statement>> bv;
+                for (auto& s : sc.body) bv.push_back(std::move(s));
+                elseChain = std::make_unique<BlockStmt>(std::move(bv));
+                break;
+            }
+        }
+
+        // Build if-else chain in reverse so the first arm has highest priority.
+        for (int i = static_cast<int>(cases.size()) - 1; i >= 0; --i) {
+            auto& sc = cases[i];
+            if (sc.isDefault) continue;
+
+            // Build OR of per-value conditions.
+            std::unique_ptr<Expression> armCond;
+            if (sc.value)
+                armCond = makeValCond(sc.value);
+            for (auto& ev : sc.values) {
+                auto c = makeValCond(ev);
+                armCond = armCond ? std::make_unique<BinaryExpr>("||", std::move(armCond), std::move(c))
+                                  : std::move(c);
+            }
+            if (!armCond) continue;
+
+            std::vector<std::unique_ptr<Statement>> bv;
+            for (auto& s : sc.body) bv.push_back(std::move(s));
+            auto thenBlock = std::make_unique<BlockStmt>(std::move(bv));
+            elseChain = std::make_unique<IfStmt>(std::move(armCond), std::move(thenBlock), std::move(elseChain));
+        }
+
+        if (!elseChain)
+            elseChain = std::make_unique<BlockStmt>(std::vector<std::unique_ptr<Statement>>{});
+
+        // If the discriminant is complex, wrap in a block with a temp var.
+        if (!isIdent) {
+            std::vector<std::unique_ptr<Statement>> outerStmts;
+            outerStmts.push_back(std::make_unique<VarDecl>(discName, std::move(condition)));
+            outerStmts.push_back(std::move(elseChain));
+            return std::make_unique<BlockStmt>(std::move(outerStmts));
+        }
+        return elseChain;
+    }
+
     return std::make_unique<SwitchStmt>(std::move(condition), std::move(cases));
 }
+
+std::unique_ptr<Expression> Parser::parseWhenExpr() {
+    // when val { 1 => expr1, 2 => expr2, _ => expr3 }
+    // Default arm also accepts: else => expr
+    // Desugars to ternary chain: (val==1) ? e1 : (val==2) ? e2 : e3
+    // The discriminant may be any expression.
+    // If it is not a bare identifier, it is lifted into a synthetic IIFE so
+    // it is evaluated exactly once: (|__d| ternary)( expr )
+    const bool hasParen = match(TokenType::LPAREN);
+    auto discriminant = parseExpression();
+    if (hasParen)
+        consume(TokenType::RPAREN, "Expected ')' after when expression discriminant");
+
+    // Determine the identifier name used for comparisons.
+    // When the discriminant is already a bare variable we use it directly;
+    // otherwise we generate a synthetic param name and wrap the result
+    // in an IIFE lambda call so the expression is evaluated exactly once.
+    const bool isIdent = discriminant->type == ASTNodeType::IDENTIFIER_EXPR;
+    std::string discName;
+    if (isIdent) {
+        discName = static_cast<IdentifierExpr*>(discriminant.get())->name;
+    } else {
+        discName = "__when_disc_" + std::to_string(lambdaCounter_);
+    }
+
+    consume(TokenType::LBRACE, "Expected '{' after when expression");
+
+    // Helper: parse a single arm value, handling optional range suffix (a..b, a..=b).
+    auto parseArmVal = [&]() -> std::unique_ptr<Expression> {
+        auto lo = parseExpression();
+        if (match(TokenType::DOT_DOT)) {
+            const bool inclusive = match(TokenType::ASSIGN); // ..=
+            auto hi = parseExpression();
+            const std::string op = inclusive ? "..=" : "..";
+            const int hiLine = hi->line, hiCol = hi->column;
+            auto range = std::make_unique<BinaryExpr>(op, std::move(lo), std::move(hi));
+            range->line = hiLine; range->column = hiCol;
+            return range;
+        }
+        return lo;
+    };
+
+    struct WhenArm {
+        std::vector<std::unique_ptr<Expression>> values; // empty means default
+        std::unique_ptr<Expression> result;
+    };
+    std::vector<WhenArm> arms;
+
+    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        WhenArm arm;
+        bool isDefault = false;
+
+        if ((check(TokenType::IDENTIFIER) && peek().lexeme == "_") || match(TokenType::ELSE)) {
+            if (check(TokenType::IDENTIFIER) && peek().lexeme == "_")
+                advance(); // consume '_'
+            consume(TokenType::FAT_ARROW, "Expected '=>' after default arm in when expression");
+            arm.result = parseExpression();
+            isDefault = true;
+        } else {
+            arm.values.push_back(parseArmVal());
+            while (match(TokenType::COMMA)) {
+                if (check(TokenType::FAT_ARROW)) break;
+                arm.values.push_back(parseArmVal());
+            }
+            consume(TokenType::FAT_ARROW, "Expected '=>' after value in when expression");
+            arm.result = parseExpression();
+        }
+        arms.push_back(std::move(arm));
+        match(TokenType::COMMA);
+        if (isDefault) break;
+    }
+    consume(TokenType::RBRACE, "Expected '}' to close when expression");
+
+    // Build ternary chain from back to front
+    std::unique_ptr<Expression> result = nullptr;
+    int startIdx = static_cast<int>(arms.size()) - 1;
+
+    // Check if last arm is default (_)
+    if (!arms.empty() && arms.back().values.empty()) {
+        result = std::move(arms.back().result);
+        startIdx = static_cast<int>(arms.size()) - 2;
+    } else {
+        // No default: fallback to 0
+        result = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+        startIdx = static_cast<int>(arms.size()) - 1;
+    }
+
+    for (int i = startIdx; i >= 0; --i) {
+        auto& arm = arms[i];
+        if (arm.values.empty()) continue;
+
+        // Build condition: discName == v1 || discName == v2 || ...
+        // Range patterns (a..b, a..=b) desugar to: discName >= a && discName < b
+        // (or discName <= b for inclusive ..= ranges).
+        std::unique_ptr<Expression> cond = nullptr;
+        for (auto& v : arm.values) {
+            std::unique_ptr<Expression> cond_v;
+            if (v->type == ASTNodeType::BINARY_EXPR) {
+                auto* bin = static_cast<BinaryExpr*>(v.get());
+                if (bin->op == ".." || bin->op == "..=") {
+                    auto discRefLo = std::make_unique<IdentifierExpr>(discName);
+                    discRefLo->line = bin->line; discRefLo->column = bin->column;
+                    auto discRefHi = std::make_unique<IdentifierExpr>(discName);
+                    discRefHi->line = bin->line; discRefHi->column = bin->column;
+                    auto geExpr = std::make_unique<BinaryExpr>(">=", std::move(discRefLo), std::move(bin->left));
+                    const std::string hiOp = (bin->op == "..=") ? "<=" : "<";
+                    auto ltExpr = std::make_unique<BinaryExpr>(hiOp, std::move(discRefHi), std::move(bin->right));
+                    cond_v = std::make_unique<BinaryExpr>("&&", std::move(geExpr), std::move(ltExpr));
+                }
+            }
+            if (!cond_v) {
+                auto discRef = std::make_unique<IdentifierExpr>(discName);
+                cond_v = std::make_unique<BinaryExpr>("==", std::move(discRef), std::move(v));
+            }
+            if (!cond) {
+                cond = std::move(cond_v);
+            } else {
+                cond = std::make_unique<BinaryExpr>("||", std::move(cond), std::move(cond_v));
+            }
+        }
+
+        result = std::make_unique<TernaryExpr>(std::move(cond), std::move(arm.result), std::move(result));
+    }
+
+    // If the discriminant was a non-identifier expression, wrap in an IIFE
+    // (|__when_disc_N| ternary_chain)(discriminant) so it is evaluated once.
+    if (!isIdent) {
+        const std::string lambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
+        Parameter param(discName);
+        param.typeName = "i64"; // default; codegen infers actual type
+        std::vector<Parameter> fnParams;
+        fnParams.push_back(std::move(param));
+
+        auto returnStmt = std::make_unique<ReturnStmt>(std::move(result));
+        std::vector<std::unique_ptr<Statement>> stmts;
+        stmts.push_back(std::move(returnStmt));
+        auto block = std::make_unique<BlockStmt>(std::move(stmts));
+        auto fnDecl = std::make_unique<FunctionDecl>(lambdaName, std::vector<std::string>{},
+                                                      std::move(fnParams), std::move(block));
+        lambdaFunctions_.push_back(std::move(fnDecl));
+
+        // Build call: __lambda_N(discriminant)
+        std::vector<std::unique_ptr<Expression>> callArgs;
+        callArgs.push_back(std::move(discriminant));
+        return std::make_unique<CallExpr>(lambdaName, std::move(callArgs));
+    }
+
+    return result;
+}
+
 
 // forever { ... }
 // Desugars to: while (true) { ... }
@@ -3954,48 +4407,13 @@ std::unique_ptr<Statement> Parser::parseForEachStmt() {
         }
         auto body = parseStatement();
 
-        // Desugar to: { var __arr = collection; for (idx in 0...len(__arr)) { var item = __arr[idx]; body } }
-        static int foreachIdxCounter = 0;
-        const int id = foreachIdxCounter++;
-        const std::string arrTmp = "__foreach_arr_" + std::to_string(id);
-
-        std::vector<std::unique_ptr<Statement>> outerStmts;
-
-        // var __foreach_arr_N = collection;
-        auto arrDecl = std::make_unique<VarDecl>(arrTmp, std::move(collection));
-        arrDecl->isCompilerGenerated = true;
-        arrDecl->line = firstName.line;
-        arrDecl->column = firstName.column;
-        outerStmts.push_back(std::move(arrDecl));
-
-        // Build inner body: { var item = __foreach_arr_N[idx]; original_body }
-        std::vector<std::unique_ptr<Statement>> innerStmts;
-
-        // var item = __foreach_arr_N[idx];
-        auto arrRef = std::make_unique<IdentifierExpr>(arrTmp);
-        auto idxRef = std::make_unique<IdentifierExpr>(firstName.lexeme);
-        auto indexExpr = std::make_unique<IndexExpr>(std::move(arrRef), std::move(idxRef));
-        auto itemDecl = std::make_unique<VarDecl>(itemName.lexeme, std::move(indexExpr));
-        itemDecl->isCompilerGenerated = true;
-        itemDecl->line = itemName.line;
-        itemDecl->column = itemName.column;
-        innerStmts.push_back(std::move(itemDecl));
-        innerStmts.push_back(std::move(body));
-        auto innerBlock = std::make_unique<BlockStmt>(std::move(innerStmts));
-
-        // for (idx in 0...len(__foreach_arr_N))
-        auto zero = std::make_unique<LiteralExpr>(static_cast<long long>(0));
-        std::vector<std::unique_ptr<Expression>> lenArgs;
-        lenArgs.push_back(std::make_unique<IdentifierExpr>(arrTmp));
-        auto lenCall = std::make_unique<CallExpr>("len", std::move(lenArgs));
-        lenCall->fromStdNamespace = true; // compiler-generated
-        auto forStmt = std::make_unique<ForStmt>(firstName.lexeme, std::move(zero), std::move(lenCall), nullptr,
-                                                 std::move(innerBlock));
-        forStmt->line = firstName.line;
-        forStmt->column = firstName.column;
-        outerStmts.push_back(std::move(forStmt));
-
-        return std::make_unique<BlockStmt>(std::move(outerStmts));
+        // Emit a ForKVStmt — codegen decides at code-generation time whether
+        // the collection is a hashmap (bucket-walking) or an array (indexed).
+        auto kvStmt = std::make_unique<ForKVStmt>(firstName.lexeme, itemName.lexeme,
+                                                  std::move(collection), std::move(body));
+        kvStmt->line = firstName.line;
+        kvStmt->column = firstName.column;
+        return kvStmt;
     }
 
     consume(TokenType::IN, "Expected 'in' after foreach variable");
@@ -4003,8 +4421,22 @@ std::unique_ptr<Statement> Parser::parseForEachStmt() {
     if (hasParen) {
         consume(TokenType::RPAREN, "Expected ')' after foreach collection");
     }
+    std::unique_ptr<Expression> whereFilter = nullptr;
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "where") {
+        advance(); // consume 'where'
+        whereFilter = parseExpression();
+    }
     auto body = parseStatement();
-    return std::make_unique<ForEachStmt>(firstName.lexeme, std::move(collection), std::move(body));
+    if (whereFilter) {
+        std::vector<std::unique_ptr<Statement>> innerStmts;
+        innerStmts.push_back(std::move(body));
+        auto innerBlock = std::make_unique<BlockStmt>(std::move(innerStmts));
+        body = std::make_unique<IfStmt>(std::move(whereFilter), std::move(innerBlock));
+    }
+    auto feStmt = std::make_unique<ForEachStmt>(firstName.lexeme, std::move(collection), std::move(body));
+    // foreach...else: else block runs if loop exits without break.
+    if (match(TokenType::ELSE)) feStmt->elseBody = parseStatement();
+    return feStmt;
 }
 
 // elif (condition) { ... } [elif (...) { ... }] [else { ... }]
@@ -4318,6 +4750,143 @@ std::vector<std::unique_ptr<Statement>> Parser::parseTupleDestructuringDecl(bool
     return stmts;
 }
 
+// ── parseTupleDestrAssign ────────────────────────────────────────────────────
+// Desugar `(a, b, c) = rhs` into:
+//   var __tda_N_0 = rhs.0;
+//   var __tda_N_1 = rhs.1;
+//   ...
+//   a = __tda_N_0;  b = __tda_N_1; ...
+// (Temporaries prevent aliasing issues like `(a,b)=(b,a)`)
+std::unique_ptr<Statement> Parser::parseTupleDestrAssign() {
+    static int tdaCounter = 0;
+    const int id = tdaCounter++;
+
+    const Token lparen = consume(TokenType::LPAREN, "Expected '(' for tuple destructuring assignment");
+
+    std::vector<std::string> names;
+    if (!check(TokenType::RPAREN)) {
+        auto parseName = [&]() {
+            if (check(TokenType::IDENTIFIER)) {
+                names.push_back(peek().lexeme);
+                advance();
+            } else {
+                error("Expected variable name in tuple destructuring assignment");
+            }
+        };
+        parseName();
+        while (match(TokenType::COMMA)) {
+            if (check(TokenType::RPAREN)) break;
+            parseName();
+        }
+    }
+    consume(TokenType::RPAREN, "Expected ')' after variable names");
+    consume(TokenType::ASSIGN, "Expected '=' in tuple destructuring assignment");
+
+    auto rhs = parseExpression();
+
+    if (names.empty())
+        error("Tuple destructuring assignment needs at least one variable");
+
+    // Store the RHS into a temporary.
+    const std::string tmpRhs = "__tda_" + std::to_string(id) + "_rhs";
+    auto tmpDecl = std::make_unique<VarDecl>(tmpRhs, std::move(rhs), /*isConst=*/false);
+    tmpDecl->isCompilerGenerated = true;
+    tmpDecl->line = lparen.line;
+    tmpDecl->column = lparen.column;
+
+    // For each lhs[i], create a temp: var __tda_N_i = tmpRhs.i
+    std::vector<std::unique_ptr<Statement>> stmts;
+    stmts.push_back(std::move(tmpDecl));
+
+    std::vector<std::string> tmpNames;
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (names[i] == "_") {
+            tmpNames.push_back("");
+            continue;
+        }
+        const std::string tmpName = "__tda_" + std::to_string(id) + "_" + std::to_string(i);
+        tmpNames.push_back(tmpName);
+
+        auto refRhs = std::make_unique<IdentifierExpr>(tmpRhs);
+        auto fieldExpr = std::make_unique<FieldAccessExpr>(std::move(refRhs), std::to_string(i));
+        fieldExpr->line = lparen.line;
+        fieldExpr->column = lparen.column;
+
+        auto tmpVarDecl = std::make_unique<VarDecl>(tmpName, std::move(fieldExpr), /*isConst=*/false);
+        tmpVarDecl->isCompilerGenerated = true;
+        tmpVarDecl->line = lparen.line;
+        tmpVarDecl->column = lparen.column;
+        stmts.push_back(std::move(tmpVarDecl));
+    }
+
+    // Now assign each temp back to the LHS variable.
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (names[i] == "_" || tmpNames[i].empty()) continue;
+
+        auto assignExpr = std::make_unique<AssignExpr>(names[i],
+                                                       std::make_unique<IdentifierExpr>(tmpNames[i]));
+        assignExpr->line = lparen.line;
+        assignExpr->column = lparen.column;
+        auto exprStmt = std::make_unique<ExprStmt>(std::move(assignExpr));
+        exprStmt->line = lparen.line;
+        exprStmt->column = lparen.column;
+        stmts.push_back(std::move(exprStmt));
+    }
+
+    auto blk = std::make_unique<BlockStmt>(std::move(stmts));
+    blk->line = lparen.line;
+    blk->column = lparen.column;
+    return blk;
+}
+
+// ── parseImplBlock ──────────────────────────────────────────────────────────
+// Parses `impl StructName { fn method(self, ...) { ... } ... }` and desugars
+// each method to `fn StructName::method(self: StructName, ...)`.
+//
+// Rules:
+//   - First parameter named `self` without a type annotation is given type
+//     StructName automatically.
+//   - Methods without `self` as first param are treated as static methods
+//     (equivalent to `fn StructName::method(...)`).
+//   - The generated FunctionDecl is pushed onto lambdaFunctions_ so it is
+//     appended to the module alongside lambda functions.
+void Parser::parseImplBlock(std::vector<std::unique_ptr<FunctionDecl>>& functions) {
+    const Token structNameTok = consume(TokenType::IDENTIFIER, "Expected struct name after 'impl'");
+    const std::string structName = structNameTok.lexeme;
+
+    consume(TokenType::LBRACE, "Expected '{' after struct name in impl block");
+
+    while (!check(TokenType::RBRACE) && !isAtEnd()) {
+        // Skip optional semicolons between methods.
+        if (match(TokenType::SEMICOLON))
+            continue;
+        // Parse one method: `fn methodName(params) -> RetType { body }`
+        // (with optional annotations that parseFunction handles, but here we
+        //  do a lightweight parse to keep it simple and consistent).
+        auto fnDecl = parseFunction(/*isOptMax=*/false);
+        if (!fnDecl)
+            continue;
+
+        // Build the qualified name: StructName::methodName.
+        // The parsed name is the bare method name; prepend the struct name.
+        const std::string bareName = fnDecl->name;
+        // Avoid double-qualifying if the user wrote `fn Struct::method` inside impl.
+        const std::string qualifiedName =
+            (bareName.find("::") != std::string::npos) ? bareName : (structName + "::" + bareName);
+        fnDecl->name = qualifiedName;
+
+        // Fill in `self` parameter type if missing.
+        if (!fnDecl->parameters.empty() && fnDecl->parameters[0].name == "self" &&
+            fnDecl->parameters[0].typeName.empty()) {
+            fnDecl->parameters[0].typeName = structName;
+        }
+
+        lambdaFunctions_.push_back(std::move(fnDecl));
+    }
+
+    consume(TokenType::RBRACE, "Expected '}' to close impl block");
+}
+
 std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
     const Token nameToken = consume(TokenType::IDENTIFIER, "Expected enum name");
     consume(TokenType::LBRACE, "Expected '{' after enum name");
@@ -4343,8 +4912,11 @@ std::unique_ptr<EnumDecl> Parser::parseEnumDecl() {
     return std::make_unique<EnumDecl>(nameToken.lexeme, std::move(members));
 }
 
-std::unique_ptr<StructDecl> Parser::parseStructDecl(StructRepr repr, int reprAlignN) {
-    const Token nameToken = consume(TokenType::IDENTIFIER, "Expected struct name");
+std::unique_ptr<StructDecl> Parser::parseStructDecl(StructRepr repr, int reprAlignN, const std::string& forcedName) {
+    Token nameToken =
+        forcedName.empty()
+            ? consume(TokenType::IDENTIFIER, "Expected struct name")
+            : Token(TokenType::IDENTIFIER, forcedName, tokens[current].line, tokens[current].column);
     consume(TokenType::LBRACE, "Expected '{' after struct name");
 
     // Register the struct name early so that operator bodies defined inside
@@ -4516,8 +5088,14 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl(StructRepr repr, int reprAli
         if (match(TokenType::COLON)) {
             typeName = parseTypeAnnotation();
         }
-        fieldDecls.push_back(StructField(fieldToken.lexeme, typeName, attrs));
+        // Optional default value: fieldname: type = expr
+        std::unique_ptr<Expression> defaultVal = nullptr;
+        if (match(TokenType::ASSIGN)) {
+            defaultVal = parseExpression();
+        }
+        fieldDecls.push_back(StructField(fieldToken.lexeme, typeName, attrs, std::move(defaultVal)));
         match(TokenType::COMMA);
+        match(TokenType::SEMICOLON);
     }
 
     consume(TokenType::RBRACE, "Expected '}' after struct body");
@@ -4532,6 +5110,14 @@ std::unique_ptr<StructDecl> Parser::parseStructDecl(StructRepr repr, int reprAli
 std::unique_ptr<Expression> Parser::parseStructLiteral(const std::string& name, int line, int col) {
     std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fieldValues;
 
+    // Optional spread base: `Struct { ..base, field: val }`.
+    // The spread expression must appear first (like Rust / JavaScript spread).
+    std::unique_ptr<Expression> spreadBase;
+    if (match(TokenType::DOT_DOT)) {
+        spreadBase = parseExpression();
+        match(TokenType::COMMA); // optional comma after spread
+    }
+
     while (!check(TokenType::RBRACE) && !isAtEnd()) {
         const Token fieldToken = consume(TokenType::IDENTIFIER, "Expected field name in struct literal");
         consume(TokenType::COLON, "Expected ':' after field name");
@@ -4542,6 +5128,7 @@ std::unique_ptr<Expression> Parser::parseStructLiteral(const std::string& name, 
 
     consume(TokenType::RBRACE, "Expected '}' after struct literal");
     auto expr = std::make_unique<StructLiteralExpr>(name, std::move(fieldValues));
+    expr->spreadBase = std::move(spreadBase);
     expr->line = line;
     expr->column = col;
     return expr;
@@ -5158,9 +5745,12 @@ std::unique_ptr<Expression> Parser::parseComparison() {
 
 check_in:
     // 'not in' operator: x not in arr → !array_contains(arr, x)
-    // 'not' is parsed as an IDENTIFIER (no dedicated keyword), so check for
-    // IDENTIFIER with lexeme "not" followed by the IN keyword.
-    if (check(TokenType::IDENTIFIER) && peek().lexeme == "not" &&
+    // 'not' may be the NOT keyword (from the 'not' keyword alias for '!')
+    // or an IDENTIFIER with lexeme "not" in older code paths.
+    // Suppressed inside let...in binding values (inLetBinding_ flag) so that
+    // 'in' terminates the binding rather than being consumed as an operator.
+    if (!inLetBinding_ &&
+        (check(TokenType::NOT) || (check(TokenType::IDENTIFIER) && peek().lexeme == "not")) &&
         current + 1 < tokens.size() && tokens[current + 1].type == TokenType::IN) {
         const Token notToken = tokens[current];
         advance(); // consume 'not'
@@ -5181,7 +5771,8 @@ check_in:
 
     // 'in' operator: x in arr → array_contains(arr, x)
     // Placed at comparison precedence so it binds like other relational ops.
-    if (match(TokenType::IN)) {
+    // Suppressed inside let...in binding values so 'in' terminates the binding.
+    if (!inLetBinding_ && match(TokenType::IN)) {
         const Token inToken = tokens[current - 1];
         auto container = parseShift();
         std::vector<std::unique_ptr<Expression>> args;
@@ -5191,6 +5782,23 @@ check_in:
         callExpr->fromStdNamespace = true; // compiler-generated (in operator desugaring)
         callExpr->line = inToken.line;
         callExpr->column = inToken.column;
+        return callExpr;
+    }
+
+    // 'is' type-check: expr is typename → is_type(expr, "typename")
+    if (check(TokenType::IDENTIFIER) && peek().lexeme == "is" &&
+        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::IDENTIFIER) {
+        const Token isTok = tokens[current];
+        advance(); // consume 'is'
+        const Token typeTok = tokens[current];
+        advance(); // consume typename
+        std::vector<std::unique_ptr<Expression>> args;
+        args.push_back(std::move(left));
+        args.push_back(std::make_unique<LiteralExpr>(typeTok.lexeme));
+        auto callExpr = std::make_unique<CallExpr>("is_type", std::move(args));
+        callExpr->fromStdNamespace = true;
+        callExpr->line = isTok.line;
+        callExpr->column = isTok.column;
         return callExpr;
     }
 
@@ -5366,32 +5974,143 @@ std::unique_ptr<Expression> Parser::parseUnary() {
     //   trylock m        => mutex_try_lock(m)
     if (match(TokenType::SPAWN)) {
         const Token kw = tokens[current - 1];
-        std::vector<std::unique_ptr<Expression>> args;
 
-        if (match(TokenType::LPAREN)) {
+        // ── Enhanced spawn: collect modifiers before the target function ──
+        // Syntax: spawn [modifier...] fn(arg)
+        // Modifiers (in any order, each consumed once):
+        //   detached | joinable | move | shared | pinned | cold | hot
+        //   stack(N)  | priority(N) | affinity(N)
+        //
+        // Desugars to:
+        //   thread_create_ex(fn, arg, flags, stack_sz, priority, affinity)
+        // where flags = bit0:detached, bit2:cold, bit3:hot
+        //
+        // If no modifiers are present, falls back to thread_create(fn[, arg]).
+
+        struct SpawnOpts {
+            bool detached  = false;
+            bool cold      = false;
+            bool hot       = false;
+            int64_t stackSz    = 0;  // 0 = default
+            int64_t priority   = 0;  // 0 = default
+            int64_t affinity   = -1; // -1 = no pin
+            bool hasModifiers  = false;
+        } opts;
+
+        // Helper: peek at current token as an identifier
+        auto peekIdent = [this](const std::string& name) -> bool {
+            return check(TokenType::IDENTIFIER) && tokens[current].lexeme == name;
+        };
+        auto consumeIdent = [this](const std::string& name) {
+            if (check(TokenType::IDENTIFIER) && tokens[current].lexeme == name) advance();
+        };
+        auto parseIntArg = [this](const char* mod) -> int64_t {
+            consume(TokenType::LPAREN, std::string("Expected '(' after '") + mod + "'");
+            bool neg = false;
+            if (match(TokenType::MINUS)) neg = true;
+            if (!check(TokenType::INTEGER) && !check(TokenType::FLOAT))
+                error(std::string("Expected integer value in '") + mod + "(...)'");
+            const Token vt = advance();
+            int64_t v = vt.type == TokenType::INTEGER
+                            ? static_cast<int64_t>(vt.intValue)
+                            : static_cast<int64_t>(vt.floatValue);
+            if (neg) v = -v;
+            consume(TokenType::RPAREN, std::string("Expected ')' after '") + mod + "(...)'");
+            return v;
+        };
+
+        // Consume modifiers in any order (up to 10 passes to handle any ordering)
+        for (int pass = 0; pass < 10; ++pass) {
+            if (peekIdent("detached"))  { consumeIdent("detached");  opts.detached = true;  opts.hasModifiers = true; continue; }
+            if (peekIdent("joinable"))  { consumeIdent("joinable");  /* joinable is default */ opts.hasModifiers = true; continue; }
+            if (peekIdent("move"))      { consumeIdent("move");      /* already default ownership */ opts.hasModifiers = true; continue; }
+            if (peekIdent("shared"))    { consumeIdent("shared");    opts.hasModifiers = true; continue; }
+            if (peekIdent("pinned"))    { consumeIdent("pinned");    if (opts.affinity < 0) opts.affinity = 0; opts.hasModifiers = true; continue; }
+            if (peekIdent("cold"))      { consumeIdent("cold");      opts.cold = true;  opts.hasModifiers = true; continue; }
+            if (peekIdent("hot"))       { consumeIdent("hot");       opts.hot  = true;  opts.hasModifiers = true; continue; }
+            if (peekIdent("stack")) {
+                advance(); // consume "stack"
+                int64_t sz = parseIntArg("stack");
+                // Accept unit suffixes written as identifiers after the number:
+                // already consumed the ')' above, but handle e.g. stack(1MB) as a
+                // numeric literal — users write stack(1048576).
+                opts.stackSz = sz;
+                opts.hasModifiers = true;
+                continue;
+            }
+            if (peekIdent("priority")) {
+                advance();
+                opts.priority = parseIntArg("priority");
+                opts.hasModifiers = true;
+                continue;
+            }
+            if (peekIdent("affinity")) {
+                advance();
+                opts.affinity = parseIntArg("affinity");
+                opts.hasModifiers = true;
+                continue;
+            }
+            break; // no more recognized modifiers
+        }
+
+        // ── Now parse the target: fn(arg?) ──────────────────────────────
+        // Two sub-forms:
+        //   spawn (...) — legacy positional form kept for back-compat
+        //   spawn [mods] fnname(arg?)
+        if (!opts.hasModifiers && check(TokenType::LPAREN)) {
+            // Legacy: spawn(fn) or spawn(fn, arg)
+            advance(); // consume '('
+            std::vector<std::unique_ptr<Expression>> args;
             args.push_back(parseExpression());
-            if (match(TokenType::COMMA)) {
-                args.push_back(parseExpression());
-            }
+            if (match(TokenType::COMMA)) args.push_back(parseExpression());
             consume(TokenType::RPAREN, "Expected ')' after spawn(...)");
-        } else {
-            args.push_back(parseSpawnTargetCompact());
-            if (!match(TokenType::LPAREN)) {
-                error("Expected '(' after spawn target; use spawn worker() or spawn worker(arg)");
-            }
-            if (!check(TokenType::RPAREN)) {
-                args.push_back(parseExpression());
-                if (check(TokenType::COMMA)) {
-                    error("spawn target(arg) accepts at most one argument");
-                }
-            }
-            consume(TokenType::RPAREN, "Expected ')' after spawn target argument");
+            if (args.empty() || args.size() > 2)
+                error("spawn expects one target and optional one argument");
+            return makeThreadKeywordCall("thread_create", kw, std::move(args));
         }
 
-        if (args.empty() || args.size() > 2) {
-            error("spawn expects one target and optional one argument");
+        // Parse fn target
+        auto targetExpr = parseSpawnTargetCompact();
+        if (!match(TokenType::LPAREN))
+            error("Expected '(' after spawn target; use: spawn [mods] fn() or spawn [mods] fn(arg)");
+        std::unique_ptr<Expression> argExpr;
+        if (!check(TokenType::RPAREN)) {
+            argExpr = parseExpression();
+            if (check(TokenType::COMMA))
+                error("spawn target(arg) accepts at most one argument");
         }
-        return makeThreadKeywordCall("thread_create", kw, std::move(args));
+        consume(TokenType::RPAREN, "Expected ')' after spawn target argument");
+
+        if (!opts.hasModifiers) {
+            // No modifiers: use simple thread_create for zero overhead
+            std::vector<std::unique_ptr<Expression>> args;
+            args.push_back(std::move(targetExpr));
+            if (argExpr) args.push_back(std::move(argExpr));
+            return makeThreadKeywordCall("thread_create", kw, std::move(args));
+        }
+
+        // ── Build thread_create_ex(fn, arg, flags, stack_sz, priority, affinity) ──
+        int64_t flags = 0;
+        if (opts.detached) flags |= 1;
+        if (opts.cold)     flags |= 4;
+        if (opts.hot)      flags |= 8;
+
+        auto makeI64Lit = [&](int64_t v) -> std::unique_ptr<Expression> {
+            auto lit = std::make_unique<LiteralExpr>(static_cast<long long>(v));
+            lit->line = kw.line;
+            lit->column = kw.column;
+            return lit;
+        };
+
+        std::vector<std::unique_ptr<Expression>> exArgs;
+        exArgs.push_back(std::move(targetExpr));                // arg0: fn
+        if (argExpr) exArgs.push_back(std::move(argExpr));      // arg1: thread arg
+        else         exArgs.push_back(makeI64Lit(0));            // arg1: 0 (no arg)
+        exArgs.push_back(makeI64Lit(flags));                     // arg2: flags
+        exArgs.push_back(makeI64Lit(opts.stackSz));              // arg3: stack size
+        exArgs.push_back(makeI64Lit(opts.priority));             // arg4: priority
+        exArgs.push_back(makeI64Lit(opts.affinity));             // arg5: affinity core
+        return makeThreadKeywordCall("thread_create_ex", kw, std::move(exArgs));
     }
 
     if (match(TokenType::JOIN)) {
@@ -5510,11 +6229,10 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
             expr->line = opToken.line;
             expr->column = opToken.column;
         }
-        // Handle array indexing or slice syntax arr[start:end]
+        // Handle array indexing or slice syntax arr[start:end] / arr[start..end]
         else if (match(TokenType::LBRACKET)) {
             const Token bracketToken = tokens[current - 1];
-            // Check for slice syntax: arr[start:end]
-            // If first token after '[' is ':', it's arr[:end] (start defaults to 0)
+            // ── `arr[:end]` — from-zero colon slice ─────────────────────────
             if (match(TokenType::COLON)) {
                 // arr[:end] → array_slice(arr, 0, end)
                 auto endIdx = parseExpression();
@@ -5531,6 +6249,31 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
                 callExpr->line = bracketToken.line;
                 callExpr->column = bracketToken.column;
                 expr = std::move(callExpr);
+            // ── `arr[..end]` / `arr[..=end]` — range-style from-zero slice ──
+            } else if (match(TokenType::DOT_DOT)) {
+                // arr[..end]  → array_slice(arr, 0, end)      exclusive
+                // arr[..=end] → array_slice(arr, 0, end + 1)  inclusive
+                const bool inclusive = match(TokenType::ASSIGN);
+                auto endIdx = parseExpression();
+                if (inclusive) {
+                    auto oneLit = std::make_unique<LiteralExpr>(static_cast<long long>(1));
+                    oneLit->line = bracketToken.line;
+                    oneLit->column = bracketToken.column;
+                    endIdx = std::make_unique<BinaryExpr>("+", std::move(endIdx), std::move(oneLit));
+                }
+                consume(TokenType::RBRACKET, "Expected ']' after range slice");
+                std::vector<std::unique_ptr<Expression>> args;
+                args.push_back(std::move(expr));
+                auto zeroLit = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+                zeroLit->line = bracketToken.line;
+                zeroLit->column = bracketToken.column;
+                args.push_back(std::move(zeroLit));
+                args.push_back(std::move(endIdx));
+                auto callExpr = std::make_unique<CallExpr>("array_slice", std::move(args));
+                callExpr->fromStdNamespace = true;
+                callExpr->line = bracketToken.line;
+                callExpr->column = bracketToken.column;
+                expr = std::move(callExpr);
             } else {
                 auto index = parseExpression();
                 if (match(TokenType::COLON)) {
@@ -5543,6 +6286,27 @@ std::unique_ptr<Expression> Parser::parsePostfix() {
                     args.push_back(std::move(endIdx));
                     auto callExpr = std::make_unique<CallExpr>("array_slice", std::move(args));
                     callExpr->fromStdNamespace = true; // compiler-generated (slice syntax)
+                    callExpr->line = bracketToken.line;
+                    callExpr->column = bracketToken.column;
+                    expr = std::move(callExpr);
+                } else if (match(TokenType::DOT_DOT)) {
+                    // arr[start..end]  → array_slice(arr, start, end)      exclusive
+                    // arr[start..=end] → array_slice(arr, start, end + 1)  inclusive
+                    const bool inclusive = match(TokenType::ASSIGN);
+                    auto endIdx = parseExpression();
+                    if (inclusive) {
+                        auto oneLit = std::make_unique<LiteralExpr>(static_cast<long long>(1));
+                        oneLit->line = bracketToken.line;
+                        oneLit->column = bracketToken.column;
+                        endIdx = std::make_unique<BinaryExpr>("+", std::move(endIdx), std::move(oneLit));
+                    }
+                    consume(TokenType::RBRACKET, "Expected ']' after range slice");
+                    std::vector<std::unique_ptr<Expression>> args;
+                    args.push_back(std::move(expr));
+                    args.push_back(std::move(index));
+                    args.push_back(std::move(endIdx));
+                    auto callExpr = std::make_unique<CallExpr>("array_slice", std::move(args));
+                    callExpr->fromStdNamespace = true;
                     callExpr->line = bracketToken.line;
                     callExpr->column = bracketToken.column;
                     expr = std::move(callExpr);
@@ -5791,6 +6555,140 @@ std::unique_ptr<Expression> Parser::parseCall() {
 }
 
 std::unique_ptr<Expression> Parser::parsePrimary() {
+    // 'when' in expression context: when val { 1 => e1, 2 => e2, _ => e3 }
+    // Desugars to a ternary chain: (val==1) ? e1 : (val==2) ? e2 : e3
+    if (check(TokenType::WHEN)) {
+        const Token kw = tokens[current];
+        advance(); // consume 'when'
+        return parseWhenExpr();
+    }
+
+    // ── if-expression: `if cond { expr } else { expr }` ────────────────────
+    // Zero-cost: desugars to TernaryExpr which compiles to a single LLVM
+    // select (or conditional branch + phi) — identical to `cond ? a : b`.
+    //
+    // Syntax:
+    //   if cond { expr }                    -- else branch defaults to 0
+    //   if cond { expr } else { expr }
+    //   if (cond) { expr } else { expr }    -- parens optional
+    //
+    // Each block body is a single expression (no statements).  Use the
+    // statement form `if cond { stmts }` for multi-statement bodies.
+    if (check(TokenType::IF)) {
+        const Token ifTok = tokens[current];
+        advance(); // consume 'if'
+        // Optional parentheses around condition.
+        const bool hasParen = match(TokenType::LPAREN);
+        auto cond = parseExpression();
+        if (hasParen)
+            consume(TokenType::RPAREN, "Expected ')' after if-expression condition");
+        consume(TokenType::LBRACE, "Expected '{' for if-expression then branch");
+        auto thenExpr = parseExpression();
+        consume(TokenType::RBRACE, "Expected '}' after if-expression then branch");
+        std::unique_ptr<Expression> elseExpr;
+        if (match(TokenType::ELSE)) {
+            consume(TokenType::LBRACE, "Expected '{' after 'else' in if-expression");
+            elseExpr = parseExpression();
+            consume(TokenType::RBRACE, "Expected '}' after if-expression else branch");
+        } else {
+            // No else branch: produce 0 (integer or null pointer in context).
+            elseExpr = std::make_unique<LiteralExpr>(static_cast<long long>(0));
+            elseExpr->line = ifTok.line;
+            elseExpr->column = ifTok.column;
+        }
+        auto ternary =
+            std::make_unique<TernaryExpr>(std::move(cond), std::move(thenExpr), std::move(elseExpr));
+        ternary->line = ifTok.line;
+        ternary->column = ifTok.column;
+        return ternary;
+    }
+
+    // ── let...in expression: `let x = e1, y = e2 in body` ─────────────────
+    // Introduces scoped bindings visible only in `body`. Evaluates to body.
+    if (check(TokenType::LET)) {
+        const Token letTok = tokens[current];
+        advance(); // consume 'let'
+        std::vector<LetInExpr::Binding> bindings;
+        do {
+            const Token nameTok = consume(TokenType::IDENTIFIER, "Expected variable name in let binding");
+            consume(TokenType::ASSIGN, "Expected '=' after variable name in let binding");
+            // Suppress the 'in' membership operator while parsing binding values
+            // so that 'in' terminates the binding list rather than being consumed
+            // as an operator (e.g. `let x = 5 in body` must parse as let-in, not
+            // `array_contains(body, 5)`).
+            inLetBinding_ = true;
+            auto val = parseExpression();
+            inLetBinding_ = false;
+            LetInExpr::Binding b;
+            b.name = nameTok.lexeme;
+            b.value = std::move(val);
+            bindings.push_back(std::move(b));
+        } while (match(TokenType::COMMA));
+        consume(TokenType::IN, "Expected 'in' after let bindings");
+        auto body = parseExpression();
+        auto letIn = std::make_unique<LetInExpr>(std::move(bindings), std::move(body));
+        letIn->line = letTok.line;
+        letIn->column = letTok.column;
+        return letIn;
+    }
+
+    // Anonymous function expression: fn(params) -> RetType { body }
+    // or: fn(params) { body }  (return type inferred as i64/default)
+    // Desugars to a lambda — named __lambda_N — exactly like |params| { body }.
+    if (check(TokenType::FN) &&
+        current + 1 < tokens.size() && tokens[current + 1].type == TokenType::LPAREN) {
+        const Token fnTok = tokens[current];
+        advance(); // consume 'fn'
+        advance(); // consume '('
+        std::vector<std::string> params;
+        std::vector<std::string> paramTypes;
+        if (!check(TokenType::RPAREN)) {
+            do {
+                if (check(TokenType::RPAREN)) break; // trailing comma
+                const Token pname = consume(TokenType::IDENTIFIER, "Expected parameter name");
+                std::string ptype = "i64";
+                if (match(TokenType::COLON))
+                    ptype = parseTypeAnnotation();
+                params.push_back(pname.lexeme);
+                paramTypes.push_back(ptype);
+            } while (match(TokenType::COMMA));
+        }
+        consume(TokenType::RPAREN, "Expected ')' after anonymous function parameters");
+        // Optional explicit return type: -> RetType
+        std::string retType = "i64";
+        if (check(TokenType::ARROW)) {
+            advance(); // consume '->'
+            retType = parseTypeAnnotation();
+        }
+        // Body must be a block.
+        consume(TokenType::LBRACE, "Expected '{' for anonymous function body");
+        // Re-use parseLambda body helper — build a block and store as a lambda function.
+        const std::string lambdaName = "__lambda_" + std::to_string(lambdaCounter_++);
+        std::vector<Parameter> fnParams;
+        for (size_t i = 0; i < params.size(); ++i) {
+            Parameter p(params[i]);
+            p.typeName = paramTypes[i];
+            fnParams.push_back(std::move(p));
+        }
+        // Parse statements until '}'.
+        std::vector<std::unique_ptr<Statement>> stmts;
+        while (!check(TokenType::RBRACE) && !isAtEnd())
+            stmts.push_back(parseStatement());
+        consume(TokenType::RBRACE, "Expected '}' to close anonymous function body");
+        auto block = std::make_unique<BlockStmt>(std::move(stmts));
+        block->line = fnTok.line;
+        block->column = fnTok.column;
+        auto fnDecl =
+            std::make_unique<FunctionDecl>(lambdaName, std::vector<std::string>{}, std::move(fnParams), std::move(block));
+        fnDecl->line = fnTok.line;
+        fnDecl->column = fnTok.column;
+        fnDecl->returnType = retType;
+        lambdaFunctions_.push_back(std::move(fnDecl));
+        auto nameId = std::make_unique<IdentifierExpr>(lambdaName);
+        nameId->line = fnTok.line;
+        nameId->column = fnTok.column;
+        return nameId;
+    }
     // likely(expr) / unlikely(expr) — branch-weight expression hint.
     // Strip the hint and return the inner expression.  The compiler retains
     // correctness; LLVM branch-weight metadata is not added in this path.
@@ -7053,6 +7951,108 @@ std::unique_ptr<Expression> Parser::parseArrayLiteral() {
     std::vector<std::unique_ptr<Expression>> elements;
 
     if (!check(TokenType::RBRACKET)) {
+        // ── Array comprehension: [expr for var in iterable [if cond]] ────────
+        // Desugars to: array_map([array_filter(]iterable[, |var| cond)], |var| expr)
+        // where "iterable" is either a range expression (start..end / start..=end)
+        // or an existing collection.
+        //
+        // Examples:
+        //   [x * x for x in 1..6]           -- squares of 1..5
+        //   [x for x in arr if x % 2 == 0]  -- filter by predicate
+        //   [x * 2 for x in arr]             -- map each element
+        //
+        // Zero-cost: desugars entirely at parse time to existing AST nodes;
+        // array_map / array_filter / range are already zero-overhead builtins.
+        //
+        // Skip comprehension check when the first element starts with `...`
+        // (spread operator, tokenized as TokenType::RANGE — the three-dot `...`
+        // token — distinct from the two-dot `..` DOT_DOT range token).
+        if (!check(TokenType::RANGE)) {
+            // Snapshot position so we can roll back if this isn't a comprehension.
+            const size_t savedPos = current;
+            // Parse the map expression (may be complex).
+            auto mapExpr = parseExpression();
+            if (check(TokenType::FOR)) {
+                // This is a comprehension.
+                advance(); // consume 'for'
+                const Token varTok = consume(TokenType::IDENTIFIER, "Expected variable name after 'for' in array comprehension");
+                const std::string varName = varTok.lexeme;
+                consume(TokenType::IN, "Expected 'in' after variable in array comprehension");
+
+                // Parse the iterable.  Accept:
+                //   start..end    (exclusive)
+                //   start..=end   (inclusive: desugars to range(start, end+1))
+                //   expression    (existing array/collection)
+                std::unique_ptr<Expression> collection;
+                auto startExpr = parseExpression();
+                if (match(TokenType::DOT_DOT)) {
+                    // start..end (exclusive range) or start..=end (inclusive)
+                    bool inclusive = match(TokenType::ASSIGN); // ..= parsed as DOT_DOT ASSIGN
+                    auto endExpr = parseExpression();
+                    // Build range(start, end) or range(start, end+1)
+                    std::vector<std::unique_ptr<Expression>> rangeArgs;
+                    rangeArgs.push_back(std::move(startExpr));
+                    if (inclusive) {
+                        // end + 1
+                        auto one = std::make_unique<LiteralExpr>(static_cast<long long>(1));
+                        one->line = varTok.line;
+                        one->column = varTok.column;
+                        auto endPlusOne = std::make_unique<BinaryExpr>("+", std::move(endExpr), std::move(one));
+                        endPlusOne->line = varTok.line;
+                        endPlusOne->column = varTok.column;
+                        rangeArgs.push_back(std::move(endPlusOne));
+                    } else {
+                        rangeArgs.push_back(std::move(endExpr));
+                    }
+                    auto rangeCall = std::make_unique<CallExpr>("range", std::move(rangeArgs));
+                    rangeCall->line = varTok.line;
+                    rangeCall->column = varTok.column;
+                    collection = std::move(rangeCall);
+                } else if (match(TokenType::RANGE)) {
+                    // start...end (classic OmScript inclusive range)
+                    auto endExpr = parseExpression();
+                    auto one = std::make_unique<LiteralExpr>(static_cast<long long>(1));
+                    one->line = varTok.line;
+                    one->column = varTok.column;
+                    auto endPlusOne = std::make_unique<BinaryExpr>("+", std::move(endExpr), std::move(one));
+                    endPlusOne->line = varTok.line;
+                    endPlusOne->column = varTok.column;
+                    std::vector<std::unique_ptr<Expression>> rangeArgs;
+                    rangeArgs.push_back(std::move(startExpr));
+                    rangeArgs.push_back(std::move(endPlusOne));
+                    auto rangeCall = std::make_unique<CallExpr>("range", std::move(rangeArgs));
+                    rangeCall->line = varTok.line;
+                    rangeCall->column = varTok.column;
+                    collection = std::move(rangeCall);
+                } else {
+                    // Plain expression iterable (already parsed as startExpr).
+                    collection = std::move(startExpr);
+                }
+
+                // Optional filter: `if cond` — parse as raw expression for fused codegen.
+                std::unique_ptr<Expression> filterExprRaw;
+                if (check(TokenType::IF)) {
+                    advance(); // consume 'if'
+                    filterExprRaw = parseExpression();
+                }
+
+                // Emit ArrayComprehensionExpr — single-pass fused loop in codegen.
+                // filterExprRaw may be nullptr (no filter).  mapExpr is the element
+                // to collect.  This avoids the two-allocation array_map(array_filter(...))
+                // pattern when a filter is present.
+                auto comprExpr = std::make_unique<ArrayComprehensionExpr>(
+                    varName, std::move(collection),
+                    std::move(filterExprRaw), std::move(mapExpr));
+                comprExpr->line = varTok.line;
+                comprExpr->column = varTok.column;
+
+                consume(TokenType::RBRACKET, "Expected ']' to close array comprehension");
+                return comprExpr;
+            }
+            // Not a comprehension — restore position and fall through to normal parsing.
+            current = savedPos;
+        }
+
         do {
             // Handle spread operator: ...expr
             if (match(TokenType::RANGE)) {
@@ -7082,6 +8082,15 @@ std::unique_ptr<Expression> Parser::parsePipe() {
         auto node = std::make_unique<PipeExpr>(std::move(expr), fnName.lexeme);
         node->line = pipeToken.line;
         node->column = pipeToken.column;
+        // Optional extra args: x |> fn(a, b)  →  fn(x, a, b)
+        if (match(TokenType::LPAREN)) {
+            if (!check(TokenType::RPAREN)) {
+                do {
+                    node->extraArgs.push_back(parseExpression());
+                } while (match(TokenType::COMMA));
+            }
+            consume(TokenType::RPAREN, "Expected ')' after pipe extra arguments");
+        }
         expr = std::move(node);
     }
 
@@ -7154,6 +8163,39 @@ std::unique_ptr<Expression> Parser::parseLambda() {
     nameId->line = pipeToken.line;
     nameId->column = pipeToken.column;
     return nameId;
+}
+
+// ── isTupleDestrAssign ───────────────────────────────────────────────────────
+// Look-ahead predicate: returns true when the token stream matches
+//   ( IDENTIFIER { , IDENTIFIER } ) =
+// indicating a tuple destructuring assignment (not a declaration).
+// Used in parseStatement to detect `(a, b) = expr;`.
+bool Parser::isTupleDestrAssign() const {
+    if (current >= tokens.size() || tokens[current].type != TokenType::LPAREN)
+        return false;
+    size_t pos = current + 1;
+    // At least one identifier
+    if (pos >= tokens.size() || tokens[pos].type != TokenType::IDENTIFIER)
+        return false;
+    ++pos;
+    // Optional: _
+    // Accept `_` as a wildcard too
+    while (pos < tokens.size() && tokens[pos].type == TokenType::COMMA) {
+        ++pos;
+        if (pos >= tokens.size())
+            return false;
+        if (tokens[pos].type != TokenType::IDENTIFIER)
+            return false;
+        ++pos;
+    }
+    // Closing paren
+    if (pos >= tokens.size() || tokens[pos].type != TokenType::RPAREN)
+        return false;
+    ++pos;
+    // Followed by '=' (not '==' or '=>')
+    if (pos >= tokens.size() || tokens[pos].type != TokenType::ASSIGN)
+        return false;
+    return true;
 }
 
 // ── isArrowLambdaParens ──────────────────────────────────────────────────────

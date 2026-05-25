@@ -1,0 +1,101 @@
+import std;
+// round92_zero_cost_test.om — Round-92: zero-cost builtin improvements
+// Tests: lerp, trunc, rint, saturating_mul, sat_add/sub/sat_mul aliases,
+//        wrap_add/sub/mul, bit_floor, bit_ceil, bit_width
+// Expected return value: 32
+
+fn main() {
+    var pass = 0;
+
+    // ── lerp ─────────────────────────────────────────────────────────────────
+    // lerp(a, b, t) = a + (b-a)*t, implemented via single FMA instruction.
+    var l1 = lerp(0.0, 10.0, 0.5);   // 5.0
+    var l2 = lerp(2.0, 4.0, 0.25);   // 2.5
+    var l3 = lerp(0.0, 1.0, 0.0);    // 0.0
+    var l4 = lerp(0.0, 1.0, 1.0);    // 1.0
+    pass = pass + (l1 == 5.0);
+    pass = pass + (l2 == 2.5);
+    pass = pass + (l3 == 0.0);
+    pass = pass + (l4 == 1.0);
+
+    // ── trunc ─────────────────────────────────────────────────────────────────
+    // Rounds towards zero (completes floor/ceil/round/trunc quartet).
+    var t1 = trunc(3.7);    // → 3
+    var t2 = trunc(-3.7);   // → -3
+    var t3 = trunc(5.0);    // → 5 (already integral)
+    pass = pass + (t1 == 3.0);
+    pass = pass + (t2 == -3.0);
+    pass = pass + (t3 == 5.0);
+
+    // ── rint ─────────────────────────────────────────────────────────────────
+    // Banker's rounding: ties go to nearest even integer.
+    var r1 = rint(2.5);   // → 2.0 (ties to even)
+    var r2 = rint(3.5);   // → 4.0 (ties to even)
+    var r3 = rint(2.3);   // → 2.0 (normal round down)
+    var r4 = rint(-1.5);  // → -2.0 (ties to even)
+    pass = pass + (r1 == 2.0);
+    pass = pass + (r2 == 4.0);
+    pass = pass + (r3 == 2.0);
+    pass = pass + (r4 == -2.0);
+
+    // ── saturating_mul ───────────────────────────────────────────────────────
+    // Signed saturating multiply: clamps to INT64_MAX on overflow.
+    var sm1 = saturating_mul(3, 4);               // → 12
+    var sm2 = sat_mul(1000000000, 1000000000);     // → 1000000000000000000
+    pass = pass + (sm1 == 12);
+    pass = pass + (sm2 == 1000000000000000000);
+
+    // ── sat_add / sat_sub aliases ─────────────────────────────────────────────
+    var sa1 = sat_add(100, 200);  // → 300
+    var ss1 = sat_sub(100, 200);  // → -100
+    pass = pass + (sa1 == 300);
+    pass = pass + (ss1 == -100);
+
+    // ── wrap_add / wrap_sub / wrap_mul ────────────────────────────────────────
+    // Wrapping arithmetic: defined overflow without undefined behavior.
+    var wa = wrap_add(7, 5);     // → 12
+    var ws = wrap_sub(3, 10);    // → -7
+    var wm = wrap_mul(6, 7);     // → 42
+    pass = pass + (wa == 12);
+    pass = pass + (ws == -7);
+    pass = pass + (wm == 42);
+
+    // ── bit_floor ────────────────────────────────────────────────────────────
+    // Highest power-of-2 not exceeding n; 0 for n <= 0.
+    var bf1 = bit_floor(1);    // → 1
+    var bf2 = bit_floor(6);    // → 4
+    var bf3 = bit_floor(8);    // → 8
+    var bf4 = bit_floor(12);   // → 8
+    var bf5 = bit_floor(0);    // → 0
+    pass = pass + (bf1 == 1);
+    pass = pass + (bf2 == 4);
+    pass = pass + (bf3 == 8);
+    pass = pass + (bf4 == 8);
+    pass = pass + (bf5 == 0);
+
+    // ── bit_ceil ─────────────────────────────────────────────────────────────
+    // Smallest power-of-2 not less than n; 1 for n <= 1.
+    var bc1 = bit_ceil(1);    // → 1
+    var bc2 = bit_ceil(5);    // → 8
+    var bc3 = bit_ceil(8);    // → 8
+    var bc4 = bit_ceil(9);    // → 16
+    pass = pass + (bc1 == 1);
+    pass = pass + (bc2 == 8);
+    pass = pass + (bc3 == 8);
+    pass = pass + (bc4 == 16);
+
+    // ── bit_width ────────────────────────────────────────────────────────────
+    // Minimum bits to represent n; 0 for n == 0.
+    var bw1 = bit_width(0);    // → 0
+    var bw2 = bit_width(1);    // → 1
+    var bw3 = bit_width(7);    // → 3
+    var bw4 = bit_width(8);    // → 4
+    var bw5 = bit_width(255);  // → 8
+    pass = pass + (bw1 == 0);
+    pass = pass + (bw2 == 1);
+    pass = pass + (bw3 == 3);
+    pass = pass + (bw4 == 4);
+    pass = pass + (bw5 == 8);
+
+    return pass;
+}

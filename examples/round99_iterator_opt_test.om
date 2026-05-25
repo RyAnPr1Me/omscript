@@ -1,0 +1,121 @@
+import std;
+// round99_iterator_opt_test.om — Iterator optimization tests
+// Tests: for k, v in map (native kv iteration), array comprehension fusion,
+//        and foreach pointer-mode (functional correctness).
+
+// ── Test 1-5: for k, v in map ────────────────────────────────────────────────
+
+fn map_kv_sum() -> int {
+    var m = map_new();
+    m = map_set(m, 1, 100);
+    m = map_set(m, 2, 200);
+    m = map_set(m, 3, 300);
+    var key_sum = 0;
+    var val_sum = 0;
+    for k, v in m {
+        key_sum = key_sum + k;
+        val_sum = val_sum + v;
+    }
+    // keys: 1+2+3=6, vals: 100+200+300=600
+    return (key_sum == 6) + (val_sum == 600);
+}
+
+fn map_kv_count() -> int {
+    var m = map_new();
+    m = map_set(m, 10, 1);
+    m = map_set(m, 20, 2);
+    var count = 0;
+    for k, v in m {
+        count = count + 1;
+    }
+    return count == 2;
+}
+
+fn map_kv_values() -> int {
+    var m = map_new();
+    m = map_set(m, 5, 50);
+    m = map_set(m, 6, 60);
+    var found = 0;
+    for k, v in m {
+        if v == 50 { found = found + 1; }
+        if v == 60 { found = found + 1; }
+    }
+    return found == 2;
+}
+
+// ── Test 6-10: array comprehension fusion ────────────────────────────────────
+
+fn comprehension_filter_map() -> int {
+    var arr = [1, 2, 3, 4, 5, 6];
+    // [x*2 for x in arr if x > 3] => [8, 10, 12]
+    var result = [x*2 for x in arr if x > 3];
+    var sum = 0;
+    foreach item in result {
+        sum = sum + item;
+    }
+    return (sum == 30) + (len(result) == 3);
+}
+
+fn comprehension_no_filter() -> int {
+    var arr = [1, 2, 3];
+    var doubled = [x*2 for x in arr];
+    return (doubled[0] == 2) + (doubled[1] == 4) + (doubled[2] == 6);
+}
+
+fn comprehension_all_filtered() -> int {
+    var arr = [1, 2, 3];
+    var empty = [x for x in arr if x > 100];
+    return len(empty) == 0;
+}
+
+// ── Test 11-15: foreach pointer-mode (functional correctness) ─────────────────
+
+fn foreach_sum() -> int {
+    var arr = [10, 20, 30, 40, 50];
+    var sum = 0;
+    foreach item in arr {
+        sum = sum + item;
+    }
+    return sum == 150;
+}
+
+fn foreach_large() -> int {
+    var arr = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    var product = 1;
+    foreach item in arr {
+        product = product + item;
+    }
+    return product == 56;
+}
+
+fn foreach_indexed() -> int {
+    var arr = [5, 10, 15, 20];
+    var weighted = 0;
+    foreach i, val in arr {
+        weighted = weighted + i * val;
+    }
+    // 0*5 + 1*10 + 2*15 + 3*20 = 0 + 10 + 30 + 60 = 100
+    return weighted == 100;
+}
+
+fn main() -> int {
+    var total = 0;
+
+    // map kv tests (tests 1-5)
+    var kv_sum = map_kv_sum();
+    total = total + kv_sum;                      // +2 if both pass => total=2
+    total = total + map_kv_count();              // +1 => total=3
+    total = total + map_kv_values();             // +1 => total=4
+
+    // comprehension tests (tests 6-10)
+    total = total + comprehension_filter_map();  // +2 => total=6
+    total = total + comprehension_no_filter();   // +3 => total=9
+    total = total + comprehension_all_filtered(); // +1 => total=10
+
+    // foreach pointer-mode tests (tests 11-15)
+    total = total + foreach_sum();               // +1 => total=11
+    total = total + foreach_large();             // +1 => total=12
+    total = total + foreach_indexed();           // +1 => total=13
+
+    return total;
+}

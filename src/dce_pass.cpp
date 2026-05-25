@@ -200,9 +200,14 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
 
         long long condVal = 0;
         if (isIntLiteral(whileStmt->condition.get(), &condVal) && condVal == 0) {
-            // while (0) — body is unreachable; remove the loop entirely.
+            // while (0) — loop never executes (condition false from the start).
+            // The else body runs on any exit without break, which includes never
+            // having entered the loop, so replace the whole statement with it.
             ++stats.deadLoops;
-            stmt = std::make_unique<BlockStmt>(std::vector<std::unique_ptr<Statement>>{});
+            if (whileStmt->elseBody)
+                stmt = std::move(whileStmt->elseBody);
+            else
+                stmt = std::make_unique<BlockStmt>(std::vector<std::unique_ptr<Statement>>{});
         }
         break;
     }
@@ -256,7 +261,12 @@ static DCEStats transformStmt(std::unique_ptr<Statement>& stmt) {
         if (isIntLiteral(forStmt->start.get(), &startVal) && isIntLiteral(forStmt->end.get(), &endVal) &&
             startVal >= endVal) {
             ++stats.deadLoops;
-            stmt = std::make_unique<BlockStmt>(std::vector<std::unique_ptr<Statement>>{});
+            // for...else: if the range is empty, the loop exits without break,
+            // so the else body should run.
+            if (forStmt->elseBody)
+                stmt = std::move(forStmt->elseBody);
+            else
+                stmt = std::make_unique<BlockStmt>(std::vector<std::unique_ptr<Statement>>{});
             break;
         }
         if (forStmt->body) {

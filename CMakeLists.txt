@@ -411,7 +411,7 @@ endif()
 # ── LLVM linking ──────────────────────────────────────────────────────────────
 set(LLVM_COMPONENTS
     core native support passes target transformutils analysis
-    asmparser codegen mc mcparser bitreader
+    asmparser codegen mc mcparser bitreader object
 )
 
 llvm_map_components_to_libnames(llvm_libs ${LLVM_COMPONENTS})

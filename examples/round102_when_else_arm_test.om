@@ -1,0 +1,51 @@
+import std;
+
+// Round-102:
+//   when default arm accepts `else =>` as an alias for `_ =>`
+
+fn classify_stmt(v: int) -> int {
+    var out = 0;
+    when v {
+        1 => { out = 10; },
+        2 => { out = 20; },
+        else => { out = 99; }
+    }
+    return out;
+}
+
+fn classify_expr(v: int) -> int {
+    return when v {
+        0 => 100,
+        1, 2 => 200,
+        else => 300
+    };
+}
+
+fn test_when_statement_else_default() -> int {
+    var ok = 0;
+    if classify_stmt(1) == 10 { ok = ok + 1; }
+    if classify_stmt(2) == 20 { ok = ok + 1; }
+    if classify_stmt(7) == 99 { ok = ok + 1; }
+    return ok; // 3
+}
+
+fn test_when_expression_else_default() -> int {
+    var ok = 0;
+    if classify_expr(0) == 100 { ok = ok + 1; }
+    if classify_expr(2) == 200 { ok = ok + 1; }
+    if classify_expr(9) == 300 { ok = ok + 1; }
+    return ok; // 3
+}
+
+fn test_mixed_default_forms() -> int {
+    var a = when 5 { 1 => 10, _ => 11 };
+    var b = when 5 { 1 => 10, else => 11 };
+    return (a == 11) + (b == 11); // 2
+}
+
+fn main() -> int {
+    return test_when_statement_else_default() +
+           test_when_expression_else_default() +
+           test_mixed_default_forms(); // 8
+}
+

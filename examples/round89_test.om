@@ -1,0 +1,144 @@
+import std;
+// round89_test.om — Round-89 additions
+// Tests: map_map, map_to_pairs, str_insert, str_delete.
+
+fn double_val(v: int) -> int {
+    return v * 2;
+}
+
+fn negate_val(v: int) -> int {
+    return 0 - v;
+}
+
+fn main() -> int {
+    var total = 0;
+
+    // ── map_map ──────────────────────────────────────────────────────────────
+
+    // Test 1: map_map doubles all values
+    var m = map_new();
+    m = map_set(m, 1, 10);
+    m = map_set(m, 2, 20);
+    m = map_set(m, 3, 30);
+    var m2 = map_map(m, double_val);
+    total = total + (map_get(m2, 1, 0) == 20);   // +1
+    // total = 1
+
+    // Test 2: map_map: second key
+    total = total + (map_get(m2, 2, 0) == 40);   // +1
+    // total = 2
+
+    // Test 3: map_map: third key
+    total = total + (map_get(m2, 3, 0) == 60);   // +1
+    // total = 3
+
+    // Test 4: map_map does not mutate source map
+    total = total + (map_get(m, 1, 0) == 10);    // +1
+    // total = 4
+
+    // Test 5: map_map preserves size
+    total = total + (map_size(m2) == 3);          // +1
+    // total = 5
+
+    // Test 6: map_map with negate
+    var m3 = map_map(m, negate_val);
+    total = total + (map_get(m3, 2, 0) == -20);  // +1
+    // total = 6
+
+    // ── map_to_pairs ─────────────────────────────────────────────────────────
+
+    // Test 7: map_to_pairs returns an array of length 2*count
+    var m4 = map_new();
+    m4 = map_set(m4, 100, 200);
+    var pairs = map_to_pairs(m4);
+    total = total + (len(pairs) == 2);            // +1
+    // total = 7
+
+    // Test 8: pairs[0] == key, pairs[1] == value for single-entry map
+    total = total + (pairs[0] == 100 && pairs[1] == 200);  // +1
+    // total = 8
+
+    // Test 9: map_to_pairs on empty map → empty array
+    var empty_m = map_new();
+    var empty_pairs = map_to_pairs(empty_m);
+    total = total + (len(empty_pairs) == 0);      // +1
+    // total = 9
+
+    // Test 10: map_to_pairs on 2-entry map → length 4
+    var m5 = map_new();
+    m5 = map_set(m5, 7, 77);
+    m5 = map_set(m5, 8, 88);
+    var pairs5 = map_to_pairs(m5);
+    total = total + (len(pairs5) == 4);           // +1
+    // total = 10
+
+    // Test 11: round-trip: keys and values appear in pairs array
+    var sum_keys = pairs5[0] + pairs5[2];
+    var sum_vals = pairs5[1] + pairs5[3];
+    total = total + (sum_keys == 15 && sum_vals == 165);  // +1
+    // total = 11
+
+    // ── str_insert ───────────────────────────────────────────────────────────
+
+    // Test 12: str_insert between words (compile-time fold)
+    var s1 = str_insert("hello world", 5, " dear");
+    total = total + (s1 == "hello dear world");   // +1
+    // total = 12
+
+    // Test 13: str_insert at position 0 (prepend)
+    var s2 = str_insert("world", 0, "hello ");
+    total = total + (s2 == "hello world");        // +1
+    // total = 13
+
+    // Test 14: str_insert at end (append)
+    var s3 = str_insert("hello", 5, " world");
+    total = total + (s3 == "hello world");        // +1
+    // total = 14
+
+    // Test 15: str_insert at clamped pos > len → treated as append
+    var s4 = str_insert("abc", 99, "!");
+    total = total + (s4 == "abc!");               // +1
+    // total = 15
+
+    // Test 16: str_insert runtime path
+    var base = "foobar";
+    var ins  = str_insert(base, 3, "---");
+    total = total + (ins == "foo---bar");          // +1
+    // total = 16
+
+    // ── str_delete ───────────────────────────────────────────────────────────
+
+    // Test 17: str_delete from middle (compile-time fold)
+    var d1 = str_delete("hello dear world", 5, 5);
+    total = total + (d1 == "hello world");        // +1
+    // total = 17
+
+    // Test 18: str_delete from beginning
+    var d2 = str_delete("hello world", 0, 6);
+    total = total + (d2 == "world");              // +1
+    // total = 18
+
+    // Test 19: str_delete to end of string
+    var d3 = str_delete("hello world", 5, 6);
+    total = total + (d3 == "hello");              // +1
+    // total = 19
+
+    // Test 20: str_delete with len clamped to remaining length
+    var d4 = str_delete("abc", 1, 99);
+    total = total + (d4 == "a");                  // +1
+    // total = 20
+
+    // Test 21: str_delete runtime path
+    var src = "abcXXdef";
+    var del = str_delete(src, 3, 2);
+    total = total + (del == "abcdef");             // +1
+    // total = 21
+
+    // Test 22: str_delete with len=0 returns unchanged string
+    var d5 = str_delete("hello", 2, 0);
+    total = total + (d5 == "hello");              // +1
+    // total = 22
+
+    println(total);
+    return total;
+}

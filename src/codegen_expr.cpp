@@ -3,6 +3,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdint>
+#include <unordered_set>
 
 // Apply maximum compiler optimizations to this hot path.
 #ifdef __GNUC__
@@ -6008,6 +6009,21 @@ bool CodeGenerator::canStackAllocateArray(const std::string& varName) const {
     return stackAllocatedArrays_.count(varName) != 0;
 }
 
+llvm::Value* CodeGenerator::generateLetIn(LetInExpr* expr) {
+    // Evaluate bindings in order, then evaluate body with bindings in scope.
+    beginScope();
+    llvm::Function* function = builder->GetInsertBlock()->getParent();
+    for (auto& binding : expr->bindings) {
+        llvm::Value* val = generateExpression(binding.value.get());
+        llvm::AllocaInst* alloca = createEntryBlockAlloca(function, binding.name, val->getType());
+        builder->CreateStore(val, alloca);
+        bindVariable(binding.name, alloca);
+    }
+    llvm::Value* result = generateExpression(expr->body.get());
+    endScope();
+    return result;
+}
+
 llvm::Value* CodeGenerator::generateArray(ArrayExpr* expr) {
     // Check if any elements are spread expressions
     bool hasSpread = false;
@@ -6969,6 +6985,49 @@ llvm::Value* CodeGenerator::generateStructLiteral(StructLiteralExpr* expr) {
     // Fetch the field annotation list (if any) so we know each field's
     // declared type for value conversion.
     auto declIt = structFieldDecls_.find(expr->structName);
+
+    // ── Struct spread / update: `Struct { ..base, field: val }` ──────────────
+    // Copy all fields from the spread base first (zero-cost: same GEP+store
+    // sequence as writing each field by hand).  Explicit fieldValues below
+    // overwrite whichever fields were named.
+    if (expr->spreadBase) {
+        llvm::Value* baseVal = generateExpression(expr->spreadBase.get());
+        // The spread base evaluates to a struct pointer.  Convert from integer
+        // if the value arrived via ptrtoint (legacy path).
+        auto* ptrTy = llvm::PointerType::getUnqual(*context);
+        llvm::Value* basePtr =
+            baseVal->getType()->isPointerTy() ? baseVal : builder->CreateIntToPtr(baseVal, ptrTy, "spread.baseptr");
+        for (size_t i = 0; i < numFields; i++) {
+            llvm::Type* elemTy = sty->getElementType(static_cast<unsigned>(i));
+            llvm::Align fieldAlign = module->getDataLayout().getABITypeAlign(elemTy);
+            llvm::Value* srcPtr =
+                builder->CreateStructGEP(sty, basePtr, static_cast<unsigned>(i), "spread.src.ptr");
+            llvm::Value* srcVal = builder->CreateAlignedLoad(elemTy, srcPtr, fieldAlign, "spread.src.val");
+            if (auto* loadInst = llvm::dyn_cast<llvm::LoadInst>(srcVal))
+                loadInst->setMetadata(llvm::LLVMContext::MD_tbaa, getOrCreateFieldTBAA(expr->structName, i));
+            llvm::Value* dstPtr =
+                builder->CreateStructGEP(sty, structAlloca, static_cast<unsigned>(i), "spread.dst.ptr");
+            llvm::StoreInst* st = builder->CreateStore(srcVal, dstPtr);
+            st->setMetadata(llvm::LLVMContext::MD_tbaa, getOrCreateFieldTBAA(expr->structName, i));
+        }
+    }
+
+    // Apply default values for unspecified fields
+    if (declIt != structFieldDecls_.end()) {
+        std::unordered_set<std::string> specifiedFields;
+        for (auto& [fn, _] : expr->fieldValues)
+            specifiedFields.insert(fn);
+        for (size_t i = 0; i < declIt->second.size(); ++i) {
+            const auto& fd = declIt->second[i];
+            if (fd.defaultVal && specifiedFields.find(fd.name) == specifiedFields.end()) {
+                llvm::Value* defVal = generateExpression(fd.defaultVal.get());
+                llvm::Type* elemTy = sty->getElementType(static_cast<unsigned>(i));
+                defVal = convertTo(defVal, elemTy);
+                llvm::Value* fieldPtr = builder->CreateStructGEP(sty, structAlloca, static_cast<unsigned>(i), "struct.default.ptr");
+                builder->CreateStore(defVal, fieldPtr);
+            }
+        }
+    }
 
     // Apply each provided field initializer.
     for (auto& [fieldName, valueExpr] : expr->fieldValues) {

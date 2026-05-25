@@ -234,6 +234,7 @@ The following identifiers are reserved as keywords. They are grouped by category
 | `global` | Global variable scope |
 | `struct` | Structure type |
 | `enum` | Enumeration type |
+| `impl` | Method block for a struct type (see §14.5.1) |
 
 **Exception handling:**
 | Keyword | Purpose |
@@ -709,6 +710,12 @@ OmScript is **statically typed**. Variable declarations may be typed explicitly 
 
 Type annotations use the colon `:` separator: `name: type`.
 
+Canonical and alias spellings are both accepted for common scalar types:
+- `int` / `integer`
+- `bool` / `boolean`
+- `char` / `character`
+- `string` / `str`
+
 **Variable declarations**:
 ```omscript
 var x: int = 42;
@@ -809,6 +816,19 @@ OmScript provides signed and unsigned integer types of various widths:
 | Type | Representation | Encoding | LLVM Type |
 | --- | --- | --- | --- |
 | `string` | Heap-allocated, immutable | UTF-8 | `ptr` (opaque) |
+| `str` | Alias for `string` | UTF-8 | `ptr` (opaque) |
+
+`str` is a built-in alias for `string` and may be used interchangeably in any type
+annotation position (variable declarations, function parameters, return types, struct
+fields).
+
+```omscript
+fn greet(name: str) -> str {
+    return "Hello, " + name;
+}
+
+var s: str = "hello";
+```
 
 **Semantics**:
 - Strings are immutable heap objects (reference-counted in the runtime)
@@ -886,7 +906,9 @@ fn print_hello() -> void {
 
 #### 4.4.1 Array Type: `T[]`
 
-**Syntax**: `T[]` denotes an array of elements of type `T`.
+**Syntax**:
+- `T[]` denotes an array of elements of type `T`.
+- `array<T>` is equivalent shorthand for `T[]`.
 
 **Representation**: Heap-allocated, dynamically-sized array (reference-counted).
 
@@ -918,6 +940,8 @@ var cell: int = matrix[0][1];  // 2
 **Syntax**:
 - `dict` (untyped dictionary)
 - `dict[K, V]` (typed dictionary annotation — parsed but keys and values are stored as `i64`; the type parameters are informational only)
+- `dict<K, V>` (equivalent angle-bracket form)
+- `map<K, V>` / `map[K, V]` (aliases for `dict<K, V>` / `dict[K, V]`)
 
 **Representation**: Hash map (heap-allocated, reference-counted).
 
@@ -1099,6 +1123,18 @@ struct Point {
 }
 ```
 
+**Inline type-alias form**: `type Name = struct { ... }`
+
+A struct can be declared inline as a type alias.  The resulting name behaves
+identically to a top-level `struct` declaration.
+
+```omscript
+type Point = struct { x: int, y: int }
+type Rect  = struct { w: int, h: int }
+
+fn area(r: Rect) -> int { return r.w * r.h; }
+```
+
 **Fields** must have explicit type annotations when the struct is declared with typed fields. For structs declared without per-field annotations (legacy form), fields default to `i64` and type information is inferred from usage.
 
 **Representation**: Opaque pointer to heap-allocated struct object (reference-counted).
@@ -1107,6 +1143,7 @@ struct Point {
 
 **Operations**:
 - Creation: `Point { x: 10, y: 20 }`
+- Spread / update: `Point { ..p, y: 20 }` (see §10.5)
 - Field access: `p.x`, `p.y`
 - Field assignment: `p.x = 30`
 
@@ -1888,7 +1925,43 @@ println(py);  // 4
 var (first, _, third) = get_triple();
 ```
 
-### 5.12 Scope Rules
+### 5.11.3 Tuple Destructuring Assignment
+
+**Syntax**: `(a, b [, c ...]) = expr;`
+
+Assigns to *existing* variables by unpacking a tuple or struct value. All right-hand side values are evaluated before any assignment, preventing aliasing bugs during multi-variable swaps and rotations.
+
+**Semantics**:
+- LHS variables must already be declared; this is an assignment, not a declaration.
+- RHS fields are accessed via integer field indices `.0`, `.1`, … exactly as in §5.11.2.
+- Underscore `_` skips an element.
+- Evaluates all RHS components into temporaries first, then assigns, so `(a, b) = (b, a)` correctly swaps `a` and `b`.
+
+**Desugaring**:
+```omscript
+(a, b) = (b, a);
+// ↓ desugars to:
+var __tda_0_rhs = (b, a);
+var __tda_0_0 = __tda_0_rhs.0;
+var __tda_0_1 = __tda_0_rhs.1;
+a = __tda_0_0;
+b = __tda_0_1;
+```
+
+**Examples**:
+```omscript
+// Swap two variables (classic idiom):
+var x = 5;
+var y = 10;
+(x, y) = (y, x);   // x==10, y==5
+
+// Three-variable left-rotation:
+var a = 1; var b = 2; var c = 3;
+(a, b, c) = (b, c, a);  // a==2, b==3, c==1
+
+// With arbitrary expressions on the right:
+(x, y) = (x + y, x - y);
+```
 
 **Block scope**: Variables declared in a block `{ ... }` are visible only within that block and nested blocks.
 
@@ -2511,9 +2584,9 @@ fn main() -> int {
 
 For a complete description including JIT usage and platform notes, see §4.4.10.
 
-### 6.10 Lambdas — Anonymous Functions
+### 6.10 Lambdas and Anonymous Functions
 
-**Syntax**: `|param1, param2, ...| expression` or `|param1, param2, ...| { statements }`
+**Lambda syntax**: `|param1, param2, ...| expression` or `|param1, param2, ...| { statements }`
 
 **Semantics**:
 - Defines an anonymous function (lambda)
@@ -2536,14 +2609,58 @@ var total: int = array_reduce(arr, |acc, x| {
 // total = 15
 ```
 
-**Captures**: Lambdas **do not capture** variables from the enclosing scope. All data must be passed explicitly as parameters. (True closures are not implemented.)
+**`fn` anonymous expression syntax**: `fn(params) { body }` or `fn(params) -> type { body }`
+
+A `fn` literal can be used as an expression anywhere a function value is expected.
+This is equivalent to a lambda but supports explicit parameter type annotations and
+a declared return type.
+
+```omscript
+var double = fn(x: int) -> int { return x * 2; };
+println(double(5));  // 10
+
+// Passed directly to a higher-order function:
+var arr = [1, 2, 3];
+var neg = array_map(arr, fn(x: int) -> int { return -x; });
+```
+
+**Captures**: Lambdas and `fn` expressions **do not capture** variables from the
+enclosing scope. All data must be passed explicitly as parameters.
+(True closures are not implemented.)
 
 **Use cases**:
 - Higher-order functions: `array_map`, `array_filter`, `array_reduce`
 - Inline predicates and transformations
 - Pipe chains (see §9.11)
 
-**Internal representation**: Each lambda is desugared to a top-level named function with a compiler-generated name (e.g., `__lambda_0`, `__lambda_1`).
+**Internal representation**: Each lambda / `fn` expression is desugared to a top-level
+named function with a compiler-generated name (e.g., `__lambda_0`, `__lambda_1`).
+
+### 6.10.1 Calling Lambda Variables Directly
+
+Variables initialized from a lambda expression or a named function are **directly callable** using standard call syntax `f(args...)`.
+
+```omscript
+var double = |x| x * 2;
+var result = double(5);   // 10   — direct lambda variable call
+
+var inc = |x| x + 1;
+println(double(inc(3)));  // 8
+```
+
+Named functions may also be stored in variables and called through them:
+
+```omscript
+fn square(x: int) -> int { return x * x; }
+
+var sq = square;
+println(sq(7));   // 49
+```
+
+**Rules:**
+- The variable must be initialized from a lambda expression or a function name at the point of declaration. Untracked sources (e.g., a variable reassigned to a different function after declaration) may not be callable through this mechanism.
+- The call emits an indirect function-pointer call at the LLVM IR level; the optimizer typically inlines it.
+- Argument and return types follow the lambda signature (all parameters are `i64`-width; return value is `i64`-width).
 
 ---
 
@@ -2551,7 +2668,7 @@ var total: int = array_reduce(arr, |acc, x| {
 
 ### 7.1 `if` / `elif` / `else`
 
-**Syntax**:
+**Statement syntax**:
 ```omscript
 if (condition) {
     // then-branch
@@ -2562,26 +2679,73 @@ if (condition) {
 }
 ```
 
+Parentheses around each condition are **optional** (both `if x > 0 {` and `if (x > 0) {` are accepted).
+
 **Semantics**:
 - Evaluates `condition`; if true, executes then-branch; otherwise checks `elif` conditions in order; if all false, executes `else`-branch
 - Conditions are evaluated lazily (short-circuit)
 - Braces `{ }` are **required** for all branches (no braceless single-statement forms)
 
-**Example**:
+**Statement example**:
 ```omscript
 var x: int = 10;
-if (x > 0) {
+if x > 0 {
     println("Positive");
-} elif (x < 0) {
+} elif x < 0 {
     println("Negative");
 } else {
     println("Zero");
 }
 ```
 
+#### `if` as an expression
+
+`if` can be used anywhere an expression is expected.  Each branch must contain a
+single expression (no statements); omitting `else` produces `0` / `null`.
+
+**Zero-cost**: desugars to a single LLVM `select` instruction — identical IR to
+the ternary operator `cond ? a : b`.
+
+**Expression syntax**:
+```omscript
+var result = if condition { expr } else { expr }
+```
+
+**Examples**:
+```omscript
+var x = 5;
+
+// Basic if-expression
+var size = if x > 3 { "big" } else { "small" };
+
+// Without else — produces 0 when condition is false
+var bonus = if x > 10 { 100 };   // 0 when x ≤ 10
+
+// Nested
+var grade = if x > 9 { "A" } else { if x > 7 { "B" } else { "C" } };
+
+// As function argument
+println(if x == 5 { "five" } else { "other" });
+
+// Optional parens on condition
+var y = if (x > 0) { x } else { -x };   // absolute value
+```
+
+**Comparison with ternary**:
+
+| Form | Style |
+| --- | --- |
+| `cond ? a : b` | Traditional C-style ternary (also supported) |
+| `if cond { a } else { b }` | Block-style; reads more naturally for complex conditions |
+
+Both compile to the same IR.
+
+
 ### 7.2 `unless`
 
-**Syntax**: `unless (condition) { ... } else { ... }`
+**Syntax**: `unless condition { ... } else { ... }`
+
+Parentheses around the condition are **optional** (either form is accepted).
 
 **Semantics**:
 - Syntactic sugar for `if (!condition) { ... } else { ... }`
@@ -2589,6 +2753,10 @@ if (x > 0) {
 
 **Example**:
 ```omscript
+unless x > 10 {
+    println("x is not greater than 10");
+}
+// Parenthesized form is also valid:
 unless (x > 10) {
     println("x is not greater than 10");
 }
@@ -2603,7 +2771,9 @@ if (!(x > 10)) {
 
 ### 7.3 `guard`
 
-**Syntax**: `guard (condition) else { early_exit }`
+**Syntax**: `guard condition else { early_exit }`
+
+Parentheses around the condition are **optional** (either form is accepted).
 
 **Semantics**:
 - Early-exit pattern: if `condition` is **false**, executes `early_exit` block (which must exit the function, e.g., via `return`, `throw`, `break`)
@@ -2612,9 +2782,14 @@ if (!(x > 10)) {
 **Example**:
 ```omscript
 fn validate(x: int) -> int {
-    guard (x > 0) else {
+    guard x > 0 else {
         return -1;
     }
+    return x * 2;
+}
+// Parenthesized form is also valid:
+fn validate2(x: int) -> int {
+    guard (x > 0) else { return -1; }
     return x * 2;
 }
 ```
@@ -2683,34 +2858,94 @@ switch (x) {
 
 ### 7.5 `when` — Pattern-Matching Variant
 
-**Syntax**:
+**Syntax** (statement form):
 ```omscript
-when (expression) {
+when discriminant {
     value1, value2, ... => { body }
     value3 => { body }
     _ => { body }
 }
 ```
 
+Parentheses around the discriminant are **optional** (either form is accepted).
+
+**Expression form** — `when` as an expression (usable anywhere an expression is expected):
+```omscript
+var result = when discriminant { arm1 => expr1, arm2 => expr2, _ => expr_default };
+```
+
+**Discriminant**: Any expression — integer, string, float, the result of an arithmetic
+expression, a function call, etc. The discriminant is evaluated once.
+
 **Semantics**:
-- Similar to `switch` but with pattern-matching syntax
+- Each arm matches if the discriminant equals one of the listed values
 - `=>` separates pattern from body
 - `_` is a wildcard pattern (matches any value, equivalent to `default`)
 - **No fallthrough**: each arm is independent
 - **No `break` required**: arms are non-fallthrough by design
+- **String dispatch**: when any arm value is a string literal, the compiler emits a chain of `strcmp` comparisons — no integer switch table required
 
-**Example**:
+**Integer statement example**:
 ```omscript
 fn day_name(day: int) -> string {
     var result: string = "";
-    when (day) {
+    when day {
         1, 2, 3, 4, 5 => { result = "Weekday"; }
-        6, 7 => { result = "Weekend"; }
-        _ => { result = "Invalid"; }
+        6, 7           => { result = "Weekend"; }
+        _              => { result = "Invalid"; }
     }
     return result;
 }
 ```
+
+**String dispatch statement example**:
+```omscript
+fn fruit_color(fruit: string) -> string {
+    var color = "unknown";
+    when fruit {
+        "apple"  => { color = "red"; }
+        "banana" => { color = "yellow"; }
+        "grape"  => { color = "purple"; }
+        _ => { color = "other"; }
+    }
+    return color;
+}
+
+// Multi-value string arms
+fn day_type(day: string) -> string {
+    var kind = "unknown";
+    when day {
+        "Saturday", "Sunday" => { kind = "weekend"; }
+        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday" => { kind = "weekday"; }
+        _ => { kind = "unknown"; }
+    }
+    return kind;
+}
+```
+
+**Expression example** (integers and strings both work):
+```omscript
+// Integer expression
+var grade = when (score / 10) {
+    10, 9 => "A",
+    8     => "B",
+    7     => "C",
+    _     => "F"
+};
+
+// String expression
+var icon = when status {
+    "ok"      => "✓",
+    "warning" => "⚠",
+    "error"   => "✗",
+    _         => "?"
+};
+```
+
+**Codegen notes**:
+- **Integer discriminant**: compiled to LLVM `SwitchInst` (O(1) dispatch via a jump table or binary search, at the optimizer's discretion).  Small switches (≤ 2 arms) use a conditional-branch chain at O2+.
+- **String discriminant**: compiled to a sequential chain of `strcmp` calls.  The compiler evaluates the discriminant once, then tests each arm in source order.  The `_` default arm, if present, executes after all arms fail.
+
 
 ### 7.6 `defer`
 
@@ -3038,7 +3273,9 @@ do {
 
 ### 8.3 `until`
 
-**Syntax**: `until (condition) { body }`
+**Syntax**: `until condition { body }`
+
+Parentheses around the condition are **optional** (either form is accepted).
 
 **Semantics**:
 - Syntactic sugar for `while (!condition) { body }`
@@ -3047,10 +3284,12 @@ do {
 **Example**:
 ```omscript
 var i: int = 0;
-until (i == 10) {
+until i == 10 {
     println(i);
     i = i + 1;
 }
+// Parenthesized form is also valid:
+until (i == 10) { i++; }
 ```
 
 ### 8.4 `for (i in start...end)` — Range Loops
@@ -3897,6 +4136,52 @@ var seq: int[] = range(0, 5);          // [0, 1, 2, 3, 4]
 var evens: int[] = range_step(0, 10, 2);  // [0, 2, 4, 6, 8]
 ```
 
+#### 10.1.1 Array Comprehensions
+
+Array comprehensions are a concise way to build arrays by mapping and optionally
+filtering an iterable.  They desugar entirely at parse time to `array_map` /
+`array_filter` / `range` calls, so they carry **zero overhead** compared to
+writing those calls by hand.
+
+**Syntax**:
+```omscript
+[expr for var in iterable]
+[expr for var in iterable if condition]
+```
+
+- `expr` — expression evaluated for each element (may reference `var`)
+- `var`  — loop variable bound to each element
+- `iterable` — range (`start..end`, `start..=end`, `start...end`) or any existing array
+- `if condition` — optional filter; only elements where `condition` is true are included
+
+**Range comprehensions** (builds a new array from a numeric range):
+```omscript
+var squares  = [x * x for x in 1..6];        // [1, 4, 9, 16, 25]   (exclusive end)
+var cubes    = [x * x * x for x in 1..=5];   // [1, 8, 27, 64, 125] (inclusive end)
+```
+
+**Map comprehension** (transform each element of an existing array):
+```omscript
+var arr     = [1, 2, 3, 4, 5];
+var doubled = [x * 2 for x in arr];           // [2, 4, 6, 8, 10]
+```
+
+**Filter + map comprehension**:
+```omscript
+var evens      = [x for x in arr if x % 2 == 0];         // [2, 4]
+var big_sq     = [x * x for x in 1..11 if x * x > 25];  // [36, 49, 64, 81, 100]
+```
+
+**Desugaring** (for documentation purposes):
+
+| Comprehension | Equivalent expression |
+| --- | --- |
+| `[f(x) for x in a..b]` | `array_map(range(a, b), \|x\| f(x))` |
+| `[f(x) for x in a..=b]` | `array_map(range(a, b+1), \|x\| f(x))` |
+| `[f(x) for x in arr]` | `array_map(arr, \|x\| f(x))` |
+| `[f(x) for x in arr if p(x)]` | `array_map(array_filter(arr, \|x\| p(x)), \|x\| f(x))` |
+
+
 ### 10.2 Indexing and Slicing
 
 **Indexing**: `arr[i]` accesses the element at index `i` (zero-based).
@@ -3907,19 +4192,40 @@ var first: int = arr[0];  // 10
 var second: int = arr[1]; // 20
 ```
 
-**Out-of-bounds access**: Undefined behavior (may trap, return garbage, or wrap).
+**Out-of-bounds access**: Produces a runtime error (bounds check with abort).
 
-**Slicing** (half-open range): `arr[i..j]` extracts elements from index `i` to `j-1`.
-
-```omscript
-var slice: int[] = arr[1..3];  // [20, 30]
-```
-
-**Slicing** (closed range): `arr[i...j]` extracts elements from index `i` to `j` (inclusive).
+**Slicing — range syntax** (exclusive end): `arr[start..end]` extracts elements from index
+`start` to `end - 1`.
 
 ```omscript
-var slice2: int[] = arr[0...1];  // [10, 20]
+var arr = [10, 20, 30, 40, 50];
+var sl = arr[1..4];   // [20, 30, 40]  — indices 1, 2, 3
 ```
+
+**Slicing — range syntax** (inclusive end): `arr[start..=end]` extracts elements from
+`start` to `end` (both inclusive).
+
+```omscript
+var sl2 = arr[1..=3]; // [20, 30, 40]  — indices 1, 2, 3
+```
+
+**Slicing — from-zero forms**: `arr[..end]` (exclusive) and `arr[..=end]` (inclusive)
+default the start to `0`.
+
+```omscript
+var sl3 = arr[..3];   // [10, 20, 30]  — indices 0, 1, 2
+var sl4 = arr[..=2];  // [10, 20, 30]  — indices 0, 1, 2
+```
+
+**Slicing — colon syntax**: `arr[start:end]` (exclusive, alternate form).
+
+```omscript
+var sl5 = arr[1:4];   // [20, 30, 40]  — identical to arr[1..4]
+var sl6 = arr[:3];    // [10, 20, 30]  — identical to arr[..3]
+```
+
+**Semantics**: Indices are clamped to `[0, len]`; out-of-range bounds never abort.
+The result is always a fresh heap-allocated array (the slice never aliases the source).
 
 **Negative indices**: **Not currently supported**. Use positive indices only.
 
@@ -3946,11 +4252,37 @@ var first_byte: int = s[0];  // 104 (ASCII 'h')
 var ch: string = char_at(s, 1);  // "e"
 ```
 
-**Slicing**: `s[i..j]` and `s[i...j]` extract substrings.
+**Slicing — range syntax** (exclusive end): `s[start..end]` extracts a substring from
+byte index `start` to `end - 1`.
 
 ```omscript
-var sub: string = s[1..4];  // "ell"
+var s = "hello world";
+var greeting = s[0..5];    // "hello"
+var place    = s[6..11];   // "world"
 ```
+
+**Slicing — range syntax** (inclusive end): `s[start..=end]` includes the byte at `end`.
+
+```omscript
+var greeting2 = s[0..=4];  // "hello"
+```
+
+**Slicing — from-zero forms**: `s[..end]` (exclusive) and `s[..=end]` (inclusive) start
+from index `0`.
+
+```omscript
+var prefix = s[..5];       // "hello"
+```
+
+**Slicing — colon syntax**: `s[start:end]` (exclusive, alternate form).
+
+```omscript
+var world = s[6:11];       // "world"  — identical to s[6..11]
+var hello = s[:5];         // "hello"  — identical to s[..5]
+```
+
+**Semantics**: Indices are clamped to `[0, len]`; out-of-range bounds never abort.
+The result is always a newly allocated string.
 
 **Length**: `len(s)` returns the byte count (not character count for multibyte UTF-8).
 
@@ -4007,6 +4339,32 @@ var x_val: int = p.x;  // 10
 ```omscript
 p.y = 25;  // p.y is now 25
 ```
+
+**Struct spread / update syntax**: `StructName { ..base, field: override, ... }`
+
+Copy all fields from an existing struct value, optionally overriding specific fields.
+The spread base (`..base`) must appear first in the literal.
+
+```omscript
+struct Color { r: int, g: int, b: int }
+
+var red  = Color { r: 255, g: 0, b: 0 };
+
+// Pure copy via spread:
+var red2 = Color { ..red };              // r=255, g=0, b=0
+
+// Update one field:
+var orange = Color { ..red, g: 165 };   // r=255, g=165, b=0
+
+// Update multiple fields:
+var purple = Color { ..red, g: 0, b: 255 }; // r=255, g=0, b=255
+```
+
+**Zero-cost**: The spread lowers to exactly the same sequence of typed `GEP + store`
+instructions as writing each field by hand — no extra copies or allocations.
+
+**Uninitialized fields**: Fields not present in the literal and not covered by the spread
+base are zero-initialized.
 
 **Layout control**: Prefix the struct declaration with `@repr(...)` to control memory layout (see §4.4.6).
 
@@ -4357,14 +4715,36 @@ var x = array_remove(a, 2);  // x = 30, a = [10, 20, 40]
 #### `array_slice(array, start, end) → array`
 
 **Signature:** `array_slice(array, i64, i64) → array`  
-**Semantics:** Return a NEW array containing elements `[start, end)`.  
+**Semantics:** Return a NEW array containing elements `[start, end)` (exclusive end).  
 **Time:** O(end - start)  
-**Alias:** This is the implementation of the slice operator `arr[start:end]`.
+**Alias:** This is the underlying implementation for all slice syntax forms on arrays and
+strings:
+
+| Syntax | Equivalent |
+| --- | --- |
+| `arr[start..end]` | `array_slice(arr, start, end)` — exclusive |
+| `arr[start..=end]` | `array_slice(arr, start, end + 1)` — inclusive |
+| `arr[..end]` | `array_slice(arr, 0, end)` — from-zero exclusive |
+| `arr[..=end]` | `array_slice(arr, 0, end + 1)` — from-zero inclusive |
+| `arr[start:end]` | `array_slice(arr, start, end)` — colon form (identical to `..`) |
+| `arr[:end]` | `array_slice(arr, 0, end)` — colon from-zero |
+| `s[start..end]` | string substr `s[start, end)` — dispatches to `str_substr` path |
+
+Bounds are clamped to `[0, len]`; out-of-range indices never abort.
 
 **Example:**
 ```omscript
 var a = [10, 20, 30, 40];
 var b = array_slice(a, 1, 3);  // [20, 30]
+
+// Slice syntax (all equivalent):
+var c = a[1..3];     // [20, 30]  exclusive
+var d = a[1..=2];    // [20, 30]  inclusive
+var e = a[..2];      // [10, 20]  from-zero
+
+// String slicing (same syntax):
+var s = "hello world";
+var sub = s[6..11];  // "world"
 ```
 
 ---
@@ -6054,6 +6434,76 @@ println(c.get()); // desugars to Counter::get(c) → 6
 Both call styles are accepted:
 - `obj.method(args)` — dot-call syntax (recommended)
 - `StructName::method(obj, args)` — explicit qualified call
+
+---
+
+### 14.5.1 `impl` Blocks
+
+**Syntax:**
+```omscript
+impl StructName {
+    fn method_name(self, param1: Type1, ...) -> RetType { ... }
+    fn static_method(param: Type) -> RetType { ... }
+    ...
+}
+```
+
+`impl` blocks are syntactic sugar for declaring multiple methods on a struct in one grouped block, avoiding the need to repeat the `fn StructName::` prefix for each method.
+
+**Rules:**
+- The first parameter named `self` **without** a type annotation is automatically typed as `StructName`.
+- Methods with `self` as the first parameter are instance methods; methods without `self` are static (constructor-style) methods.
+- Any number of `fn` declarations may appear inside an `impl` block.
+- `impl` blocks are permitted at the top level and inside `namespace` blocks.
+
+**Equivalence:** The following two declarations are identical:
+```omscript
+// Explicit form
+fn Vec2::len_sq(self: Vec2) -> int {
+    return self.x * self.x + self.y * self.y;
+}
+
+// impl block form
+impl Vec2 {
+    fn len_sq(self) -> int {
+        return self.x * self.x + self.y * self.y;
+    }
+}
+```
+
+**Full example:**
+```omscript
+struct Vec2 {
+    x: int,
+    y: int,
+}
+
+impl Vec2 {
+    // Static factory method (no self)
+    fn new(x: int, y: int) -> Vec2 {
+        return Vec2 { x: x, y: y };
+    }
+
+    // Instance methods (self typed as Vec2 automatically)
+    fn len_sq(self) -> int {
+        return self.x * self.x + self.y * self.y;
+    }
+    fn scale(self, k: int) -> Vec2 {
+        return Vec2 { x: self.x * k, y: self.y * k };
+    }
+    fn add(self, other: Vec2) -> Vec2 {
+        return Vec2 { x: self.x + other.x, y: self.y + other.y };
+    }
+}
+
+fn main() {
+    var v = Vec2::new(3, 4);   // static call
+    println(v.len_sq());       // 25
+    var v2 = v.scale(2);
+    println(v2.x);             // 6
+    return 0;
+}
+```
 
 ---
 

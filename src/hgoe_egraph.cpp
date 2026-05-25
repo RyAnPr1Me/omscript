@@ -1100,9 +1100,13 @@ static void visitExpr(std::unique_ptr<Expression>& exprPtr, const std::vector<Re
     case ASTNodeType::SPREAD_EXPR:
         visitExpr(static_cast<SpreadExpr*>(expr)->operand, rules, cfg, stats);
         break;
-    case ASTNodeType::PIPE_EXPR:
-        visitExpr(static_cast<PipeExpr*>(expr)->left, rules, cfg, stats);
+    case ASTNodeType::PIPE_EXPR: {
+        auto* pe = static_cast<PipeExpr*>(expr);
+        visitExpr(pe->left, rules, cfg, stats);
+        for (auto& ea : pe->extraArgs)
+            visitExpr(ea, rules, cfg, stats);
         break;
+    }
     case ASTNodeType::MOVE_EXPR:
         visitExpr(static_cast<MoveExpr*>(expr)->source, rules, cfg, stats);
         break;

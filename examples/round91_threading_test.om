@@ -1,0 +1,83 @@
+import std;
+// round91_threading_test.om — Round-91: threading improvements
+// Tests: rwlock, condvar, thread_self/equal, enhanced spawn modifiers
+// Expected return value: 14
+
+fn worker_noop() -> int {
+    return 0;
+}
+
+fn worker_add(x: int) -> int {
+    return x + 1;
+}
+
+fn main() {
+    var score = 0;
+
+    // ── rwlock tests ──────────────────────────────────────────────────────────
+
+    // Test 1: rwlock_new returns a non-null handle
+    var rw = rwlock_new();
+    score = score + (rw != 0);
+
+    // Test 2: rwlock_rdlock succeeds (returns 0)
+    var r1 = rwlock_rdlock(rw);
+    score = score + (r1 == 0);
+
+    // Test 3: rwlock_unlock succeeds
+    var r2 = rwlock_unlock(rw);
+    score = score + (r2 == 0);
+
+    // Test 4: rwlock_wrlock succeeds
+    var r3 = rwlock_wrlock(rw);
+    score = score + (r3 == 0);
+
+    // Test 5: rwlock_unlock again
+    var r4 = rwlock_unlock(rw);
+    score = score + (r4 == 0);
+
+    // Test 6: rwlock_try_wrlock succeeds when unlocked (returns 1)
+    var r5 = rwlock_try_wrlock(rw);
+    score = score + (r5 == 1);
+    rwlock_unlock(rw);
+
+    // Test 7: rwlock_destroy succeeds
+    var r6 = rwlock_destroy(rw);
+    score = score + (r6 == 0);
+
+    // ── condvar tests ─────────────────────────────────────────────────────────
+
+    // Test 8: cond_new returns a non-null handle
+    var cv = cond_new();
+    score = score + (cv != 0);
+
+    // Test 9: cond_signal on an un-waited condvar succeeds
+    var s1 = cond_signal(cv);
+    score = score + (s1 == 0);
+
+    // Test 10: cond_broadcast succeeds
+    var s2 = cond_broadcast(cv);
+    score = score + (s2 == 0);
+
+    // Test 11: cond_destroy succeeds
+    var s3 = cond_destroy(cv);
+    score = score + (s3 == 0);
+
+    // ── thread_self / thread_equal ────────────────────────────────────────────
+
+    // Test 12: thread_self returns a positive id
+    var self_id = thread_self();
+    score = score + (self_id != 0);
+
+    // Test 13: thread_equal(self, self) == 1
+    var self2 = thread_self();
+    score = score + thread_equal(self_id, self2);
+
+    // ── enhanced spawn ────────────────────────────────────────────────────────
+
+    // Test 14: spawn detached worker compiles and runs (returns 0 = no handle)
+    var t1 = spawn detached worker_noop();
+    score = score + (t1 == 0);
+
+    return score;
+}

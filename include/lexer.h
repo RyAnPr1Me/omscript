@@ -94,6 +94,9 @@ enum class TokenType {
     LOCK,      // lock      — mutex_lock keyword sugar
     UNLOCK,    // unlock    — mutex_unlock keyword sugar
     TRYLOCK,   // trylock   — mutex_try_lock keyword sugar
+    ENSURE,     // ensure  — always-on runtime guard
+    IMPL,       // impl    — method block for a struct type
+    LET,        // let     — scoped let...in expression binding
 
     // Operators
     PLUS,

@@ -27,9 +27,11 @@ namespace {
 // duration so the views remain valid for the lifetime of the program.
 static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"fn", TokenType::FN},
+    {"func", TokenType::FN},       // alias for fn
     {"return", TokenType::RETURN},
     {"if", TokenType::IF},
     {"else", TokenType::ELSE},
+    {"otherwise", TokenType::ELSE}, // alias for else
     {"while", TokenType::WHILE},
     {"do", TokenType::DO},
     {"for", TokenType::FOR},
@@ -69,6 +71,7 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"forever", TokenType::FOREVER},
     {"foreach", TokenType::FOREACH},
     {"elif", TokenType::ELIF},
+    {"elseif", TokenType::ELIF},   // alias for elif
     {"swap", TokenType::SWAP},
     {"times", TokenType::TIMES},
     {"with", TokenType::WITH},
@@ -94,6 +97,12 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"lock",      TokenType::LOCK},       // mutex_lock sugar
     {"unlock",    TokenType::UNLOCK},     // mutex_unlock sugar
     {"trylock",   TokenType::TRYLOCK},    // mutex_try_lock sugar
+    {"ensure",    TokenType::ENSURE},     // ensure — always-on runtime guard
+    {"impl",      TokenType::IMPL},       // impl   — method block for a struct type
+    {"let",       TokenType::LET},        // let    — scoped let...in expression binding
+    {"and",       TokenType::AND},        // alias for &&
+    {"or",        TokenType::OR},         // alias for ||
+    {"not",       TokenType::NOT},        // alias for !
 };
 
 /// Throw a DiagnosticError with the given message and source location.
@@ -383,7 +392,13 @@ Token Lexer::scanIdentifier() {
     const std::string_view idView(source.data() + start, pos - start);
     auto it = keywords.find(idView);
     if (it != keywords.end()) {
-        return makeToken(it->second, std::string(idView));
+        // Normalize operator-keyword aliases to canonical operator lexemes so that
+        // AST op strings remain the symbolic forms that codegen expects.
+        std::string lexeme(idView);
+        if (lexeme == "and") lexeme = "&&";
+        else if (lexeme == "or")  lexeme = "||";
+        else if (lexeme == "not") lexeme = "!";
+        return makeToken(it->second, std::move(lexeme));
     }
 
     return makeToken(TokenType::IDENTIFIER, std::string(idView));

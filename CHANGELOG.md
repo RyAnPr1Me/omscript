@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-89: `map_map`, `map_to_pairs`, `str_insert`, `str_delete`** (`src/codegen_builtins.cpp`, `examples/round89_test.om`, `run_tests.sh`):
+  - `map_map(m, fn)` — Returns a new map with the same keys as `m` but each value transformed by `fn(val) → new_val`. Does not mutate the source map. Supports compile-time folding when the input is constant-foldable.
+  - `map_to_pairs(m)` — Returns a flat integer array `[k1, v1, k2, v2, ...]` containing all key-value pairs from `m`. Useful for iterating map entries or serializing maps. Result is recognized as an integer array by the type system.
+  - `str_insert(s, pos, sub)` — Returns a new string with `sub` inserted at character position `pos` (clamped to `[0, len(s)]`). Supports compile-time constant folding.
+  - `str_delete(s, pos, len)` — Returns a new string with `len` characters removed starting at position `pos` (both clamped to valid ranges). Supports compile-time constant folding.
+  - Added `examples/round89_test.om` with 22 assertions covering all new builtins and wired it into `run_tests.sh`.
+
 - **Round-88: `File` handle type** (`src/codegen_builtins.cpp`, `src/codegen.cpp`, `include/codegen.h`, `include/pass_utils.h`, `src/parser.cpp`, `examples/file_type_test.om`, `run_tests.sh`):
   - Added `File` as a first-class bare value type (Rust-style): declare as `var f: File = file_open(path, mode);`.
   - `File` is internally an opaque file-handle pointer (same LLVM representation as `c_FILE`), but exposed without the pointer syntax at the language level.

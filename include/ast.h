@@ -77,6 +77,9 @@ enum class ASTNodeType {
     JMP_STMT,          // jmp label; — unconditional jump to a named label (deprecated)
     LABEL_STMT,        // label name: — declares a named jump target in the current function
     TUPLE_EXPR,        // (v1, v2, ...) — tuple literal; lowered to an anonymous LLVM struct
+    LET_IN_EXPR,       // let x = e1, y = e2 in body — scoped bindings in expression context
+    FOR_KV_STMT,       // for k, v in map { ... } — native hashmap key-value iteration
+    ARRAY_COMPREHENSION_EXPR, // [expr for var in coll if cond] — fused single-pass comprehension
 };
 
 class ASTNode {
@@ -207,6 +210,24 @@ class ArrayExpr : public Expression {
         : Expression(ASTNodeType::ARRAY_EXPR), elements(std::move(elems)) {}
 };
 
+/// [mapExpr for varName in sourceExpr if filterExpr] — fused single-pass comprehension.
+/// filterExpr may be nullptr (no filter condition).  Emitted in codegen as a single loop
+/// that avoids the intermediate array allocation produced by array_map(array_filter(...)).
+class ArrayComprehensionExpr : public Expression {
+  public:
+    std::string varName;                       ///< iteration variable name
+    std::unique_ptr<Expression> sourceExpr;    ///< collection to iterate
+    std::unique_ptr<Expression> filterExpr;    ///< optional filter (may be nullptr)
+    std::unique_ptr<Expression> mapExpr;       ///< element expression to collect
+
+    ArrayComprehensionExpr(const std::string& var,
+                           std::unique_ptr<Expression> src,
+                           std::unique_ptr<Expression> filt,
+                           std::unique_ptr<Expression> map)
+        : Expression(ASTNodeType::ARRAY_COMPREHENSION_EXPR), varName(var),
+          sourceExpr(std::move(src)), filterExpr(std::move(filt)), mapExpr(std::move(map)) {}
+};
+
 class IndexExpr : public Expression {
   public:
     std::unique_ptr<Expression> array;
@@ -259,6 +280,9 @@ class PipeExpr : public Expression {
   public:
     std::unique_ptr<Expression> left;
     std::string functionName;
+    /// Extra arguments supplied in `x |> fn(a, b)` form.
+    /// When non-empty, desugars to `fn(x, a, b)` rather than `fn(x)`.
+    std::vector<std::unique_ptr<Expression>> extraArgs;
 
     PipeExpr(std::unique_ptr<Expression> l, const std::string& fn)
         : Expression(ASTNodeType::PIPE_EXPR), left(std::move(l)), functionName(fn) {}
@@ -367,6 +391,7 @@ class WhileStmt : public Statement {
   public:
     std::unique_ptr<Expression> condition;
     std::unique_ptr<Statement> body;
+    std::unique_ptr<Statement> elseBody; ///< Optional: runs if loop exits without break
     LoopConfig loopHints;
     std::string label; ///< Optional loop label for labeled break/continue
 
@@ -393,6 +418,7 @@ class ForStmt : public Statement {
     std::unique_ptr<Expression> end;
     std::unique_ptr<Expression> step; // Optional, can be nullptr
     std::unique_ptr<Statement> body;
+    std::unique_ptr<Statement> elseBody; ///< Optional: runs if loop exits without break
     LoopConfig loopHints;
     std::string label; ///< Optional loop label for labeled break/continue
 
@@ -419,11 +445,30 @@ class ForEachStmt : public Statement {
     std::string iteratorVar;
     std::unique_ptr<Expression> collection;
     std::unique_ptr<Statement> body;
+    std::unique_ptr<Statement> elseBody; ///< Optional: runs if loop exits without break
     LoopConfig loopHints;
     std::string label; ///< Optional loop label for labeled break/continue
 
     ForEachStmt(const std::string& iter, std::unique_ptr<Expression> coll, std::unique_ptr<Statement> b)
         : Statement(ASTNodeType::FOR_EACH_STMT), iteratorVar(iter), collection(std::move(coll)), body(std::move(b)) {}
+};
+
+/// for k, v in map { ... } — native hashmap key-value iteration.
+/// In codegen: if collection is a dict, emits a bucket-walking loop;
+/// otherwise falls back to indexed array access.
+class ForKVStmt : public Statement {
+  public:
+    std::string keyVar;
+    std::string valVar;
+    std::unique_ptr<Expression> collection;
+    std::unique_ptr<Statement> body;
+    std::string label; ///< Optional loop label for labeled break/continue
+    LoopConfig loopHints;
+
+    ForKVStmt(const std::string& k, const std::string& v,
+              std::unique_ptr<Expression> coll, std::unique_ptr<Statement> b)
+        : Statement(ASTNodeType::FOR_KV_STMT), keyVar(k), valVar(v),
+          collection(std::move(coll)), body(std::move(b)) {}
 };
 
 // A single case arm in a switch statement.
@@ -536,8 +581,17 @@ struct StructField {
     std::string name;
     std::string typeName; ///< Optional type annotation
     FieldAttrs attrs;
+    std::unique_ptr<Expression> defaultVal; ///< Optional default value (nullptr if none)
 
-    StructField(const std::string& n, const std::string& t = "", FieldAttrs a = {}) : name(n), typeName(t), attrs(a) {}
+    StructField(const std::string& n, const std::string& t = "", FieldAttrs a = {},
+                std::unique_ptr<Expression> def = nullptr)
+        : name(n), typeName(t), attrs(a), defaultVal(std::move(def)) {}
+
+    // Move-only due to unique_ptr member
+    StructField(StructField&&) = default;
+    StructField& operator=(StructField&&) = default;
+    StructField(const StructField&) = delete;
+    StructField& operator=(const StructField&) = delete;
 };
 
 // Forward declaration for OperatorOverload.
@@ -583,6 +637,11 @@ class StructLiteralExpr : public Expression {
   public:
     std::string structName;
     std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fieldValues;
+    /// Optional spread base: `Struct { ..base, field: val }`.
+    /// When non-null, all fields from `base` are copied first, then
+    /// explicit fieldValues overwrite the specified fields.  Zero-cost:
+    /// lowers to the same GEP+store sequence as writing each field by hand.
+    std::unique_ptr<Expression> spreadBase;
 
     StructLiteralExpr(const std::string& name, std::vector<std::pair<std::string, std::unique_ptr<Expression>>> fv)
         : Expression(ASTNodeType::STRUCT_LITERAL_EXPR), structName(name), fieldValues(std::move(fv)) {}
@@ -1199,6 +1258,22 @@ class NewConstructExpr : public Expression {
 
     NewConstructExpr(std::string tn, std::vector<std::pair<std::string, std::unique_ptr<Expression>>> flds)
         : Expression(ASTNodeType::NEW_CONSTRUCT_EXPR), typeName(std::move(tn)), fields(std::move(flds)) {}
+};
+
+/// `let x = e1, y = e2 in body`
+/// Introduces scoped bindings visible only within `body`. The expression
+/// evaluates to the value of `body`.
+class LetInExpr : public Expression {
+  public:
+    struct Binding {
+        std::string name;
+        std::unique_ptr<Expression> value;
+    };
+    std::vector<Binding> bindings;
+    std::unique_ptr<Expression> body;
+
+    LetInExpr(std::vector<Binding> b, std::unique_ptr<Expression> body)
+        : Expression(ASTNodeType::LET_IN_EXPR), bindings(std::move(b)), body(std::move(body)) {}
 };
 
 } // namespace omscript
