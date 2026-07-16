@@ -544,15 +544,16 @@ Token Lexer::scanRawMultiLineString() {
         const char c = peek();
 
         if (__builtin_expect(c == 'O' && pos + 8 <= source.length(), 0)) {
-            if (source.compare(pos, 8, "OPTMAX=:") == 0) {
-                for (int i = 0; i < 8; i++) {
+            static constexpr int kOptmaxTokenLen = 8;
+            if (source.compare(pos, kOptmaxTokenLen, "OPTMAX=:") == 0) {
+                for (int i = 0; i < kOptmaxTokenLen; ++i) {
                     advance();
                 }
                 tokens.push_back(makeToken(TokenType::OPTMAX_START, "OPTMAX=:"));
                 continue;
             }
-            if (source.compare(pos, 8, "OPTMAX!:") == 0) {
-                for (int i = 0; i < 8; i++) {
+            if (source.compare(pos, kOptmaxTokenLen, "OPTMAX!:") == 0) {
+                for (int i = 0; i < kOptmaxTokenLen; ++i) {
                     advance();
                 }
                 tokens.push_back(makeToken(TokenType::OPTMAX_END, "OPTMAX!:"));

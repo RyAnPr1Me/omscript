@@ -19,6 +19,7 @@
 #include <llvm/Support/raw_ostream.h>
 #include <optional>
 #include <sstream>
+#include <string_view>
 #include <vector>
 
 #ifdef _WIN32
@@ -59,7 +60,7 @@ constexpr int kDownloadTimeoutSeconds = 120;
 /// Create a unique temporary file from a template ending in XXXXXX.
 /// On success the file is created and its fd is returned; the template buffer
 /// is modified in-place to contain the actual path.  Returns -1 on failure.
-int portableMkstemp(std::vector<char>& templateBuf) {
+[[nodiscard]] int portableMkstemp(std::vector<char>& templateBuf) {
 #ifdef _WIN32
     // _mktemp_s modifies the template in place, then we open the file.
     if (_mktemp_s(templateBuf.data(), templateBuf.size()) != 0) {
@@ -84,7 +85,7 @@ void portableClose(int fd) {
 
 /// Create a unique temporary directory from a template ending in XXXXXX.
 /// Returns true on success; the template buffer is modified in-place.
-bool portableMkdtemp(std::vector<char>& templateBuf) {
+[[nodiscard]] bool portableMkdtemp(std::vector<char>& templateBuf) {
 #ifdef _WIN32
     if (_mktemp_s(templateBuf.data(), templateBuf.size()) != 0) {
         return false;
@@ -147,7 +148,7 @@ constexpr const char* kBinaryName =
 #endif
 
 /// Return true if the current process has root/administrator privileges.
-bool isPrivileged() {
+[[nodiscard]] bool isPrivileged() {
 #ifdef _WIN32
     // On Windows, check if the process is elevated.
     HANDLE token = nullptr;
@@ -235,12 +236,9 @@ struct Version {
     bool valid = false;
 };
 
-Version parseVersion(const std::string& versionStr) {
+[[nodiscard]] Version parseVersion(const std::string& versionStr) {
     Version v;
-    std::string s = versionStr;
-    if (!s.empty() && s[0] == 'v') {
-        s = s.substr(1);
-    }
+    std::string s = (!versionStr.empty() && versionStr[0] == 'v') ? versionStr.substr(1) : versionStr;
     try {
         std::istringstream ss(s);
         std::string part;
@@ -262,7 +260,7 @@ Version parseVersion(const std::string& versionStr) {
     return v;
 }
 
-bool versionGreaterThan(const Version& a, const Version& b) {
+[[nodiscard]] bool versionGreaterThan(const Version& a, const Version& b) {
     if (a.major != b.major) {
         return a.major > b.major;
     }
@@ -307,7 +305,7 @@ std::string jsonField(const std::string& json, const std::string& key) {
 
 // Use curl to fetch the latest release tag from the GitHub API.
 // Returns an empty string on failure.
-std::string fetchLatestReleaseTag() {
+[[nodiscard]] std::string fetchLatestReleaseTag() {
     auto curlPathOrErr = llvm::sys::findProgramByName("curl");
     if (!curlPathOrErr) {
         return "";
@@ -368,7 +366,7 @@ std::string fetchLatestReleaseTag() {
 }
 
 // Download the release archive for `tagName` and install the binary to `installDir`.
-bool downloadAndInstallRelease(const std::string& tagName, const std::string& installDir) {
+[[nodiscard]] bool downloadAndInstallRelease(const std::string& tagName, const std::string& installDir) {
     auto curlPathOrErr = llvm::sys::findProgramByName("curl");
     if (!curlPathOrErr) {
         std::cerr << "Error: curl is required to download updates but was not found\n";
@@ -536,7 +534,7 @@ bool downloadAndInstallRelease(const std::string& tagName, const std::string& in
     return true;
 }
 
-bool isRoot() {
+[[nodiscard]] bool isRoot() {
     return isPrivileged();
 }
 
@@ -591,26 +589,28 @@ std::string getInstallBinDir(bool system) {
 #endif
 }
 
-bool fileExists(const std::string& path) {
+[[nodiscard]] bool fileExists(const std::string& path) {
     return std::filesystem::exists(path);
 }
 
-bool isInPath(const std::string& binDir) {
+[[nodiscard]] bool isInPath(const std::string& binDir) {
     const char* pathPtr = getenv("PATH");
-    std::string pathEnv = pathPtr ? pathPtr : "";
-    size_t pos = 0;
-    std::string token;
-    while ((pos = pathEnv.find(kPathSeparator)) != std::string::npos) {
-        token = pathEnv.substr(0, pos);
-        if (token == binDir) {
+    if (!pathPtr) {
+        return false;
+    }
+    std::string_view pathEnv(pathPtr);
+    while (!pathEnv.empty()) {
+        const size_t sep = pathEnv.find(kPathSeparator);
+        const std::string_view entry = (sep == std::string_view::npos) ? pathEnv : pathEnv.substr(0, sep);
+        if (entry == binDir) {
             return true;
         }
-        pathEnv.erase(0, pos + 1);
+        pathEnv = (sep == std::string_view::npos) ? std::string_view{} : pathEnv.substr(sep + 1);
     }
-    return pathEnv == binDir;
+    return false;
 }
 
-bool isSymlinkOrCopy(const std::string& path, const std::string& target) {
+[[nodiscard]] bool isSymlinkOrCopy(const std::string& path, const std::string& target) {
     if (!fileExists(path)) {
         return false;
     }
@@ -625,7 +625,7 @@ bool isSymlinkOrCopy(const std::string& path, const std::string& target) {
     }
 }
 
-bool installToSystem(const std::string& targetDir, bool force) {
+[[nodiscard]] bool installToSystem(const std::string& targetDir, bool force) {
     const std::string exePath = getExecutablePath();
 
     if (exePath.empty() || !fileExists(exePath)) {
@@ -1055,7 +1055,7 @@ PackageInfo readPackageManifest(const std::string& manifestPath) {
 }
 
 /// Download a URL to a local file using curl.  Returns true on success.
-bool downloadFile(const std::string& url, const std::string& destPath) {
+[[nodiscard]] bool downloadFile(const std::string& url, const std::string& destPath) {
     // Reject paths containing ".." to prevent path traversal
     if (destPath.find("..") != std::string::npos) {
         std::cerr << "Error: invalid destination path\n";
@@ -1081,7 +1081,7 @@ bool downloadFile(const std::string& url, const std::string& destPath) {
 
 /// Download a URL and return its contents as a string.
 /// Returns an empty string on failure.
-std::string downloadString(const std::string& url) {
+[[nodiscard]] std::string downloadString(const std::string& url) {
     auto curlPathOrErr = llvm::sys::findProgramByName("curl");
     if (!curlPathOrErr) {
         return "";
@@ -1173,7 +1173,7 @@ std::vector<PackageInfo> parseRegistryIndex(const std::string& json) {
 /// Validate a package name to prevent path traversal attacks.
 /// Package names must only contain alphanumerics, hyphens, and underscores.
 constexpr size_t kMaxPackageNameLength = 128;
-bool isValidPackageName(const std::string& name) {
+[[nodiscard]] bool isValidPackageName(const std::string& name) {
     if (name.empty() || name.size() > kMaxPackageNameLength) {
         return false;
     }
