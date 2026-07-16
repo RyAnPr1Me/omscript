@@ -141,7 +141,7 @@ std::vector<uint32_t> PassRegistry::topologicalOrder(const std::vector<uint32_t>
                 if (!inSet.count(p.id))
                     continue;
                 for (const char* req : p.requires_) {
-                    if (std::string_view(req) == std::string_view(fact)) {
+                    if (std::string_view(req) == fact) {
                         inDegree[p.id]--;
                         if (inDegree[p.id] == 0) {
                             // Insert in sorted position for determinism.
