@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Round-89: AST and codegen performance optimizations** (`src/alg_simp_pass.cpp`, `include/alg_simp_pass.h`, `src/codegen_expr.cpp`):
+  - **Chained shift folding**: `(x << c1) << c2 → x << (c1+c2)` and `(x >> c1) >> c2 → x >> (c1+c2)` in the algebraic simplification pass, reducing chained shift expressions to a single shift before IR codegen.
+  - **Bitwise constant reassociation**: `(x & c1) & c2 → x & (c1&c2)`, `(x | c1) | c2 → x | (c1|c2)`, `(x ^ c1) ^ c2 → x ^ (c1^c2)` — folds pairs of bitwise-op-with-constant into one operation.
+  - **Float power specializations**: Added `x**9`, `x**10`, and `x**16` float specializations in codegen (4 fmuls each), avoiding a `llvm.pow` intrinsic call for these common exponents, consistent with existing `x**3` through `x**8` specializations.
+
 - **Round-88: `File` handle type** (`src/codegen_builtins.cpp`, `src/codegen.cpp`, `include/codegen.h`, `include/pass_utils.h`, `src/parser.cpp`, `examples/file_type_test.om`, `run_tests.sh`):
   - Added `File` as a first-class bare value type (Rust-style): declare as `var f: File = file_open(path, mode);`.
   - `File` is internally an opaque file-handle pointer (same LLVM representation as `c_FILE`), but exposed without the pointer syntax at the language level.

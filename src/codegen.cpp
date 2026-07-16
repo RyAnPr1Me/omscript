@@ -96,9 +96,10 @@ using omscript::VarDecl;
 using omscript::WhileStmt;
 
 /// Concurrency builtin names.  User functions that call any of these must NOT
-static const std::unordered_set<std::string> kConcurrencyBuiltins = {"thread_create", "thread_join",  "mutex_new",
-                                                                     "thread_detach", "mutex_new",    "mutex_lock",
-                                                                     "mutex_try_lock","mutex_unlock", "mutex_destroy"};
+static const std::unordered_set<std::string> kConcurrencyBuiltins = {"thread_create", "thread_join",
+                                                                     "thread_detach", "mutex_new",
+                                                                     "mutex_lock",    "mutex_try_lock",
+                                                                     "mutex_unlock",  "mutex_destroy"};
 
 /// Recursively check if an expression tree contains a call to any name in @p names.
 static bool exprCallsAny(const Expression* e, const std::unordered_set<std::string>& names) {
@@ -109,7 +110,7 @@ static bool exprCallsAny(const Expression* e, const std::unordered_set<std::stri
         auto* call = static_cast<const CallExpr*>(e);
         if (names.count(call->callee))
             return true;
-        for (auto& arg : call->arguments)
+        for (const auto& arg : call->arguments)
             if (exprCallsAny(arg.get(), names))
                 return true;
         return false;
@@ -148,7 +149,7 @@ static bool stmtCallsAny(const Statement* s, const std::unordered_set<std::strin
     switch (s->type) {
     case ASTNodeType::BLOCK: {
         auto* blk = static_cast<const BlockStmt*>(s);
-        for (auto& st : blk->statements)
+        for (const auto& st : blk->statements)
             if (stmtCallsAny(st.get(), names))
                 return true;
         return false;
@@ -314,7 +315,7 @@ static const std::unordered_set<std::string> stdlibFunctions = {
     "funcptr_new", "malloc", "free", "type_name"};
 
 bool isStdlibFunction(const std::string& name) {
-    return stdlibFunctions.find(name) != stdlibFunctions.end();
+    return stdlibFunctions.count(name) != 0;
 }
 
 CodeGenerator::CodeGenerator(OptimizationLevel optLevel)
@@ -512,10 +513,7 @@ llvm::Type* CodeGenerator::getFloatType() {
 llvm::Type* CodeGenerator::resolveAnnotatedType(const std::string& annotation) {
     // Strip reference prefix '&' — borrowed references share the same
     // underlying type (e.g., &i32 → i32).
-    std::string ann = annotation;
-    if (!ann.empty() && ann[0] == '&') {
-        ann = ann.substr(1);
-    }
+    std::string ann = (!annotation.empty() && annotation[0] == '&') ? annotation.substr(1) : annotation;
     // ── Type alias resolution ─────────────────────────────────────────────────
     // Chase the typeAliasMap_ chain up to 32 hops (handles transitive aliases
     // that were not yet fully resolved when the AST was built, or that come from
@@ -1203,7 +1201,9 @@ CodeGenerator::emitCountingLoop(llvm::StringRef prefix, llvm::Value* limit, llvm
     llvm::Value* cond = builder->CreateICmpULT(idx, limit, llvm::Twine(prefix) + ".cond");
     // Loops almost never execute zero iterations; mark the taken branch hot.
     if (optimizationLevel >= OptimizationLevel::O2) {
-        llvm::MDNode* w = llvm::MDBuilder(*context).createBranchWeights(2000, 1);
+        // 2000:1 weight — loop body is almost always taken over the exit edge.
+        static constexpr uint32_t kLoopTakenWeight = 2000;
+        llvm::MDNode* w = llvm::MDBuilder(*context).createBranchWeights(kLoopTakenWeight, 1);
         builder->CreateCondBr(cond, bodyBB, doneBB, w);
     } else {
         builder->CreateCondBr(cond, bodyBB, doneBB);
@@ -2707,7 +2707,7 @@ llvm::Function* CodeGenerator::getOrEmitHashMapNew() {
         builder->CreateCall(getOrDeclareCalloc(), {llvm::ConstantInt::get(i64Ty, 1), totalBytes}, "hmap.buf");
     // OmScript assumes allocations always succeed — annotate call-site result.
     llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::NonNull);
-    llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::getWithDereferenceableBytes(*context, 208));
+    llvm::cast<llvm::CallInst>(buf)->addRetAttr(llvm::Attribute::getWithDereferenceableBytes(*context, static_cast<uint64_t>(kInitBytes)));
     // Store capacity in slot 0
     {
         auto* st = builder->CreateAlignedStore(cap, buf, llvm::MaybeAlign(8));
