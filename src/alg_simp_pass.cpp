@@ -588,7 +588,10 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             if (inner->op == op) {
                 long long c1 = 0, c2 = 0;
                 if (isIntLiteral(inner->right.get(), &c1) && isIntLiteral(R, &c2)) {
-                    const long long combined = (op == "&") ? (c1 & c2) : (op == "|") ? (c1 | c2) : (c1 ^ c2);
+                    long long combined;
+                    if (op == "&")      combined = c1 & c2;
+                    else if (op == "|") combined = c1 | c2;
+                    else                combined = c1 ^ c2;
                     std::unique_ptr<Expression> base = std::move(inner->left);
                     expr = makeBinary(op, std::move(base), makeIntLiteral(combined));
                     ++count;
