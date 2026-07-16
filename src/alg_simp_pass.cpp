@@ -558,6 +558,45 @@ static unsigned simplifyExpr(std::unique_ptr<Expression>& expr) {
             }
         }
 
+        // ── Chained shift folding ──────────────────────────────────────────
+        // (x << c1) << c2 → x << (c1 + c2)   [left-shift chain]
+        // (x >> c1) >> c2 → x >> (c1 + c2)   [logical right-shift chain]
+        // Valid when c1, c2 ≥ 0 and c1 + c2 < 64 (avoids shift-by-width UB).
+        // Bitwise shifts are integer-only in OmScript so no float-type guard is needed.
+        if ((op == "<<" || op == ">>") && L->type == ASTNodeType::BINARY_EXPR) {
+            auto* inner = static_cast<BinaryExpr*>(L);
+            if (inner->op == op) {
+                long long c1 = 0, c2 = 0;
+                if (isIntLiteral(inner->right.get(), &c1) && isIntLiteral(R, &c2) &&
+                    c1 >= 0 && c2 >= 0 && c1 + c2 < 64) {
+                    std::unique_ptr<Expression> base = std::move(inner->left);
+                    expr = makeBinary(op, std::move(base), makeIntLiteral(c1 + c2));
+                    ++count;
+                    return count;
+                }
+            }
+        }
+
+        // ── Bitwise constant reassociation ────────────────────────────────
+        // (x & c1) & c2 → x & (c1 & c2)
+        // (x | c1) | c2 → x | (c1 | c2)
+        // (x ^ c1) ^ c2 → x ^ (c1 ^ c2)
+        // All three are valid for any integer expression: &, |, ^ are
+        // associative and integer-only in OmScript (no float-type guard needed).
+        if ((op == "&" || op == "|" || op == "^") && L->type == ASTNodeType::BINARY_EXPR) {
+            auto* inner = static_cast<BinaryExpr*>(L);
+            if (inner->op == op) {
+                long long c1 = 0, c2 = 0;
+                if (isIntLiteral(inner->right.get(), &c1) && isIntLiteral(R, &c2)) {
+                    const long long combined = (op == "&") ? (c1 & c2) : (op == "|") ? (c1 | c2) : (c1 ^ c2);
+                    std::unique_ptr<Expression> base = std::move(inner->left);
+                    expr = makeBinary(op, std::move(base), makeIntLiteral(combined));
+                    ++count;
+                    return count;
+                }
+            }
+        }
+
         // ── Self-identifier comparisons ────────────────────────────────────
         // These are only safe for integers because NaN comparisons for floats
         // do not satisfy the reflexive property (NaN != NaN).

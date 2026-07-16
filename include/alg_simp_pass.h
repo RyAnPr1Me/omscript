@@ -22,6 +22,17 @@
 ///     x ^ 0  → x          0 ^ x  → x
 ///     x << 0 → x          x >> 0 → x
 ///
+///   Chained shift folding (integer-only; both operands must be non-negative
+///   literals and c1 + c2 < 64):
+///     (x << c1) << c2 → x << (c1+c2)
+///     (x >> c1) >> c2 → x >> (c1+c2)
+///
+///   Bitwise constant reassociation (integer-only; all three operators are
+///   associative, so two adjacent constant masks can always be merged):
+///     (x & c1) & c2 → x & (c1 & c2)
+///     (x | c1) | c2 → x | (c1 | c2)
+///     (x ^ c1) ^ c2 → x ^ (c1 ^ c2)
+///
 ///   Absorbing elements:
 ///     x * 0  → 0          0 * x  → 0
 ///     x & 0  → 0          0 & x  → 0

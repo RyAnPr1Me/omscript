@@ -1643,6 +1643,27 @@ llvm::Value* CodeGenerator::generateBinary(BinaryExpr* expr) {
                     auto* q4 = builder->CreateFMul(sq, sq, "fpow8.q4");
                     return builder->CreateFMul(q4, q4, "fpow8");
                 }
+                if (rv == 9.0) {
+                    // x**9.0 → ((x²)²)² * x  (4 fmuls vs pow call)
+                    auto* sq = builder->CreateFMul(left, left, "fpow9.sq");
+                    auto* q4 = builder->CreateFMul(sq, sq, "fpow9.q4");
+                    auto* q8 = builder->CreateFMul(q4, q4, "fpow9.q8");
+                    return builder->CreateFMul(q8, left, "fpow9");
+                }
+                if (rv == 10.0) {
+                    // x**10.0 → ((x²)²)² * x²  (4 fmuls vs pow call; even exponent)
+                    auto* sq = builder->CreateFMul(left, left, "fpow10.sq");
+                    auto* q4 = builder->CreateFMul(sq, sq, "fpow10.q4");
+                    auto* q8 = builder->CreateFMul(q4, q4, "fpow10.q8");
+                    return builder->CreateFMul(q8, sq, "fpow10");
+                }
+                if (rv == 16.0) {
+                    // x**16.0 → (((x²)²)²)²  (4 fmuls vs pow call; even exponent)
+                    auto* sq = builder->CreateFMul(left, left, "fpow16.sq");
+                    auto* q4 = builder->CreateFMul(sq, sq, "fpow16.q4");
+                    auto* q8 = builder->CreateFMul(q4, q4, "fpow16.q8");
+                    return builder->CreateFMul(q8, q8, "fpow16");
+                }
                 if (rv == -2.0) {
                     // x**(-2.0) → 1.0/(x*x)  (fmul + fdiv vs pow call)
                     auto* sq = builder->CreateFMul(left, left, "fpow_n2.sq");
