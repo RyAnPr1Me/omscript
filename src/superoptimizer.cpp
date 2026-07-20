@@ -1328,9 +1328,9 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst, const std::v
     // Detect bit-smear sequence ending with popcount subtraction:
 
     // We detect the end of the pattern: sub(bitwidth, ctpop(or-chain))
-    if (inst->getOpcode() != llvm::Instruction::Sub)
-        return std::nullopt;
     if (!inst->getType()->isIntegerTy())
+        return std::nullopt;
+    if (inst->getOpcode() != llvm::Instruction::Sub)
         return std::nullopt;
 
     unsigned bitWidth = inst->getType()->getIntegerBitWidth();
