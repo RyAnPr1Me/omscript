@@ -1,3 +1,4 @@
+import std;
 fn main() {
     var a = str_format("%lld items", 42);
     var eq = str_eq(a, "42 items");  // should be 1

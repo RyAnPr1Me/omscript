@@ -811,6 +811,8 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst, const std::v
 [[nodiscard]] static std::optional<IdiomMatch> detectRotate(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::Or)
         return std::nullopt;
+    if (!inst->getType()->isIntegerTy())
+        return std::nullopt;
 
     llvm::Value* op0 = inst->getOperand(0);
     llvm::Value* op1 = inst->getOperand(1);
@@ -855,6 +857,8 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst, const std::v
 /// Detect: select(x < 0, -x, x)  →  abs(x)
 /// Also:   (x ^ (x >> 31)) - (x >> 31)  →  abs(x) for i32
 [[nodiscard]] static std::optional<IdiomMatch> detectAbsoluteValue(llvm::Instruction* inst) {
+    if (!inst->getType()->isIntegerTy())
+        return std::nullopt;
     // Pattern 1: select(icmp slt x, 0, sub 0, x, x)
     if (auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst)) {
         auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(sel->getCondition());
@@ -976,6 +980,8 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst, const std::v
 [[nodiscard]] static std::optional<IdiomMatch> detectMinMax(llvm::Instruction* inst) {
     auto* sel = llvm::dyn_cast<llvm::SelectInst>(inst);
     if (!sel)
+        return std::nullopt;
+    if (!sel->getType()->isIntegerTy())
         return std::nullopt;
 
     auto* cmp = llvm::dyn_cast<llvm::ICmpInst>(sel->getCondition());
@@ -1239,6 +1245,8 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst, const std::v
 [[nodiscard]] static std::optional<IdiomMatch> detectByteSwap(llvm::Instruction* inst) {
     if (inst->getOpcode() != llvm::Instruction::Or)
         return std::nullopt;
+    if (!inst->getType()->isIntegerTy())
+        return std::nullopt;
 
     // 16-bit byte swap: ((x >> 8) & 0xFF) | ((x & 0xFF) << 8)
     // or: (x >> 8) | (x << 8) for i16
@@ -1321,6 +1329,8 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst, const std::v
 
     // We detect the end of the pattern: sub(bitwidth, ctpop(or-chain))
     if (inst->getOpcode() != llvm::Instruction::Sub)
+        return std::nullopt;
+    if (!inst->getType()->isIntegerTy())
         return std::nullopt;
 
     unsigned bitWidth = inst->getType()->getIntegerBitWidth();
@@ -1633,6 +1643,8 @@ std::optional<uint64_t> evaluateInst(const llvm::Instruction* inst, const std::v
 
 /// Detect: select(x > 0, 1, select(x < 0, -1, 0))  →  sign(x)
 [[nodiscard]] static std::optional<IdiomMatch> detectSignFunction(llvm::Instruction* inst) {
+    if (!inst->getType()->isIntegerTy())
+        return std::nullopt;
     // Pattern 1: or(ashr(x, 63), zext(icmp sgt(x, 0)))
     if (inst->getOpcode() == llvm::Instruction::Or) {
         auto* ashrInst = llvm::dyn_cast<llvm::BinaryOperator>(inst->getOperand(0));

@@ -1,3 +1,4 @@
+import std;
 fn main() {
     var cnt = str_count("abcabcabc", "abc");
     print(cnt);

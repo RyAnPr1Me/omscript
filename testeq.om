@@ -1,3 +1,4 @@
+import std;
 fn main() {
     var a = "hello";
     var b = "hello";

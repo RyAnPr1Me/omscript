@@ -1,3 +1,4 @@
+import std;
 fn main() {
     var upper = str_upper("hello");
     print(upper);

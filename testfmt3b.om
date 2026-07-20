@@ -1,3 +1,4 @@
+import std;
 fn main() {
     var c = str_format("%lld + %lld = %lld", 2, 3, 5);
     var l = str_len(c);

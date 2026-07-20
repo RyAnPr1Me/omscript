@@ -1,3 +1,4 @@
+import std;
 fn test_array_product() {
     var a = [2, 3, 4];
     var p = array_product(a);

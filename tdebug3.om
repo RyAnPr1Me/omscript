@@ -1,3 +1,4 @@
+import std;
 fn main() {
     var lower = str_lower("WORLD");
     print(lower);
