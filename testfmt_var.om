@@ -1,3 +1,4 @@
+import std;
 fn main() {
     var fmt = "%lld%%";
     var pct = str_format(fmt, 75);

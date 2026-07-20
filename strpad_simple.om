@@ -1,3 +1,4 @@
+import std;
 fn main() {
     var s = str_pad_left("hi", 5, " ");
     var l = str_len(s);

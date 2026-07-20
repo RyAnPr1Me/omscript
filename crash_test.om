@@ -1,3 +1,4 @@
+import std;
 fn test_array_insert() {
     var a = [1, 2, 4, 5];
     var b = array_insert(a, 2, 3);
